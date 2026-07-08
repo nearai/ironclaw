@@ -9,12 +9,16 @@
  *   variant   "primary" | "outline" | "secondary" | "ghost" | "danger"
  *   size      "sm" | "md" (default) | "lg" | "icon" | "icon-sm"
  *   fullWidth boolean
+ *   loading   boolean — shows an inline spinner, disables the button, sets
+ *             aria-busy. The label stays visible so the button keeps its width.
+ *   disabled  boolean
  *   as        "button" | "a" (renders anchor; pass href via ...props)
  *   className string — for layout/spacing overrides (margin, width, etc.)
  *   children
- *   ...rest   forwarded to the element (type, disabled, onClick, href, …)
+ *   ...rest   forwarded to the element (type, onClick, href, …)
  */
 import { cn } from "../utils/cn";
+import { Spinner } from "./spinner";
 
 /* ── Gradient assets (Tailwind can't express these) ────────────────── */
 
@@ -73,12 +77,27 @@ export function Button({
   variant = "primary",
   size = "md",
   fullWidth = false,
+  loading = false,
+  disabled = false,
   as: Tag = "button",
   ...rest
 }) {
   const Element: any = Tag;
   const sizeClass  = SIZES[size] ?? SIZES.md;
   const fullClass  = fullWidth ? "w-full" : "";
+  const isDisabled = disabled || loading;
+  const isAnchor = Tag === "a";
+  const disabledAnchorClass = isAnchor && isDisabled ? "cursor-not-allowed opacity-50" : "";
+  const elementProps =
+    isAnchor && isDisabled
+      ? {
+          ...rest,
+          onClick: (event) => {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+          },
+        }
+      : rest;
 
   /* ── Primary: gradient + hover overlay ──────────────────────────── */
   if (variant === "primary") {
@@ -92,11 +111,16 @@ export function Button({
           BASE,
           sizeClass,
           fullClass,
+          disabledAnchorClass,
           "relative overflow-hidden text-white group",
           "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}
-        {...rest}
+        disabled={isDisabled}
+        aria-disabled={isAnchor && isDisabled ? true : undefined}
+        aria-busy={loading || undefined}
+        tabIndex={isAnchor && isDisabled ? -1 : undefined}
+        {...elementProps}
       >
         <span
           aria-hidden="true"
@@ -104,6 +128,7 @@ export function Button({
           className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100"
         />
         <span className="relative z-10 flex items-center gap-2">
+          {loading && <Spinner />}
           {children}
         </span>
       </Element>
@@ -115,10 +140,19 @@ export function Button({
 
   return (
     <Element
-      className={cn(BASE, sizeClass, fullClass, variantClass, className)}
-      {...rest}
+      className={cn(BASE, sizeClass, fullClass, disabledAnchorClass, variantClass, className)}
+      disabled={isDisabled}
+      aria-disabled={isAnchor && isDisabled ? true : undefined}
+      aria-busy={loading || undefined}
+      tabIndex={isAnchor && isDisabled ? -1 : undefined}
+      {...elementProps}
     >
-      {children}
+      {loading ? (
+        <span className="inline-flex items-center gap-2">
+          <Spinner />
+          {children}
+        </span>
+      ) : children}
     </Element>
   );
 }

@@ -13,6 +13,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint ..",
     "test": "vitest run",
     "vendor": "bash vendor.sh",
     "all": "bash build.sh"
@@ -33,6 +34,8 @@
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
+    "eslint": "10.1.0",
+    "globals": "17.0.0",
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
     "vite": "8.1.3",

@@ -277,7 +277,7 @@ function slackChannelPickerCopy(action, t) {
     title: action?.title || t("channels.slackAccessTitle"),
     instructions:
       action?.instructions || t("channels.slackAccessInstructions"),
-    inputPlaceholder: action?.input_placeholder || action?.code_placeholder || "C0123456789",
+    inputPlaceholder: action?.input_placeholder || "C0123456789",
     addLabel: t("channels.slackAccessAdd"),
     loadingMessage: t("channels.slackAccessLoading"),
     emptyMessage: t("channels.slackAccessEmpty"),

@@ -47,11 +47,20 @@ export function storeToken(token) {
 // Must be a non-empty token with no control characters; `crypto.randomUUID`
 // satisfies the validator in `webui_inbound::parse_client_action_id`.
 export function clientActionId() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+  if (typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
   const bytes = new Uint8Array(16);
-  (crypto?.getRandomValues || ((b) => b))(bytes);
+  if (typeof crypto !== "undefined" && crypto && typeof crypto.getRandomValues === "function") {
+    // Must be invoked on `crypto` — an unbound call throws `Illegal invocation`.
+    crypto.getRandomValues(bytes);
+  } else {
+    // No Web Crypto at all. Math.random suffices: the id only needs to be
+    // unique per action, never constant (a constant id dedupes distinct sends).
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 

@@ -15,8 +15,8 @@ use ironclaw_host_api::{
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile},
 };
 
+use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::{
-    local_dev_capability_policy::LocalDevCapabilityPolicy,
     profile_approval_authorization::{
         ApprovalSettingsProvider, ProfileApprovalGatePolicy, profile_approval_authorizer,
     },

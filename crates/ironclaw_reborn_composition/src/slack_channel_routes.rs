@@ -1011,6 +1011,7 @@ impl From<SlackSetupError> for SlackRouteError {
             SlackSetupError::StoreUnavailable | SlackSetupError::SecretStoreUnavailable { .. } => {
                 Self::Unavailable
             }
+            SlackSetupError::OAuthClientNotConfigured => Self::Unavailable,
         }
     }
 }

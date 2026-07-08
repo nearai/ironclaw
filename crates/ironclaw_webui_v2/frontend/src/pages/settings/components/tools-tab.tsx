@@ -183,7 +183,7 @@ export function ToolsTab({
   searchQuery = "",
 }) {
   const t = useT();
-  const { tools, query, setPermission, savedTools } = useTools();
+  const { tools, query, setPermission, savedTools, error: permissionError } = useTools();
 
   if (query.isLoading) {
     return (
@@ -251,6 +251,16 @@ export function ToolsTab({
         savedKeys={savedKeys}
         isLoading={isLoading}
       />
+
+      {permissionError &&
+      (
+        <div
+          className="rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
+          role="alert"
+        >
+          {t("error.saveFailed", { message: permissionError.message })}
+        </div>
+      )}
 
       {searchQuery &&
       (

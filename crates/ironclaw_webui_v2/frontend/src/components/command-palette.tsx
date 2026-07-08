@@ -15,21 +15,21 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
 
   const commands = React.useMemo(() => {
     const actions = [
-      { id: "new-chat", label: "New chat", icon: "plus", group: "Actions", run: () => onNewChat?.() },
-      { id: "go-chat", label: "Go to Chat", icon: "chat", group: "Navigate", run: () => navigate("/chat") },
-      { id: "go-extensions", label: "Go to Extensions", icon: "plug", group: "Navigate", run: () => navigate("/extensions") },
-      { id: "go-settings", label: "Go to Settings", icon: "settings", group: "Navigate", run: () => navigate("/settings") },
-      { id: "toggle-theme", label: "Toggle theme", icon: "moon", group: "Actions", run: () => onToggleTheme?.() },
+      { id: "new-chat", label: t("command.newChat"), icon: "plus", group: t("command.group.actions"), run: () => onNewChat?.() },
+      { id: "go-chat", label: t("command.goChat"), icon: "chat", group: t("command.group.navigate"), run: () => navigate("/chat") },
+      { id: "go-extensions", label: t("command.goExtensions"), icon: "plug", group: t("command.group.navigate"), run: () => navigate("/extensions") },
+      { id: "go-settings", label: t("command.goSettings"), icon: "settings", group: t("command.group.navigate"), run: () => navigate("/settings") },
+      { id: "toggle-theme", label: t("command.toggleTheme"), icon: "moon", group: t("command.group.actions"), run: () => onToggleTheme?.() },
     ];
     const threads = (threadsState?.threads || []).map((thread) => ({
       id: `thread-${thread.id}`,
-      label: thread.title || `Thread ${thread.id.slice(0, 8)}`,
+      label: thread.title || t("thread.fallback", { id: thread.id.slice(0, 8) }),
       icon: "chat",
-      group: "Threads",
+      group: t("command.group.threads"),
       run: () => navigate(`/chat/${thread.id}`),
     }));
     return [...actions, ...threads];
-  }, [threadsState, navigate, onNewChat, onToggleTheme]);
+  }, [threadsState, navigate, onNewChat, onToggleTheme, t]);
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -82,8 +82,8 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
   let lastGroup = null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label="Command palette">
-      <button type="button" aria-label="Close" onClick={onClose} className="absolute inset-0 bg-black/50"></button>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label={t("command.dialogLabel")}>
+      <button type="button" aria-label={t("common.close")} onClick={onClose} className="absolute inset-0 bg-black/50"></button>
       <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]">
         <div className="flex items-center gap-2 border-b border-[var(--v2-panel-border)] px-3">
           <Icon name="search" className="h-4 w-4 text-[var(--v2-text-faint)]" />
@@ -99,7 +99,7 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
         </div>
         <ul className="max-h-[50vh] overflow-y-auto p-1.5">
           {filtered.length === 0 &&
-          (<li className="px-3 py-6 text-center text-sm text-[var(--v2-text-faint)]">No matches</li>)}
+          (<li className="px-3 py-6 text-center text-sm text-[var(--v2-text-faint)]">{t("command.noMatches")}</li>)}
           {filtered.map((command, index) => {
             const showGroup = command.group !== lastGroup;
             lastGroup = command.group;

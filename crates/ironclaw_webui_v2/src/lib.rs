@@ -59,10 +59,16 @@ mod sse_capacity;
 pub mod static_assets;
 
 #[allow(deprecated)]
+#[cfg(feature = "webui-v2-beta")]
 pub use descriptors::is_webui_v2_llm_config_route_id;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
+    WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
+    WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_USER,
+    WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS, WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
+    WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
+    WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS, WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
     WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_PROJECT,
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_DELETE_AUTOMATION,
@@ -86,18 +92,19 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG, WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
     WEBUI_V2_ROUTE_READ_FS_FILE, WEBUI_V2_ROUTE_READ_PROJECT_FILE, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
     WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL, WEBUI_V2_ROUTE_RESOLVE_GATE,
-    WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_SEARCH_SKILLS, WEBUI_V2_ROUTE_SEND_MESSAGE,
-    WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
-    WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
-    WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE, WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
-    WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_START_CODEX_LOGIN,
-    WEBUI_V2_ROUTE_START_NEARAI_LOGIN, WEBUI_V2_ROUTE_STAT_FS_PATH,
-    WEBUI_V2_ROUTE_STAT_PROJECT_FILE, WEBUI_V2_ROUTE_STREAM_EVENTS,
+    WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_RETRY_RUN, WEBUI_V2_ROUTE_SEARCH_SKILLS,
+    WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
+    WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
+    WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION, WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE,
+    WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE, WEBUI_V2_ROUTE_SETUP_EXTENSION,
+    WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
+    WEBUI_V2_ROUTE_STAT_FS_PATH, WEBUI_V2_ROUTE_STAT_PROJECT_FILE, WEBUI_V2_ROUTE_STREAM_EVENTS,
     WEBUI_V2_ROUTE_STREAM_EVENTS_WS, WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
-    WEBUI_V2_ROUTE_TRACE_CREDITS, WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
-    WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
-    WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
-    is_webui_v2_operator_webui_config_route_id, webui_v2_routes,
+    WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES, WEBUI_V2_ROUTE_TRACE_CREDITS,
+    WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE, WEBUI_V2_ROUTE_UPDATE_PROJECT,
+    WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER, WEBUI_V2_ROUTE_UPDATE_SKILL,
+    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_operator_webui_config_route_id,
+    webui_v2_routes,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
@@ -111,12 +118,13 @@ pub use handlers::{
     list_extension_registry, list_extensions, list_fs_mounts, list_llm_models,
     list_operator_config, list_outbound_delivery_targets, list_settings_tools, list_skills,
     list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
-    remove_extension, remove_skill, resolve_gate, resume_automation,
+    remove_extension, remove_skill, resolve_gate, resume_automation, retry_run,
     run_operator_service_lifecycle, run_operator_setup, search_skills, send_message,
     set_active_llm, set_auto_activate_learned, set_operator_config_key, set_outbound_preferences,
     set_settings_tool_permission, set_settings_tools_auto_approve, set_skill_auto_activate,
     setup_extension, start_codex_login, start_nearai_login, stat_fs_path, stream_events,
-    stream_events_ws, test_llm_connection, trace_credits, update_skill, upsert_llm_provider,
+    stream_events_ws, test_llm_connection, trace_account_traces, trace_credits, update_skill,
+    upsert_llm_provider,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{

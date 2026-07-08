@@ -12,9 +12,9 @@ export function primaryExtensionAction(ext) {
     return "configure";
   }
 
-  // Channel-surface extensions are configured or paired through their channel
-  // panels. A generic Activate button bypasses that guidance and can hit the
-  // wrong lifecycle endpoint for Slack-style inbound proof-code flows.
+  // Channel-surface extensions are configured through their setup surfaces.
+  // A generic Activate button bypasses that guidance and can hit the wrong
+  // lifecycle endpoint.
   if (isChannelExtensionKind(ext?.kind)) {
     return null;
   }

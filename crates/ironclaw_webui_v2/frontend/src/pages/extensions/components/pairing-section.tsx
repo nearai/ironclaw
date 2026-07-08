@@ -158,8 +158,7 @@ function resolvePairingCopy(t, i18nKeys, copy) {
   return {
     title: copy?.title || t(i18nKeys.title),
     instructions: copy?.instructions || t(i18nKeys.instructions),
-    placeholder:
-      copy?.input_placeholder || copy?.code_placeholder || t(i18nKeys.placeholder),
+    placeholder: copy?.input_placeholder || t(i18nKeys.placeholder),
     action: copy?.submit_label || t(i18nKeys.action),
     success: copy?.success_message || t(i18nKeys.success),
     error: copy?.error_message || t(i18nKeys.error),

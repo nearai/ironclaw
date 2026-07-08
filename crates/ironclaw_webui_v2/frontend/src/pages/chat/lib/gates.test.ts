@@ -103,9 +103,9 @@ test("gateFromEvent maps approval context into readable approval card props", ()
     reusable: false,
   });
   assert.deepEqual(gate.approvalDetails, [
-    { label: "Action", value: "Run tool" },
-    { label: "Destination", value: "GET https://example.com" },
-    { label: "Scope", value: "This request only" },
+    { label: "Action", labelKey: "approval.detail.action", value: "Run tool" },
+    { label: "Destination", labelKey: "approval.detail.destination", value: "GET https://example.com" },
+    { label: "Scope", labelKey: "approval.detail.scope", value: "This request only" },
     { label: "Capability", value: "builtin.http" },
     { label: "Estimated network egress", value: "4096 bytes" },
   ]);

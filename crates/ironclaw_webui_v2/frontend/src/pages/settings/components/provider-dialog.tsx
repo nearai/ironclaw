@@ -41,7 +41,7 @@ export function ProviderDialog({
     : t("llm.newProvider");
 
   return (
-    <Modal open={open} onClose={onClose} title={title} size="lg">
+    <Modal open={open} onClose={onClose} title={title} size="lg" closeLabel={t("common.close")}>
       <ModalBody className="space-y-4">
         {!isBuiltin &&
         (

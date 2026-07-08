@@ -29,8 +29,68 @@ use crate::loop_exit_applier::{
     ThreadCheckpointLoopExitEvidencePort,
 };
 
+/// Always-empty test fixture — no filesystem/CAS store needed here, this
+/// test module only ever wants "no awaited-child evidence exists."
+struct NoAwaitDependentRunEvidence;
+
+#[async_trait]
+impl AwaitDependentRunEvidenceStore for NoAwaitDependentRunEvidence {
+    async fn has_awaited_child_gate(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+}
+
 pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunEvidenceStore> {
-    Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new())
+    Arc::new(NoAwaitDependentRunEvidence)
+}
+
+/// Minimal in-memory test double recording one `(scope, run_id, gate_ref,
+/// mode)` tuple — enough for the two real-evidence tests in `mod.rs`
+/// (accept a matching blocking-mode gate, reject a background-mode one)
+/// without pulling in the real filesystem-backed `FilesystemAwaitEdgeStore`
+/// (feature-gated behind `filesystem-goal-store`; this test module is
+/// `#[cfg(test)]`-only and must stay compilable without that feature).
+pub(super) struct RecordingAwaitDependentRunEvidence {
+    scope: TurnScope,
+    run_id: TurnRunId,
+    gate_ref: GateRef,
+    mode: ironclaw_loop_support::SpawnSubagentMode,
+}
+
+impl RecordingAwaitDependentRunEvidence {
+    pub(super) fn new(
+        scope: TurnScope,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        mode: ironclaw_loop_support::SpawnSubagentMode,
+    ) -> Self {
+        Self {
+            scope,
+            run_id,
+            gate_ref,
+            mode,
+        }
+    }
+}
+
+#[async_trait]
+impl AwaitDependentRunEvidenceStore for RecordingAwaitDependentRunEvidence {
+    async fn has_awaited_child_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(*scope == self.scope
+            && run_id == self.run_id
+            && gate_ref.as_str() == self.gate_ref.as_str()
+            && self.mode == ironclaw_loop_support::SpawnSubagentMode::Blocking)
+    }
 }
 
 pub(super) fn text_checkpoint_evidence(
@@ -126,6 +186,16 @@ impl TurnStateStore for StaticTurnStateStore {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("resume_turn should not be called by evidence tests")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(
@@ -391,10 +461,20 @@ fn test_profile(
     }
 }
 
-#[derive(Default)]
 pub(super) struct RecordingTransitionPort {
     raw_failures: Mutex<Vec<String>>,
     apply_calls: Mutex<usize>,
+    latest_resumable_checkpoint_result: Mutex<Result<Option<TurnCheckpointId>, TurnError>>,
+}
+
+impl Default for RecordingTransitionPort {
+    fn default() -> Self {
+        Self {
+            raw_failures: Mutex::new(Vec::new()),
+            apply_calls: Mutex::new(0),
+            latest_resumable_checkpoint_result: Mutex::new(Ok(None)),
+        }
+    }
 }
 
 impl RecordingTransitionPort {
@@ -429,6 +509,18 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
         _request: RecoverExpiredLeasesRequest,
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        _scope: &TurnScope,
+        _turn_id: TurnId,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        self.latest_resumable_checkpoint_result
+            .lock()
+            .expect("lock")
+            .clone()
     }
 
     async fn record_model_route_snapshot(

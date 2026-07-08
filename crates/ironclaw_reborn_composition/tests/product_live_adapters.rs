@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
@@ -32,8 +34,11 @@ use ironclaw_reborn::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
     },
     subagent::{
+        await_edge::{
+            boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+            store::FilesystemAwaitEdgeStore,
+        },
         flavors::StaticSubagentDefinitionResolver,
-        gate_resolution::BoundedSubagentGateResolutionStore,
         goal_store::InMemoryBoundedSubagentGoalStore,
     },
 };
@@ -1315,7 +1320,27 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
 
     let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_state.clone();
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let await_edge_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
+    )));
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&await_edge_store),
+        subagent_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        turn_state.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+        adapters.capability_result_writer.clone(),
+        Arc::clone(&thread_service),
+    ));
+    let await_edge_driver = Arc::new(ScopeRecoveryDriver::new(
+        Arc::clone(&await_edge_resolver),
+        Arc::clone(&await_edge_store),
+    ));
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state,
@@ -1328,8 +1353,13 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         capability_factory: adapters.capability_factory,
         capability_surface_resolver: adapters.capability_surface_resolver,
         capability_result_writer: adapters.capability_result_writer,
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: subagent_gate_store.clone(),
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_driver
+            as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+        subagent_await_edge_settler: await_edge_resolver
+            as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+        subagent_await_edge_evidence: Arc::clone(&await_edge_store)
+            as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             adapters.capability_input_resolver,
@@ -1339,7 +1369,8 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
             thread_service,
             turn_state_for_evidence,
             loop_checkpoint_for_evidence,
-            subagent_gate_store,
+            await_edge_store
+                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             thread_scope,
         )),
         config: DefaultPlannedRuntimeConfig::default(),

@@ -68,7 +68,7 @@ test("primaryExtensionAction suppresses Activate for channel kind in pairing sta
       onboarding_state: "pairing",
     }),
     null,
-    "kind:channel + pairing should return null (pairing section owns it)",
+    "kind:channel + installed should return null (configure/setup owns it)",
   );
   assert.equal(
     primaryExtensionAction({
@@ -77,7 +77,7 @@ test("primaryExtensionAction suppresses Activate for channel kind in pairing sta
       activation_status: "installed",
     }),
     null,
-    "kind:channel + installed should hand off to channel setup/pairing UI",
+    "kind:channel + installed should hand off to channel configure/setup UI",
   );
 });
 

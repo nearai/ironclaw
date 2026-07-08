@@ -115,7 +115,7 @@ export function ApprovalCard({
               {approvalDetails.map(
                 (detail) => (
                   <div key={detail.label} className="grid gap-1 border-b border-iron-800/70 px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]">
-                    <dt className="font-medium text-iron-400">{detail.label}</dt>
+                    <dt className="font-medium text-iron-400">{detail.labelKey ? t(detail.labelKey) : detail.label}</dt>
                     <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-iron-100">{approvalPayloadPreview(detail.value, expandedPayload)}</dd>
                   </div>
                 ),

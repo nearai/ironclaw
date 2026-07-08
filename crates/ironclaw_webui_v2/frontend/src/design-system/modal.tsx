@@ -18,6 +18,7 @@
  *   <ModalFooter>  — action button row with top divider
  */
 import React from "react";
+import { useT } from "../lib/i18n";
 import { cn } from "../utils/cn";
 import { Icon } from "./icons";
 
@@ -39,6 +40,7 @@ export function Modal({
   title,
   size = "md",
   className = "",
+  closeLabel,
   children,
 }) {
   /* Lock body scroll when open */
@@ -89,7 +91,7 @@ export function Modal({
         )}
       >
         {title
-          ? (<ModalHeader onClose={onClose}>{title}</ModalHeader>) : null}
+          ? (<ModalHeader onClose={onClose} closeLabel={closeLabel}>{title}</ModalHeader>) : null}
         {children}
       </div>
     </div>
@@ -98,7 +100,9 @@ export function Modal({
 
 /* ─── ModalHeader ─────────────────────────────────────────────────── */
 
-export function ModalHeader({ children, onClose, className = "" }) {
+export function ModalHeader({ children, onClose, className = "", closeLabel }) {
+  const t = useT();
+  const effectiveCloseLabel = closeLabel || t("common.close");
   return (
     <div
       className={cn(
@@ -118,7 +122,7 @@ export function ModalHeader({ children, onClose, className = "" }) {
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close"
+            aria-label={effectiveCloseLabel}
             className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px]
               border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]
               text-[var(--v2-text-muted)]

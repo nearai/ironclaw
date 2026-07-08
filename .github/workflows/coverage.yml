@@ -127,6 +127,28 @@ jobs:
         if: matrix.has_postgres
         run: echo "DATABASE_URL=postgres://postgres:postgres@localhost/ironclaw_test" >> "$GITHUB_ENV"
 
+      - name: Enable pnpm for setup-node cache
+        if: contains(matrix.flags, '--all-features')
+        run: corepack enable pnpm
+
+      - name: Install Node.js for WebUI bundle build
+        if: contains(matrix.flags, '--all-features')
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        if: contains(matrix.flags, '--all-features')
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies
+        if: contains(matrix.flags, '--all-features')
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
+
       - name: Generate coverage
         run: cargo llvm-cov ${{ matrix.flags }} --workspace --lcov --output-path lcov.info
 

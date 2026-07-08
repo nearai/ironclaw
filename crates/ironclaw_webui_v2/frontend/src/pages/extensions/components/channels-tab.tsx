@@ -1,7 +1,6 @@
 import { StatusPill } from "../../../design-system/primitives";
 import { useT } from "../../../lib/i18n";
 import { SlackAdminManagedSection } from "../../../components/slack-setup-panel";
-import { SlackPairingSection } from "../../../components/slack-pairing-section";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import { PairingSection } from "./pairing-section";
 import { redeemPairingCode } from "../lib/pairing-api";
@@ -22,12 +21,12 @@ export function isInboundProofCodeAction(connectAction) {
   return connectAction?.strategy === "inbound_proof_code";
 }
 
-export function isSlackAdminManagedAction(connectAction) {
-  return connectAction?.channel === "slack" && isAdminManagedChannelsAction(connectAction);
+export function isGenericInboundProofCodeAction(connectAction) {
+  return connectAction?.channel !== "slack" && isInboundProofCodeAction(connectAction);
 }
 
-export function isSlackInboundProofCodeAction(connectAction) {
-  return connectAction?.channel === "slack" && isInboundProofCodeAction(connectAction);
+export function isSlackAdminManagedAction(connectAction) {
+  return connectAction?.channel === "slack" && isAdminManagedChannelsAction(connectAction);
 }
 
 export function findSlackConnectAction(connectableChannels) {
@@ -45,11 +44,15 @@ export function connectActionsForPackage(connectableChannels, item) {
 export function connectActionsForChannel(connectableChannels, channel) {
   if (!channel) return [];
   const channels = connectableChannels || [];
+  const adminAction = channels.find(
+    (connectAction) =>
+      connectAction?.channel === channel && isAdminManagedChannelsAction(connectAction)
+  );
+  if (channel === "slack") {
+    return adminAction ? [adminAction] : [];
+  }
   const actions = [
-    channels.find(
-      (connectAction) =>
-        connectAction?.channel === channel && isAdminManagedChannelsAction(connectAction)
-    ),
+    adminAction,
     channels.find(
       (connectAction) =>
         connectAction?.channel === channel && isInboundProofCodeAction(connectAction)
@@ -72,10 +75,7 @@ export function ChannelConnectActionSections({
       if (isSlackAdminManagedAction(action)) {
         return (<SlackAdminManagedSection key={key} action={action.action} />);
       }
-      if (isSlackInboundProofCodeAction(action)) {
-        return (<SlackPairingSection key={key} action={action.action} />);
-      }
-      if (isInboundProofCodeAction(action)) {
+      if (isGenericInboundProofCodeAction(action)) {
         return (
           <PairingSection
             key={key}
@@ -192,8 +192,9 @@ export function ChannelsTab({
             {installedChannels.map(
               (ch) => {
                 const connectActions = connectActionsForPackage(connectableChannels, ch);
+                const isSlack = isSlackPackage(ch);
                 const pairingHandledByConnectAction =
-                  connectActions.some(isInboundProofCodeAction);
+                  connectActions.some(isGenericInboundProofCodeAction);
                 return (
                   <div key={packageId(ch)} className="flex flex-col gap-3">
                     <ExtensionCard
@@ -207,7 +208,8 @@ export function ChannelsTab({
                     (<ChannelConnectActionSections
                       connectActions={connectActions}
                     />)}
-                    {!pairingHandledByConnectAction &&
+                    {!isSlack &&
+                    !pairingHandledByConnectAction &&
                     (ch.onboarding_state === "pairing_required" ||
                       ch.onboarding_state === "pairing") &&
                     ( <PairingSection
@@ -253,9 +255,11 @@ function BuiltinRow({
   enabled,
   detail,
   children = null,
-  statusLabel = enabled ? "on" : "off",
+  statusLabel = null,
   statusTone = enabled ? "success" : "muted",
 }) {
+  const t = useT();
+  const effectiveStatusLabel = statusLabel || (enabled ? t("channels.statusOn") : t("channels.statusOff"));
   return (
     <div
       className="border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
@@ -266,7 +270,7 @@ function BuiltinRow({
             <span className="text-sm font-medium text-iron-200">{name}</span>
             <StatusPill
               tone={statusTone}
-              label={statusLabel}
+              label={effectiveStatusLabel}
             />
           </div>
           <div className="mt-1 text-xs text-iron-300">{description}</div>

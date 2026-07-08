@@ -23,8 +23,8 @@ use rust_decimal::Decimal;
 ///
 /// The accountant gets:
 ///
-/// 1. The caller's `ResourceGovernor` (in-memory for local-dev,
-///    `PersistentResourceGovernor` for libsql / postgres production).
+/// 1. The caller's `ResourceGovernor` (in-memory for non-durable local-dev,
+///    `FilesystemResourceGovernor` for libsql / postgres production).
 /// 2. The caller's `ModelCostTable` (typically derived from
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
 /// 3. A `BudgetGateStore` (in-memory for local-dev,
@@ -116,6 +116,7 @@ mod tests {
         // Drive one `pre_model_call` to fire the seeding policy.
         let context = test_run_context("tenant-shared-helper", "alice-shared-helper");
         let request = ironclaw_turns::run_profile::LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
             model_preference: None,

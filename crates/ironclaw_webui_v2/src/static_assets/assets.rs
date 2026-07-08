@@ -250,30 +250,42 @@ mod tests {
         assert!(!renderer.contains("codeEl.style.whiteSpace"));
 
         let styles = source_text("styles/app.css");
-        assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;\n}"));
+        assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;"));
+        assert!(styles.contains("overflow-wrap: anywhere;"));
         assert!(styles.contains(".markdown-code-frame {\n  position: relative;"));
         assert!(styles.contains("width: 100%;\n  max-width: 100%;\n  min-width: 0;"));
         assert!(styles.contains("overflow: hidden;"));
         assert!(styles.contains("border-radius: 8px; box-sizing: border-box; width: 100%;"));
         assert!(styles.contains("overflow-x: auto; white-space: pre; margin-bottom: 0.75em;"));
+        assert!(styles.contains("overflow-wrap: normal;\n  word-break: normal;"));
         assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
         assert!(styles.contains("font-size: 0.9em; line-height: 1.65; white-space: inherit;"));
+        assert!(!styles.contains("word-break: break-word"));
+        assert!(!styles.contains("white-space: pre-wrap"));
+        assert!(!styles.contains("word-break: break-all"));
         assert!(!styles.contains("width: max-content"));
+        assert!(styles.contains("--v2-chat-readable-max-width:"));
+        assert!(styles.contains(".v2-chat-readable-width {\n  max-width: 100%;\n}"));
+        assert!(styles.contains("@media (min-width: 640px) {"));
+        assert!(styles.contains("max-width: var(--v2-chat-readable-max-width);"));
+        assert!(styles.contains("@media (max-width: 639.98px) {"));
+        assert!(!styles.contains("@media (max-width: 768px)"));
 
         let message_list = source_text("pages/chat/components/message-list.tsx");
         assert!(message_list.contains("relative flex min-h-0 min-w-0 flex-1"));
-        assert!(message_list.contains("flex min-w-0 flex-1 overflow-y-auto"));
-        assert!(!message_list.contains("overflow-x-hidden"));
+        assert!(message_list.contains("flex min-w-0 flex-1 overflow-y-auto overflow-x-hidden"));
         assert!(message_list.contains("mx-auto flex w-full min-w-0 max-w-5xl flex-col"));
 
         let message_bubble = source_text("pages/chat/components/message-bubble.tsx");
         assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
-        assert!(message_bubble.contains(
-            "const bubbleWidthClass = isUser ? \"max-w-[85%]\" : isNotice ? \"mx-auto max-w-[85%]\" : \"w-full max-w-[85%]\";"
-        ));
+        assert!(message_bubble.contains("const bubbleWidthClass = isUser"));
+        assert!(message_bubble.contains("\"v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"mx-auto v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"w-full v2-chat-readable-width\""));
+        assert!(!message_bubble.contains("sm:max-w-["));
         assert!(
             message_bubble.contains(
-                "const contentWidthClass = isUser ? \"\" : \"w-full min-w-0 max-w-full\";"
+                "const contentWidthClass = isUser ? \"min-w-0 max-w-full\" : \"w-full min-w-0 max-w-full\";"
             )
         );
         assert!(message_bubble.contains("contentWidthClass,"));
@@ -303,7 +315,6 @@ mod tests {
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackAdminManagedSection"));
-        assert!(channels_tab.contains("SlackPairingSection"));
         assert!(channels_tab.contains("findSlackConnectActions"));
         assert!(channels_tab.contains("slackConnectActions"));
         assert!(channels_tab.contains("action={action.action}"));
@@ -315,20 +326,23 @@ mod tests {
 
     #[test]
     fn channel_connection_gate_rides_the_auth_rail() {
-        // The channel-connection-events module keeps only its display/notify
-        // half — the connect broadcast used for cross-tab cache invalidation.
-        // The waiter/continuation machinery (the historical-panel bug) is gone:
-        // pairing gates now block/resume on the standard auth-gate rail.
+        // Slack's bespoke pairing artifacts are gone (slack-pairing-api.js,
+        // SlackPairingSection); channel pairing now rides the standard
+        // auth-gate rail. The generic channel-connection machinery is retained
+        // and generalized: channel-connection-events keeps its cross-tab connect
+        // broadcast AND the waiter/continuation half that resumes a chat blocked
+        // on a channel connected in another tab. This dual wiring is locked by
+        // the useChat-send / configure-modal suites that PR #5604 authored.
         let events = source_text("lib/channel-connection-events.ts");
         assert!(events.contains("notifyChannelConnected"));
         assert!(events.contains("subscribeChannelConnected"));
         assert!(events.contains("BroadcastChannel"));
-        assert!(!events.contains("channelConnectionContinuationMessage"));
-        assert!(!events.contains("rememberChannelConnectionWaiter"));
-        assert!(!events.contains("resumeWaitingChannelConnections"));
-        assert!(!events.contains("ironclaw:channel-connection:waiting:v1"));
+        assert!(events.contains("channelConnectionContinuationMessage"));
+        assert!(events.contains("rememberChannelConnectionWaiter"));
+        assert!(events.contains("resumeWaitingChannelConnections"));
+        assert!(events.contains("ironclaw:channel-connection:waiting:v1"));
 
-        // gates.js recognizes the challenge kinds (manual_token / oauth_url)
+        // gates.ts recognizes the challenge kinds (manual_token / oauth_url)
         // that ALL auth gates use, and normalizes the optional channel
         // `connection` context onto the pending gate.
         let gates = source_text("pages/chat/lib/gates.ts");
@@ -336,30 +350,44 @@ mod tests {
         assert!(gates.contains("oauth_url"));
         assert!(gates.contains("connectionFromContext"));
 
-        // useChat keeps a cache-invalidation-only channel-connected subscription
-        // and a redeem-only pairing submit that does NOT call resolveGate (the
-        // backend resumes the parked turn). All waiter/derive heuristics are gone.
+        // The channel-connection/onboarding state machine — the channel-connected
+        // subscription, pairing redemption through the generic pairing API
+        // (submitOnboardingPairing -> redeemPairingCode; frontend scaffolding —
+        // no backend mounts the generic redeem route until the first non-Slack
+        // inbound channel lands, see PAIRING_REDEEM_PATH), and the
+        // waiter/onboarding-resume wiring that resumes a chat blocked on a
+        // channel connected in another tab — moved out of useChat into the
+        // dedicated useChannelOnboarding hook (PR #5604 mn10). useChat still
+        // wires that hook in and re-exposes its handles, so the wiring is
+        // verified here and the state machine itself in its new home below.
         let use_chat = source_text("pages/chat/hooks/useChat.ts");
-        assert!(use_chat.contains("subscribeChannelConnected"));
+        assert!(use_chat.contains("useChannelOnboarding(threadId, {"));
+        assert!(use_chat.contains("submitOnboardingPairing"));
         assert!(use_chat.contains("submitChannelConnectionPairing"));
-        assert!(!use_chat.contains("connectionEventMatchesOnboarding"));
-        assert!(!use_chat.contains("resumeOnboardingAfterChannelConnected"));
-        assert!(!use_chat.contains("rememberChannelConnectionWaiter"));
-        assert!(!use_chat.contains("forgetChannelConnectionWaiter"));
-        assert!(!use_chat.contains("channelConnectionRequirementFromCard"));
-        assert!(!use_chat.contains("pendingOnboarding"));
         assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
 
-        // chat.js renders the pairing card off a manual_token gate carrying a
+        let use_channel_onboarding = source_text("pages/chat/hooks/useChannelOnboarding.ts");
+        assert!(use_channel_onboarding.contains("subscribeChannelConnected"));
+        assert!(use_channel_onboarding.contains("submitOnboardingPairing"));
+        assert!(use_channel_onboarding.contains("submitChannelConnectionPairing"));
+        assert!(use_channel_onboarding.contains("redeemPairingCode"));
+        assert!(use_channel_onboarding.contains("connectionEventMatchesOnboarding"));
+        // OAuth completion/failure matching goes through the shared flow-id
+        // matchers, not a hand-rolled comparison that could drift on the
+        // payload contract (type guard, snake_case flow_id fallback).
+        assert!(use_channel_onboarding.contains("completionMatchesFlow"));
+        assert!(use_channel_onboarding.contains("failureMatchesFlow"));
+        assert!(use_channel_onboarding.contains("rememberChannelConnectionWaiter"));
+        assert!(use_channel_onboarding.contains("forgetChannelConnectionWaiter"));
+        assert!(use_channel_onboarding.contains("channelConnectionRequirementFromCard"));
+        assert!(use_channel_onboarding.contains("pendingOnboarding"));
+
+        // chat.ts renders the pairing card off a manual_token gate carrying a
         // connection, on the same auth-gate switch as the token / oauth cards.
         let chat = source_text("pages/chat/chat.tsx");
         assert!(chat.contains("OnboardingPairingCard"));
-        assert!(chat.contains("isChannelPairingGate"));
+        assert!(chat.contains("pendingGate.connection"));
         assert!(chat.contains("submitChannelConnectionPairing"));
-
-        let slack_pairing = source_text("lib/slack-pairing-api.ts");
-        assert!(slack_pairing.contains("notifyChannelConnected"));
-        assert!(slack_pairing.contains("sourceThreadId: options.threadId || null"));
 
         let generic_pairing = source_text("pages/extensions/lib/pairing-api.ts");
         assert!(generic_pairing.contains("notifyChannelConnected"));
@@ -476,9 +504,11 @@ mod tests {
     fn desktop_sidebar_toggle_assets_are_wired() {
         let header = source_text("components/page-header.tsx");
         assert!(header.contains("type=\"button\""));
-        assert!(header.contains("aria-label=\"Toggle sidebar\""));
+        assert!(header.contains(r#"const toggleSidebarLabel = t("sidebar.toggle")"#));
+        assert!(header.contains("aria-label={toggleSidebarLabel}"));
         assert!(header.contains("aria-controls=\"gateway-sidebar\""));
         assert!(header.contains("aria-expanded={sidebarOpen ? \"true\" : \"false\"}"));
+        assert!(header.contains("title={toggleSidebarLabel}"));
         assert!(!header.contains("md:hidden"));
 
         let sidebar = source_text("components/sidebar.tsx");
@@ -720,8 +750,14 @@ mod tests {
         let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");
         assert!(configure_modal.contains("const isActive = extensionIsActive(extension);"));
         assert!(
-            configure_modal.contains("const canActivate = setupReadyForActivation({ extension"),
+            configure_modal.contains("const canActivate =")
+                && configure_modal
+                    .contains("setupReadyForActivation({ extension, secrets, fields })"),
             "the modal Activate button must be gated by lifecycle-aware setup readiness"
+        );
+        assert!(
+            configure_modal.contains("!isChannelExtensionKind(extension?.kind)"),
+            "channel extensions activate via OAuth/pairing, not the generic Activate button"
         );
         assert!(configure_modal.contains("extensions.activeConfigured"));
 
@@ -745,10 +781,23 @@ mod tests {
             use_extensions.contains("const watchOauthProgress = React.useCallback"),
             "OAuth setup should watch in-flight authorization, not only popup close"
         );
+        // The in-flight watcher polls on an interval; within that poll it must
+        // refresh setup state (so a setup-complete callback lands promptly)
+        // BEFORE it considers giving up because the popup was closed. Assert the
+        // ordering structurally rather than by exact whitespace so a reformat
+        // doesn't false-flag while a real reorder still would.
+        let poll_body_start = use_extensions
+            .find("browserWindow.setInterval(")
+            .expect("OAuth setup should poll on an interval while the popup is open");
+        let poll_body = &use_extensions[poll_body_start..];
+        let refresh_idx = poll_body
+            .find("refreshSetupState();")
+            .expect("OAuth setup poll must refresh setup state");
+        let popup_close_idx = poll_body
+            .find("popup && popup.closed")
+            .expect("OAuth setup poll must still handle the popup closing");
         assert!(
-            use_extensions.contains(
-                "refreshSetupState();\n        if (\n          setupIsConfigured() ||\n          (popup && popup.closed)"
-            ),
+            refresh_idx < popup_close_idx,
             "OAuth setup must refresh setup state before waiting for popup close"
         );
     }

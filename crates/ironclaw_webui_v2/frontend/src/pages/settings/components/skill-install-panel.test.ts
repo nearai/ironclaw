@@ -1,8 +1,8 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import vm from "node:vm";
+
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness.ts";
 
 const COPY = {
   "skills.content": "SKILL.md content",
@@ -19,24 +19,6 @@ const COPY = {
   "skills.namePlaceholder": "skill-name",
   "skills.nameRequired": "Skill name is required.",
 };
-
-function skillInstallPanelSourceForTest() {
-  const source = readFileSync(new URL("./skill-install-panel.tsx", import.meta.url), "utf8");
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace(/^export function /, "function "));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SkillInstallPanel };`;
-}
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -117,7 +99,6 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
 
   const installs = [];
   const context = {
-    globalThis: {},
     Boolean,
     Button,
     Card,
@@ -135,7 +116,12 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
       return value;
     },
   };
-  vm.runInNewContext(skillInstallPanelSourceForTest(), context);
+  const exports = runVmModuleForTest(
+    "./skill-install-panel.tsx",
+    ["SkillInstallPanel"],
+    context,
+    import.meta.url
+  );
   const allComponents = new Set([Button, Card, FormField, Icon, Input, Textarea]);
 
   return {
@@ -149,7 +135,7 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
     },
     render({ isInstalling = false } = {}) {
       cursor = 0;
-      return context.globalThis.__testExports.SkillInstallPanel({
+      return exports.SkillInstallPanel({
         isInstalling,
         onInstall: async (payload) => {
           installs.push(payload);

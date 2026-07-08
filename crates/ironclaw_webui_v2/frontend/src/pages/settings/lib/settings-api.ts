@@ -221,6 +221,11 @@ export function setAutoActivateLearned(enabled) {
 export function fetchTraceCredits() {
   return apiFetch("/api/webchat/v2/traces/credit");
 }
+// Submitted Trace Commons traces for the authenticated caller (read-only,
+// server-scoped). Mirrors fetchTraceCredits.
+export function fetchAccountTraces() {
+  return apiFetch("/api/webchat/v2/traces/account");
+}
 // Authorize a held (manual-review) trace for submission. No request body —
 // the submission id is in the path. Returns { authorized: bool }.
 export function authorizeTraceHold(submissionId) {

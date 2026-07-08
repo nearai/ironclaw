@@ -2,6 +2,7 @@
 import React from "react";
 import { gateFromEvent, gateFromProjectionGate } from "./gates";
 import {
+  isTerminalToolStatus,
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages";

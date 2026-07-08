@@ -31,7 +31,6 @@ mod auth_interaction;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
-mod channel_connection_resume;
 mod command_dispatch;
 mod commands;
 mod conversation_binding;
@@ -88,11 +87,6 @@ pub use automation_thread_metadata::{
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
-};
-pub use channel_connection_resume::{
-    ChannelConnectionResumeReadModel, ChannelConnectionResumeScope, ChannelConnectionResumeService,
-    ChannelPairingBlockedRun, DefaultChannelConnectionResumeService,
-    ResumeChannelConnectionRequest, ResumeChannelConnectionResponse,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
@@ -162,7 +156,9 @@ pub use ironclaw_product_adapters::{
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AutomationListRequest, AutomationProductFacade, ChannelConnectionFacade, CodexLoginStart,
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, AutomationListRequest,
+    AutomationProductFacade, ChannelConnectionFacade, CodexLoginStart,
     ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
     FsMount, InboundAttachmentLander, InboundAttachmentReader, LlmActiveSelection,
@@ -172,7 +168,12 @@ pub use reborn_services::{
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
     ProductAgentBoundCaller, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest,
+    ProjectServiceError, RebornAccountTrace, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
+    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
@@ -207,18 +208,18 @@ pub use reborn_services::{
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
     RebornProjectInfo, RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse,
     RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductFacade,
-    StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
-    UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
+    RebornResumeGateResponse, RebornRetryRunResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
+    SkillsProductFacade, StaticConnectableChannelsProductFacade, StaticOperatorStatusService,
+    TriggerRunThreadScope, UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
     UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
     normalize_operator_log_context_value,
@@ -229,6 +230,7 @@ pub use webui_inbound::{
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundAttachment,
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 pub use workflow::DefaultProductWorkflow;

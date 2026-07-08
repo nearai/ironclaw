@@ -10,7 +10,7 @@
 # After running, you can:
 #   cargo check           # default features (postgres + libsql)
 #   cargo test            # default test suite (uses libsql temp DB)
-#   cargo test --all-features         # full test suite (run WebUI pnpm build first)
+#   cargo test --all-features         # full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)
 
 set -euo pipefail
 
@@ -84,5 +84,5 @@ echo ""
 echo "Quick start:"
 echo "  cargo run                            # Run with default features"
 echo "  cargo test                           # Test suite (libsql temp DB)"
-echo "  cargo test --all-features            # Full test suite (run WebUI pnpm build first)"
-echo "  cargo clippy --all-features          # Lint all code (run WebUI pnpm build first)"
+echo "  cargo test --all-features            # Full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"
+echo "  cargo clippy --all-features          # Lint all code (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"

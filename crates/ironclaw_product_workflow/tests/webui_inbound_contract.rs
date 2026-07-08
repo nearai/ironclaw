@@ -5,7 +5,7 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiGateResolution, WebUiInboundAttachment, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
 };
 use ironclaw_turns::SanitizedCancelReason;
 use serde_json::json;
@@ -98,6 +98,35 @@ fn cancel_run_maps_to_canonical_cancel_request() {
     assert_eq!(request.actor.user_id.as_str(), "user-alpha");
     assert_eq!(request.idempotency_key.as_str(), "cancel-1");
     assert_eq!(request.reason, SanitizedCancelReason::OperatorRequested);
+}
+
+#[test]
+fn retry_run_maps_to_canonical_retry_command() {
+    let request: WebUiRetryRunRequest = serde_json::from_value(json!({
+        "client_action_id": "retry-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id()
+    }))
+    .expect("request json");
+
+    let command = request.into_command(caller()).expect("valid command");
+
+    let WebUiInboundCommand::RetryRun {
+        scope,
+        actor,
+        run_id: parsed_run_id,
+        client_action_id,
+    } = command
+    else {
+        panic!("expected retry-run command");
+    };
+    assert_eq!(scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(actor.user_id.as_str(), "user-alpha");
+    assert_eq!(
+        parsed_run_id.as_uuid(),
+        Uuid::parse_str(&run_id()).expect("uuid")
+    );
+    assert_eq!(client_action_id.as_str(), "retry-1");
 }
 
 #[test]

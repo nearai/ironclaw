@@ -28,7 +28,7 @@ import { cn } from "../utils/cn";
  * branching. */
 const STATE_PRESENTATION = Object.freeze({
   [THREAD_STATE.NEEDS_ATTENTION]: {
-    label: "Needs your attention",
+    labelKey: "thread.state.needsAttention",
     textClass: "text-[var(--v2-warning-text)]",
     dotClass: "bg-[var(--v2-warning-text)]",
     // The colored dot + label badge already signals attention; the solid
@@ -37,13 +37,13 @@ const STATE_PRESENTATION = Object.freeze({
     borderClass: "border-transparent",
   },
   [THREAD_STATE.RUNNING]: {
-    label: "Running",
+    labelKey: "thread.state.running",
     textClass: "text-[var(--v2-positive-text)]",
     dotClass: "bg-[var(--v2-positive-text)]",
     borderClass: "border-[var(--v2-positive-text)]",
   },
   [THREAD_STATE.FAILED]: {
-    label: "Failed",
+    labelKey: "thread.state.failed",
     textClass: "text-[var(--v2-danger-text)]",
     dotClass: "bg-[var(--v2-danger-text)]",
     borderClass: "border-[var(--v2-danger-text)]",
@@ -73,17 +73,18 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
   const activityIso = threadActivityIso(thread);
   const timeLabel = formatThreadActivityLabel(activityIso);
   const timeTitle = formatThreadActivityTooltip(activityIso);
+  const presentationLabel = presentation ? t(presentation.labelKey) : "";
 
   const handleDelete = React.useCallback(
     (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (!window.confirm("Delete this chat?")) return;
+      if (!window.confirm(t("thread.deleteConfirm"))) return;
       Promise.resolve(onDelete?.(thread.id)).catch((err) => {
-        window.alert(err?.message || "Unable to delete chat");
+        window.alert(err?.message || t("chat.deleteFailed"));
       });
     },
-    [onDelete, thread.id]
+    [onDelete, thread.id, t]
   );
 
   const handleTogglePin = React.useCallback(
@@ -116,11 +117,11 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
       >
         <div className="flex w-full items-center gap-1.5">
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug">
-            {thread.title || `Thread ${thread.id.slice(0, 8)}`}
+            {thread.title || t("thread.fallback", { id: thread.id.slice(0, 8) })}
           </span>
           {presentation &&
           (<span
-            aria-label={presentation.label}
+            aria-label={presentationLabel}
             className={cn("h-1.5 w-1.5 shrink-0 rounded-full", presentation.dotClass)}
           />)}
         </div>
@@ -131,7 +132,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
             presentation ? presentation.textClass : "text-[var(--v2-text-faint)]"
           )}
         >
-          {presentation ? presentation.label : timeLabel}
+          {presentation ? presentationLabel : timeLabel}
         </span>)}
       </button>
       <button

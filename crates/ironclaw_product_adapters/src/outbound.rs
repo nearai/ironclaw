@@ -970,7 +970,7 @@ pub enum AuthPromptChallengeKind {
     OAuthUrl,
     /// User pastes a secret string into the chat form. Wire value is
     /// `manual_token` (via `rename_all = "snake_case"`): paste a secret. Covers
-    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Slack): the
+    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Telegram): the
     /// interaction modality — "paste a string" — is identical; what differs is
     /// the resolve route, which rides in `connection` context (present for
     /// channel pairing, absent for a stored-credential secret).
@@ -982,7 +982,7 @@ pub enum AuthPromptChallengeKind {
 
 /// Connection context for a channel-pairing challenge riding the `manual_token`
 /// modality. Present on an auth prompt when the paste is a pairing code that
-/// connects an inbound channel (e.g. Slack), carrying the render copy and the
+/// connects an inbound channel (e.g. Telegram), carrying the render copy and the
 /// resolve-route discriminator (`channel`) so one paste card serves both a
 /// stored-credential secret and a channel pairing code. Additive + serde-default
 /// so rows written before this field deserialize as `None`.
@@ -1237,6 +1237,10 @@ pub enum ProductProjectionItem {
         /// User-facing sanitized explanation for terminal failure states.
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_summary: Option<String>,
+        /// Present only for failed runs: whether the run recorded a resumable
+        /// checkpoint and can be retried via the run retry endpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
     },
     Gate {
         run_id: TurnRunId,
@@ -1285,6 +1289,7 @@ impl ProductProjectionItem {
                 status,
                 failure_category: _,
                 failure_summary,
+                retryable,
                 ..
             } => {
                 validate_bounded_text(
@@ -1292,6 +1297,12 @@ impl ProductProjectionItem {
                     status,
                     PROJECTION_ITEM_ID_MAX_BYTES,
                 )?;
+                if retryable.is_some() && status != "failed" {
+                    return Err(invalid(
+                        "projection_run_retryable",
+                        "retryable is only valid for failed run status entries",
+                    ));
+                }
                 if let Some(summary) = failure_summary {
                     validate_bounded_text(
                         "projection_failure_summary",
@@ -1397,6 +1408,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 failure_category: Option<String>,
                 #[serde(default)]
                 failure_summary: Option<String>,
+                #[serde(default)]
+                retryable: Option<bool>,
             },
             Gate {
                 run_id: TurnRunId,
@@ -1443,6 +1456,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 status,
                 failure_category,
                 failure_summary,
+                retryable,
             } => ProductProjectionItem::RunStatus {
                 run_id,
                 status,
@@ -1451,6 +1465,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                     .transpose()
                     .map_err(serde::de::Error::custom)?,
                 failure_summary,
+                retryable,
             },
             Wire::Gate {
                 run_id,
@@ -1655,17 +1670,17 @@ mod tests {
                 auth_context: Some(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::ManualToken,
-                        Some("slack".to_string()),
+                        Some("telegram".to_string()),
                         None,
                         None,
                         None,
                         Some(ConnectionPromptContext {
-                            channel: "slack".to_string(),
+                            channel: "telegram".to_string(),
                             strategy: Some("inbound_proof_code".to_string()),
                             instructions: Some(
                                 "Message the app to get a pairing code.".to_string(),
                             ),
-                            input_placeholder: Some("Enter Slack pairing code...".to_string()),
+                            input_placeholder: Some("Enter Telegram pairing code...".to_string()),
                             submit_label: Some("Connect".to_string()),
                             error_message: Some("Invalid or expired pairing code.".to_string()),
                         }),
@@ -1685,11 +1700,11 @@ mod tests {
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["connection"]["channel"],
-            "slack"
+            "telegram"
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["connection"]["input_placeholder"],
-            "Enter Slack pairing code..."
+            "Enter Telegram pairing code..."
         );
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize connection gate projection");
@@ -1811,6 +1826,7 @@ mod tests {
                 failure_summary: Some(
                     "The run failed because its runner lease expired.".to_string(),
                 ),
+                retryable: None,
             }],
         )
         .expect("valid run status projection");
@@ -1826,6 +1842,47 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize run status projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_allows_retryable_failed_run_status() {
+        ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "failed".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect("failed run status may carry retryability");
+    }
+
+    #[test]
+    fn projection_state_rejects_retryable_non_failed_run_status() {
+        let error = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect_err("running run status must not carry retryability");
+
+        assert!(
+            matches!(
+                error,
+                ProductAdapterError::InvalidIdentifier {
+                    kind: "projection_run_retryable",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
@@ -1850,6 +1907,7 @@ mod tests {
                 status: "failed".to_string(),
                 failure_category: None,
                 failure_summary: None,
+                retryable: None,
             }]
         );
     }

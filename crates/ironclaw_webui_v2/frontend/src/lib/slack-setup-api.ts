@@ -17,8 +17,12 @@ export function saveSlackSetup(setup) {
   };
   const botToken = String(setup.bot_token || "").trim();
   const signingSecret = String(setup.signing_secret || "").trim();
+  const oauthClientId = String(setup.oauth_client_id || "").trim();
+  const oauthClientSecret = String(setup.oauth_client_secret || "").trim();
   if (botToken) body.bot_token = botToken;
   if (signingSecret) body.signing_secret = signingSecret;
+  if (oauthClientId) body.oauth_client_id = oauthClientId;
+  if (oauthClientSecret) body.oauth_client_secret = oauthClientSecret;
   return apiFetch(SLACK_SETUP_PATH, {
     method: "PUT",
     body: JSON.stringify(body),

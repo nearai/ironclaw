@@ -15,7 +15,7 @@ function slackSetupPanelSourceForTest() {
         .replace("export function SlackSetupPanel", "function SlackSetupPanel"),
     );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP, FieldHint, slackSetupCopy };`;
 }
 
 function createReactStub(state) {
@@ -112,6 +112,7 @@ function setupContext(state, saveResponses = []) {
         config.onSuccess(data, variables);
       },
     }),
+    useT: () => (key) => key,
   };
   vm.runInNewContext(slackSetupPanelSourceForTest(), context);
   return { context, invalidations, setQueryDataCalls };
@@ -148,6 +149,26 @@ test("SlackSetupPanel does not reset dirty form fields on background setup refet
 
   assert.equal(state.values[0].installation_id, "install_dirty");
   assert.equal(state.values[0].bot_token, "xoxb-dirty");
+});
+
+test("FieldHint falls back to literal help copy when no translator is supplied", () => {
+  const state = { hookIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const { context } = setupContext(state);
+  const { FieldHint } = context.globalThis.__testExports;
+
+  const rendered = FieldHint({
+    help: {
+      bodyKey: "slackSetup.help.body",
+      body: "Fallback body",
+      exampleKey: "slackSetup.help.example",
+      example: "Fallback example",
+    },
+    t: null,
+  });
+
+  const body = JSON.stringify(rendered);
+  assert.match(body, /Fallback body/);
+  assert.match(body, /Fallback example/);
 });
 
 test("SlackSetupPanel does not overwrite user input when initial setup load resolves", () => {
@@ -215,6 +236,8 @@ test("SlackSetupPanel clears secrets and accepts saved status after successful s
     shared_subject_user_id: "",
     bot_token: "",
     signing_secret: "",
+    oauth_client_id: "",
+    oauth_client_secret: "",
   });
   assert.deepEqual(JSON.parse(JSON.stringify(setQueryDataCalls)), [
     [["slack-setup"], savedStatus],
@@ -256,12 +279,14 @@ test("SlackSetupPanel defines field guidance for Slack credentials", () => {
   const { context } = setupContext(state);
   const help = context.globalThis.__testExports.FIELD_HELP;
 
-  assert.match(help.installationId.body, /Local IronClaw name/);
-  assert.equal(help.installationId.example, "Example: local-slack");
-  assert.match(help.teamId.body, /workspace\/team ID/);
-  assert.equal(help.teamId.example, "Example: T0123456789");
-  assert.match(help.appId.body, /App Credentials/);
-  assert.equal(help.appId.example, "Example: A0123456789");
-  assert.match(help.botToken.body, /Bot User OAuth Token/);
-  assert.match(help.signingSecret.body, /Signing Secret/);
+  assert.equal(help.installationId.bodyKey, "slackSetup.help.installationId");
+  assert.equal(help.installationId.exampleKey, "slackSetup.example.localSlack");
+  assert.equal(help.teamId.bodyKey, "slackSetup.help.teamId");
+  assert.equal(help.teamId.exampleKey, "slackSetup.example.teamId");
+  assert.equal(help.appId.bodyKey, "slackSetup.help.appId");
+  assert.equal(help.appId.exampleKey, "slackSetup.example.appId");
+  assert.equal(help.botToken.bodyKey, "slackSetup.help.botToken");
+  assert.equal(help.signingSecret.bodyKey, "slackSetup.help.signingSecret");
+  assert.match(help.oauthClientId.body, /Client ID/);
+  assert.match(help.oauthClientSecret.body, /Client Secret/);
 });

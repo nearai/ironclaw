@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import React from "react";
+import { useT } from "../lib/i18n";
 import { useAuthSession } from "./auth";
 import { defaultRoute } from "./routes";
 import { GatewayLayout } from "../layout/gateway-layout";
@@ -18,9 +19,10 @@ import { AdminPage } from "../pages/admin/admin-page";
 import { LogsPage } from "../pages/logs/logs-page";
 
 function AuthLoading() {
+  const t = useT();
   return (
     <main className="grid min-h-[100dvh] place-items-center bg-[var(--v2-canvas)] px-6">
-      <div className="text-sm text-[var(--v2-text-muted)]">Checking session...</div>
+      <div className="text-sm text-[var(--v2-text-muted)]">{t("app.checkingSession")}</div>
     </main>
   );
 }

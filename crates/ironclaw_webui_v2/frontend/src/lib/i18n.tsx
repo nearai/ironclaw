@@ -25,7 +25,11 @@ function detectLanguage() {
 const packs = {};
 
 export function registerPack(lang, translations) {
-  packs[lang] = translations;
+  if (packs[lang]) {
+    Object.assign(packs[lang], translations);
+  } else {
+    packs[lang] = translations;
+  }
 }
 
 // Lazy loaders for every non-default locale. `en` is bundled eagerly in

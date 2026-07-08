@@ -560,6 +560,16 @@ mod tests {
             panic!("resume_turn should not be called by cancellation factory tests")
         }
 
+        async fn retry_turn(
+            &self,
+            request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            // WS-3 implements this.
+            Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            })
+        }
+
         async fn request_cancel(
             &self,
             _request: CancelRunRequest,
@@ -853,6 +863,16 @@ mod tests {
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
             panic!("resume_turn should not be called by cancellation factory tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            // WS-3 implements this.
+            Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            })
         }
 
         async fn request_cancel(

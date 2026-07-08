@@ -128,6 +128,36 @@ jobs:
           find crates/ironclaw_gateway/static/js -type f -name '*.js' \
             -exec node --check {} +
 
+  webui-v2-js-lint:
+    name: WebUI v2 JS lint (no-undef)
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Enable pnpm
+        run: corepack enable pnpm
+      - name: Install Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+      # `no-undef` over WebUI v2 JavaScript catches production modules that reference a
+      # symbol they never imported. The VM-based component suites stub
+      # every collaborator through a `vm` context, so that class of bug (e.g. an
+      # htm `${Component}` used without an import) passes the unit tests and only
+      # surfaces at runtime — this is the gate the eval harness cannot provide.
+      - name: Install WebUI v2 frontend deps
+        working-directory: crates/ironclaw_webui_v2/frontend
+        run: pnpm install --frozen-lockfile
+      - name: Lint WebUI v2 JS
+        working-directory: crates/ironclaw_webui_v2/frontend
+        run: pnpm lint
+
   deny-check:
     name: cargo-deny
     needs: changes
@@ -356,6 +386,7 @@ jobs:
       - reborn-cli-smoke
       - no-panics
       - gateway-boundaries
+      - webui-v2-js-lint
     steps:
       - run: |
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
@@ -369,7 +400,8 @@ jobs:
             "clippy=${{ needs.clippy.result }}" \
             "deny-check=${{ needs.deny-check.result }}" \
             "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
-            "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
+            "gateway-boundaries=${{ needs.gateway-boundaries.result }}" \
+            "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
             if [[ "$result" != "success" ]]; then

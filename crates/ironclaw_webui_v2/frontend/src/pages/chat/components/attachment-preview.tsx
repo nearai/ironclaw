@@ -16,6 +16,7 @@
 import React from "react";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "../../../design-system/modal";
 import { Icon } from "../../../design-system/icons";
+import { useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob, blobToDataUrl } from "../../../lib/api";
 import { attachmentPreviewMode } from "../lib/attachments";
 
@@ -24,6 +25,7 @@ import { attachmentPreviewMode } from "../lib/attachments";
 const MAX_TEXT_PREVIEW_CHARS = 100_000;
 
 export function AttachmentPreviewModal({ attachment, onClose }) {
+  const t = useT();
   const open = Boolean(attachment);
   // `view` holds the resolved representation: { dataUrl?, frameUrl?, text?,
   // downloadUrl?, truncated? }. `status` is the load state machine.
@@ -88,16 +90,16 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
 
   return (
     <Modal open={open} onClose={onClose} size="xl">
-      <ModalHeader onClose={onClose}>
+      <ModalHeader onClose={onClose} closeLabel={t("common.close")}>
         <span className="block truncate">{filename}</span>
       </ModalHeader>
       <ModalBody className="flex min-h-[12rem] items-center justify-center">
         {status === "loading" &&
-        (<div className="text-sm text-iron-400">Loading…</div>)}
+        (<div className="text-sm text-iron-400">{t("common.loading")}</div>)}
         {status === "error" &&
-        (<div className="text-sm text-iron-400">Couldn't load this attachment.</div>)}
+        (<div className="text-sm text-iron-400">{t("chat.attachmentLoadFailed")}</div>)}
         {status === "ready" &&
-        (<PreviewBody mode={mode} view={view} filename={filename} />)}
+        (<PreviewBody mode={mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
       <ModalFooter>
         {view.downloadUrl &&
@@ -108,21 +110,21 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
           className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
         >
           <Icon name="download" className="h-3.5 w-3.5" />
-          <span>Download</span>
+          <span>{t("common.download")}</span>
         </a>)}
         <button
           type="button"
           onClick={onClose}
           className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
         >
-          Close
+          {t("common.close")}
         </button>
       </ModalFooter>
     </Modal>
   );
 }
 
-function PreviewBody({ mode, view, filename }) {
+function PreviewBody({ mode, view, filename, t }) {
   switch (mode) {
     case "image":
       return (<img
@@ -147,7 +149,7 @@ function PreviewBody({ mode, view, filename }) {
         >{view.text}</pre>
         {view.truncated &&
         (<div className="mt-2 text-xs text-iron-400">
-          Preview truncated — download the file to see the rest.
+          {t("chat.attachmentPreviewTruncated")}
         </div>)}
       </div>);
     default:
@@ -155,7 +157,7 @@ function PreviewBody({ mode, view, filename }) {
       // way out.
       return (<div className="flex flex-col items-center gap-2 text-iron-400">
         <Icon name="file" className="h-10 w-10 text-signal" />
-        <div className="text-sm">This file type can't be previewed.</div>
+        <div className="text-sm">{t("chat.attachmentPreviewUnavailable")}</div>
       </div>);
   }
 }

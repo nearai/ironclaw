@@ -309,11 +309,11 @@ test("Chat keeps composer send blocked while a gate owns the run decision", asyn
   assert.equal(props.sendDisabled, true);
   assert.equal(
     props.statusText,
-    "Resolve the approval request before sending another message.",
+    "chat.resolveApprovalBeforeSend",
   );
   await assert.rejects(
     props.onSend("draft while approval is open"),
-    /Resolve the approval request before sending another message/,
+    /chat\.resolveApprovalBeforeSend/,
   );
   assert.equal(sendCount, 0);
 });
@@ -435,18 +435,18 @@ test("Chat renders the pairing card from a channel-connection gate and blocks co
   assert.equal(inputProps.sendDisabled, true);
   assert.equal(
     inputProps.statusText,
-    "Finish connecting the channel before sending another message.",
+    "chat.finishPairingBeforeSend",
   );
   // The pairing gate blocks the composer exactly like any other pending gate.
   await assert.rejects(
     inputProps.onSend("do not send while pairing"),
-    /Finish connecting the channel before sending another message/,
+    /chat\.finishPairingBeforeSend/,
   );
   assert.equal(sendCount, 0);
 });
 
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
-  const historyLoadError = "Failed to load conversation history.";
+  const historyLoadError = "chat.history.loadFailed";
   const { tree, components } = renderChat({
     hookState: {
       messages: [],

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_hooks::{
     HookId, HookLocalId, HookRegistrar, HookRegistry, HookVersion,
     dispatch::HookDispatcherBuilder,
@@ -25,9 +25,9 @@ use ironclaw_hooks::{
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPath, HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
-    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
+    PackageId, PermissionMode, Principal, ProcessId, ProjectId, ResourceEstimate, ResourceUsage,
+    RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -39,7 +39,7 @@ use ironclaw_host_runtime::{
     TurnRunSchedulerConfig, VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
@@ -50,7 +50,7 @@ use ironclaw_loop_support::{
     IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    identity_message_ref, loop_driver_execution_extension_id,
+    SubagentSpawnGoalStore, identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::app_loop_family::build_loop_family_registry;
@@ -62,8 +62,8 @@ use ironclaw_reborn::loop_driver_host::{
     TextOnlyLoopHostConfig,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
+    AwaitDependentRunEvidenceStore, BlockedEvidenceRequest, CompletionEvidenceRequest,
+    FailureEvidenceRequest, FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
     ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::model_routes::{
@@ -79,7 +79,11 @@ use ironclaw_reborn::runtime::{
     build_default_planned_runtime, build_product_live_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    await_edge::{
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+        store::FilesystemAwaitEdgeStore,
+    },
+    flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriver;
@@ -112,7 +116,7 @@ use ironclaw_turns::{
     RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
     TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
@@ -156,6 +160,73 @@ fn driver_requirements_for(
 
 fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
+}
+
+/// Build a fresh in-memory-backed await-edge store/resolver/boot-recovery
+/// trio for call sites that compose `DefaultPlannedRuntimeParts` directly
+/// (mirrors the production composition's wiring, minus the
+/// `bind_coordinator` call — `build_default_planned_runtime`/
+/// `build_product_live_planned_runtime` perform that internally against
+/// `parts.subagent_await_edge_settler`). The returned store also backs
+/// `subagent_await_edge_evidence`; callers needing a
+/// `ThreadCheckpointLoopExitEvidencePort` should pass a clone of it (coerced
+/// to `Arc<dyn AwaitDependentRunEvidenceStore>`) as that port's fourth
+/// argument, in place of the deleted `BoundedSubagentGateResolutionStore`.
+type TestAwaitEdgeTrio = (
+    Arc<FilesystemAwaitEdgeStore<InMemoryBackend>>,
+    Arc<AwaitEdgeResolver<InMemorySessionThreadService, InMemoryBackend>>,
+    Arc<ScopeRecoveryDriver<InMemorySessionThreadService, InMemoryBackend>>,
+);
+
+fn build_test_await_edge_trio(
+    goal_store: Arc<dyn SubagentSpawnGoalStore>,
+    turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+    result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    thread_service: Arc<InMemorySessionThreadService>,
+) -> TestAwaitEdgeTrio {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let fs = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    let store = Arc::new(FilesystemAwaitEdgeStore::new(fs));
+    let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&store),
+        goal_store,
+        turn_state_store,
+        result_writer,
+        thread_service,
+    ));
+    let driver = Arc::new(ScopeRecoveryDriver::new(
+        Arc::clone(&resolver),
+        Arc::clone(&store),
+    ));
+    (store, resolver, driver)
+}
+
+/// Build a fresh, never-written-to in-memory await-edge store for call sites
+/// that only need `AwaitDependentRunEvidenceStore` (blocked-exit evidence)
+/// and never exercise subagent-spawn await-edge resolution — an empty store
+/// answers `has_awaited_child_gate` as `false`, matching the deleted
+/// `BoundedSubagentGateResolutionStore`'s always-empty behavior at these
+/// call sites (none of them spawn subagents).
+fn in_memory_await_edge_evidence_store() -> Arc<FilesystemAwaitEdgeStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let fs = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    Arc::new(FilesystemAwaitEdgeStore::new(fs))
 }
 
 fn test_safety_context() -> InstructionSafetyContext {
@@ -231,6 +302,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
 
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version.clone()),
             model_preference: None,
@@ -345,6 +417,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
 
     let error = host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -401,6 +474,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
         .unwrap();
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: None,
         model_preference: None,
@@ -1348,7 +1422,7 @@ async fn text_only_model_reply_driver_sanitizes_model_failures_and_skips_transcr
 
     assert!(matches!(
         error,
-        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "model_error"
+        AgentLoopDriverError::Failed { ref reason_kind, detail: _ } if reason_kind == "model_error"
     ));
     assert_driver_error_hides_raw_payloads(&error);
     assert_no_assistant_message(&fixture).await;
@@ -1374,7 +1448,7 @@ async fn text_only_model_reply_driver_rejects_capability_calls_without_dispatchi
 
     assert!(matches!(
         error,
-        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "invalid_model_output"
+        AgentLoopDriverError::Failed { ref reason_kind, detail: _ } if reason_kind == "invalid_model_output"
     ));
     assert_driver_error_hides_raw_payloads(&error);
     assert_no_assistant_message(&fixture).await;
@@ -1442,6 +1516,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1493,6 +1568,7 @@ async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1834,7 +1910,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             thread_service.clone(),
             turn_store.clone(),
             loop_checkpoint_store.clone(),
-            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            in_memory_await_edge_evidence_store(),
         ));
     let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
@@ -2138,7 +2214,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 
     assert_eq!(
         failed.failure.expect("failure").category(),
-        "driver_unavailable"
+        "host_stage_unavailable_checkpoint"
     );
     assert!(
         fixture.gateway.requests().is_empty(),
@@ -2205,7 +2281,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
 
     assert_eq!(
         failed.failure.as_ref().expect("failure").category(),
-        "model_error"
+        "model_unavailable"
     );
     assert_driver_public_outputs_hide_raw_payloads(&failed);
     let model_requests = fixture.gateway.requests();
@@ -2820,6 +2896,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -3314,12 +3391,18 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
-        subagent_gate_store.clone(),
+        await_edge_store.clone() as Arc<dyn AwaitDependentRunEvidenceStore>,
     ));
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
@@ -3334,8 +3417,10 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         capability_factory,
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store,
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3469,12 +3554,18 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
-        subagent_gate_store.clone(),
+        await_edge_store.clone() as Arc<dyn AwaitDependentRunEvidenceStore>,
     ));
     // A 60-second poll interval ensures the scheduler cannot advance the run
     // via fallback polling within the 5-second assertion window. Only a wake
@@ -3491,8 +3582,10 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         capability_factory,
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store,
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3637,12 +3730,18 @@ async fn build_runtime_host_with_optional_hooks(
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
-        subagent_gate_store.clone(),
+        await_edge_store.clone() as Arc<dyn AwaitDependentRunEvidenceStore>,
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
@@ -3656,8 +3755,10 @@ async fn build_runtime_host_with_optional_hooks(
         capability_factory,
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store,
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3990,7 +4091,13 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         ),
     );
 
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -4005,8 +4112,11 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
         )),
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: subagent_gate_store.clone(),
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store.clone()
+            as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4014,7 +4124,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
-            subagent_gate_store,
+            await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4064,6 +4174,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -4108,7 +4219,13 @@ async fn product_live_parts_for_gate_test(
             ModelRoute::new("nearai", "qwen3-coder").unwrap(),
         ),
     );
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -4123,8 +4240,11 @@ async fn product_live_parts_for_gate_test(
             CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
         )),
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: subagent_gate_store.clone(),
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store.clone()
+            as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4132,7 +4252,7 @@ async fn product_live_parts_for_gate_test(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
-            subagent_gate_store,
+            await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4219,6 +4339,7 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: host_dyn
                 .build_prompt_bundle(LoopPromptBundleRequest {
                     mode: PromptMode::TextOnly,
@@ -4496,6 +4617,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface_version.clone()),
             model_preference: None,
@@ -4824,6 +4946,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version),
             model_preference: None,
@@ -4915,6 +5038,7 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
     // only observable through the rendered model content.
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: bundle.messages,
             surface_version: Some(surface_version),
             model_preference: None,
@@ -5616,6 +5740,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
     assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: Some(surface.version),
         model_preference: None,
@@ -8059,6 +8184,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
         let CapabilityOutcome::Completed(completed) = capability else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "script_capability_did_not_complete".to_string(),
+                detail: None,
             });
         };
         let prompt_bundle = host
@@ -8075,6 +8201,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
@@ -8085,6 +8212,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let reply_ref = host
@@ -8199,6 +8327,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
@@ -8209,6 +8338,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let reply_ref = host
@@ -8248,6 +8378,7 @@ fn driver_host_error(
 ) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: format!("{:?}", error.kind),
+        detail: error.detail,
     }
 }
 
@@ -8256,13 +8387,12 @@ fn loop_exit_applier_for_fixture(
     turn_store: Arc<InMemoryTurnStateStore>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new(
             Arc::clone(&fixture.thread_service),
             turn_store.clone(),
             loop_checkpoint_store,
-            subagent_gate_store,
+            in_memory_await_edge_evidence_store(),
         )
         .with_checkpoint_state_store(fixture.checkpoint_state_store.clone()),
     );
@@ -8314,6 +8444,16 @@ impl TurnStateStore for StaticTurnStateStore {
         _request: ResumeTurnRequest,
     ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
         panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(

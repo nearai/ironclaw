@@ -18,6 +18,8 @@ const STATUS_LABEL_KEY = {
   error: "tool.statusError",
   running: "tool.statusRunning",
 };
+const PRE_WRAP_CLASS =
+  "v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono";
 
 function statusLabelKey(status) {
   return STATUS_LABEL_KEY[status] || STATUS_LABEL_KEY.running;
@@ -73,7 +75,7 @@ export function ToolRun({ tools }) {
 
   if (tools.length <= TOOL_RUN_COLLAPSE_AFTER) {
     return (
-      <div className="flex flex-col gap-3">
+      <div className="flex min-w-0 flex-col gap-3">
         {tools.map(
           (tool, index) => (<ToolActivity
             key={tool.id || tool.callId || `${tool.toolName}-${index}`}
@@ -87,18 +89,18 @@ export function ToolRun({ tools }) {
   const summary = summarizeTools(tools, t);
 
   return (
-    <div className="flex flex-col">
+    <div className="flex min-w-0 flex-col">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded ? "true" : "false"}
         className={[
-          "v2-button flex w-full items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
+          "v2-button flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
           hasError ? "text-[var(--v2-danger-text)]" : "text-iron-400 hover:text-iron-200",
         ].join(" ")}
       >
         <Icon name="layers" className="h-4 w-4 shrink-0" />
-        <span className="truncate">{summary}</span>
+        <span className="min-w-0 truncate">{summary}</span>
         <Icon
           name="chevron"
           className={["ml-auto h-3.5 w-3.5 shrink-0", expanded ? "rotate-180" : ""].join(" ")}
@@ -107,7 +109,7 @@ export function ToolRun({ tools }) {
 
       {expanded &&
       (
-        <div className="mt-2 flex flex-col gap-3">
+        <div className="mt-2 flex min-w-0 flex-col gap-3">
           {tools.map(
             (tool, index) => (<ToolActivity
               key={tool.id || tool.callId || `${tool.toolName}-${index}`}
@@ -150,13 +152,13 @@ function ToolActivityCard({ activity, nested = false }) {
       aria-expanded={expanded ? "true" : "false"}
       aria-controls={controlsId}
       data-testid="tool-activity-toggle"
-      className="v2-button flex w-full items-center gap-2.5 border-0 border-b border-iron-700/40 bg-transparent px-1 py-2 text-left text-sm"
+      className="v2-button flex w-full min-w-0 items-center gap-2.5 border-0 border-b border-iron-700/40 bg-transparent px-1 py-2 text-left text-sm"
     >
       <span className={["h-2 w-2 shrink-0 rounded-full", dotClass].join(" ")} />
       <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-iron-300"
         >{t(statusLabelKey(toolStatus))}</span
       >
-      <span className="shrink-0 truncate font-mono text-[13px] font-medium text-iron-100"
+      <span className="min-w-0 truncate font-mono text-[13px] font-medium text-iron-100"
         >{toolName}</span
       >
       {toolDetail &&
@@ -176,7 +178,7 @@ function ToolActivityCard({ activity, nested = false }) {
 
   return (
     <div
-      className={nested ? "" : "flex gap-3"}
+      className={nested ? "min-w-0 max-w-full" : "flex min-w-0 max-w-full gap-3"}
       data-testid="tool-activity-card"
       data-tool-name={toolName || ""}
       data-tool-status={toolStatus || ""}
@@ -189,7 +191,7 @@ function ToolActivityCard({ activity, nested = false }) {
           <Icon name="tool" className="h-4 w-4" />
         </div>
       )}
-      <div className={nested ? "min-w-0 flex-1" : "min-w-0 max-w-[85%] flex-1"}>
+      <div className={nested ? "min-w-0 flex-1" : "min-w-0 flex-1 v2-chat-readable-width"}>
         {row}
         {expanded &&
         (<ToolDetailPanel
@@ -245,7 +247,7 @@ function ToolDetailPanel({
     return (
       <div
         id={controlsId}
-        className="rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950 px-3 py-2 font-mono text-xs text-iron-400"
+        className="v2-wrap-anywhere rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950 px-3 py-2 font-mono text-xs text-iron-400"
       >
         {t("tool.noDetail")}
       </div>
@@ -256,9 +258,9 @@ function ToolDetailPanel({
     <div
       id={controlsId}
       data-testid="tool-activity-detail"
-      className="rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950"
+      className="min-w-0 overflow-hidden rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950"
     >
-      <div className="flex items-center gap-1 border-b border-iron-700/40 px-2 pt-1.5">
+      <div className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-iron-700/40 px-2 pt-1.5">
         {tabs.map(
           (tab) => (
             <button
@@ -276,7 +278,7 @@ function ToolDetailPanel({
             </button>
           )
         )}
-        <span className="ml-auto px-1 py-1 font-mono text-[10px] text-iron-500">
+        <span className="ml-auto shrink-0 px-1 py-1 font-mono text-[10px] text-iron-500">
           {toolStatus === "error"
             ? t("tool.exitError")
             : toolStatus === "declined"
@@ -286,16 +288,16 @@ function ToolDetailPanel({
             : t("tool.exitOk")}{toolDurationMs !== null ? ` · ${toolDurationMs}ms` : ""}
         </span>
       </div>
-      <div className="p-3 text-xs">
+      <div className="min-w-0 overflow-hidden p-3 text-xs">
         {active === "details" &&
-        (<div className="whitespace-pre-wrap text-iron-200">{toolDetail}</div>)}
+        (<div className="v2-wrap-anywhere whitespace-pre-wrap text-iron-200">{toolDetail}</div>)}
         {active === "params" &&
-        (<pre className="overflow-x-auto rounded bg-iron-900 p-2 font-mono text-iron-100">{toolParameters}</pre>)}
+        (<pre className={[PRE_WRAP_CLASS, "text-iron-100"].join(" ")}>{toolParameters}</pre>)}
         {active === "result" && (<ToolResult text={toolResultPreview} />)}
         {(active === "error" || active === "declined") &&
         (<pre
           className={[
-            "overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono",
+            PRE_WRAP_CLASS,
             active === "declined" ? "text-iron-300" : "text-[var(--v2-danger-text)]",
           ].join(" ")}
         >{toolError}</pre>)}
@@ -308,13 +310,14 @@ function ToolDetailPanel({
    of flat objects, pretty-printed JSON for other structured payloads, and a
    plain preformatted block otherwise. */
 function ToolResult({ text }) {
+  const t = useT();
   const value = typeof text === "string" ? text.trim() : "";
 
   if (/^data:image\/(?:png|jpe?g|gif|webp|bmp);/i.test(value)) {
     return (<img
       src={value}
-      alt="Tool result"
-      className="max-h-72 rounded-lg border border-iron-700 object-contain"
+      alt={t("tool.resultAlt")}
+      className="max-h-72 max-w-full rounded-lg border border-iron-700 object-contain"
     />);
   }
 
@@ -335,7 +338,7 @@ function ToolResult({ text }) {
       }, new Set())
     );
     return (
-      <div className="overflow-x-auto rounded border border-iron-700/60">
+      <div className="max-w-full overflow-x-auto rounded border border-iron-700/60">
         <table className="w-full border-collapse text-left font-mono text-[11px]">
           <thead>
             <tr>
@@ -366,12 +369,12 @@ function ToolResult({ text }) {
 
   if (parsed !== undefined && typeof parsed === "object") {
     return (<pre
-      className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]"
+      className={[PRE_WRAP_CLASS, "text-[var(--v2-positive-text)]"].join(" ")}
     >{JSON.stringify(parsed, null, 2)}</pre>);
   }
 
   return (<pre
-    className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]"
+    className={[PRE_WRAP_CLASS, "text-[var(--v2-positive-text)]"].join(" ")}
   >{text}</pre>);
 }
 

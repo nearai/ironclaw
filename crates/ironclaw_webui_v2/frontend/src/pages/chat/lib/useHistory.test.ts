@@ -112,7 +112,7 @@ test("useHistory records a load error when timeline fetch fails", async () => {
   assert.equal(setCalls.at(-1).isLoading, false);
   assert.equal(
     setCalls.at(-1).loadError,
-    "Failed to load conversation history.",
+    "chat.history.loadFailed",
   );
   assert.equal(consoleErrors.length, 1);
 });

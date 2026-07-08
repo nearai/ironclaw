@@ -54,6 +54,8 @@ export function PageHeader({
     return route ? t(route.labelKey) : "";
   }, [location.pathname, threadsState.activeThreadId, threadsState.threads, t, breadcrumb]);
 
+  const toggleSidebarLabel = t("sidebar.toggle");
+
   return (
     <header
       className={cn(
@@ -66,10 +68,10 @@ export function PageHeader({
         type="button"
         onClick={onToggleSidebar}
         className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)]"
-        aria-label="Toggle sidebar"
+        aria-label={toggleSidebarLabel}
         aria-controls="gateway-sidebar"
         aria-expanded={sidebarOpen ? "true" : "false"}
-        title="Toggle sidebar"
+        title={toggleSidebarLabel}
       >
         <Icon name="list" className="h-4 w-4" />
       </button>

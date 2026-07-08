@@ -23,7 +23,11 @@ export const primaryRoutes = [
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
   { id: "logs", path: "/logs", labelKey: "nav.logs", hidden: true },
   { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: false },
-  { id: "admin", path: "/admin", labelKey: "nav.admin", hidden: true },
+  // Un-hidden: its lib/admin-api.js now calls the real v2
+  // `/api/webchat/v2/admin/users*` endpoints (user CRUD + status/role +
+  // per-user secret provisioning). Authorization is enforced server-side, so a
+  // non-admin caller sees a 403/forbidden state rather than the surface.
+  { id: "admin", path: "/admin", labelKey: "nav.admin", hidden: false },
 ];
 
 export const routeSectionDefs = [
@@ -60,10 +64,11 @@ export const EXTENSIONS_SUB_ROUTES = [
   { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
 ];
 
+// Only the Users tab ships in this admin port. The dashboard and usage tabs
+// are usage/analytics surfaces, deliberately out of scope here (their
+// components remain in the tree but are not routed).
 export const ADMIN_SUB_ROUTES = [
-  { id: "dashboard", labelKey: "admin.tab.dashboard", icon: "pulse" },
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
-  { id: "usage", labelKey: "admin.tab.usage", icon: "spark" },
 ];
 
 export const EXPANDABLE_SUB_ROUTES = {
