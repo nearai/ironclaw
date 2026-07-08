@@ -194,6 +194,21 @@ impl TriggerMutatorAttemptGateway {
         self.registration_outcomes.lock().await.clone()
     }
 
+    async fn wait_for_registration_outcomes(
+        &self,
+        expected_len: usize,
+        timeout: Duration,
+    ) -> BTreeMap<String, Result<(), String>> {
+        let stop = Instant::now() + timeout;
+        loop {
+            let outcomes = self.registration_outcomes().await;
+            if outcomes.len() >= expected_len || Instant::now() >= stop {
+                return outcomes;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// One provider tool call per scheduled-trigger mutator capability id,
     /// paired with a payload shaped for that capability's real input schema
     /// (see `ironclaw_host_runtime::first_party_tools::trigger_management`'s
@@ -1447,10 +1462,9 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // legitimate trigger's id before the fire runs.
     gateway.set_mutator_target_trigger_id(trigger_id).await;
 
-    // Wait for the fire to settle. This is the model's ONLY turn where a
-    // capability call can be attempted (`invoke_trigger_create` above never
-    // touched the model), so once `last_status` is set, the mutator
-    // self-attempts inside `gateway` have already run to completion.
+    // Wait for the fire submission to settle. `last_status` is written when
+    // the turn is accepted/replayed by the poller, before the asynchronous
+    // agent loop necessarily reaches the model gateway under coverage builds.
     let settled = wait_for_settled(
         &repo,
         &tenant_id,
@@ -1460,10 +1474,17 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     )
     .await;
 
+    // Now wait for the fired run's only model turn to reach the gateway and
+    // attempt all four mutator registrations. Without this second wait the
+    // test can race on slower instrumented builds: the trigger record is
+    // already marked accepted, but the model-facing turn has not run yet.
+    let registration_outcomes = gateway
+        .wait_for_registration_outcomes(4, Duration::from_secs(15))
+        .await;
+
     runtime.shutdown().await.expect("runtime shutdown");
 
     let captured_contents = gateway.captured_message_contents().await;
-    let registration_outcomes = gateway.registration_outcomes().await;
 
     assert_eq!(
         registration_outcomes.len(),
