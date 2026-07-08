@@ -111,8 +111,8 @@ impl ExtensionActivationMode {
 /// COMPRESSED body (8 MiB), so these bound what an uploaded bundle may expand
 /// to in memory. Generous for real tool bundles (wasm + schemas + prompts),
 /// tight enough that a hostile upload cannot OOM the host.
-const MAX_EXTENSION_BUNDLE_FILES: usize = 512;
-const MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_EXTENSION_BUNDLE_FILES: usize = 512;
+pub(crate) const MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Extract an uploaded tool bundle (a zip) into `(path, bytes)` pairs, guarding
 /// against zip-slip: absolute paths, `..` traversal, and backslash separators
@@ -2022,6 +2022,60 @@ output_schema_ref = "schemas/run.output.json"
                 .snapshot()
                 .get_capability(&ironclaw_host_api::CapabilityId::new("uploaded.run").unwrap())
                 .is_some()
+        );
+    }
+
+    /// Intended lifecycle for imported extensions: remove returns the package
+    /// to "available" (the catalog keeps it, assets in memory) and installing
+    /// it again from the Registry must work without re-uploading. (Dropping an
+    /// imported package from the catalog entirely is a future endpoint.)
+    #[tokio::test]
+    async fn imported_extension_reinstalls_after_remove() {
+        let (_dir, storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+        facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect("import uploaded tool bundle");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "uploaded")
+            .expect("valid ref");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install imported extension");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("remove imported extension");
+        assert!(
+            !storage_root
+                .join("system/extensions/uploaded/manifest.toml")
+                .exists(),
+            "remove must delete the materialized files"
+        );
+        let reinstall = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall { package_ref },
+            )
+            .await
+            .expect("reinstalling a removed imported extension from the catalog must succeed");
+        assert_eq!(reinstall.phase, LifecyclePhase::Installed);
+        assert!(
+            storage_root
+                .join("system/extensions/uploaded/wasm/tool.wasm")
+                .exists(),
+            "reinstall must re-materialize the in-memory assets"
         );
     }
 
