@@ -1376,17 +1376,36 @@ fn unavailable_requested_capability_guard(
 fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
     let mut ids = Vec::new();
     let mut token_start = None;
+    // Track Markdown inline-code parity (per line) in this same single pass so we
+    // never rescan the line for each token — one long user line with many
+    // capability-shaped tokens would otherwise be O(n^2).
+    let mut in_inline_code = false;
+    let mut token_in_code = false;
     for (index, character) in content.char_indices() {
         if is_capability_token_char(character) {
-            token_start.get_or_insert(index);
+            if token_start.is_none() {
+                token_start = Some(index);
+                token_in_code = in_inline_code;
+            }
             continue;
         }
         if let Some(start) = token_start.take() {
-            push_explicit_capability_request_token(content, start, index, &mut ids);
+            push_explicit_capability_request_token(content, start, index, token_in_code, &mut ids);
+        }
+        match character {
+            '\n' => in_inline_code = false,
+            '`' => in_inline_code = !in_inline_code,
+            _ => {}
         }
     }
     if let Some(start) = token_start {
-        push_explicit_capability_request_token(content, start, content.len(), &mut ids);
+        push_explicit_capability_request_token(
+            content,
+            start,
+            content.len(),
+            token_in_code,
+            &mut ids,
+        );
     }
     ids
 }
@@ -1401,13 +1420,21 @@ fn push_explicit_capability_request_token(
     content: &str,
     start: usize,
     end: usize,
+    in_inline_code: bool,
     ids: &mut Vec<CapabilityId>,
 ) {
     let token = &content[start..end];
     if !is_likely_capability_reference(token)
-        || is_inside_inline_code(content, start)
         || !is_explicit_capability_request_token(content, start, end)
     {
+        return;
+    }
+    // Tokens written in Markdown inline code (e.g. "use `playwright.sync_api`", a
+    // Python module) are code references, not capability requests — ignore them,
+    // UNLESS the prompt also explicitly labels the token a tool/capability (e.g.
+    // "use the `builtin.http` capability"), in which case the backticks are just
+    // formatting on a genuine request and the guard must still fire.
+    if in_inline_code && !has_capability_noun_context(content, start, end) {
         return;
     }
     if let Ok(capability_id) = CapabilityId::new(token)
@@ -1421,38 +1448,29 @@ fn is_likely_capability_reference(token: &str) -> bool {
     token.starts_with("builtin.") || token.split('.').count() == 2
 }
 
-/// True when the token starting at `start` sits inside a Markdown inline-code
-/// span — i.e. an odd number of backticks precede it on its line. Task prompts
-/// wrap library/module references in backticks (e.g. "use `playwright.sync_api`",
-/// a Python module named after a request verb); those are code being referenced,
-/// not a capability the agent is being asked to invoke, so the guard must ignore
-/// them. A bare, un-backticked "use gmail.send" is still treated as a request.
-fn is_inside_inline_code(content: &str, start: usize) -> bool {
-    let line_start = content[..start].rfind('\n').map_or(0, |nl| nl + 1);
-    content[line_start..start]
-        .bytes()
-        .filter(|&b| b == b'`')
-        .count()
-        % 2
-        == 1
-}
-
-fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
-    let previous_content = &content[..start]; // safety: start is produced by char_indices or content.len().
-    let previous_word = previous_content
+/// The request-word immediately before `start` (alphanumeric/`_`/`-` run).
+fn previous_request_word(content: &str, start: usize) -> Option<&str> {
+    content[..start]
         .trim_end()
         .rsplit(|character: char| !is_capability_request_word_char(character))
-        .find(|word| !word.is_empty());
-    if previous_word.is_some_and(is_capability_request_verb) {
-        return true;
-    }
+        .find(|word| !word.is_empty())
+}
 
+/// True when the word right before or after the token is an explicit "tool" /
+/// "capability" noun — the prompt is calling the token out as a capability, so
+/// it's a genuine request even when written in backticks.
+fn has_capability_noun_context(content: &str, start: usize, end: usize) -> bool {
     let next_word = content[end..]
         .trim_start()
         .split(|character: char| !is_capability_request_word_char(character))
         .find(|word| !word.is_empty());
-    previous_word.is_some_and(is_capability_request_noun)
+    previous_request_word(content, start).is_some_and(is_capability_request_noun)
         || next_word.is_some_and(is_capability_request_noun)
+}
+
+fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
+    previous_request_word(content, start).is_some_and(is_capability_request_verb)
+        || has_capability_noun_context(content, start, end)
 }
 
 fn is_capability_request_word_char(character: char) -> bool {
@@ -2083,6 +2101,23 @@ mod tests {
         assert!(
             guard.is_some(),
             "guard should still fire for a real builtin capability that is disabled"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_capability_with_explicit_noun() {
+        // Backticks alone don't excuse a request the prompt explicitly labels a
+        // capability/tool — the inline-code skip must not swallow a genuine
+        // request. Here `builtin.http` is backticked but called a "capability".
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the `builtin.http` capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "explicitly-labeled capability must still fire even when backticked"
         );
         assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
     }
