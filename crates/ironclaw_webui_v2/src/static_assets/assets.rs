@@ -677,6 +677,11 @@ mod tests {
 
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         assert!(events.contains("isFinalReply: true"));
+        assert!(
+            events.contains("isFinalReply: false"),
+            "live projection text must remain in-flight until final reply/timeline finalizes it"
+        );
+        assert!(events.contains("function projectionTextRunId"));
     }
 
     #[test]

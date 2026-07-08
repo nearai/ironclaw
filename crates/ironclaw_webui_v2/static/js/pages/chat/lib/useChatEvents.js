@@ -139,14 +139,23 @@ export function useChatEvents({
 
         case "final_reply": {
           const reply = frame.reply || {};
+          const turnRunId = reply.turn_run_id || null;
           setMessages((prev) => [
-            ...prev,
+            ...prev.filter(
+              (message) =>
+                !(
+                  turnRunId &&
+                  message.role === "assistant" &&
+                  message.turnRunId === turnRunId &&
+                  message.isFinalReply !== true
+                ),
+            ),
             {
-              id: `reply-${reply.turn_run_id || Date.now()}`,
+              id: `reply-${turnRunId || Date.now()}`,
               role: "assistant",
               content: reply.text || "",
               timestamp: reply.generated_at || new Date().toISOString(),
-              turnRunId: reply.turn_run_id,
+              turnRunId,
               isFinalReply: true,
             },
           ]);
@@ -495,6 +504,7 @@ function applyProjectionItems({
       // the same projection snapshot as a still-blocked gate, so run_status
       // remains the source of truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
+      const textRunId = projectionTextRunId(item.text.id);
       setMessages((prev) => {
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
         const existing = prev.findIndex(
@@ -506,7 +516,8 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: prev[existing]?.timestamp || new Date().toISOString(),
-          isFinalReply: true,
+          turnRunId: prev[existing]?.turnRunId || textRunId,
+          isFinalReply: false,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -705,6 +716,12 @@ function clearLocallyResolvedRun(locallyResolvedGatesRef, runId) {
 function isLocallyResolvedGate(locallyResolvedGatesRef, runId, gateRef) {
   if (!runId || !gateRef) return false;
   return Boolean(locallyResolvedGatesRef?.current?.has(`${runId}\n${gateRef}`));
+}
+
+function projectionTextRunId(id) {
+  if (typeof id !== "string") return null;
+  const prefix = "text:";
+  return id.startsWith(prefix) ? id.slice(prefix.length) || null : null;
 }
 
 function upsertToolFromActivity(setMessages, invocationId, card) {

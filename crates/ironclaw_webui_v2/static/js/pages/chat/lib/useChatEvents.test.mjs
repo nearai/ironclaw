@@ -198,6 +198,12 @@ test("useChatEvents: projection text streams into one assistant bubble without e
   assert.equal(harness.messages[0].id, "text-text:run-1");
   assert.equal(harness.messages[0].role, "assistant");
   assert.equal(harness.messages[0].content, "partial");
+  assert.equal(harness.messages[0].turnRunId, "run-1");
+  assert.equal(
+    harness.messages[0].isFinalReply,
+    false,
+    "streamed projection text is still in-flight until terminal reply/timeline finalizes it",
+  );
 
   harness.handleEvent({
     type: "projection_update",
@@ -211,6 +217,8 @@ test("useChatEvents: projection text streams into one assistant bubble without e
   assert.equal(harness.isProcessing, true);
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].content, "partial answer");
+  assert.equal(harness.messages[0].turnRunId, "run-1");
+  assert.equal(harness.messages[0].isFinalReply, false);
 
   harness.handleEvent({
     type: "projection_update",
@@ -224,6 +232,44 @@ test("useChatEvents: projection text streams into one assistant bubble without e
   assert.equal(harness.isProcessing, false);
   assert.equal(harness.activeRun, null);
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
+test("useChatEvents: final_reply replaces matching streamed projection bubble", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", body: "part" } },
+        ],
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "partial answer finalized",
+        generated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.deepEqual(plain(harness.messages[0]), {
+    id: "reply-run-1",
+    role: "assistant",
+    content: "partial answer finalized",
+    timestamp: "2026-07-08T13:00:00Z",
+    turnRunId: "run-1",
+    isFinalReply: true,
+  });
+  assert.equal(harness.isProcessing, false);
 });
 
 test("useChatEvents: skill activation projection stays out of chat transcript", () => {
