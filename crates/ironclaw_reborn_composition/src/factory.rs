@@ -4664,8 +4664,8 @@ mod tests {
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
         MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
-        ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, ScopedPath, SecretHandle,
-        TenantId, TrustClass, UserId, VirtualPath,
+        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, SecretHandle, TenantId,
+        TrustClass, UserId, VirtualPath,
     };
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_host_api::{
@@ -4768,23 +4768,11 @@ mod tests {
 
         let reservation = local_runtime
             .resource_governor
-            .reserve(
-                scope,
-                ResourceEstimate {
-                    usd: Some(dec!(0.10)),
-                    ..ResourceEstimate::default()
-                },
-            )
+            .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
             .expect("reservation");
         local_runtime
             .resource_governor
-            .reconcile(
-                reservation.id,
-                ResourceUsage {
-                    usd: dec!(0.10),
-                    ..ResourceUsage::default()
-                },
-            )
+            .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
             .expect("reconcile");
 
         assert_eq!(
