@@ -5662,10 +5662,8 @@ output_schema_ref = "schemas/write.output.json"
                         .expect("write test response");
                 }
 
-                if is_chat_completion {
-                    if let Some(auth_tx) = auth_tx.take() {
-                        let _ = auth_tx.send(auth_header);
-                    }
+                if is_chat_completion && let Some(auth_tx) = auth_tx.take() {
+                    let _ = auth_tx.send(auth_header);
                 }
             }
         });
