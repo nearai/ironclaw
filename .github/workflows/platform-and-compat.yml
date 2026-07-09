@@ -11,6 +11,19 @@ on:
         required: false
         type: boolean
         default: true
+      deep:
+        description: >-
+          Marker that this run is a reusable deep-CI invocation. Callers never
+          need to set it: the default makes `inputs.deep` true exactly when
+          this workflow runs via workflow_call, and the empty inputs context
+          makes it falsy on direct triggers. Job conditions must use this
+          instead of `github.event_name == 'workflow_call'` — in a reusable
+          workflow, github.event_name reflects the CALLER's event (e.g.
+          `schedule` under Nightly Deep CI), so that comparison never matches
+          and the gated jobs silently skip.
+        required: false
+        type: boolean
+        default: true
   pull_request:
     branches:
       - main
@@ -44,13 +57,13 @@ jobs:
     outputs:
       docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
       has_core_code: ${{ steps.non_diff.outputs.has_core_code || steps.diff.outputs.has_core_code }}
-      has_engine_replay_risk: ${{ steps.non_diff.outputs.has_engine_replay_risk || steps.diff.outputs.has_engine_replay_risk }}
       has_runtime_heavy_risk: ${{ steps.non_diff.outputs.has_runtime_heavy_risk || steps.diff.outputs.has_runtime_heavy_risk }}
       has_web_risk: ${{ steps.non_diff.outputs.has_web_risk || steps.diff.outputs.has_web_risk }}
       has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
       has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
       has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
       has_legacy_tests: ${{ steps.non_diff.outputs.has_legacy_tests || steps.diff.outputs.has_legacy_tests }}
+      has_docker_risk: ${{ steps.non_diff.outputs.has_docker_risk || steps.diff.outputs.has_docker_risk }}
     steps:
       - id: non_diff
         if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
@@ -58,11 +71,6 @@ jobs:
           echo "docs_only=false" >> "$GITHUB_OUTPUT"
           echo "has_core_code=true" >> "$GITHUB_OUTPUT"
           echo "has_legacy_tests=true" >> "$GITHUB_OUTPUT"
-          if [ "${{ github.event_name }}" = "workflow_call" ]; then
-            echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"
-          fi
           echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
           # Keep deterministic full browser E2E in its own scheduled/manual
           # workflow. The merge queue runs only smoke coverage for web-risk
@@ -71,6 +79,7 @@ jobs:
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
+          echo "has_docker_risk=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -96,12 +105,6 @@ jobs:
           }
 
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
-
-          if has_match '^(crates/ironclaw_(common|skills)/|src/(agent|auth|bridge|context|extensions|llm|orchestrator|secrets|skills|tools|worker|workspace)/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/(replay-gate|test|nightly-deep-ci)\.yml$)'; then
-            echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"
-          fi
 
           if has_match '^(crates/ironclaw_(common|safety|skills)/|src/(agent|auth|bridge|config|context|db|extensions|gate|history|hooks|orchestrator|ownership|pairing|safety|sandbox|secrets|setup|skills|tools|webhooks|worker|workspace)/|src/channels/channel\.rs$|src/channels/manager\.rs$|src/channels/relay/|src/channels/wasm/|channels-src/telegram/|migrations/|src/app\.rs$|src/main\.rs$|src/lib\.rs$|tests/telegram_auth_integration\.rs$|tests/e2e_thread_scheduling\.rs$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
             echo "has_runtime_heavy_risk=true" >> "$GITHUB_OUTPUT"
@@ -133,24 +136,10 @@ jobs:
             echo "has_slack_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-  matrix-config:
-    name: Configure matrix
-    runs-on: ubuntu-latest
-    outputs:
-      test_matrix: ${{ steps.set.outputs.test_matrix }}
-      windows_matrix: ${{ steps.set.outputs.windows_matrix }}
-    steps:
-      - id: set
-        run: |
-          FULL='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
-          SLIM='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"}]'
-
-          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo "test_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
-            echo "windows_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
+          if has_match '^(Dockerfile|\.dockerignore$|\.github/workflows/platform-and-compat\.yml$)'; then
+            echo "has_docker_risk=true" >> "$GITHUB_OUTPUT"
           else
-            echo "test_matrix=${FULL}" >> "$GITHUB_OUTPUT"
-            echo "windows_matrix=${FULL}" >> "$GITHUB_OUTPUT"
+            echo "has_docker_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
   hooks-parity-tests:
@@ -212,13 +201,22 @@ jobs:
 
   windows-build:
     name: Windows Build (${{ matrix.name }})
-    needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || inputs.deep == true)
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.matrix-config.outputs.windows_matrix) }}
+        # This job only runs on push / workflow_call (never on PR or
+        # merge_group), so it always builds the full feature matrix — no
+        # event-conditional SLIM/FULL indirection.
+        include:
+          - name: all-features
+            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
+          - name: default
+            flags: ""
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -240,7 +238,7 @@ jobs:
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_wasm_abi_risk == 'true')
+      (github.event_name == 'push' || inputs.deep == true || needs.changes.outputs.has_wasm_abi_risk == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -296,7 +294,7 @@ jobs:
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call') &&
+      (github.event_name == 'push' || inputs.deep == true) &&
       needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -331,10 +329,18 @@ jobs:
   docker-build:
     name: Docker Build
     needs: changes
+    # Dockerfile changes must not be a main-only failure: the merge queue
+    # builds the images when the merge group actually touches Docker inputs.
+    # The merge_group arm deliberately does not require has_legacy_tests —
+    # the scope classifier matches only the literal `Dockerfile`, so a
+    # Dockerfile.reborn/.dockerignore-only merge group reports
+    # has_legacy_tests=false while has_docker_risk=true.
     if: >
       needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker))
+      ((needs.changes.outputs.has_legacy_tests == 'true' &&
+        (github.event_name == 'push' ||
+         (inputs.deep == true && inputs.include_docker))) ||
+       (github.event_name == 'merge_group' && needs.changes.outputs.has_docker_risk == 'true'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -421,3 +427,42 @@ jobs:
           GITHUB_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event_name == 'merge_group' && github.event.merge_group.base_ref || '' }}
           ALLOW_SKIP_VERSION_CHECK: ${{ steps.skip_labels.outputs.allow_skip }}
         run: ./scripts/check-version-bumps.sh
+
+  platform-compat:
+    name: Platform & Compat
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - changes
+      - hooks-parity-tests
+      - windows-build
+      - wasm-wit-compat
+      - bench-compile
+      - docker-build
+      - version-check
+    steps:
+      - name: Check Platform & Compat jobs
+        run: |
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "changes (scope detection) failed: ${{ needs.changes.result }}"
+            exit 1
+          fi
+
+          # Every job in this workflow is conditionally gated (by event or by
+          # detected scope), so "skipped" is a legitimate pass; anything that
+          # actually ran must have succeeded. This roll-up gives the workflow
+          # one stable check name that branch rulesets can require.
+          for job_result in \
+            "hooks-parity-tests=${{ needs.hooks-parity-tests.result }}" \
+            "windows-build=${{ needs.windows-build.result }}" \
+            "wasm-wit-compat=${{ needs.wasm-wit-compat.result }}" \
+            "bench-compile=${{ needs.bench-compile.result }}" \
+            "docker-build=${{ needs.docker-build.result }}" \
+            "version-check=${{ needs.version-check.result }}"; do
+            name="${job_result%%=*}"
+            result="${job_result##*=}"
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "$name failed: $result"
+              exit 1
+            fi
+          done

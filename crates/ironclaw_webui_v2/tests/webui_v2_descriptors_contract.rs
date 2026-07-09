@@ -46,7 +46,8 @@ use ironclaw_webui_v2::{
     WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_STATUS,
     WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG, WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
     WEBUI_V2_ROUTE_READ_FS_FILE, WEBUI_V2_ROUTE_READ_PROJECT_FILE, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
-    WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL, WEBUI_V2_ROUTE_RESOLVE_GATE,
+    WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL,
+    WEBUI_V2_ROUTE_RENAME_AUTOMATION, WEBUI_V2_ROUTE_RESOLVE_GATE,
     WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_RETRY_RUN, WEBUI_V2_ROUTE_SEARCH_SKILLS,
     WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
     WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
@@ -353,6 +354,23 @@ fn expected_table() -> Vec<Expected> {
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,
             body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 60,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_RENAME_AUTOMATION,
+            method: NetworkMethod::Post,
+            pattern: "/api/webchat/v2/automations/{automation_id}",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: body_limit_kib(4),
             rate_limit_max: 60,
             rate_limit_window_seconds: 60,
             rate_limit_scope: RateLimitScope::PerCaller,
@@ -1577,6 +1595,31 @@ fn route_lookup() -> HashMap<String, IngressRouteDescriptor> {
         .into_iter()
         .map(|d| (d.route_id().as_str().to_string(), d))
         .collect()
+}
+
+#[test]
+fn automation_resource_descriptor_pattern_is_dual_method_only() {
+    let mut matching_routes = Vec::new();
+    for route in webui_v2_routes() {
+        if route.route_pattern().as_str() == "/api/webchat/v2/automations/{automation_id}" {
+            matching_routes.push((route.route_id().as_str().to_string(), route.method()));
+        }
+    }
+
+    matching_routes.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        matching_routes,
+        vec![
+            (
+                WEBUI_V2_ROUTE_DELETE_AUTOMATION.to_string(),
+                NetworkMethod::Delete,
+            ),
+            (
+                WEBUI_V2_ROUTE_RENAME_AUTOMATION.to_string(),
+                NetworkMethod::Post,
+            ),
+        ],
+    );
 }
 
 #[test]

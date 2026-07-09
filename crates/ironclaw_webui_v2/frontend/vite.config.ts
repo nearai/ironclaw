@@ -16,7 +16,6 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: /^@tanstack\/react-query$/, replacement: require.resolve("@tanstack/react-query") },
-      { find: /^htm$/, replacement: require.resolve("htm") },
       { find: /^react$/, replacement: require.resolve("react") },
       { find: /^react\/jsx-runtime$/, replacement: require.resolve("react/jsx-runtime") },
       { find: /^react-dom$/, replacement: require.resolve("react-dom") },
@@ -61,6 +60,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.{test,spec}.{js,mjs,ts,mts}"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    setupFiles: ["src/test/vm-tsx-setup.ts"],
   },
 });

@@ -1,7 +1,7 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchJobDetail, fetchJobEvents, sendJobPrompt } from "../lib/jobs-api.js";
+import { fetchJobDetail, fetchJobEvents, sendJobPrompt } from "../lib/jobs-api";
 
 export function useJobDetail(jobId) {
   const queryClient = useQueryClient();

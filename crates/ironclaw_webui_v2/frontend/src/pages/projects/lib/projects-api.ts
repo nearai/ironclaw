@@ -14,7 +14,7 @@ import {
   updateProject as apiUpdateProject,
   updateProjectMemberRole as apiUpdateProjectMemberRole,
   listThreads as apiListThreads,
-} from "../../../lib/api.js";
+} from "../../../lib/api";
 
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
 // expect. Mission/spend/gate metrics default to 0 in the components (`|| 0`),
