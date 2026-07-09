@@ -222,6 +222,13 @@ export function MessageList({
 
   React.useEffect(() => cancelScrollSync, [cancelScrollSync]);
 
+  const latestUserMessageKey = React.useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.role === "user") return messageKey(message);
+    }
+    return null;
+  }, [messages]);
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
 
   return (
@@ -264,6 +271,11 @@ export function MessageList({
                 message={item.message}
                 onRetry={onRetryMessage}
                 threadId={threadId}
+                dimContent={
+                  pending &&
+                  item.message?.role === "user" &&
+                  messageKey(item.message) === latestUserMessageKey
+                }
               />)
         )}
         {children}

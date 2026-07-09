@@ -131,6 +131,19 @@ test("MessageList force-follows when the latest message is newly sent by the use
   );
 });
 
+test("MessageList dims only the latest user message while a run is pending", () => {
+  assert.match(
+    messageListSource,
+    /const latestUserMessageKey = React\.useMemo\(\(\) => \{[\s\S]*for \(let index = messages\.length - 1; index >= 0; index -= 1\) \{[\s\S]*if \(message\?\.role === "user"\) return messageKey\(message\);/,
+    "message-list should identify the latest user message as the pending prompt",
+  );
+  assert.match(
+    messageListSource,
+    /dimContent=\{\s*pending &&\s*item\.message\?\.role === "user" &&\s*messageKey\(item\.message\) === latestUserMessageKey\s*\}/,
+    "only the latest user message should stay dimmed while the active run is pending",
+  );
+});
+
 test("MessageList observes content growth from streamed markdown layout", () => {
   assert.match(
     messageListSource,
