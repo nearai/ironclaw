@@ -5,30 +5,42 @@ use crate::estimate_tokens_from_chars;
 
 pub(crate) type SelectedPromptContextMessage = (ContextMessage, u64);
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PromptContextSelection {
+    pub(crate) selected: Vec<SelectedPromptContextMessage>,
+    pub(crate) dropped_messages: usize,
+}
+
 pub(crate) fn select_prompt_context_messages(
     messages: Vec<ContextMessage>,
     budget: PromptContextTokenBudget,
-) -> Vec<SelectedPromptContextMessage> {
+) -> PromptContextSelection {
     let visible_tokens = budget.visible_transcript_tokens();
-    if visible_tokens == 0 {
-        return Vec::new();
-    }
-    let mut selected = Vec::new();
-    let mut selected_tokens = 0_u64;
+    let total_messages = messages.len();
+    let mut selected: Vec<SelectedPromptContextMessage> = Vec::new();
 
-    for message in messages.into_iter().rev() {
-        let message_tokens = estimate_tokens_from_chars(&message.content).as_u64();
-        let fits = selected_tokens.saturating_add(message_tokens) <= visible_tokens;
-        if fits {
+    if visible_tokens > 0 {
+        // Walk newest-first, estimating tokens lazily and stopping at the first
+        // message that does not fit. This runs on the per-turn model path, so we
+        // move each admitted message out (never clone the body) and never scan
+        // the dropped older prefix — cost stays O(visible window), not
+        // O(whole transcript).
+        let mut selected_tokens = 0_u64;
+        for message in messages.into_iter().rev() {
+            let message_tokens = estimate_tokens_from_chars(&message.content).as_u64();
+            if selected_tokens.saturating_add(message_tokens) > visible_tokens {
+                break;
+            }
             selected_tokens = selected_tokens.saturating_add(message_tokens);
             selected.push((message, message_tokens));
-        } else {
-            break;
         }
+        selected.reverse();
     }
 
-    selected.reverse();
-    selected
+    PromptContextSelection {
+        dropped_messages: total_messages - selected.len(),
+        selected,
+    }
 }
 
 #[cfg(test)]
@@ -56,11 +68,12 @@ mod tests {
     fn selector_keeps_contiguous_newest_messages_within_budget() {
         let messages = vec![message(1, "a"), message(2, "b"), message(3, "c")];
 
-        let selected =
+        let selection =
             select_prompt_context_messages(messages, PromptContextTokenBudget::new(2, 0, 0));
 
         assert_eq!(
-            selected
+            selection
+                .selected
                 .iter()
                 .map(|(message, _)| message.sequence)
                 .collect::<Vec<_>>(),
@@ -72,43 +85,64 @@ mod tests {
     fn selector_rejects_newest_message_when_it_exceeds_budget() {
         let messages = vec![message(1, "aaaa"), message(2, "this message is too large")];
 
-        let selected =
+        let selection =
             select_prompt_context_messages(messages, PromptContextTokenBudget::new(1, 0, 0));
 
-        assert!(selected.is_empty());
+        assert!(selection.selected.is_empty());
     }
 
     #[test]
     fn selector_returns_empty_for_empty_input() {
-        let selected =
+        let selection =
             select_prompt_context_messages(Vec::new(), PromptContextTokenBudget::new(1, 0, 0));
 
-        assert!(selected.is_empty());
+        assert!(selection.selected.is_empty());
     }
 
     #[test]
     fn selector_returns_empty_when_visible_budget_is_zero() {
-        let selected = select_prompt_context_messages(
+        let selection = select_prompt_context_messages(
             vec![message(1, "a")],
             PromptContextTokenBudget::new(1, 1, 0),
         );
 
-        assert!(selected.is_empty());
+        assert!(selection.selected.is_empty());
     }
 
     #[test]
     fn selector_admits_message_at_exact_budget_boundary() {
         let messages = vec![message(1, "a"), message(2, "b")];
 
-        let selected =
+        let selection =
             select_prompt_context_messages(messages, PromptContextTokenBudget::new(2, 0, 0));
 
         assert_eq!(
-            selected
+            selection
+                .selected
                 .iter()
                 .map(|(message, _)| message.sequence)
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn selector_reports_dropped_messages_when_budget_exceeded() {
+        let messages = vec![message(1, "a"), message(2, "b"), message(3, "c")];
+
+        let selection =
+            select_prompt_context_messages(messages, PromptContextTokenBudget::new(2, 0, 0));
+
+        assert_eq!(selection.dropped_messages, 1);
+    }
+
+    #[test]
+    fn selector_reports_zero_dropped_messages_when_everything_fits() {
+        let messages = vec![message(1, "a"), message(2, "b")];
+
+        let selection =
+            select_prompt_context_messages(messages, PromptContextTokenBudget::new(2, 0, 0));
+
+        assert_eq!(selection.dropped_messages, 0);
     }
 }

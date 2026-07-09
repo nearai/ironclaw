@@ -146,12 +146,13 @@ use ironclaw_turns::{
         CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
         InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -219,6 +220,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     identity_budget: IdentityBudget,
+    instruction_budget: Option<PromptContextTokenBudget>,
     prompt_context_budget: PromptContextTokenBudget,
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     identity_candidates: Arc<IdentityCandidateCache>,
@@ -286,6 +288,7 @@ where
             skill_context_source: None,
             identity_context_source: None,
             identity_budget: IdentityBudget::default(),
+            instruction_budget: None,
             prompt_context_budget: PromptContextTokenBudget::default(),
             context_window_cache: None,
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
@@ -308,6 +311,15 @@ where
 
     pub fn with_identity_budget(mut self, budget: IdentityBudget) -> Self {
         self.identity_budget = budget;
+        self
+    }
+
+    /// Opt-in token cap for injected skill instruction snippets. Unset by
+    /// default, so instruction injection stays unbounded unless a composition
+    /// root wires a budget here; the always-on debug signal in
+    /// `select_instruction_snippets_for_context` reports the size regardless.
+    pub fn with_instruction_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.instruction_budget = Some(budget);
         self
     }
 
@@ -334,6 +346,20 @@ where
     fn run_context(&self) -> &LoopRunContext {
         &self.run_context
     }
+}
+
+fn trace_prompt_context_drops(
+    selection: &prompt_context_budget::PromptContextSelection,
+    budget: PromptContextTokenBudget,
+) {
+    if selection.dropped_messages == 0 {
+        return;
+    }
+    tracing::debug!(
+        dropped_messages = selection.dropped_messages,
+        visible_budget_tokens = budget.visible_transcript_tokens(),
+        "prompt context exceeded visible budget; older messages dropped from model context"
+    );
 }
 
 #[async_trait]
@@ -369,6 +395,8 @@ where
             }
             None => Vec::new(),
         };
+        let instruction_snippets =
+            self.select_instruction_snippets_for_context(instruction_snippets);
         let identity_messages = match self.identity_context_source.as_deref() {
             Some(source) => {
                 let mode = request.mode;
@@ -402,14 +430,16 @@ where
             .iter()
             .filter_map(context_message_to_compaction_metadata)
             .collect();
-        let messages = prompt_context_budget::select_prompt_context_messages(
+        let prompt_context_selection = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
         );
+        trace_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
 
         Ok(LoopContextBundle {
             identity_messages,
-            messages: messages
+            messages: prompt_context_selection
+                .selected
                 .into_iter()
                 .filter_map(context_message_to_loop_message)
                 .collect(),
@@ -424,6 +454,62 @@ impl<S> ThreadBackedLoopContextPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
+    fn select_instruction_snippets_for_context(
+        &self,
+        mut snippets: Vec<LoopContextSnippet>,
+    ) -> Vec<LoopContextSnippet> {
+        let Some(budget) = self.instruction_budget else {
+            // No cap configured: pass snippets through untouched. Estimate the
+            // total only for the debug signal, and only when debug tracing is on.
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let instruction_tokens = snippets
+                    .iter()
+                    .map(|snippet| estimate_tokens_from_chars(&snippet.model_content).as_u64())
+                    .fold(0_u64, u64::saturating_add);
+                tracing::debug!(
+                    snippets = snippets.len(),
+                    instruction_tokens,
+                    budgeted = false,
+                    "skill instruction snippets estimated for prompt context"
+                );
+            }
+            return snippets;
+        };
+
+        // Lossless per-snippet admission: skill instructions are behavioural
+        // contracts, so a snippet is never truncated mid-text. Admit whole
+        // snippets in priority order until the next would exceed the budget, then
+        // drop the remaining lowest-priority snippets. Each snippet is estimated
+        // exactly once.
+        sort_instruction_snippets_for_prompt(&mut snippets);
+        let visible_instruction_tokens = budget.visible_transcript_tokens();
+        let total_snippets = snippets.len();
+        let mut admitted_tokens = 0_u64;
+        let mut admitted = Vec::new();
+        let mut dropped = 0_usize;
+
+        for (index, snippet) in snippets.into_iter().enumerate() {
+            let snippet_tokens = estimate_tokens_from_chars(&snippet.model_content).as_u64();
+            if admitted_tokens.saturating_add(snippet_tokens) <= visible_instruction_tokens {
+                admitted_tokens = admitted_tokens.saturating_add(snippet_tokens);
+                admitted.push(snippet);
+            } else {
+                dropped = total_snippets.saturating_sub(index);
+                break;
+            }
+        }
+
+        if dropped > 0 {
+            tracing::debug!(
+                admitted = admitted.len(),
+                dropped,
+                admitted_tokens,
+                "skill instruction snippets exceeded budget; lowest-priority snippets dropped"
+            );
+        }
+        admitted
+    }
+
     fn publish_personal_context_admitted(
         &self,
         mode: PromptMode,
@@ -1253,12 +1339,13 @@ where
         let context = self.load_model_context_window().await?;
 
         if requested_messages.is_empty() {
-            let context_messages = prompt_context_budget::select_prompt_context_messages(
+            let prompt_context_selection = prompt_context_budget::select_prompt_context_messages(
                 context.messages,
                 self.prompt_context_budget,
             );
-            let mut messages = Vec::with_capacity(context_messages.len());
-            for (message, _) in context_messages {
+            trace_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
+            let mut messages = Vec::with_capacity(prompt_context_selection.selected.len());
+            for (message, _) in prompt_context_selection.selected {
                 let Some(content_ref) = message_ref_from_context(&message) else {
                     continue;
                 };
