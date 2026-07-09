@@ -12,12 +12,12 @@
  *   loading   boolean — shows an inline spinner, disables the button, sets
  *             aria-busy. The label stays visible so the button keeps its width.
  *   disabled  boolean
- *   as        "button" | "a" (renders anchor; pass href via ...props)
+ *   as        "button" | "a" | Link-like component (pass href/to via ...props)
  *   className string — for layout/spacing overrides (margin, width, etc.)
  *   children
  *   ...rest   forwarded to the element (type, onClick, href, …)
  */
-import type { ElementType, ReactNode } from "react";
+import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
 import { cn } from "../utils/cn";
 import { Spinner } from "./spinner";
 
@@ -70,7 +70,7 @@ const VARIANTS = {
     "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
 };
 
-type ButtonProps = {
+type ButtonOwnProps = {
   children?: ReactNode;
   className?: string;
   variant?: "primary" | keyof typeof VARIANTS;
@@ -79,8 +79,28 @@ type ButtonProps = {
   loading?: boolean;
   disabled?: boolean;
   as?: ElementType;
-  [key: string]: any;
 };
+
+type ButtonNativeProps = Omit<
+  ComponentPropsWithoutRef<"button">,
+  keyof ButtonOwnProps | "disabled"
+>;
+
+type LinkLikeProps = {
+  href?: ComponentPropsWithoutRef<"a">["href"];
+  target?: ComponentPropsWithoutRef<"a">["target"];
+  rel?: ComponentPropsWithoutRef<"a">["rel"];
+  download?: ComponentPropsWithoutRef<"a">["download"];
+  to?: string;
+  replace?: boolean;
+  reloadDocument?: boolean;
+  preventScrollReset?: boolean;
+  relative?: "route" | "path";
+  state?: unknown;
+  viewTransition?: boolean;
+};
+
+type ButtonProps = ButtonOwnProps & ButtonNativeProps & LinkLikeProps;
 
 /* ── Component ─────────────────────────────────────────────────────── */
 
@@ -95,17 +115,18 @@ export function Button({
   as: Tag = "button",
   ...rest
 }: ButtonProps) {
-  const Element: any = Tag;
+  const Element = Tag;
   const sizeClass  = SIZES[size] ?? SIZES.md;
   const fullClass  = fullWidth ? "w-full" : "";
   const isDisabled = disabled || loading;
   const isLinkLike = Tag === "a" || rest.href != null || rest.to != null;
   const disabledAnchorClass = isLinkLike && isDisabled ? "cursor-not-allowed opacity-50" : "";
+  const nativeDisabled = isLinkLike ? undefined : isDisabled;
   const elementProps =
     isLinkLike && isDisabled
       ? {
           ...rest,
-          onClick: (event) => {
+          onClick: (event: { preventDefault?: () => void; stopPropagation?: () => void }) => {
             event?.preventDefault?.();
             event?.stopPropagation?.();
           },
@@ -129,7 +150,7 @@ export function Button({
           "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}
-        disabled={isDisabled}
+        disabled={nativeDisabled}
         aria-disabled={isLinkLike && isDisabled ? true : undefined}
         aria-busy={loading || undefined}
         tabIndex={isLinkLike && isDisabled ? -1 : undefined}
@@ -154,7 +175,7 @@ export function Button({
   return (
     <Element
       className={cn(BASE, sizeClass, fullClass, disabledAnchorClass, variantClass, className)}
-      disabled={isDisabled}
+      disabled={nativeDisabled}
       aria-disabled={isLinkLike && isDisabled ? true : undefined}
       aria-busy={loading || undefined}
       tabIndex={isLinkLike && isDisabled ? -1 : undefined}

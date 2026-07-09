@@ -71,16 +71,7 @@ function collectScalars(root) {
 function componentProps(root, component) {
   const props = [];
   visit(root, (node) => {
-    if (!Array.isArray(node.values)) return;
-    for (let index = 0; index < node.values.length; index += 1) {
-      if (node.values[index] !== component) continue;
-      const current = {};
-      for (let propIndex = index + 1; propIndex < node.values.length; propIndex += 1) {
-        const name = node.strings[propIndex]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
-        if (name) current[name] = node.values[propIndex];
-      }
-      props.push(current);
-    }
+    if (node.type === component) props.push(node.props || {});
   });
   return props;
 }
@@ -105,13 +96,21 @@ function loadComponents() {
   function Icon() {}
   function Link() {}
   function StatusPill() {}
+  function buildScopedLogsPath({ threadId, runId }) {
+    const params = new URLSearchParams();
+    if (threadId) params.set("thread_id", threadId);
+    if (runId) params.set("run_id", runId);
+    const suffix = params.toString();
+    return `/logs${suffix ? `?${suffix}` : ""}`;
+  }
   const context = {
     globalThis: {},
     Button,
     Icon,
     Link,
     StatusPill,
-    buildScopedLogsPath: ({ threadId, runId }) => `/logs?thread=${threadId}&run=${runId}`,
+    URLSearchParams,
+    buildScopedLogsPath,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
     runSummaryView,
@@ -206,6 +205,32 @@ test("RecentRunRow renders failed run actions as real links when thread and run 
   assert.equal(openRun.to, "/chat/thread%3Afailed");
   assert.equal(openRun.disabled, false);
   assert.equal(logs.as, Link);
-  assert.equal(logs.to, "/logs?thread=thread:failed&run=run-failed");
+  assert.equal(logs.to, "/logs?thread_id=thread%3Afailed&run_id=run-failed");
   assert.equal(logs.disabled, false);
+});
+
+test("RecentRunRow disables run actions when navigation ids are not safe", () => {
+  const { Button, Link, RecentRunRow } = loadComponents();
+
+  const rendered = RecentRunRow({
+    run: {
+      status: "error",
+      status_label: "Error",
+      status_tone: "danger",
+      fired_label: "Jun 5, 9:00 AM",
+      thread_id: "thread\nfailed",
+      run_id: "run\rfailed",
+    },
+  });
+
+  const buttons = componentProps(rendered, Button);
+  const openRun = buttons.find((button) => button["data-testid"] === "automation-run-open");
+  const logs = buttons.find((button) => button["data-testid"] === "automation-run-logs");
+
+  assert.equal(openRun.as, Link);
+  assert.equal(openRun.to, "#");
+  assert.equal(openRun.disabled, true);
+  assert.equal(logs.as, Link);
+  assert.equal(logs.to, "#");
+  assert.equal(logs.disabled, true);
 });

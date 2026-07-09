@@ -8,6 +8,17 @@ import { runSummaryView } from "../lib/automations-presenters";
 import { buildScopedLogsPath } from "../../logs/lib/logs-data";
 
 const MAX_VISIBLE_DOTS = 8;
+const MAX_NAVIGATION_ID_LENGTH = 512;
+const DISABLED_LINK_TARGET = "#";
+
+function navigationId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_NAVIGATION_ID_LENGTH || /[\u0000-\u001F\u007F]/.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
 
 export function recentRunKey(run) {
   return run.run_id || run.thread_id || run.submitted_at || run.timestamp_source;
@@ -82,14 +93,16 @@ export function RunHistorySummary({ runs = [], className = "" }) {
 
 export function RecentRunRow({ run }) {
   const t = useT();
-  const chatPath =
-    run.chat_path ||
-    (run.thread_id ? `/chat/${encodeURIComponent(run.thread_id)}` : null);
-  const logsPath = buildScopedLogsPath({
-    threadId: run.thread_id,
-    runId: run.run_id,
-  });
-  const canOpenLogs = Boolean(run.thread_id || run.run_id);
+  const threadId = navigationId(run.thread_id);
+  const runId = navigationId(run.run_id);
+  const chatPath = threadId ? `/chat/${encodeURIComponent(threadId)}` : null;
+  const canOpenLogs = Boolean(threadId || runId);
+  const logsPath = canOpenLogs
+    ? buildScopedLogsPath({
+        threadId,
+        runId,
+      })
+    : DISABLED_LINK_TARGET;
 
   return (
     <div className="grid gap-3 border-b border-[var(--v2-panel-border)] py-3 last:border-0 sm:grid-cols-[6.5rem_minmax(0,1fr)_auto] sm:items-center">
@@ -112,8 +125,8 @@ export function RecentRunRow({ run }) {
       </div>
       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
         <Button
-          as={chatPath ? Link : "button"}
-          to={chatPath || undefined}
+          as={Link}
+          to={chatPath || DISABLED_LINK_TARGET}
           variant="secondary"
           size="sm"
           disabled={!chatPath}
@@ -123,8 +136,8 @@ export function RecentRunRow({ run }) {
           {t("automations.detail.openRun")}
         </Button>
         <Button
-          as={canOpenLogs ? Link : "button"}
-          to={canOpenLogs ? logsPath : undefined}
+          as={Link}
+          to={logsPath}
           variant="ghost"
           size="sm"
           disabled={!canOpenLogs}
