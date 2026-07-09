@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
@@ -8,7 +11,8 @@ use ironclaw_skills::{
     MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
-use parking_lot::Mutex;
+use parking_lot::Mutex as ParkingMutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
 
 use crate::{
@@ -107,7 +111,8 @@ impl FilesystemSkillBundleRoot {
 pub struct FilesystemSkillBundleSource<F> {
     filesystem: Arc<ScopedFilesystem<F>>,
     roots: Vec<FilesystemSkillBundleRoot>,
-    validated_manifests: Mutex<HashSet<ScopedPath>>,
+    validated_manifests: ParkingMutex<HashSet<ScopedPath>>,
+    system_root_descriptor_cache: AsyncMutex<HashMap<String, Vec<SkillBundleDescriptor>>>,
     max_skill_md_bytes: usize,
     max_bundle_file_bytes: usize,
     max_bundles_per_root: usize,
@@ -122,6 +127,14 @@ impl<F> std::fmt::Debug for FilesystemSkillBundleSource<F> {
             .field(
                 "validated_manifests",
                 &self.validated_manifests.lock().len(),
+            )
+            .field(
+                "system_root_descriptor_cache",
+                &self
+                    .system_root_descriptor_cache
+                    .try_lock()
+                    .ok()
+                    .map(|cache| cache.len()),
             )
             .field("max_skill_md_bytes", &self.max_skill_md_bytes)
             .field("max_bundle_file_bytes", &self.max_bundle_file_bytes)
@@ -146,7 +159,8 @@ where
         Ok(Self {
             filesystem,
             roots,
-            validated_manifests: Mutex::new(HashSet::new()),
+            validated_manifests: ParkingMutex::new(HashSet::new()),
+            system_root_descriptor_cache: AsyncMutex::new(HashMap::new()),
             max_skill_md_bytes: MAX_PROMPT_FILE_SIZE as usize,
             max_bundle_file_bytes: DEFAULT_MAX_BUNDLE_FILE_BYTES,
             max_bundles_per_root: DEFAULT_MAX_BUNDLES_PER_ROOT,
@@ -174,6 +188,48 @@ where
     /// Returns the configured filesystem roots.
     pub fn roots(&self) -> &[FilesystemSkillBundleRoot] {
         &self.roots
+    }
+
+    /// Preloads stable system-root descriptors so the first prompt does not
+    /// pay the directory/manifest scan cost.
+    pub async fn warm_system_root_descriptor_cache(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<(), SkillBundleSourceError> {
+        let mut descriptors = Vec::new();
+        for root in self
+            .roots
+            .iter()
+            .filter(|root| root.source_kind() == SkillSourceKind::System)
+        {
+            self.list_root_with_cache(scope, root, &mut descriptors)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn list_root_with_cache(
+        &self,
+        scope: &ResourceScope,
+        root: &FilesystemSkillBundleRoot,
+        descriptors: &mut Vec<SkillBundleDescriptor>,
+    ) -> Result<(), SkillBundleSourceError> {
+        if root.source_kind() != SkillSourceKind::System {
+            return self.list_root(scope, root, descriptors).await;
+        }
+
+        let cache_key = root.root().as_str().to_string();
+        let mut cache = self.system_root_descriptor_cache.lock().await;
+        if let Some(cached) = cache.get(&cache_key) {
+            descriptors.extend(cached.clone());
+            return Ok(());
+        }
+
+        let mut discovered = Vec::new();
+        self.list_root(scope, root, &mut discovered).await?;
+        cache.insert(cache_key, discovered.clone());
+        descriptors.extend(discovered);
+        Ok(())
     }
 
     async fn list_root(
@@ -328,7 +384,8 @@ where
             if !root_visible_for_run(root, run_context) {
                 continue;
             }
-            self.list_root(&scope, root, &mut descriptors).await?;
+            self.list_root_with_cache(&scope, root, &mut descriptors)
+                .await?;
         }
         sort_skill_bundle_descriptors(&mut descriptors);
         Ok(descriptors)
@@ -648,6 +705,112 @@ mod tests {
         assert_eq!(
             descriptions,
             vec!["System review", "User review", "Local review"]
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_caches_system_root_descriptors_after_first_scan() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/system/skills/system-alpha/SKILL.md",
+            skill_md("system-alpha", "System alpha"),
+        )
+        .await;
+
+        let first = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|descriptor| descriptor.id().to_string())
+                .collect::<Vec<_>>(),
+            vec!["system:system-alpha"]
+        );
+
+        write_root(
+            &root,
+            "/system/skills/system-beta/SKILL.md",
+            skill_md("system-beta", "System beta"),
+        )
+        .await;
+
+        let second = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|descriptor| descriptor.id().to_string())
+                .collect::<Vec<_>>(),
+            vec!["system:system-alpha"],
+            "system skills are process-stable after first discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_warms_system_root_descriptor_cache() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/system/skills/system-alpha/SKILL.md",
+            skill_md("system-alpha", "System alpha"),
+        )
+        .await;
+
+        let context = run_context().await;
+        source
+            .warm_system_root_descriptor_cache(&resource_scope_for_run(&context))
+            .await
+            .unwrap();
+
+        write_root(
+            &root,
+            "/system/skills/system-beta/SKILL.md",
+            skill_md("system-beta", "System beta"),
+        )
+        .await;
+
+        let descriptors = source.list_skill_bundles(&context).await.unwrap();
+        assert_eq!(
+            descriptors
+                .iter()
+                .map(|descriptor| descriptor.id().to_string())
+                .collect::<Vec<_>>(),
+            vec!["system:system-alpha"],
+            "system warmup populates the same process-stable descriptor cache as first discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_does_not_cache_user_root_misses() {
+        let (root, source) = mounted_source();
+        let first = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        assert!(first.is_empty());
+
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/local-review/SKILL.md",
+            skill_md("local-review", "Local review"),
+        )
+        .await;
+
+        let second = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|descriptor| descriptor.id().to_string())
+                .collect::<Vec<_>>(),
+            vec!["user:local-review"]
         );
     }
 

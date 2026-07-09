@@ -1418,10 +1418,7 @@ mod tests {
             }),
         );
         let worker = TriggerPollerWorker::new(
-            TriggerPollerWorkerConfig {
-                fires_per_tick: 1,
-                ..TriggerPollerWorkerConfig::default()
-            },
+            TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
             TriggerPollerWorkerDeps {
                 repository: repo,
                 source_provider: Arc::new(ScheduleTriggerSourceProvider),
@@ -1482,10 +1479,7 @@ mod tests {
             }),
         );
         let worker = TriggerPollerWorker::new(
-            TriggerPollerWorkerConfig {
-                fires_per_tick: 1,
-                ..TriggerPollerWorkerConfig::default()
-            },
+            TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
             TriggerPollerWorkerDeps {
                 repository: repo,
                 source_provider: Arc::new(ScheduleTriggerSourceProvider),
@@ -1558,10 +1552,7 @@ mod tests {
             }),
         );
         let worker = TriggerPollerWorker::new(
-            TriggerPollerWorkerConfig {
-                fires_per_tick: 1,
-                ..TriggerPollerWorkerConfig::default()
-            },
+            TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
             TriggerPollerWorkerDeps {
                 repository: repo,
                 source_provider: Arc::new(ScheduleTriggerSourceProvider),
@@ -1728,10 +1719,7 @@ mod tests {
             Arc::new(RecordingTurnCoordinator { run_id }),
         );
         let worker = TriggerPollerWorker::new(
-            TriggerPollerWorkerConfig {
-                fires_per_tick: 1,
-                ..TriggerPollerWorkerConfig::default()
-            },
+            TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
             TriggerPollerWorkerDeps {
                 repository: repo.clone(),
                 source_provider: Arc::new(ScheduleTriggerSourceProvider),
@@ -2013,10 +2001,7 @@ mod tests {
             captured: captured.clone(),
         });
         let worker = TriggerPollerWorker::new(
-            TriggerPollerWorkerConfig {
-                fires_per_tick: 1,
-                ..TriggerPollerWorkerConfig::default()
-            },
+            TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
             TriggerPollerWorkerDeps {
                 repository: repo,
                 source_provider: Arc::new(ScheduleTriggerSourceProvider),

@@ -40,7 +40,6 @@ ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }

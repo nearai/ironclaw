@@ -1,14 +1,18 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use super::port_adapters::HostManagedLoopCheckpointPort;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryRunProfileResolver, LoopCheckpointStateRef, LoopCheckpointStore,
-    PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileResolver, TurnActor,
-    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
+    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
+    LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
+    PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnError, TurnId,
+    TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
         LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
@@ -49,6 +53,36 @@ fn test_checkpoint_port(
     (port, state_store, checkpoint_store)
 }
 
+#[derive(Default)]
+struct CountingCheckpointStateStore {
+    inner: InMemoryCheckpointStateStore,
+    get_calls: AtomicUsize,
+}
+
+impl CountingCheckpointStateStore {
+    fn get_calls(&self) -> usize {
+        self.get_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl CheckpointStateStore for CountingCheckpointStateStore {
+    async fn put_checkpoint_state(
+        &self,
+        request: PutCheckpointStateRequest,
+    ) -> Result<CheckpointStateRecord, TurnError> {
+        self.inner.put_checkpoint_state(request).await
+    }
+
+    async fn get_checkpoint_state(
+        &self,
+        request: GetCheckpointStateRequest,
+    ) -> Result<Option<CheckpointStateRecord>, TurnError> {
+        self.get_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.get_checkpoint_state(request).await
+    }
+}
+
 #[tokio::test]
 async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
     let context = test_run_context().await;
@@ -87,6 +121,70 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
     assert_eq!(loaded.schema_id, expected_schema_id);
     assert_eq!(loaded.schema_version, expected_schema_version);
     assert_eq!(loaded.payload.as_bytes(), payload.as_slice());
+}
+
+#[tokio::test]
+async fn checkpoint_port_skips_read_back_for_host_staged_ref() {
+    let context = test_run_context().await;
+    let state_store = Arc::new(CountingCheckpointStateStore::default());
+    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopCheckpointPort::new(
+        context.clone(),
+        state_store.clone(),
+        checkpoint_store,
+        milestone_sink,
+    );
+
+    let state_ref = port
+        .stage_checkpoint_payload(StageCheckpointPayloadRequest {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.as_str().to_string(),
+            payload: br#"{"iteration":1}"#.to_vec(),
+        })
+        .await
+        .expect("host staging should write payload");
+
+    port.checkpoint(LoopCheckpointRequest {
+        kind: LoopCheckpointKind::BeforeModel,
+        state_ref,
+        gate_ref: None,
+    })
+    .await
+    .expect("host-staged ref should checkpoint without a read-back");
+
+    assert_eq!(
+        state_store.get_calls(),
+        0,
+        "checkpoint should trust refs returned by this host's stage call"
+    );
+
+    let directly_staged = state_store
+        .put_checkpoint_state(PutCheckpointStateRequest::new(
+            context.scope.clone(),
+            context.turn_id,
+            context.run_id,
+            context.checkpoint_schema_id.clone(),
+            context.checkpoint_schema_version,
+            LoopCheckpointKind::BeforeModel,
+            br#"{"iteration":2}"#.to_vec(),
+        ))
+        .await
+        .expect("direct store staging should work");
+
+    port.checkpoint(LoopCheckpointRequest {
+        kind: LoopCheckpointKind::BeforeModel,
+        state_ref: directly_staged.state_ref,
+        gate_ref: None,
+    })
+    .await
+    .expect("directly staged ref should still be accepted through store verification");
+
+    assert_eq!(
+        state_store.get_calls(),
+        1,
+        "refs not minted by this host must still use durable store verification"
+    );
 }
 
 #[tokio::test]

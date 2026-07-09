@@ -116,11 +116,9 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
         "/projects/project1",
         MountPermissions::read_only(),
     );
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1);
     let reservation_id = ResourceReservationId::new();
     let mut start = process_start(process_id, invocation_id, scope.clone());
     start.mounts = mounts.clone();

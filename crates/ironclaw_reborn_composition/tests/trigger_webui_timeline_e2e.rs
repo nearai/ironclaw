@@ -146,10 +146,10 @@ async fn build_timeline_runtime(root: &tempfile::TempDir) -> RebornRuntime {
         })
         .with_trigger_poller_settings(
             TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test()
-                .with_worker_config(TriggerPollerWorkerConfig {
-                    poll_interval: Duration::from_millis(20),
-                    ..Default::default()
-                }),
+                .with_worker_config(
+                    TriggerPollerWorkerConfig::default()
+                        .set_poll_interval(Duration::from_millis(20)),
+                ),
         )
         .with_model_gateway_override(Arc::new(StaticGateway) as Arc<dyn HostManagedModelGateway>);
 

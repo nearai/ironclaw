@@ -23,6 +23,7 @@ use crate::extension_host::extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,
 };
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
@@ -734,12 +735,11 @@ fn bundled_extension_package(
             reason: format!("host port catalog rejected bundled {label} extension: {error}"),
         }
     })?;
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("host API contracts rejected bundled {label} extension: {error}"),
-            }
-        })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host API contracts rejected bundled {label} extension: {error}"),
+        }
+    })?;
     let record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
         ManifestSource::HostBundled,
@@ -1631,12 +1631,11 @@ where
             reason: format!("host port catalog rejected available extension: {error}"),
         }
     })?;
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("host API contract registry rejected available extension: {error}"),
-            }
-        })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host API contract registry rejected available extension: {error}"),
+        }
+    })?;
 
     let mut packages = Vec::new();
     for entry in entries {
