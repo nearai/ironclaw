@@ -1224,7 +1224,7 @@ fn runner_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::MutexGuard};
 
     use ironclaw_reborn_composition::{
         CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
@@ -1234,7 +1234,7 @@ mod tests {
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::test_env::{EnvGuard, lock_runtime_env};
+    use super::test_env::EnvGuard;
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
@@ -1247,6 +1247,25 @@ mod tests {
     #[cfg(feature = "libsql")]
     use super::local_runtime_storage_root;
     use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+
+    struct RuntimeEnvGuard {
+        // Fields drop in declaration order: restore the env before releasing
+        // the process-wide lock.
+        _resource_governor_singleton: EnvGuard,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    fn lock_runtime_env() -> RuntimeEnvGuard {
+        let lock = super::test_env::lock_runtime_env();
+        let resource_governor_singleton = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
+            "true",
+        );
+        RuntimeEnvGuard {
+            _resource_governor_singleton: resource_governor_singleton,
+            _lock: lock,
+        }
+    }
 
     fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
         ironclaw_reborn_config::RebornConfigFile::parse_text(
