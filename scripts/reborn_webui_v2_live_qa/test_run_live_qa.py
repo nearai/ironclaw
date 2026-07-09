@@ -3554,6 +3554,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "schedule re-posts the marker on the next fire and false-fails",
             )
             self.assertIn("exactly_once_grace_seconds", source)
+            self.assertIn(
+                "require_slack_tools_on_surface=True",
+                source,
+                "exactly-once probes must ASSERT the Slack tools surface "
+                "precondition; without it the duplicate arm passes vacuously",
+            )
 
     def test_default_suite_includes_github_connect_after_generated_auth_seed(self):
         self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
