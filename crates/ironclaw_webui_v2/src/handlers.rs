@@ -27,38 +27,39 @@ use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
-    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
-    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    ProjectionCursor, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
+    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornCancelRunResponse,
+    RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
@@ -1215,6 +1216,20 @@ pub async fn resume_automation(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/automations/:automation_id`
+pub async fn rename_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+    Json(request): Json<WebUiRenameAutomationRequest>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .rename_automation(caller, automation_id, request)
+        .await?;
+    Ok(Json(response))
+}
+
 /// `DELETE /api/webchat/v2/automations/:automation_id`
 pub async fn delete_automation(
     State(state): State<WebUiV2State>,
@@ -1277,6 +1292,21 @@ pub async fn trace_account_traces(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
     let response = state.services().trace_account_traces(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/traces/account-login-link`
+///
+/// Mint a one-time Trace Commons browser login link for the authenticated
+/// caller (hosted users have no host-file access; this response is the only
+/// delivery channel). Scope is derived from the caller; no input is accepted.
+/// Unenrolled callers receive the zero-state, not an error. SECURITY: the
+/// returned URL is a one-time account credential — it must never be logged.
+pub async fn trace_account_login_link(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornAccountLoginLinkResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_account_login_link(caller).await?;
     Ok(Json(response))
 }
 

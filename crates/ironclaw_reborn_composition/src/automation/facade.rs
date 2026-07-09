@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
-    AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    AutomationListRequest, AutomationName, AutomationProductFacade, ProductAgentBoundCaller,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     TriggerRunThreadScope,
@@ -172,6 +172,34 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         self.set_automation_state(caller, automation_id, TriggerState::Scheduled)
             .await
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        name: AutomationName,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let record = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.rename_scoped_trigger(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+                name,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(RebornAutomationMutationResponse {
+            updated: record.is_some(),
+            automation: record.map(|record| automation_info_from_record(record, &[])),
+        })
     }
 
     async fn delete_automation(

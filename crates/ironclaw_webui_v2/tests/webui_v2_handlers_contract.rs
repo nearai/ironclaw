@@ -29,21 +29,21 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -63,8 +63,9 @@ use ironclaw_product_workflow::{
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
     UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -257,12 +258,16 @@ struct StubServices {
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
+    rename_automation_calls: Mutex<Vec<(String, WebUiRenameAutomationRequest)>>,
     delete_automation_calls: Mutex<Vec<String>>,
     /// Captures the authenticated caller's user id for each
     /// `trace_account_traces` call, so the contract test can assert the handler
     /// forwards the caller (the route is caller-scoped).
     trace_account_traces_callers: Mutex<Vec<String>>,
+    /// Forwarded caller user-ids for each `trace_account_login_link` call.
+    trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_rename_automation_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
@@ -334,6 +339,10 @@ impl StubServices {
 
     fn fail_delete_automation(&self, error: RebornServicesError) {
         *self.next_delete_automation_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_rename_automation(&self, error: RebornServicesError) {
+        *self.next_rename_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
@@ -828,6 +837,34 @@ impl RebornServicesApi for StubServices {
             automation: Some(automation_info(
                 "automation-resumed",
                 "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn rename_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.rename_automation_calls
+            .lock()
+            .expect("lock")
+            .push((automation_id, request));
+        if let Some(error) = self
+            .next_rename_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-renamed",
+                "Renamed status",
                 "0 9 * * *",
             )),
         })
@@ -1390,6 +1427,29 @@ impl RebornServicesApi for StubServices {
         Ok(RebornAccountTracesResponse {
             enrolled: false,
             traces: vec![],
+        })
+    }
+
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        // Capture the forwarded caller (tenant AND user — this is the trusted
+        // identity boundary) so the contract test can verify the caller-scoped
+        // route threads the authenticated identity, then return a hermetic
+        // canned mint (no network / filesystem).
+        self.trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .push(format!(
+                "{}/{}",
+                caller.tenant_id.as_str(),
+                caller.actor().user_id.as_str()
+            ));
+        Ok(RebornAccountLoginLinkResponse {
+            minted: true,
+            enrolled: true,
+            url: Some("https://commons.example/account/login?code=stub".to_string()),
         })
     }
 }
@@ -2314,6 +2374,108 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
 }
 
 #[tokio::test]
+async fn rename_automation_dispatches_path_id_and_body_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Renamed status"}"#))
+                .expect("rename request"),
+        )
+        .await
+        .expect("rename oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert_eq!(body["automation"]["automation_id"], "automation-renamed");
+    assert_eq!(body["automation"]["name"], "Renamed status");
+
+    let calls = services
+        .rename_automation_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "automation-alpha");
+    assert_eq!(calls[0].1.name.as_deref(), Some("Renamed status"));
+}
+
+#[tokio::test]
+async fn rename_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("name".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::Blank),
+            },
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "validation",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_rename_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Renamed status"}"#))
+                    .expect("rename request"),
+            )
+            .await
+            .expect("rename oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .rename_automation_calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(automation_id, request)| { (automation_id.clone(), request.name.clone()) })
+                .collect::<Vec<_>>(),
+            vec![(
+                "automation-alpha".to_string(),
+                Some("Renamed status".to_string())
+            )]
+        );
+    }
+}
+
+#[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
     // The facade's default `trace_credits` body reads contributor-local
     // Trace Commons state scoped by the authenticated caller's user id.
@@ -2419,6 +2581,47 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
             .expect("lock")
             .clone(),
         vec![user_id],
+    );
+}
+
+#[tokio::test]
+async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
+    // POST /traces/account-login-link is caller-scoped and returns the minted
+    // one-time URL in the authenticated response body — the only delivery
+    // channel hosted users have (no host-file access).
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/traces/account-login-link")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["minted"], true);
+    assert_eq!(body["enrolled"], true);
+    assert_eq!(
+        body["url"],
+        "https://commons.example/account/login?code=stub"
+    );
+
+    // The route must forward the authenticated caller's tenant AND user id to
+    // the facade — the scope is trusted-caller-derived, never request input
+    // (fails if the handler stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["tenant-alpha/user-alpha".to_string()],
     );
 }
 

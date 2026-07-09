@@ -2,8 +2,8 @@ import { useT } from "../../../lib/i18n";
 import { Button } from "../../../design-system/button";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
 import {
-  compactCount,
   formatCurrency,
+  formatProjectHealth,
   formatProjectRelativeTime,
   healthTone,
 } from "../lib/projects-presenters";
@@ -36,7 +36,7 @@ function ProjectCard({ project, onOpen, t }) {
             {project.description || t("projects.noDescription")}
           </p>
         </div>
-        <StatusPill tone={healthTone(project.health)} label={project.health || "unknown"} />
+        <StatusPill tone={healthTone(project.health)} label={formatProjectHealth(project.health, t)} />
       </div>
 
       {project.goals?.length
@@ -55,14 +55,14 @@ function ProjectCard({ project, onOpen, t }) {
         <div className="rounded-2xl border border-iron-700 bg-iron-950/55 p-3">
           <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{t("projects.card.runtime")}</div>
           <div className="mt-2 text-sm text-iron-100">
-            {t("projects.card.threadsToday", { count: compactCount(project.threads_today || 0, "thread") })}
+            {t("projects.card.threadsToday", { count: project.threads_today || 0 })}
           </div>
         </div>
         <div className="rounded-2xl border border-iron-700 bg-iron-950/55 p-3">
           <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{t("projects.card.risk")}</div>
-          <div className="mt-2 text-sm text-iron-100">{compactCount(project.pending_gates || 0, "gate")}</div>
+          <div className="mt-2 text-sm text-iron-100">{t("projects.card.pendingGates", { count: project.pending_gates || 0 })}</div>
           <div className="mt-1 text-xs text-iron-300">
-            {t("projects.card.failures24h", { count: compactCount(project.failures_24h || 0, "failure") })}
+            {t("projects.card.failures24h", { count: project.failures_24h || 0 })}
           </div>
         </div>
       </div>
@@ -70,7 +70,7 @@ function ProjectCard({ project, onOpen, t }) {
       <div className="mt-5 flex items-center justify-between gap-3">
         <div className="text-sm text-iron-300">
           <div>{t("projects.card.spendToday", { value: formatCurrency(project.cost_today_usd || 0) })}</div>
-          <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-500">{formatProjectRelativeTime(project.last_activity)}</div>
+          <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-500">{formatProjectRelativeTime(project.last_activity, t)}</div>
         </div>
         <Button
           data-testid="project-open-workspace"
@@ -116,7 +116,7 @@ function GeneralProjectCard({ project, onOpen, t }) {
         </div>
         <div className="flex flex-wrap gap-3">
           <div className="rounded-2xl border border-iron-700 bg-iron-950/55 px-4 py-3 text-sm text-iron-200">
-            {compactCount(project.threads_today || 0, "thread")} today
+            {t("projects.general.threadsToday", { count: project.threads_today || 0 })}
           </div>
           <Button
             data-testid="project-open-workspace"

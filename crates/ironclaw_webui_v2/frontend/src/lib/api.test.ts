@@ -4,6 +4,7 @@ import { test } from "vitest";
 
 import {
   attachmentUrl,
+  clientActionId,
   deleteAutomation,
   deleteThread,
   fetchAttachmentBlob,
@@ -11,8 +12,45 @@ import {
   listAutomations,
   listThreads,
   pauseAutomation,
+  renameAutomation,
   resumeAutomation,
 } from "./api";
+
+function withCryptoGlobal(replacement, run) {
+  const prior = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", {
+    value: replacement,
+    configurable: true,
+    writable: true,
+  });
+  const restore = () => {
+    if (prior) {
+      Object.defineProperty(globalThis, "crypto", prior);
+    } else {
+      delete globalThis.crypto;
+    }
+  };
+  try {
+    const result = run();
+    if (result && typeof result.then === "function") {
+      return result.then(
+        (value) => {
+          restore();
+          return value;
+        },
+        (error) => {
+          restore();
+          throw error;
+        },
+      );
+    }
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
+  }
+}
 
 test("listAutomations reads through the v2 automations route", async () => {
   const calls = [];
@@ -107,9 +145,13 @@ test("automation mutations use encoded v2 automation routes", async () => {
 
   await pauseAutomation({ automationId: "automation/needs encoding" });
   await resumeAutomation({ automationId: "automation/needs encoding" });
+  await renameAutomation({
+    automationId: "automation/needs encoding",
+    name: "Renamed status",
+  });
   await deleteAutomation({ automationId: "automation/needs encoding" });
 
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.equal(
     calls[0].path,
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
@@ -124,7 +166,13 @@ test("automation mutations use encoded v2 automation routes", async () => {
     calls[2].path,
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
   );
-  assert.equal(calls[2].options.method, "DELETE");
+  assert.equal(calls[2].options.method, "POST");
+  assert.equal(calls[2].options.body, JSON.stringify({ name: "Renamed status" }));
+  assert.equal(
+    calls[3].path,
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
+  );
+  assert.equal(calls[3].options.method, "DELETE");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
 
@@ -142,6 +190,11 @@ test("automation state mutations reject before fetch when automation id is missi
 
   await assert.rejects(pauseAutomation(), /automationId is required/);
   await assert.rejects(resumeAutomation({}), /automationId is required/);
+  await assert.rejects(renameAutomation({ name: "Renamed" }), /automationId is required/);
+  await assert.rejects(
+    renameAutomation({ automationId: "automation-alpha" }),
+    /name is required/,
+  );
   await assert.rejects(deleteAutomation({ automationId: "" }), /automationId is required/);
   assert.equal(fetchCalled, false);
 });
@@ -269,4 +322,49 @@ test("fetchAttachmentBlob rejects an off-origin URL before sending the bearer", 
     (error) => error.name === "ApiError" && error.status === 400,
   );
   assert.equal(fetchCalled, false);
+});
+
+// Regression: on insecure origins (plain-HTTP self-hosting) `crypto.randomUUID`
+// is absent while `crypto.getRandomValues` is present but must be called with
+// `this === crypto` — an unbound call throws `TypeError: Illegal invocation`
+// and every mutating request died before fetch.
+test("clientActionId works when only getRandomValues is available (insecure context)", () => {
+  const fakeCrypto = {
+    getRandomValues(bytes) {
+      if (this !== fakeCrypto) {
+        throw new TypeError("Illegal invocation");
+      }
+      for (let i = 0; i < bytes.length; i += 1) {
+        bytes[i] = (i * 37 + 11) % 256;
+      }
+      return bytes;
+    },
+  };
+
+  withCryptoGlobal(fakeCrypto, () => {
+    const id = clientActionId();
+    assert.match(id, /^[0-9a-f]{32}$/);
+    assert.notEqual(id, "0".repeat(32));
+  });
+});
+
+test("clientActionId yields distinct non-zero ids without Web Crypto", () => {
+  withCryptoGlobal(undefined, () => {
+    const first = clientActionId();
+    const second = clientActionId();
+    assert.match(first, /^[0-9a-f]{32}$/);
+    assert.match(second, /^[0-9a-f]{32}$/);
+    // The old fallback returned the unfilled zero array: a constant id that
+    // made the server dedupe distinct sends as replays of one action.
+    assert.notEqual(first, "0".repeat(32));
+    assert.notEqual(first, second);
+  });
+});
+
+test("clientActionId falls back when global crypto is null", () => {
+  withCryptoGlobal(null, () => {
+    const id = clientActionId();
+    assert.match(id, /^[0-9a-f]{32}$/);
+    assert.notEqual(id, "0".repeat(32));
+  });
 });

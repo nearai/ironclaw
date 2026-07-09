@@ -982,9 +982,9 @@ pub(super) fn route_failure_from_callback_error(
         AuthErrorCode::TokenExchangeFailed | AuthErrorCode::RefreshFailed => {
             StatusCode::BAD_GATEWAY
         }
-        AuthErrorCode::CredentialMissing | AuthErrorCode::AccountSelectionRequired => {
-            StatusCode::CONFLICT
-        }
+        AuthErrorCode::CredentialMissing
+        | AuthErrorCode::AccountSelectionRequired
+        | AuthErrorCode::ProviderIdentityAlreadyConnected => StatusCode::CONFLICT,
     };
     ProductAuthRouteFailure {
         status,

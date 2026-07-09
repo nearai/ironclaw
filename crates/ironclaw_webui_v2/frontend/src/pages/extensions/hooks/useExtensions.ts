@@ -432,6 +432,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       const configuredBeforeFlow = setupIsConfigured({
         allowProvidedSecrets: !requireCallbackCompletion,
       });
+      const hasFlowCompletionBackstop = Boolean(flowId);
       let stopped = false;
       let timer = null;
       let unsubscribe = () => {};
@@ -518,7 +519,11 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           return;
         }
         const timedOut = Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS;
-        const popupClosedBeforeCallback = popup && popup.closed && !requireCallbackCompletion;
+        // Current product-auth OAuth callbacks close their popup after writing
+        // durable flow status. With a flow id, popup.closed is expected and the
+        // status/event backstop owns completion.
+        const popupClosedBeforeCallback =
+          popup && popup.closed && !hasFlowCompletionBackstop && !requireCallbackCompletion;
         if (popupClosedBeforeCallback || timedOut) {
           if (timedOut) {
             // An abandoned reconnect otherwise ends after 10 minutes with no

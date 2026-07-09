@@ -15,7 +15,5 @@ use ironclaw_triggers::TriggerRepository;
 pub fn local_dev_automation_product_facade_for_test(
     trigger_repository: Arc<dyn TriggerRepository>,
 ) -> Arc<dyn AutomationProductFacade> {
-    Arc::new(crate::automation::RebornAutomationProductFacade::new(
-        trigger_repository,
-    ))
+    Arc::new(crate::automation::facade::RebornAutomationProductFacade::new(trigger_repository))
 }

@@ -19,6 +19,7 @@ export function AutomationsList({
   onSelectAutomation,
   onPauseAutomation,
   onResumeAutomation,
+  onRenameAutomation,
   onDeleteAutomation,
 }) {
   const t = useT();
@@ -125,6 +126,8 @@ export function AutomationsList({
                         return (
                           <tr
                             key={automation.automation_id}
+                            data-testid="automation-row"
+                            data-automation-id={automation.automation_id}
                             className={cn(
                               "border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
                               selected && "bg-[var(--v2-accent-soft)]/30"
@@ -134,6 +137,8 @@ export function AutomationsList({
                               <button
                                 type="button"
                                 aria-pressed={selected}
+                                data-testid="automation-name-button"
+                                data-automation-id={automation.automation_id}
                                 onClick={() => onSelectAutomation(automation.automation_id)}
                                 className="block w-full min-w-0 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
                               >
@@ -176,6 +181,7 @@ export function AutomationsList({
                 isMutating={isMutating}
                 onPauseAutomation={onPauseAutomation}
                 onResumeAutomation={onResumeAutomation}
+                onRenameAutomation={onRenameAutomation}
                 onDeleteAutomation={onDeleteAutomation}
               />
             </div>

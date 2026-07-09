@@ -1030,7 +1030,7 @@ fn build_app_with_authenticator(
 }
 
 async fn read_body_string(response: axum::response::Response) -> String {
-    let bytes = to_bytes(response.into_body(), 64 * 1024)
+    let bytes = to_bytes(response.into_body(), 256 * 1024)
         .await
         .expect("body bytes");
     String::from_utf8_lossy(&bytes).into_owned()

@@ -927,9 +927,7 @@ where
             .map_err(map_binding_fs_error)?
         {
             if existing.user_id != binding.user_id.as_str() {
-                return Err(RebornUserIdentityBindingError::Backend(
-                    "Slack actor is already bound to a different user".into(),
-                ));
+                return Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound);
             }
             let updated = StoredSlackUserIdentity::from_binding(&binding, existing.created_at);
             match self
@@ -1067,9 +1065,7 @@ where
         if existing.user_id == binding.user_id.as_str() {
             return Ok(());
         }
-        Err(RebornUserIdentityBindingError::Backend(
-            "Slack actor is already bound to a different user".into(),
-        ))
+        Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound)
     }
 }
 
@@ -2145,7 +2141,10 @@ mod tests {
             .await
             .expect_err("rebind should fail");
 
-        assert!(matches!(error, RebornUserIdentityBindingError::Backend(_)));
+        assert!(matches!(
+            error,
+            RebornUserIdentityBindingError::ProviderIdentityAlreadyBound
+        ));
         assert_eq!(
             state
                 .resolve_user_identity("slack", "install-alpha:U123")

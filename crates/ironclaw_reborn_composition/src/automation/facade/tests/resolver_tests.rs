@@ -20,7 +20,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::TurnRunId;
 
-use crate::automation::RebornAutomationProductFacade;
+use crate::automation::facade::RebornAutomationProductFacade;
 
 // ---------------------------------------------------------------------------
 // Shared test helpers

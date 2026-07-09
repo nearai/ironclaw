@@ -1,6 +1,8 @@
+import React from "react";
 import { useNavigate } from "react-router";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { Input } from "../../../design-system/input";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
@@ -10,6 +12,8 @@ import {
   RunDots,
   RunHistorySummary,
 } from "./automation-recent-runs";
+
+const AUTOMATION_NAME_MAX_BYTES = 256;
 
 function MetaItem({ label, value, tone = "muted" }) {
   return (
@@ -36,10 +40,20 @@ export function AutomationDetailPanel({
   isMutating = false,
   onPauseAutomation,
   onResumeAutomation,
+  onRenameAutomation,
   onDeleteAutomation,
 }) {
   const t = useT();
   const navigate = useNavigate();
+  const [isEditingName, setIsEditingName] = React.useState(false);
+  const [draftName, setDraftName] = React.useState("");
+  const [nameError, setNameError] = React.useState("");
+
+  React.useEffect(() => {
+    setIsEditingName(false);
+    setDraftName(automation?.display_name || "");
+    setNameError("");
+  }, [automation?.automation_id]);
 
   if (!automation) {
     return (
@@ -56,8 +70,10 @@ export function AutomationDetailPanel({
   const activeRun = automation.current_run;
   const canResume = automation.state === "paused";
   const canPause = automation.state === "active" || automation.state === "scheduled";
+  const canRename = Boolean(onRenameAutomation);
   const actionLabel = canResume ? t("missions.action.resume") : t("missions.action.pause");
   const actionTitle = `${actionLabel}: ${automation.display_name}`;
+  const renameTitle = `${t("automations.rename.action")}: ${automation.display_name}`;
   const handleAction = () => {
     if (canResume) {
       onResumeAutomation?.(automation.automation_id);
@@ -73,15 +89,114 @@ export function AutomationDetailPanel({
       onDeleteAutomation?.(automation.automation_id);
     }
   };
+  const handleRenameStart = () => {
+    setDraftName(automation.display_name);
+    setNameError("");
+    setIsEditingName(true);
+  };
+  const handleRenameCancel = () => {
+    setDraftName(automation.display_name);
+    setNameError("");
+    setIsEditingName(false);
+  };
+  const handleRenameSubmit = (event) => {
+    event.preventDefault();
+    const name = draftName.trim();
+    if (!name) {
+      setNameError(t("automations.rename.nameRequired"));
+      return;
+    }
+    if (byteLength(name) > AUTOMATION_NAME_MAX_BYTES) {
+      setNameError(t("automations.rename.nameTooLong"));
+      return;
+    }
+    setNameError("");
+    if (name !== automation.display_name) {
+      onRenameAutomation?.({ automationId: automation.automation_id, name });
+    }
+    setIsEditingName(false);
+  };
 
   return (
-    <Panel className="overflow-hidden">
+    <Panel className="overflow-hidden" data-testid="automation-detail-panel">
       <div className="border-b border-[var(--v2-panel-border)] p-4 sm:p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
-            <h3 className="truncate text-xl font-semibold tracking-tight text-iron-100">
-              {automation.display_name}
-            </h3>
+            {isEditingName
+              ? (
+                  <form
+                    className="flex min-w-0 flex-col gap-2"
+                    onSubmit={handleRenameSubmit}
+                  >
+                    <div className="flex min-w-0 items-start gap-2">
+                      <Input
+                        size="sm"
+                        value={draftName}
+                        data-testid="automation-rename-input"
+                        aria-label={t("automations.rename.nameLabel")}
+                        disabled={isMutating}
+                        error={Boolean(nameError)}
+                        className="min-w-0"
+                        onInput={(event) => {
+                          setDraftName(event.currentTarget.value);
+                          if (nameError) setNameError("");
+                        }}
+                      />
+                      <Button
+                        type="submit"
+                        variant="primary"
+                        size="icon-sm"
+                        data-testid="automation-rename-save"
+                        aria-label={t("common.save")}
+                        title={t("common.save")}
+                        disabled={isMutating}
+                      >
+                        <Icon name="check" className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="icon-sm"
+                        aria-label={t("common.cancel")}
+                        title={t("common.cancel")}
+                        disabled={isMutating}
+                        onClick={handleRenameCancel}
+                      >
+                        <Icon name="close" className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    {nameError && (
+                      <div className="text-xs text-[var(--v2-danger-text)]" role="alert">
+                        {nameError}
+                      </div>
+                    )}
+                  </form>
+                )
+              : (
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h3
+                      data-testid="automation-detail-title"
+                      className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-iron-100"
+                    >
+                      {automation.display_name}
+                    </h3>
+                    {canRename && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="shrink-0"
+                        data-testid="automation-rename-button"
+                        aria-label={renameTitle}
+                        title={renameTitle}
+                        disabled={isMutating}
+                        onClick={handleRenameStart}
+                      >
+                        <Icon name="edit" className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                )}
             <div className="mt-2 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
               {automation.automation_id}
             </div>
@@ -169,4 +284,11 @@ export function AutomationDetailPanel({
       </div>
     </Panel>
   );
+}
+
+function byteLength(value) {
+  if (typeof TextEncoder === "function") {
+    return new TextEncoder().encode(value).length;
+  }
+  return value.length;
 }

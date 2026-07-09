@@ -9,7 +9,7 @@ import {
   STATE_LABELS,
   isChannelExtensionKind,
 } from "../lib/extensions-schema";
-import { primaryExtensionAction } from "../lib/extension-actions";
+import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
 
 /* Card layout (Option B): self-contained bordered card. Capabilities collapse
    behind a count disclosure; secondary actions (Configure / Setup / Remove)
@@ -110,7 +110,7 @@ function ChipGrid({ items }) {
 
 export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }) {
   const t = useT();
-  const state = ext.onboarding_state || ext.activation_status || (ext.active ? "active" : "installed");
+  const state = extensionLifecycleState(ext);
   const tone = STATE_TONES[state] || "muted";
   const label = translatedKnownLabel(t, "extensions.state", state, STATE_LABELS);
   const kindLabel = translatedKnownLabel(t, "extensions.kind", ext.kind, KIND_LABELS);

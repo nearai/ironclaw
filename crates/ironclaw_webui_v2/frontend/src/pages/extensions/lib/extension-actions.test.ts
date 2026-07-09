@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import {
+  extensionLifecycleState,
   extensionIsActive,
   primaryExtensionAction,
   setupReadyForActivation,
@@ -89,6 +90,21 @@ test("primaryExtensionAction hides activation for active extensions", () => {
       active: true,
     }),
     null,
+  );
+});
+
+test("extensionLifecycleState does not call active unauthenticated setup active", () => {
+  assert.equal(
+    extensionLifecycleState({
+      package_ref: { kind: "extension", id: "slack" },
+      kind: "wasm_tool",
+      active: true,
+      authenticated: false,
+      needs_setup: true,
+      has_auth: true,
+      activation_status: "active",
+    }),
+    "auth_required",
   );
 });
 

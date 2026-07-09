@@ -5417,6 +5417,7 @@ dependencies = [
  "cron",
  "deadpool-postgres",
  "hex",
+ "ironclaw_common",
  "ironclaw_host_api",
  "ironclaw_turns",
  "libsql",
