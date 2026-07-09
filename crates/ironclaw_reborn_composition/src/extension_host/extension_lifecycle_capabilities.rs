@@ -9,8 +9,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
-    EffectKind, HostApiError, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    EffectKind, ExtensionId, HostApiError, PermissionMode, ResourceEstimate, ResourceProfile,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, TrustClass,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -180,7 +180,10 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 let package_ref = extension_package_ref(input.extension_id)?;
                 let requirements = self
                     .extension_management
-                    .activation_credential_requirements(&package_ref)
+                    .activation_credential_requirements_for_owner(
+                        &package_ref,
+                        &request.scope.user_id,
+                    )
                     .await
                     .map_err(lifecycle_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(
@@ -197,12 +200,30 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     )
                     .with_usage(resource_usage(started)));
                 }
+                let runtime_http_egress = if let Some(host_egress) =
+                    request.services.host_runtime_http_egress.as_ref()
+                {
+                    let provider =
+                        ExtensionId::new(package_ref.id.as_str().to_string()).map_err(|_| {
+                            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+                        })?;
+                    Some(Arc::new(host_egress.bind(provider, TrustClass::Sandbox))
+                        as Arc<dyn RuntimeHttpEgress>)
+                } else {
+                    request.services.runtime_http_egress.clone()
+                };
                 let mode = ExtensionActivationMode::from_dispatch_context(
                     request.scope.clone(),
-                    request.services.runtime_http_egress.clone(),
+                    runtime_http_egress,
+                    request.capability_id.clone(),
                 );
                 self.extension_management
-                    .activate_with_credential_gate(package_ref, mode, credential_gate)
+                    .activate_with_credential_gate_for_owner(
+                        package_ref,
+                        mode,
+                        &request.scope.user_id,
+                        credential_gate,
+                    )
                     .await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {

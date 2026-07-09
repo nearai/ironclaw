@@ -72,8 +72,10 @@ browser-reachable.
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
 | `webui.v2.install_extension` | POST | `/api/webchat/v2/extensions/install` | None | `ProductWorkflow` |
+| `webui.v2.register_extension` | POST | `/api/webchat/v2/extensions/register` | None | `ProductWorkflow` |
 | `webui.v2.activate_extension` | POST | `/api/webchat/v2/extensions/{package_id}/activate` | None | `ProductWorkflow` |
 | `webui.v2.remove_extension` | POST | `/api/webchat/v2/extensions/{package_id}/remove` | None | `ProductWorkflow` |
+| `webui.v2.unregister_extension` | POST | `/api/webchat/v2/extensions/{package_id}/unregister` | None | `ProductWorkflow` |
 | `webui.v2.get_extension_setup` | GET | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProjectionOnly` |
 | `webui.v2.setup_extension` | POST | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProductWorkflow` |
 | `webui.v2.get_llm_config` | GET | `/api/webchat/v2/llm/providers` | None | `ProjectionOnly` |
@@ -136,7 +138,9 @@ The `/api/webchat/v2/settings/tools` routes are authenticated caller routes,
 not operator routes. They expose the caller's tenant/user-scoped tool approval
 settings so regular multi-user sessions can read and update global
 auto-approve plus per-tool overrides without access to the operator command
-plane.
+plane. Unregistering a caller-owned registered MCP extension also revokes the
+exact reusable dispatch policies and clears the exact overrides for its durable
+discovered-capability inventory; it does not affect unrelated tools.
 
 The LLM configuration and operator setup/config/service-control routes are
 operator-wide. Host composition mounts them only when the authenticator says
@@ -240,6 +244,40 @@ handler/facade boundary. A malformed package id returns
 `validation_code: "invalid_id"` before the facade is called.
 Browsers should render registry `display_name` for users and send
 `package_ref` for lifecycle operations.
+
+### Registered hosted MCP lifecycle
+
+`register_extension` accepts `{ name, url }` for the authenticated caller and
+returns the owner-scoped `package_ref` plus server-minted `extension_id`.
+Registration validates and persists a zero-capability HTTPS MCP descriptor but
+does not fetch tool definitions. The caller activates that package through the
+normal activation route; activation performs `initialize` and live
+`tools/list` through host-owned `RuntimeHttpEgress`, then publishes only that
+owner's resulting capability surface.
+
+Unsupported tool names are skipped per entry. Registered tool descriptions and
+serialized input schemas are safety-scanned before publication; a High or
+Critical result publishes only an owner-visible disabled replacement with a
+fixed host description, inert schema, `HostInternal` visibility, and `Deny`
+permission. Every non-quarantined registered tool is still conservatively
+classified `ExternalWrite`, even when the server claims `readOnlyHint=true`.
+
+`unregister_extension` is idempotent and owner-scoped. It removes the
+registered package and uses the durable ID-only discovered-tool inventory to
+revoke exact reusable dispatch policies and clear exact per-tool overrides.
+The extension-list projection includes shared bundled installations plus only
+the authenticated caller's registered installations; other owners' entries are
+not surfaced.
+After restart, persisted registered descriptors are not treated as live tool
+definitions: a previously enabled registered installation is disabled and
+must be explicitly activated to rediscover and republish its current surface.
+
+T3 registration is credential-free (`auth = none`). A future API-key or OAuth
+body must send raw material only to a dedicated secret-submit path backed by
+the encrypted `SecretStore`; manifests and account state may retain only
+`SecretHandle`s. Plaintext can exist only during authorized just-in-time egress
+injection and must never enter model-visible payloads, manifests, transcripts,
+tool results, or logs.
 
 ## Boundary rules
 

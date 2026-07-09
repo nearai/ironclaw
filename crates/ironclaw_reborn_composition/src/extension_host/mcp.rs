@@ -9,7 +9,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_mcp::{
     McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpEgressPlanRequest,
-    McpHostHttpEgressPlanner, McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter,
+    McpHostHttpEgressPlanner, McpRequestAuthority, McpRuntime, McpRuntimeConfig,
+    McpRuntimeHttpAdapter,
 };
 
 pub(crate) const MCP_RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
@@ -83,8 +84,12 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
         if !hosted_mcp_url_allowed(request.url, &endpoint) {
             return McpHostHttpEgressPlan::default();
         }
-        let credential_injections =
-            self.credential_injections(request.provider, request.capability_id, &endpoint);
+        let credential_injections = match request.authority {
+            McpRequestAuthority::Capability(capability_id) => {
+                self.credential_injections(request.provider, capability_id, &endpoint)
+            }
+            McpRequestAuthority::ProviderDiscovery { .. } => Vec::new(),
+        };
         McpHostHttpEgressPlan {
             // Credential-free hosted MCP providers are valid: the manifest may
             // expose a public/unauthenticated server, and host network policy
@@ -182,7 +187,7 @@ fn normalize_mcp_path(path: &str) -> String {
     }
 }
 
-fn hosted_mcp_network_policy(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
+pub(crate) fn hosted_mcp_network_policy(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
@@ -250,7 +255,7 @@ mod tests {
         let scope = sample_scope();
         let plan = planner.plan(sample_plan_request(
             &provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             "https://mcp.notion.com/mcp",
             &scope,
         ));
@@ -274,7 +279,7 @@ mod tests {
 
         let plan = planner.plan(sample_plan_request(
             &provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             "https://fixture.example.com/mcp",
             &scope,
         ));
@@ -296,7 +301,7 @@ mod tests {
 
         let plan = planner.plan(sample_plan_request(
             &provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             "https://evil.example.com/mcp",
             &scope,
         ));
@@ -315,7 +320,7 @@ mod tests {
 
         let plan = planner.plan(sample_plan_request(
             &provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             "http://mcp.notion.com/mcp",
             &scope,
         ));
@@ -333,7 +338,7 @@ mod tests {
 
         let plan = planner.plan(sample_plan_request(
             &provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             "https://mcp.notion.com/other",
             &scope,
         ));
@@ -361,7 +366,12 @@ mod tests {
         let cap = CapabilityId::new("user-notion.notion-search").unwrap();
         let scope = sample_scope();
 
-        let plan = planner.plan(sample_plan_request(&provider, &cap, NOTION_MCP_URL, &scope));
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &McpRequestAuthority::Capability(cap.clone()),
+            NOTION_MCP_URL,
+            &scope,
+        ));
 
         assert_eq!(plan.credential_injections.len(), 1);
         assert_eq!(plan.network_policy.allowed_targets.len(), 1);
@@ -369,6 +379,37 @@ mod tests {
             plan.network_policy.allowed_targets[0].host_pattern,
             NOTION_MCP_HOST
         );
+    }
+
+    #[test]
+    fn provider_discovery_keeps_locked_policy_without_capability_credentials() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+            "user-notion",
+            NOTION_MCP_URL,
+            "user-notion.notion-search",
+            "mcp_user_notion_access_token",
+            ManifestSource::UserRegistered {
+                owner: UserId::new("owner-1").unwrap(),
+            },
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("user-notion").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &McpRequestAuthority::ProviderDiscovery {
+                network_policy_authority: CapabilityId::new("builtin.extension_activate").unwrap(),
+            },
+            NOTION_MCP_URL,
+            &scope,
+        ));
+
+        assert!(plan.credential_injections.is_empty());
+        assert!(plan.network_policy.deny_private_ip_ranges);
+        assert_eq!(plan.network_policy.allowed_targets.len(), 1);
+        assert_eq!(plan.response_body_limit, Some(MCP_RESPONSE_BODY_LIMIT));
+        assert_eq!(plan.timeout_ms, Some(MCP_TIMEOUT_MS));
     }
 
     #[test]
@@ -414,7 +455,12 @@ mod tests {
         let cap = CapabilityId::new("user-notion.notion-search").unwrap();
         let scope = sample_scope();
 
-        let plan = planner.plan(sample_plan_request(&provider, &cap, NOTION_MCP_URL, &scope));
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &McpRequestAuthority::Capability(cap.clone()),
+            NOTION_MCP_URL,
+            &scope,
+        ));
 
         assert!(plan.network_policy.deny_private_ip_ranges);
         assert_eq!(
@@ -441,7 +487,7 @@ mod tests {
         let host_bundled_provider = ExtensionId::new("notion").unwrap();
         let host_bundled_plan = host_bundled_planner.plan(sample_plan_request(
             &host_bundled_provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             NOTION_MCP_URL,
             &scope,
         ));
@@ -459,7 +505,7 @@ mod tests {
         let user_registered_planner = RegistryMcpEgressPlanner::new(user_registered_registry);
         let user_registered_plan = user_registered_planner.plan(sample_plan_request(
             &host_bundled_provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             NOTION_MCP_URL,
             &scope,
         ));
@@ -486,7 +532,7 @@ mod tests {
 
         let plan = planner.plan(sample_plan_request(
             &provider,
-            &cap,
+            &McpRequestAuthority::Capability(cap.clone()),
             "https://mcp.notion.com/mcp",
             &scope,
         ));
@@ -584,13 +630,13 @@ mod tests {
 
     fn sample_plan_request<'a>(
         provider: &'a ExtensionId,
-        capability_id: &'a CapabilityId,
+        authority: &'a McpRequestAuthority,
         url: &'a str,
         scope: &'a ResourceScope,
     ) -> McpHostHttpEgressPlanRequest<'a> {
         McpHostHttpEgressPlanRequest {
             provider,
-            capability_id,
+            authority,
             scope,
             transport: "http",
             method: NetworkMethod::Post,

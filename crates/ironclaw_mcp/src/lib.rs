@@ -5,6 +5,8 @@
 //! network authority; the host-selected client is the only integration point and
 //! resource accounting still happens through the host governor.
 
+mod tool_discovery;
+
 use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
@@ -17,7 +19,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
+    ExtensionPackage, ExtensionRuntime, HostedMcpToolCandidate, HostedMcpToolRejection,
 };
 use ironclaw_host_api::{
     CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, NetworkMethod,
@@ -30,6 +32,12 @@ use ironclaw_host_api::{
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
 use thiserror::Error;
+
+#[cfg(test)]
+use crate::tool_discovery::is_supported_mcp_tool_name;
+use crate::tool_discovery::parse_tools_list_result;
+#[cfg(test)]
+use ironclaw_extensions::HostedMcpToolRejectionReason;
 
 const STREAMABLE_HTTP_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
@@ -77,7 +85,7 @@ pub struct McpExecutionRequest<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpClientRequest {
     pub provider: ExtensionId,
-    pub capability_id: CapabilityId,
+    pub authority: McpRequestAuthority,
     pub scope: ResourceScope,
     pub transport: String,
     pub command: Option<String>,
@@ -85,6 +93,41 @@ pub struct McpClientRequest {
     pub url: Option<String>,
     pub input: Value,
     pub max_output_bytes: u64,
+}
+
+/// Authority context for one MCP protocol exchange.
+///
+/// Provider discovery is deliberately not represented by a synthetic
+/// capability id. Planners can therefore distinguish discovery from normal
+/// dispatch and cannot accidentally create capability-scoped staged
+/// obligations or approval keys for a zero-capability provider descriptor.
+/// Its network-policy authority is borrowed from the host capability that
+/// initiated discovery and is used only for exact staged-policy lookup at the
+/// runtime egress boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpRequestAuthority {
+    Capability(CapabilityId),
+    ProviderDiscovery {
+        network_policy_authority: CapabilityId,
+    },
+}
+
+impl McpRequestAuthority {
+    pub fn capability_id(&self) -> Option<&CapabilityId> {
+        match self {
+            Self::Capability(capability_id) => Some(capability_id),
+            Self::ProviderDiscovery { .. } => None,
+        }
+    }
+
+    fn network_policy_authority(&self) -> &CapabilityId {
+        match self {
+            Self::Capability(capability_id) => capability_id,
+            Self::ProviderDiscovery {
+                network_policy_authority,
+            } => network_policy_authority,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +167,8 @@ impl McpClientOutput {
 /// extension domain consumes, so there is no separate MCP-local mirror.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolDiscoveryOutput {
-    pub tools: Vec<HostedMcpDiscoveredTool>,
+    pub tools: Vec<HostedMcpToolCandidate>,
+    pub rejections: Vec<HostedMcpToolRejection>,
     pub usage: ResourceUsage,
 }
 
@@ -281,7 +325,7 @@ pub struct McpHostHttpEgressPlan {
 #[derive(Debug, Clone, Copy)]
 pub struct McpHostHttpEgressPlanRequest<'a> {
     pub provider: &'a ExtensionId,
-    pub capability_id: &'a CapabilityId,
+    pub authority: &'a McpRequestAuthority,
     pub scope: &'a ResourceScope,
     pub transport: &'a str,
     pub method: NetworkMethod,
@@ -470,7 +514,7 @@ where
 
         let plan = self.planner.plan(McpHostHttpEgressPlanRequest {
             provider: &request.provider,
-            capability_id: &request.capability_id,
+            authority: &request.authority,
             scope: &request.scope,
             transport: &request.transport,
             method: NetworkMethod::Post,
@@ -478,6 +522,15 @@ where
             headers: &policy_headers,
             body: &body,
         });
+        if matches!(
+            request.authority,
+            McpRequestAuthority::ProviderDiscovery { .. }
+        ) && !plan.credential_injections.is_empty()
+        {
+            return Err(McpClientError::client(request_denied(
+                McpRequestDeniedCause::DeniedCredentialSource,
+            )));
+        }
         Ok(PlannedMcpJsonRpc {
             id,
             method,
@@ -516,7 +569,7 @@ where
             .http
             .request(CapabilityHostHttpRequest {
                 scope: request.scope.clone(),
-                capability_id: request.capability_id.clone(),
+                capability_id: request.authority.network_policy_authority().clone(),
                 method: NetworkMethod::Post,
                 url: planned.url,
                 headers,
@@ -679,7 +732,10 @@ where
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
 
-        let tool_name = mcp_tool_name(&request.provider, &request.capability_id);
+        let capability_id = request.authority.capability_id().ok_or_else(|| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::InvalidAuthority))
+        })?;
+        let tool_name = mcp_tool_name(&request.provider, capability_id);
         let tool_call_params = serde_json::json!({
             "name": tool_name,
             "arguments": request.input.clone(),
@@ -766,8 +822,10 @@ where
         let result = tools.response.result.ok_or_else(|| {
             McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
         })?;
+        let parsed = parse_tools_list_result(&result).map_err(McpClientError::client)?;
         Ok(McpToolDiscoveryOutput {
-            tools: parse_tools_list_result(&result).map_err(McpClientError::client)?,
+            tools: parsed.tools,
+            rejections: parsed.rejections,
             usage,
         })
     }
@@ -1025,176 +1083,6 @@ fn parse_json_rpc_error_info(error: Option<&Value>) -> Option<JsonRpcErrorInfo> 
     Some(JsonRpcErrorInfo { code })
 }
 
-fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
-    const MAX_DISCOVERED_TOOLS: usize = 128;
-    const MAX_TOOL_NAME_BYTES: usize = 128;
-    const MAX_TOOL_DESCRIPTION_BYTES: usize = 2048;
-    const MAX_SCHEMA_DEPTH: u8 = 8;
-    const MAX_SCHEMA_NODES: usize = 512;
-    const MAX_SCHEMA_STRING_BYTES: usize = 1024;
-
-    let invalid_tool_list = || response_error(McpResponseErrorCause::InvalidToolList);
-
-    let tools = value
-        .get("tools")
-        .and_then(Value::as_array)
-        .ok_or_else(invalid_tool_list)?;
-    if tools.len() > MAX_DISCOVERED_TOOLS {
-        return Err(invalid_tool_list());
-    }
-
-    tools
-        .iter()
-        .map(|tool| {
-            let name = tool
-                .get("name")
-                .and_then(Value::as_str)
-                // Discovered tool names become Reborn capability suffixes, so
-                // discovery rejects unsupported names instead of normalizing
-                // them into potentially colliding capability IDs.
-                .filter(|name| is_supported_mcp_tool_name(name, MAX_TOOL_NAME_BYTES))
-                .ok_or_else(invalid_tool_list)?;
-            let description = tool
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if description.len() > MAX_TOOL_DESCRIPTION_BYTES
-                || description.chars().any(is_unsupported_description_char)
-            {
-                return Err(invalid_tool_list());
-            }
-            let input_schema = tool
-                .get("inputSchema")
-                .filter(|schema| schema.is_object())
-                .cloned()
-                .ok_or_else(invalid_tool_list)?;
-            if !is_supported_mcp_input_schema(
-                &input_schema,
-                MAX_SCHEMA_DEPTH,
-                MAX_SCHEMA_NODES,
-                MAX_SCHEMA_STRING_BYTES,
-            ) {
-                return Err(invalid_tool_list());
-            }
-            let annotations = parse_tool_annotations(tool.get("annotations"))?;
-            Ok(HostedMcpDiscoveredTool {
-                name: name.to_string(),
-                description: description.to_string(),
-                input_schema,
-                annotations,
-            })
-        })
-        .collect()
-}
-
-fn is_supported_mcp_input_schema(
-    schema: &Value,
-    max_depth: u8,
-    max_nodes: usize,
-    max_string_bytes: usize,
-) -> bool {
-    let mut nodes = 0usize;
-    validate_mcp_schema_value(
-        schema,
-        0,
-        max_depth,
-        max_nodes,
-        max_string_bytes,
-        &mut nodes,
-    )
-}
-
-fn validate_mcp_schema_value(
-    value: &Value,
-    depth: u8,
-    max_depth: u8,
-    max_nodes: usize,
-    max_string_bytes: usize,
-    nodes: &mut usize,
-) -> bool {
-    if depth > max_depth {
-        return false;
-    }
-    *nodes = nodes.saturating_add(1);
-    if *nodes > max_nodes {
-        return false;
-    }
-    match value {
-        Value::String(value) => {
-            value.len() <= max_string_bytes && !value.chars().any(is_unsupported_description_char)
-        }
-        Value::Array(values) => values.iter().all(|value| {
-            validate_mcp_schema_value(
-                value,
-                depth + 1,
-                max_depth,
-                max_nodes,
-                max_string_bytes,
-                nodes,
-            )
-        }),
-        Value::Object(values) => values.values().all(|value| {
-            validate_mcp_schema_value(
-                value,
-                depth + 1,
-                max_depth,
-                max_nodes,
-                max_string_bytes,
-                nodes,
-            )
-        }),
-        _ => true,
-    }
-}
-
-fn is_unsupported_description_char(value: char) -> bool {
-    value.is_control() && !matches!(value, '\n' | '\r' | '\t')
-}
-
-fn parse_tool_annotations(
-    value: Option<&Value>,
-) -> Result<HostedMcpDiscoveredToolAnnotations, String> {
-    let Some(value) = value else {
-        return Ok(HostedMcpDiscoveredToolAnnotations::default());
-    };
-    let object = value
-        .as_object()
-        .ok_or_else(|| response_error(McpResponseErrorCause::InvalidToolList))?;
-    Ok(HostedMcpDiscoveredToolAnnotations {
-        destructive_hint: object
-            .get("destructiveHint")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        side_effects_hint: object
-            .get("sideEffectsHint")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        read_only_hint: object
-            .get("readOnlyHint")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
-fn is_supported_mcp_tool_name(value: &str, max_bytes: usize) -> bool {
-    if value.is_empty() || value.len() > max_bytes || value.contains("..") {
-        return false;
-    }
-    value.split('.').all(is_supported_mcp_tool_name_segment)
-}
-
-fn is_supported_mcp_tool_name_segment(segment: &str) -> bool {
-    let Some(first) = segment.as_bytes().first().copied() else {
-        return false;
-    };
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        return false;
-    }
-    segment.bytes().all(|byte| {
-        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-    })
-}
-
 fn json_rpc_id(value: &Value) -> Option<u64> {
     match value.get("id") {
         Some(Value::Number(number)) => number.as_u64(),
@@ -1273,6 +1161,8 @@ enum McpRequestDeniedCause {
     UnsupportedTransport,
     /// A credential injection used a denied source over this boundary.
     DeniedCredentialSource,
+    /// The protocol operation was invoked with the wrong typed authority.
+    InvalidAuthority,
     /// The in-memory session map lock was poisoned.
     SessionStatePoisoned,
 }
@@ -1289,6 +1179,7 @@ impl McpRequestDeniedCause {
             Self::MissingUrl => "mcp_missing_url".to_string(),
             Self::UnsupportedTransport => "mcp_unsupported_transport".to_string(),
             Self::DeniedCredentialSource => "mcp_denied_credential_source".to_string(),
+            Self::InvalidAuthority => "mcp_invalid_request_authority".to_string(),
             Self::SessionStatePoisoned => "mcp_session_state_poisoned".to_string(),
         }
     }
@@ -1316,8 +1207,6 @@ enum McpResponseErrorCause {
     /// Response did not contain a usable JSON-RPC payload (e.g. SSE with no
     /// matching data frame).
     NoPayload,
-    /// Discovered `tools/list` result was malformed (shape/limits violation).
-    InvalidToolList,
 }
 
 impl McpResponseErrorCause {
@@ -1344,7 +1233,6 @@ impl McpResponseErrorCause {
             Self::InvalidProtocolVersion => "mcp_invalid_protocol_version".to_string(),
             Self::IdMismatch => "mcp_jsonrpc_id_mismatch".to_string(),
             Self::NoPayload => "mcp_no_payload".to_string(),
-            Self::InvalidToolList => "mcp_invalid_tool_list".to_string(),
         }
     }
 }
@@ -1554,7 +1442,7 @@ where
         Ok(PreparedMcpClientRequest {
             request: McpClientRequest {
                 provider: request.package.id.clone(),
-                capability_id: request.capability_id.clone(),
+                authority: McpRequestAuthority::Capability(request.capability_id.clone()),
                 scope: request.scope.clone(),
                 transport: transport.clone(),
                 command: command.clone(),
@@ -1719,6 +1607,50 @@ mod tests {
             .expect_err("tool discovery must cap returned tools");
 
         assert_eq!(error, "mcp_invalid_tool_list");
+    }
+
+    #[test]
+    fn parse_tools_list_result_skips_only_unsupported_names_with_bounded_metadata() {
+        let parsed = parse_tools_list_result(&json!({
+            "tools": [
+                valid_tool("safe", json!({"type": "object"})),
+                valid_tool("UNSAFE", json!({"type": "object"})),
+                valid_tool("also-safe", json!({"type": "object"}))
+            ]
+        }))
+        .expect("unsupported names are isolated per tool");
+
+        assert_eq!(
+            parsed
+                .tools
+                .iter()
+                .map(|candidate| (candidate.source_index, candidate.tool.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "safe"), (2, "also-safe")]
+        );
+        assert_eq!(
+            parsed.rejections,
+            vec![HostedMcpToolRejection {
+                tool_index: 1,
+                reason: HostedMcpToolRejectionReason::UnsupportedName,
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_discovery_authority_has_no_capability_or_obligation_key() {
+        let policy_authority =
+            CapabilityId::new("builtin.extension_activate").expect("valid capability");
+        let authority = McpRequestAuthority::ProviderDiscovery {
+            network_policy_authority: policy_authority.clone(),
+        };
+
+        assert!(authority.capability_id().is_none());
+        assert_eq!(
+            authority.network_policy_authority(),
+            &policy_authority,
+            "provider discovery borrows only its caller's staged network policy"
+        );
     }
 
     #[test]

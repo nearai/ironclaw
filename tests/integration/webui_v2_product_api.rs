@@ -15,13 +15,18 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
+};
 use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_extensions::{
     ExtensionInstallationId, ExtensionInstallationStore, ExtensionRuntimeV2, ManifestSource,
 };
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, TenantId, UserId,
+    AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
+    Principal, ResourceScope, TenantId, UserId,
 };
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
@@ -30,10 +35,13 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
+use reborn_support::doubles::RecordingNetworkHttpEgress;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::session_thread::RebornThreadHarness;
-use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json, webui_caller_for};
+use reborn_support::webui_mount::{
+    get_json, mount_webui_v2_router, post_empty, post_json, webui_caller_for,
+};
 
 #[tokio::test]
 async fn thread_history_cold_get_and_libsql_reopen() {
@@ -247,6 +255,384 @@ async fn register_extension_via_webui_api_persists_descriptor_and_installation()
     assert_eq!(url, "https://93.184.216.34/mcp");
 
     runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn unregister_registered_mcp_after_restart_revokes_only_its_durable_authority() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let owner_id = "webui-unregister-owner";
+    let tenant_id = "webui-unregister-tenant";
+    let agent_id = "webui-unregister-agent";
+    let storage_root = root.path().join("local-dev");
+    let discovery_egress = Arc::new(RecordingNetworkHttpEgress::with_mcp_discovery_tools(vec![
+        serde_json::json!({
+            "name": "read-records",
+            "description": "Read records from the hosted service",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": true}
+        }),
+    ]));
+    let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
+        .expect("local-dev runtime policy resolves");
+    let runtime_input = || {
+        ironclaw_reborn_composition::RebornRuntimeInput::from_services(
+            ironclaw_reborn_composition::RebornBuildInput::local_dev(
+                owner_id,
+                storage_root.clone(),
+            )
+            .with_runtime_policy(policy.clone())
+            .with_network_http_egress_for_test(discovery_egress.clone()),
+        )
+        .with_identity(ironclaw_reborn_composition::RebornRuntimeIdentity {
+            tenant_id: tenant_id.to_string(),
+            agent_id: agent_id.to_string(),
+            source_binding_id: "webui-unregister-source".to_string(),
+            reply_target_binding_id: "webui-unregister-reply".to_string(),
+        })
+    };
+    let runtime = ironclaw_reborn_composition::build_reborn_runtime(runtime_input())
+        .await
+        .expect("runtime builds");
+    let bundle = ironclaw_reborn_composition::build_webui_services(&runtime, None)
+        .expect("webui services build");
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new(tenant_id).expect("tenant id"),
+        UserId::new(owner_id).expect("user id"),
+        Some(AgentId::new(agent_id).expect("agent id")),
+        None,
+    );
+
+    let (register_status, register_body) = post_json(
+        mount_webui_v2_router(bundle.api.clone(), caller.clone()),
+        "/api/webchat/v2/extensions/register",
+        serde_json::json!({
+            "name": "Restart MCP",
+            "url": "https://93.184.216.34/mcp"
+        }),
+    )
+    .await;
+    assert_eq!(
+        register_status,
+        StatusCode::OK,
+        "register response: {register_body}"
+    );
+    let extension_id = register_body["extension_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("register response missing extension_id: {register_body}"));
+    let capability_id = CapabilityId::new(format!("{extension_id}.read-records"))
+        .expect("discovered capability id");
+    let extension_id = ExtensionId::new(extension_id.to_string()).expect("extension id");
+
+    let (activate_status, activate_body) = post_empty(
+        mount_webui_v2_router(bundle.api.clone(), caller.clone()),
+        &format!(
+            "/api/webchat/v2/extensions/{}/activate",
+            extension_id.as_str()
+        ),
+    )
+    .await;
+    assert_eq!(
+        activate_status,
+        StatusCode::OK,
+        "activate response: {activate_body}; requests: {:?}",
+        discovery_egress.requests(),
+    );
+    assert!(
+        activate_body.to_string().contains(capability_id.as_str()),
+        "activation must publish the discovered capability: {activate_body}"
+    );
+
+    let settings_scope = ResourceScope {
+        tenant_id: TenantId::new(tenant_id).expect("tenant id"),
+        user_id: UserId::new(owner_id).expect("user id"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let policies = runtime
+        .services()
+        .local_dev_persistent_approval_policies_for_test()
+        .expect("persistent approval store");
+    let overrides = runtime
+        .services()
+        .local_dev_tool_permission_overrides_for_test()
+        .expect("tool override store");
+    let related_policy_key = PersistentApprovalPolicyKey::new(
+        &settings_scope,
+        PersistentApprovalAction::Dispatch,
+        capability_id.clone(),
+        Principal::Extension(extension_id.clone()),
+    );
+    policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: settings_scope.clone(),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id.clone(),
+            grantee: Principal::Extension(extension_id.clone()),
+            approved_by: Principal::User(settings_scope.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::Network, EffectKind::ExternalWrite],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("seed registered capability always-allow policy");
+    let related_override_key =
+        ToolPermissionOverrideKey::new(&settings_scope, capability_id.clone());
+    overrides
+        .set(ToolPermissionOverrideInput {
+            scope: settings_scope.clone(),
+            capability_id: capability_id.clone(),
+            state: ToolPermissionOverride::Disabled,
+            updated_by: Principal::User(settings_scope.user_id.clone()),
+        })
+        .await
+        .expect("seed registered capability override");
+
+    let unrelated_capability = CapabilityId::new("builtin.http").expect("unrelated capability");
+    let unrelated_provider = ExtensionId::new("builtin").expect("unrelated provider");
+    let unrelated_policy_key = PersistentApprovalPolicyKey::new(
+        &settings_scope,
+        PersistentApprovalAction::Dispatch,
+        unrelated_capability.clone(),
+        Principal::Extension(unrelated_provider.clone()),
+    );
+    policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: settings_scope.clone(),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: unrelated_capability.clone(),
+            grantee: Principal::Extension(unrelated_provider),
+            approved_by: Principal::User(settings_scope.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::Network],
+                mounts: Default::default(),
+                network: Default::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("seed unrelated policy");
+    let unrelated_override_key =
+        ToolPermissionOverrideKey::new(&settings_scope, unrelated_capability.clone());
+    overrides
+        .set(ToolPermissionOverrideInput {
+            scope: settings_scope.clone(),
+            capability_id: unrelated_capability,
+            state: ToolPermissionOverride::AskEachTime,
+            updated_by: Principal::User(settings_scope.user_id.clone()),
+        })
+        .await
+        .expect("seed unrelated override");
+
+    let discovery_requests = discovery_egress.requests();
+    assert!(
+        discovery_requests.iter().all(|request| {
+            request.url == "https://93.184.216.34/mcp"
+                && !request
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        }),
+        "registered discovery must keep its exact target and inject no credentials: \
+         {discovery_requests:?}"
+    );
+    let discovery_methods = discovery_requests
+        .iter()
+        .filter_map(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|body| body["method"].as_str().map(str::to_string))
+        })
+        .collect::<Vec<_>>();
+    for method in ["initialize", "notifications/initialized", "tools/list"] {
+        assert!(
+            discovery_methods.iter().any(|observed| observed == method),
+            "activation discovery must send {method} through mediated NetworkHttpEgress; \
+            methods={discovery_methods:?}"
+        );
+    }
+    let discovery_request_count = discovery_requests.len();
+
+    runtime.shutdown().await.expect("first runtime shutdown");
+
+    // Rebuild before unregistering: only the durable capability-id inventory,
+    // not the in-memory active package, can authorize exact-key cleanup now.
+    let restarted_runtime = ironclaw_reborn_composition::build_reborn_runtime(runtime_input())
+        .await
+        .expect("runtime rebuilds over the same durable root");
+    let restarted_bundle =
+        ironclaw_reborn_composition::build_webui_services(&restarted_runtime, None)
+            .expect("restarted webui services build");
+    let (restarted_list_status, restarted_list_body) = get_json(
+        mount_webui_v2_router(restarted_bundle.api.clone(), caller.clone()),
+        "/api/webchat/v2/extensions",
+    )
+    .await;
+    assert_eq!(
+        restarted_list_status,
+        StatusCode::OK,
+        "restarted extension list response: {restarted_list_body}"
+    );
+    let restarted_extension = restarted_list_body["extensions"]
+        .as_array()
+        .expect("restarted extension list must contain an extensions array")
+        .iter()
+        .find(|entry| entry["package_ref"]["id"] == extension_id.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "restart must retain the registered descriptor in its exact list entry: \
+                 {restarted_list_body}"
+            )
+        });
+    assert_eq!(
+        restarted_extension["active"],
+        serde_json::json!(false),
+        "restart must fail the registered extension closed: {restarted_extension}"
+    );
+    assert_eq!(
+        restarted_extension["activation_status"],
+        serde_json::json!("disabled"),
+        "restart must report the registered extension itself as disabled: {restarted_extension}"
+    );
+    let (restarted_tools_status, restarted_tools_body) = get_json(
+        mount_webui_v2_router(restarted_bundle.api.clone(), caller.clone()),
+        "/api/webchat/v2/settings/tools",
+    )
+    .await;
+    assert_eq!(
+        restarted_tools_status,
+        StatusCode::OK,
+        "restarted tool settings response: {restarted_tools_body}"
+    );
+    assert!(
+        !restarted_tools_body
+            .to_string()
+            .contains(capability_id.as_str()),
+        "restart must not republish stale registered tool metadata: {restarted_tools_body}"
+    );
+    let (unregister_status, unregister_body) = post_empty(
+        mount_webui_v2_router(restarted_bundle.api.clone(), caller.clone()),
+        &format!(
+            "/api/webchat/v2/extensions/{}/unregister",
+            extension_id.as_str()
+        ),
+    )
+    .await;
+    assert_eq!(
+        unregister_status,
+        StatusCode::OK,
+        "unregister response: {unregister_body}"
+    );
+    let (retry_status, retry_body) = post_empty(
+        mount_webui_v2_router(restarted_bundle.api, caller),
+        &format!(
+            "/api/webchat/v2/extensions/{}/unregister",
+            extension_id.as_str()
+        ),
+    )
+    .await;
+    assert_eq!(
+        retry_status,
+        StatusCode::OK,
+        "idempotent unregister retry response: {retry_body}"
+    );
+    assert_eq!(
+        discovery_egress.requests().len(),
+        discovery_request_count,
+        "restart, disabled-state reads, unregister, and its idempotent retry must not perform \
+         ambient calls to the registered MCP server"
+    );
+    restarted_runtime
+        .shutdown()
+        .await
+        .expect("restarted runtime shutdown");
+
+    let (reopened_overrides, _, reopened_policies) =
+        ironclaw_reborn_composition::test_support::open_local_dev_approval_settings_stores_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("cold reopen approval settings stores");
+    let related_policy = reopened_policies
+        .lookup(&related_policy_key)
+        .await
+        .expect("read registered capability policy")
+        .expect("revocation retains a durable policy record");
+    assert!(
+        related_policy.revoked_at.is_some() && related_policy.active_grant().is_none(),
+        "unregister must revoke the registered capability policy: {related_policy:?}"
+    );
+    assert!(
+        reopened_overrides
+            .get(&related_override_key)
+            .await
+            .expect("read registered capability override")
+            .is_none(),
+        "unregister must clear the registered capability override"
+    );
+
+    let unrelated_policy = reopened_policies
+        .lookup(&unrelated_policy_key)
+        .await
+        .expect("read unrelated policy")
+        .expect("unrelated policy remains");
+    assert!(
+        unrelated_policy.active_grant().is_some(),
+        "unregister must not revoke unrelated authority: {unrelated_policy:?}"
+    );
+    assert!(
+        reopened_overrides
+            .get(&unrelated_override_key)
+            .await
+            .expect("read unrelated override")
+            .is_some(),
+        "unregister must not clear unrelated overrides"
+    );
+
+    let reopened_installations = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+        &storage_root,
+    )
+    .await
+    .expect("cold reopen extension installation store");
+    let installation_id =
+        ExtensionInstallationId::new(extension_id.as_str().to_string()).expect("installation id");
+    assert!(
+        reopened_installations
+            .get_installation(&installation_id)
+            .await
+            .expect("read unregistered installation")
+            .is_none(),
+        "unregister must delete the installation after authority cleanup"
+    );
+    assert!(
+        reopened_installations
+            .get_manifest(&extension_id)
+            .await
+            .expect("read unregistered manifest")
+            .is_none(),
+        "unregister must delete the manifest after authority cleanup"
+    );
+    assert!(
+        !storage_root
+            .join("system/extensions/registered")
+            .join(owner_id)
+            .join(extension_id.as_str())
+            .exists(),
+        "unregister must delete the owner descriptor only after cleanup succeeds"
+    );
 }
 
 /// Hand-rolled double: single read-only method, no logic worth exercising

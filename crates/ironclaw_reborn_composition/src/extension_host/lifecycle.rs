@@ -4,9 +4,10 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    CredentialStageError, HostApiError, HostPath, InvocationId, MountView, ResourceScope,
-    RuntimeHttpEgress, UserId, VirtualPath,
+    CapabilityId, CredentialStageError, HostApiError, HostPath, InvocationId, MountView,
+    ResourceScope, RuntimeHttpEgress, TrustClass, UserId, VirtualPath,
 };
+use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
@@ -217,6 +218,8 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
+    #[cfg(test)]
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
@@ -226,6 +229,8 @@ impl RebornLocalLifecycleFacade {
         Self {
             skill_management,
             extension_management: None,
+            host_runtime_http_egress: None,
+            #[cfg(test)]
             runtime_http_egress: None,
             credential_accounts: None,
         }
@@ -239,7 +244,16 @@ impl RebornLocalLifecycleFacade {
         self
     }
 
-    pub(crate) fn with_runtime_http_egress(
+    pub(crate) fn with_host_runtime_http_egress(
+        mut self,
+        host_runtime_http_egress: HostRuntimeHttpEgressPort,
+    ) -> Self {
+        self.host_runtime_http_egress = Some(host_runtime_http_egress);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_runtime_http_egress_for_test(
         mut self,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     ) -> Self {
@@ -356,7 +370,8 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                extension_management.list_installed().await
+                let owner = lifecycle_resource_scope(&context)?.user_id;
+                extension_management.list_installed(&owner).await
             }
             LifecycleProductAction::ExtensionRegister { name, url } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -380,6 +395,7 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
+                let owner = lifecycle_resource_scope(&context)?.user_id;
                 let credential_gate = self
                     .extension_activation_credential_gate(
                         &context,
@@ -388,10 +404,24 @@ impl RebornLocalLifecycleFacade {
                     )
                     .await?;
                 if extension_management
-                    .package_requires_hosted_mcp_discovery(&package_ref)
+                    .package_requires_hosted_mcp_discovery_for_owner(&package_ref, &owner)
                     .await?
                 {
-                    let Some(runtime_http_egress) = self.runtime_http_egress.clone() else {
+                    let extension_id =
+                        ironclaw_host_api::ExtensionId::new(package_ref.id.as_str().to_string())
+                            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                                reason: format!(
+                                    "invalid extension id for hosted MCP discovery: {error}"
+                                ),
+                            })?;
+                    let runtime_http_egress = self.host_runtime_http_egress.as_ref().map(|port| {
+                        Arc::new(port.bind(extension_id, TrustClass::Sandbox))
+                            as Arc<dyn RuntimeHttpEgress>
+                    });
+                    #[cfg(test)]
+                    let runtime_http_egress =
+                        runtime_http_egress.or_else(|| self.runtime_http_egress.clone());
+                    let Some(runtime_http_egress) = runtime_http_egress else {
                         return Err(ProductWorkflowError::InvalidBindingRequest {
                             reason: format!(
                                 "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle facade",
@@ -400,18 +430,34 @@ impl RebornLocalLifecycleFacade {
                         });
                     };
                     let scope = lifecycle_resource_scope(&context)?;
+                    let network_policy_authority = CapabilityId::new(
+                        crate::extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID,
+                    )
+                    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("invalid extension activation capability id: {error}"),
+                    })?;
                     let mode =
                         crate::extension_host::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
                             scope,
                             runtime_http_egress,
+                            network_policy_authority,
                         };
                     return match credential_gate {
                         Some(credential_gate) => {
                             extension_management
-                                .activate_with_credential_gate(package_ref, mode, credential_gate)
+                                .activate_with_credential_gate_for_owner(
+                                    package_ref,
+                                    mode,
+                                    &owner,
+                                    credential_gate,
+                                )
                                 .await
                         }
-                        None => extension_management.activate(package_ref, mode).await,
+                        None => {
+                            extension_management
+                                .activate_for_owner(package_ref, mode, &owner)
+                                .await
+                        }
                     };
                 }
                 let mode =
@@ -419,10 +465,19 @@ impl RebornLocalLifecycleFacade {
                 match credential_gate {
                     Some(credential_gate) => {
                         extension_management
-                            .activate_with_credential_gate(package_ref, mode, credential_gate)
+                            .activate_with_credential_gate_for_owner(
+                                package_ref,
+                                mode,
+                                &owner,
+                                credential_gate,
+                            )
                             .await
                     }
-                    None => extension_management.activate(package_ref, mode).await,
+                    None => {
+                        extension_management
+                            .activate_for_owner(package_ref, mode, &owner)
+                            .await
+                    }
                 }
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
@@ -458,7 +513,10 @@ impl RebornLocalLifecycleFacade {
         package_ref: &LifecyclePackageRef,
     ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductWorkflowError> {
         let requirements = extension_management
-            .activation_credential_requirements(package_ref)
+            .activation_credential_requirements_for_owner(
+                package_ref,
+                &lifecycle_resource_scope(context)?.user_id,
+            )
             .await?;
         if requirements.is_empty() {
             return Ok(None);
@@ -502,14 +560,17 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
 
     async fn project_package(
         &self,
-        _context: LifecycleProductContext,
+        context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         if package_ref.kind == LifecyclePackageKind::Extension {
             let Some(extension_management) = &self.extension_management else {
                 return unsupported_projection(Some(package_ref));
             };
-            return extension_management.project(package_ref).await;
+            let owner = lifecycle_resource_scope(&context)?.user_id;
+            return extension_management
+                .project_for_owner(package_ref, &owner)
+                .await;
         }
         unsupported_projection(Some(package_ref))
     }

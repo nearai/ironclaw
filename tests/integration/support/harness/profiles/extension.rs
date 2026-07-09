@@ -23,15 +23,22 @@ use super::super::{
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
+    extension_lifecycle_tools_profile_with_network_egress(Arc::new(
+        RecordingNetworkHttpEgress::with_body(
+            br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec(),
+        ),
+    ))
+}
+
+fn extension_lifecycle_tools_profile_with_network_egress(
+    network_egress: Arc<RecordingNetworkHttpEgress>,
+) -> HarnessResult<ToolsProfile> {
     let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
     capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
     // Hermetic guard: without a test egress, `build_local_runtime` defaults to
     // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
     // bundled extension capability post-activation, which crosses HTTP.
-    let network_egress: Arc<dyn NetworkHttpEgress> =
-        Arc::new(RecordingNetworkHttpEgress::with_body(
-            br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec(),
-        ));
+    let network_egress_for_runtime: Arc<dyn NetworkHttpEgress> = network_egress;
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
@@ -42,7 +49,7 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
             )?),
         )
         .with_seed_extension_credentials()
-        .with_network_http_egress_for_test(network_egress),
+        .with_network_http_egress_for_test(network_egress_for_runtime),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
@@ -62,6 +69,22 @@ pub(crate) async fn extension_lifecycle_tools_with_refreshing_capability_port()
     let mut profile = extension_lifecycle_tools_profile()?;
     profile.options = profile.options.with_refreshing_local_dev_capability_port();
     profile.build().await
+}
+
+/// Production-refreshing extension profile with request-aware hosted-MCP
+/// discovery responses. Existing extension profiles remain on their static
+/// response path; only callers opting into this constructor expose the
+/// recorder through `HostRuntimeCapabilityHarness::network_http_requests`.
+pub(crate) async fn extension_lifecycle_tools_with_mcp_discovery(
+    tools: Vec<serde_json::Value>,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let network_egress = Arc::new(RecordingNetworkHttpEgress::with_mcp_discovery_tools(tools));
+    let mut profile =
+        extension_lifecycle_tools_profile_with_network_egress(Arc::clone(&network_egress))?;
+    profile.options = profile.options.with_refreshing_local_dev_capability_port();
+    let mut harness = profile.build().await?;
+    harness.network_egress = Some(network_egress);
+    Ok(harness)
 }
 
 /// Model-visible capability of the visibility-probe fixture extension.

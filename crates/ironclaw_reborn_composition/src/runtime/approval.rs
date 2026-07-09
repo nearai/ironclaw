@@ -247,6 +247,7 @@ mod tests {
                 effects: vec![EffectKind::Network, EffectKind::UseSecret],
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -317,6 +318,7 @@ mod tests {
                     },
                     required: true,
                 }],
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -368,6 +370,7 @@ mod tests {
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -406,6 +409,7 @@ mod tests {
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Ask,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -473,6 +477,7 @@ mod tests {
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Deny,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(

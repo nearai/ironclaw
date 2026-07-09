@@ -5,6 +5,9 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_approvals::{
+    CapabilityPermissionOverrideStore, PersistentApprovalPolicyStore, cleanup_capability_authority,
+};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
@@ -18,7 +21,7 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkPolicy, NetworkScheme,
-    NetworkTarget, NetworkTargetPattern, PermissionMode, ResourceScope,
+    NetworkTarget, NetworkTargetPattern, PermissionMode, Principal, ResourceScope,
     RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
     VirtualPath, sha256_digest_token,
 };
@@ -30,6 +33,7 @@ use ironclaw_product_workflow::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
     ProductWorkflowError, RebornChannelConnectStrategy, RebornServicesError,
 };
+use ironclaw_safety::InjectionScanner;
 use tokio::sync::Mutex;
 
 use crate::RebornProductAuthServices;
@@ -71,6 +75,8 @@ impl ExtensionCredentialCleanup for RebornProductAuthServices {
 mod active_publication;
 #[cfg(test)]
 mod hosted_mcp_test_support;
+#[cfg(test)]
+mod registered_lifecycle_tests;
 
 use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
@@ -111,11 +117,31 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     installation_store: Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
+    capability_authority_cleanup: ExtensionCapabilityAuthorityCleanup,
+    metadata_safety: Arc<dyn InjectionScanner>,
     operation_lock: Arc<Mutex<()>>,
     // Genuinely optional (not an `optional_arc` smell): a composition without
     // product auth cannot have minted a reusable OAuth credential, so there is
     // nothing to revoke on removal.
     credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExtensionCapabilityAuthorityCleanup {
+    persistent_approval_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    tool_permission_overrides: Arc<dyn CapabilityPermissionOverrideStore>,
+}
+
+impl ExtensionCapabilityAuthorityCleanup {
+    pub(crate) fn new(
+        persistent_approval_policies: Arc<dyn PersistentApprovalPolicyStore>,
+        tool_permission_overrides: Arc<dyn CapabilityPermissionOverrideStore>,
+    ) -> Self {
+        Self {
+            persistent_approval_policies,
+            tool_permission_overrides,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +151,7 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) default_permission: PermissionMode,
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    pub(crate) network_policy: Option<NetworkPolicy>,
 }
 
 #[derive(Clone)]
@@ -133,17 +160,22 @@ pub(crate) enum ExtensionActivationMode {
     HostedMcpDiscovery {
         scope: ResourceScope,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+        network_policy_authority: CapabilityId,
     },
 }
 
 impl ActiveExtensionCapability {
-    fn from_descriptor(descriptor: &CapabilityDescriptor) -> Self {
+    fn from_descriptor(
+        descriptor: &CapabilityDescriptor,
+        network_policy: Option<NetworkPolicy>,
+    ) -> Self {
         Self {
             id: descriptor.id.clone(),
             provider: descriptor.provider.clone(),
             effects: descriptor.effects.clone(),
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
+            network_policy,
         }
     }
 }
@@ -152,11 +184,13 @@ impl ExtensionActivationMode {
     pub(crate) fn from_dispatch_context(
         scope: ResourceScope,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+        network_policy_authority: CapabilityId,
     ) -> Self {
         match runtime_http_egress {
             Some(runtime_http_egress) => Self::HostedMcpDiscovery {
                 scope,
                 runtime_http_egress,
+                network_policy_authority,
             },
             None => Self::Static,
         }
@@ -199,6 +233,20 @@ pub(crate) async fn restore_extension_lifecycle_state(
             )
             .await?;
         }
+        let restored_activation_state = if is_owner_registered(&available.package.manifest.source)
+            && installation.activation_state() == ExtensionActivationState::Enabled
+        {
+            installation_store
+                .set_activation_state(
+                    installation.installation_id(),
+                    ExtensionActivationState::Disabled,
+                )
+                .await
+                .map_err(map_extension_installation_error)?;
+            ExtensionActivationState::Disabled
+        } else {
+            installation.activation_state()
+        };
         // Owner-registered manifests already live at their owner-scoped path;
         // materializing them under `/system/extensions/<id>/` would let the
         // next boot's catalog scan re-adopt them as first-party (see
@@ -212,7 +260,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
                 .install(available.package.clone())
                 .await
                 .map_err(map_extension_error)?;
-            match installation.activation_state() {
+            match restored_activation_state {
                 ExtensionActivationState::Enabled => {
                     lifecycle
                         .enable(&available.package.id)
@@ -227,7 +275,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
                 }
             }
         }
-        if installation.activation_state() == ExtensionActivationState::Enabled {
+        if restored_activation_state == ExtensionActivationState::Enabled {
             active_extensions.publish(&available.package)?;
         }
     }
@@ -262,12 +310,36 @@ async fn remove_retired_internal_installation(
 }
 
 impl RebornLocalExtensionManagementPort {
+    #[cfg(test)]
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
         catalog: AvailableExtensionCatalog,
         installation_store: Arc<dyn ExtensionInstallationStore>,
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
         active_extensions: ActiveExtensionPublisher,
+        capability_authority_cleanup: ExtensionCapabilityAuthorityCleanup,
+        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+    ) -> Self {
+        Self::new_with_metadata_safety(
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            capability_authority_cleanup,
+            Arc::new(ironclaw_safety::Sanitizer::new()),
+            credential_cleanup,
+        )
+    }
+
+    pub(crate) fn new_with_metadata_safety(
+        filesystem: Arc<dyn RootFilesystem>,
+        catalog: AvailableExtensionCatalog,
+        installation_store: Arc<dyn ExtensionInstallationStore>,
+        lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
+        active_extensions: ActiveExtensionPublisher,
+        capability_authority_cleanup: ExtensionCapabilityAuthorityCleanup,
+        metadata_safety: Arc<dyn InjectionScanner>,
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
     ) -> Self {
         Self {
@@ -276,6 +348,8 @@ impl RebornLocalExtensionManagementPort {
             installation_store,
             lifecycle_service,
             active_extensions,
+            capability_authority_cleanup,
+            metadata_safety,
             operation_lock: Arc::new(Mutex::new(())),
             credential_cleanup,
         }
@@ -363,8 +437,9 @@ impl RebornLocalExtensionManagementPort {
 
     pub(crate) async fn list_installed(
         &self,
+        owner: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let summaries = self.installed_summaries().await?;
+        let summaries = self.installed_summaries(owner).await?;
         let count = summaries.len();
         Ok(response_with_payload(
             None,
@@ -380,6 +455,22 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.project_for_caller(package_ref, None).await
+    }
+
+    pub(crate) async fn project_for_owner(
+        &self,
+        package_ref: LifecyclePackageRef,
+        owner: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.project_for_caller(package_ref, Some(owner)).await
+    }
+
+    async fn project_for_caller(
+        &self,
+        package_ref: LifecyclePackageRef,
+        caller: Option<&UserId>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let phase = self
             .installation_store
@@ -388,7 +479,14 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)?
             .map(|installation| phase_for_activation_state(installation.activation_state()))
             .unwrap_or(LifecyclePhase::Discovered);
-        let summary = self.catalog.resolve(&package_ref)?.summary();
+        let available = resolve_with_owner_overlay(
+            &self.catalog,
+            self.filesystem.as_ref(),
+            caller,
+            &package_ref,
+        )
+        .await?;
+        let summary = available.summary();
         Ok(response_with_payload(
             Some(package_ref),
             phase,
@@ -425,25 +523,45 @@ impl RebornLocalExtensionManagementPort {
                     .unwrap_or(CapabilityVisibility::Model)
                     == CapabilityVisibility::Model
             })
-            .map(ActiveExtensionCapability::from_descriptor)
+            .map(|descriptor| {
+                let network_policy = registry
+                    .get_extension(&descriptor.provider)
+                    .and_then(crate::extension_host::mcp::hosted_http_mcp_endpoint)
+                    .map(|endpoint| {
+                        crate::extension_host::mcp::hosted_mcp_network_policy(&endpoint)
+                    });
+                ActiveExtensionCapability::from_descriptor(descriptor, network_policy)
+            })
             .collect())
     }
 
-    pub(crate) async fn activation_credential_requirements(
+    pub(crate) async fn activation_credential_requirements_for_owner(
         &self,
         package_ref: &LifecyclePackageRef,
+        owner: &UserId,
+    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
+        self.activation_credential_requirements_for_caller(package_ref, Some(owner))
+            .await
+    }
+
+    async fn activation_credential_requirements_for_caller(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        caller: Option<&UserId>,
     ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
         self.load_installation(&extension_id, &installation_id)
             .await?;
         let package = self.lifecycle_package(&extension_id).await?;
+        ensure_package_visible_to_caller(&package, caller)?;
         let requirements = package_runtime_credential_auth_requirements(&package);
         Ok(requirements)
     }
 
     async fn installed_summaries(
         &self,
+        owner: &UserId,
     ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductWorkflowError> {
         let installations = self
             .installation_store
@@ -461,8 +579,32 @@ impl RebornLocalExtensionManagementPort {
             if is_internal_extension_package_ref(&package_ref) {
                 continue;
             }
-            let Ok(available) = self.catalog.resolve(&package_ref) else {
-                continue;
+            let available = match self.catalog.resolve(&package_ref) {
+                Ok(available) => available.clone(),
+                Err(_) => {
+                    let manifest = self
+                        .installation_store
+                        .get_manifest(installation.extension_id())
+                        .await
+                        .map_err(map_extension_installation_error)?;
+                    if manifest.is_none_or(|record| {
+                        !manifest_visible_to_caller(&record.manifest().source, Some(owner))
+                    }) {
+                        continue;
+                    }
+                    match resolve_with_owner_overlay(
+                        &self.catalog,
+                        self.filesystem.as_ref(),
+                        Some(owner),
+                        &package_ref,
+                    )
+                    .await
+                    {
+                        Ok(available) => available,
+                        Err(ProductWorkflowError::InvalidBindingRequest { .. }) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
             };
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
@@ -710,13 +852,25 @@ impl RebornLocalExtensionManagementPort {
         Ok(())
     }
 
+    #[cfg_attr(not(any(test, feature = "slack-v2-host-beta")), allow(dead_code))]
     pub(crate) async fn activate(
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate)
+        self.activate_inner(package_ref, mode, None, &credential_gate)
+            .await
+    }
+
+    pub(crate) async fn activate_for_owner(
+        &self,
+        package_ref: LifecyclePackageRef,
+        mode: ExtensionActivationMode,
+        owner: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let credential_gate = UnavailableExtensionActivationCredentialGate;
+        self.activate_inner(package_ref, mode, Some(owner), &credential_gate)
             .await
     }
 
@@ -726,7 +880,18 @@ impl RebornLocalExtensionManagementPort {
         mode: ExtensionActivationMode,
         credential_gate: impl ExtensionActivationCredentialGate,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.activate_inner(package_ref, mode, &credential_gate)
+        self.activate_inner(package_ref, mode, None, &credential_gate)
+            .await
+    }
+
+    pub(crate) async fn activate_with_credential_gate_for_owner(
+        &self,
+        package_ref: LifecyclePackageRef,
+        mode: ExtensionActivationMode,
+        owner: &UserId,
+        credential_gate: impl ExtensionActivationCredentialGate,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.activate_inner(package_ref, mode, Some(owner), &credential_gate)
             .await
     }
 
@@ -738,7 +903,13 @@ impl RebornLocalExtensionManagementPort {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate =
             crate::extension_host::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate)
+        let owner = match &mode {
+            ExtensionActivationMode::HostedMcpDiscovery { scope, .. } => {
+                Some(scope.user_id.clone())
+            }
+            ExtensionActivationMode::Static => None,
+        };
+        self.activate_inner(package_ref, mode, owner.as_ref(), &credential_gate)
             .await
     }
 
@@ -746,6 +917,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
+        caller: Option<&UserId>,
         credential_gate: &dyn ExtensionActivationCredentialGate,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
@@ -756,15 +928,18 @@ impl RebornLocalExtensionManagementPort {
                 .load_installation(&extension_id, &installation_id)
                 .await?;
             let package = self.lifecycle_package(&extension_id).await?;
+            ensure_package_visible_to_caller(&package, caller)?;
             credential_gate.ensure_credentials(&package).await?;
             match mode {
                 ExtensionActivationMode::HostedMcpDiscovery {
                     scope,
                     runtime_http_egress,
+                    network_policy_authority,
                 } if is_hosted_http_mcp_package(&package) => HostedMcpDiscoveryRequest {
                     base_package: package,
                     scope,
                     runtime_http_egress,
+                    network_policy_authority,
                 },
                 _ => {
                     return self
@@ -782,13 +957,20 @@ impl RebornLocalExtensionManagementPort {
 
         let active_package = match discover_hosted_mcp_package(
             &discovery.base_package,
-            discovery.scope,
-            discovery.runtime_http_egress,
+            discovery.scope.clone(),
+            Arc::clone(&discovery.runtime_http_egress),
+            discovery.network_policy_authority.clone(),
+            self.metadata_safety.as_ref(),
         )
         .await
         {
             Ok(active_package) => active_package,
             Err(HostedMcpDiscoveryError::Transient(reason)) => {
+                if is_owner_registered(&discovery.base_package.manifest.source) {
+                    return Err(hosted_mcp_discovery_error(
+                        HostedMcpDiscoveryError::Transient(reason),
+                    ));
+                }
                 tracing::debug!(
                     extension_id = %extension_id.as_str(),
                     reason,
@@ -813,15 +995,106 @@ impl RebornLocalExtensionManagementPort {
         if current_package != discovery.base_package {
             return Err(hosted_mcp_changed_during_discovery_error());
         };
+        ensure_package_visible_to_caller(&current_package, caller)?;
         credential_gate.ensure_credentials(&active_package).await?;
-        self.commit_activation(
-            package_ref,
+        let ManifestSource::UserRegistered { owner } = &current_package.manifest.source else {
+            return self
+                .commit_activation(
+                    package_ref,
+                    &extension_id,
+                    &installation_id,
+                    installation.activation_state(),
+                    active_package,
+                )
+                .await;
+        };
+        let prior_capability_ids = RegisteredExtensionStore::load_discovered_capability_ids(
+            self.filesystem.as_ref(),
+            owner,
             &extension_id,
-            &installation_id,
-            installation.activation_state(),
-            active_package,
+        )
+        .await?;
+        let current_capability_ids = active_package
+            .capabilities
+            .iter()
+            .map(|descriptor| descriptor.id.clone())
+            .collect::<Vec<_>>();
+        let current_set = current_capability_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let removed_capability_ids = prior_capability_ids
+            .iter()
+            .filter(|capability_id| !current_set.contains(*capability_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.cleanup_registered_capability_authority(
+            &discovery.scope,
+            &extension_id,
+            &removed_capability_ids,
+        )
+        .await?;
+        RegisteredExtensionStore::replace_discovered_capability_ids(
+            self.filesystem.as_ref(),
+            owner,
+            &extension_id,
+            &current_capability_ids,
+        )
+        .await?;
+
+        match self
+            .commit_activation(
+                package_ref,
+                &extension_id,
+                &installation_id,
+                installation.activation_state(),
+                active_package,
+            )
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                if let Err(rollback_error) =
+                    RegisteredExtensionStore::replace_discovered_capability_ids(
+                        self.filesystem.as_ref(),
+                        owner,
+                        &extension_id,
+                        &prior_capability_ids,
+                    )
+                    .await
+                {
+                    return Err(compensation_failure(
+                        "registered MCP activation failed and capability inventory restore failed",
+                        error,
+                        rollback_error,
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn cleanup_registered_capability_authority(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        capability_ids: &[CapabilityId],
+    ) -> Result<(), ProductWorkflowError> {
+        cleanup_capability_authority(
+            self.capability_authority_cleanup
+                .persistent_approval_policies
+                .as_ref(),
+            self.capability_authority_cleanup
+                .tool_permission_overrides
+                .as_ref(),
+            scope,
+            &Principal::Extension(extension_id.clone()),
+            capability_ids,
         )
         .await
+        .map_err(|error| ProductWorkflowError::Transient {
+            reason: format!("registered MCP capability authority cleanup failed: {error}"),
+        })
     }
 
     async fn commit_activation(
@@ -887,13 +1160,24 @@ impl RebornLocalExtensionManagementPort {
         Ok(response)
     }
 
-    pub(crate) async fn package_requires_hosted_mcp_discovery(
+    pub(crate) async fn package_requires_hosted_mcp_discovery_for_owner(
         &self,
         package_ref: &LifecyclePackageRef,
+        owner: &UserId,
+    ) -> Result<bool, ProductWorkflowError> {
+        self.package_requires_hosted_mcp_discovery_for_caller(package_ref, Some(owner))
+            .await
+    }
+
+    async fn package_requires_hosted_mcp_discovery_for_caller(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        caller: Option<&UserId>,
     ) -> Result<bool, ProductWorkflowError> {
         let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
         let package = self.lifecycle_package(&extension_id).await?;
+        ensure_package_visible_to_caller(&package, caller)?;
         Ok(is_hosted_http_mcp_package(&package))
     }
 
@@ -915,10 +1199,12 @@ impl RebornLocalExtensionManagementPort {
         // taking the operation lock: `activation_credential_requirements` takes
         // the same lock, and the manifest is gone once removal succeeds.
         let removed_extension_id = package_ref.id.as_str().to_string();
-        let removed_providers = self.removed_extension_providers(&package_ref).await;
+        let removed_providers = self
+            .removed_extension_providers(&package_ref, &scope.user_id)
+            .await;
         let response = {
             let _operation_guard = self.operation_lock.lock().await;
-            self.remove_locked(package_ref).await
+            self.remove_locked(package_ref, Some(&scope.user_id)).await
         };
         if response.is_ok() {
             self.revoke_exclusive_credentials(scope, &removed_extension_id, &removed_providers)
@@ -944,6 +1230,24 @@ impl RebornLocalExtensionManagementPort {
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        let mut cleanup_capability_ids = RegisteredExtensionStore::load_discovered_capability_ids(
+            self.filesystem.as_ref(),
+            owner,
+            &extension_id,
+        )
+        .await?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let active_snapshot = self.active_extensions.snapshot();
+        if let Some(active_package) = active_snapshot.get_extension(&extension_id) {
+            cleanup_capability_ids.extend(
+                active_package
+                    .capabilities
+                    .iter()
+                    .map(|descriptor| descriptor.id.clone()),
+            );
+        }
+        let cleanup_capability_ids = cleanup_capability_ids.into_iter().collect::<Vec<_>>();
         let available = match resolve_with_owner_overlay(
             &self.catalog,
             self.filesystem.as_ref(),
@@ -967,12 +1271,20 @@ impl RebornLocalExtensionManagementPort {
                         .map_err(map_extension_installation_error)?
                         .is_none()
                 {
+                    self.cleanup_registered_capability_authority(
+                        scope,
+                        &extension_id,
+                        &cleanup_capability_ids,
+                    )
+                    .await?;
                     RegisteredExtensionStore::delete_descriptor(
                         self.filesystem.as_ref(),
                         owner,
                         &extension_id,
                     )
                     .await?;
+                    self.delete_registered_cleanup_intent_after_commit(owner, &extension_id)
+                        .await;
                     return Ok(registered_remove_response(package_ref));
                 }
                 return Err(error);
@@ -986,6 +1298,8 @@ impl RebornLocalExtensionManagementPort {
                 ),
             });
         }
+        self.cleanup_registered_capability_authority(scope, &extension_id, &cleanup_capability_ids)
+            .await?;
         if self
             .installation_store
             .get_installation(&installation_id)
@@ -1000,7 +1314,7 @@ impl RebornLocalExtensionManagementPort {
                 &extension_id,
             )
             .await?;
-            let response = match self.remove_locked(package_ref).await {
+            let response = match self.remove_locked(package_ref, Some(owner)).await {
                 Ok(response) => response,
                 Err(error) => {
                     if let Err(rollback_error) =
@@ -1022,11 +1336,43 @@ impl RebornLocalExtensionManagementPort {
             };
             self.revoke_exclusive_credentials(scope, extension_id.as_str(), &[])
                 .await;
+            self.delete_registered_cleanup_intent_after_commit(owner, &extension_id)
+                .await;
             return Ok(response);
         }
         RegisteredExtensionStore::delete_descriptor(self.filesystem.as_ref(), owner, &extension_id)
             .await?;
+        self.delete_registered_cleanup_intent_after_commit(owner, &extension_id)
+            .await;
         Ok(registered_remove_response(package_ref))
+    }
+
+    /// Cleanup intent is the final unregister step, after capability authority,
+    /// descriptor, lifecycle state, installation records, and publication have
+    /// already reached their committed removed state. A storage failure here
+    /// must not report the removal as uncommitted: same-name replacement would
+    /// otherwise compensate by deleting the newly installed replacement even
+    /// though the prior registration can no longer be restored. Retaining the
+    /// bounded ID-only record is safe and lets a later idempotent unregister or
+    /// same-id activation retry its deletion/replacement.
+    async fn delete_registered_cleanup_intent_after_commit(
+        &self,
+        owner: &UserId,
+        extension_id: &ExtensionId,
+    ) {
+        if let Err(error) = RegisteredExtensionStore::delete_discovered_capability_ids(
+            self.filesystem.as_ref(),
+            owner,
+            extension_id,
+        )
+        .await
+        {
+            tracing::warn!(
+                %error,
+                extension_id = extension_id.as_str(),
+                "registered MCP removal committed but cleanup inventory deletion failed; retaining stale cleanup intent"
+            );
+        }
     }
 
     /// Credential providers the extension declares, captured before removal (its
@@ -1035,8 +1381,12 @@ impl RebornLocalExtensionManagementPort {
     async fn removed_extension_providers(
         &self,
         package_ref: &LifecyclePackageRef,
+        owner: &UserId,
     ) -> Vec<AuthProviderId> {
-        match self.activation_credential_requirements(package_ref).await {
+        match self
+            .activation_credential_requirements_for_owner(package_ref, owner)
+            .await
+        {
             Ok(requirements) => {
                 let mut providers: Vec<AuthProviderId> = Vec::new();
                 for requirement in requirements {
@@ -1085,7 +1435,7 @@ impl RebornLocalExtensionManagementPort {
         if removed_providers.is_empty() {
             return;
         }
-        let Some(providers_still_in_use) = self.providers_still_in_use().await else {
+        let Some(providers_still_in_use) = self.providers_still_in_use(&scope.user_id).await else {
             return;
         };
         let extension_id = match ExtensionId::new(removed_extension_id) {
@@ -1120,8 +1470,8 @@ impl RebornLocalExtensionManagementPort {
     /// removal. Returns `None` when the set cannot be resolved so the caller
     /// fails safe and skips revocation rather than risk deleting a shared
     /// credential.
-    async fn providers_still_in_use(&self) -> Option<BTreeSet<AuthProviderId>> {
-        let response = match self.list_installed().await {
+    async fn providers_still_in_use(&self, owner: &UserId) -> Option<BTreeSet<AuthProviderId>> {
+        let response = match self.list_installed(owner).await {
             Ok(response) => response,
             Err(error) => {
                 tracing::debug!(
@@ -1138,7 +1488,7 @@ impl RebornLocalExtensionManagementPort {
         let mut providers = BTreeSet::new();
         for installed in extensions {
             match self
-                .activation_credential_requirements(&installed.summary.package_ref)
+                .activation_credential_requirements_for_owner(&installed.summary.package_ref, owner)
                 .await
             {
                 Ok(requirements) => {
@@ -1172,6 +1522,7 @@ impl RebornLocalExtensionManagementPort {
     async fn remove_locked(
         &self,
         package_ref: LifecyclePackageRef,
+        caller: Option<&UserId>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
@@ -1190,6 +1541,15 @@ impl RebornLocalExtensionManagementPort {
             })?;
         let previous_state = installation.activation_state();
         let lifecycle_package = self.lifecycle_package(&extension_id).await?;
+        ensure_package_visible_to_caller(&lifecycle_package, caller)?;
+        let active_package_before_remove = self
+            .active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .cloned();
+        let publication_package = active_package_before_remove
+            .as_ref()
+            .unwrap_or(&lifecycle_package);
         if let Err(error) = self
             .installation_store
             .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
@@ -1211,7 +1571,7 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
-        if let Err(error) = self.active_extensions.unpublish(&lifecycle_package) {
+        if let Err(error) = self.active_extensions.unpublish(publication_package) {
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
                 .await
@@ -1253,7 +1613,7 @@ impl RebornLocalExtensionManagementPort {
                 ));
             }
             if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
+                self.restore_active_publication(publication_package, previous_state)
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete installation and active publication restore failed",
@@ -1288,7 +1648,7 @@ impl RebornLocalExtensionManagementPort {
                 ));
             }
             if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
+                self.restore_active_publication(publication_package, previous_state)
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete manifest and active publication restore failed",
@@ -1323,7 +1683,7 @@ impl RebornLocalExtensionManagementPort {
                 ));
             }
             if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
+                self.restore_active_publication(publication_package, previous_state)
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete files and active publication restore failed",
@@ -1589,6 +1949,7 @@ struct HostedMcpDiscoveryRequest {
     base_package: ExtensionPackage,
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    network_policy_authority: CapabilityId,
 }
 
 struct ExtensionInstallPlan {
@@ -1930,6 +2291,18 @@ fn extension_ids_from_package_ref(
     Ok((extension_id, installation_id))
 }
 
+fn ensure_package_visible_to_caller(
+    package: &ExtensionPackage,
+    caller: Option<&UserId>,
+) -> Result<(), ProductWorkflowError> {
+    if manifest_visible_to_caller(&package.manifest.source, caller) {
+        return Ok(());
+    }
+    Err(ProductWorkflowError::InvalidBindingRequest {
+        reason: "available extension was not found".to_string(),
+    })
+}
+
 fn phase_for_activation_state(state: ExtensionActivationState) -> LifecyclePhase {
     match state {
         ExtensionActivationState::Enabled => LifecyclePhase::Active,
@@ -2093,6 +2466,9 @@ mod tests {
         AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
     };
     use async_trait::async_trait;
+    use ironclaw_approvals::{
+        InMemoryCapabilityPermissionOverrideStore, InMemoryPersistentApprovalPolicyStore,
+    };
     use ironclaw_extensions::{
         ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
         ExtensionManifest, ExtensionRegistry, InMemoryExtensionInstallationStore,
@@ -2539,7 +2915,10 @@ mod tests {
             "installing the Slack tools extension installs only itself, with no hidden companion"
         );
 
-        let list = port.list_installed().await.expect("list installed");
+        let list = port
+            .list_installed(&UserId::new("lifecycle-owner").expect("valid owner"))
+            .await
+            .expect("list installed");
         let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = list.payload
         else {
             panic!("expected extension list payload");
@@ -2606,7 +2985,10 @@ mod tests {
             .expect("install public Slack extension");
 
         let requirements = port
-            .activation_credential_requirements(&slack_ref)
+            .activation_credential_requirements_for_owner(
+                &slack_ref,
+                &UserId::new("slack-requirements-owner").expect("valid owner"),
+            )
             .await
             .expect("Slack activation requirements");
         assert_eq!(requirements.len(), 1);
@@ -2947,6 +3329,7 @@ output_schema_ref = "schemas/search.output.json"
                 )
                 .unwrap(),
                 runtime_http_egress: egress.clone(),
+                network_policy_authority: hosted_mcp_policy_authority(),
             },
         )
         .await
@@ -3002,6 +3385,7 @@ output_schema_ref = "schemas/search.output.json"
                 ExtensionActivationMode::HostedMcpDiscovery {
                     scope: hosted_mcp_scope("hosted-mcp-empty-tools"),
                     runtime_http_egress: Arc::new(EmptyToolsHostedMcpEgress),
+                    network_policy_authority: hosted_mcp_policy_authority(),
                 },
             )
             .await
@@ -3042,6 +3426,7 @@ output_schema_ref = "schemas/search.output.json"
                 ExtensionActivationMode::HostedMcpDiscovery {
                     scope: hosted_mcp_scope("hosted-mcp-credential-recheck"),
                     runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+                    network_policy_authority: hosted_mcp_policy_authority(),
                 },
                 credential_gate,
             )
@@ -3092,6 +3477,7 @@ output_schema_ref = "schemas/search.output.json"
                     ExtensionActivationMode::HostedMcpDiscovery {
                         scope: hosted_mcp_scope("hosted-mcp-remove-race"),
                         runtime_http_egress: egress,
+                        network_policy_authority: hosted_mcp_policy_authority(),
                     },
                 )
                 .await
@@ -4019,7 +4405,7 @@ output_schema_ref = "schemas/search.output.json"
             );
         let facade = facade
             .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts))
-            .with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
+            .with_runtime_http_egress_for_test(Arc::new(HostedMcpDiscoveryEgress::default()));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
@@ -4926,6 +5312,10 @@ output_schema_ref = "schemas/search.output.json"
                 Arc::clone(&active_registry),
                 test_extension_trust_policy(),
             ),
+            ExtensionCapabilityAuthorityCleanup::new(
+                Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+                Arc::new(InMemoryCapabilityPermissionOverrideStore::new()),
+            ),
             None,
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
@@ -5487,6 +5877,10 @@ output_schema_ref = "schemas/search.output.json"
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            ExtensionCapabilityAuthorityCleanup::new(
+                Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+                Arc::new(InMemoryCapabilityPermissionOverrideStore::new()),
+            ),
             None,
         ));
         (
@@ -5567,6 +5961,10 @@ output_schema_ref = "schemas/search.output.json"
             test_active_extension_publisher(
                 Arc::clone(&active_registry),
                 test_extension_trust_policy(),
+            ),
+            ExtensionCapabilityAuthorityCleanup::new(
+                Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+                Arc::new(InMemoryCapabilityPermissionOverrideStore::new()),
             ),
             credential_cleanup,
         ));
@@ -5685,6 +6083,10 @@ output_schema_ref = "schemas/search.output.json"
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            ExtensionCapabilityAuthorityCleanup::new(
+                Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+                Arc::new(InMemoryCapabilityPermissionOverrideStore::new()),
+            ),
             None,
         );
         (dir, port, active_registry, failing_store, trust_policy)
@@ -5731,6 +6133,10 @@ output_schema_ref = "schemas/search.output.json"
             test_active_extension_publisher(
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
+            ),
+            ExtensionCapabilityAuthorityCleanup::new(
+                Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+                Arc::new(InMemoryCapabilityPermissionOverrideStore::new()),
             ),
             None,
         );
@@ -6052,6 +6458,13 @@ output_schema_ref = "schemas/search.output.json"
             self.inner.capabilities()
         }
 
+        async fn get(
+            &self,
+            path: &VirtualPath,
+        ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
         async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
             self.inner.list_dir(path).await
         }
@@ -6136,6 +6549,13 @@ output_schema_ref = "schemas/search.output.json"
             InvocationId::new(),
         )
         .expect("valid local scope")
+    }
+
+    fn hosted_mcp_policy_authority() -> CapabilityId {
+        CapabilityId::new(
+            crate::extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID,
+        )
+        .expect("valid extension activation capability id")
     }
 
     struct StaticTestNetworkResolver {

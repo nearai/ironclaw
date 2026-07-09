@@ -160,14 +160,12 @@ pub(super) fn mock_mcp_extension_package(
         resource_profile: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
-    Ok(
-        ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
-            manifest,
-            root,
-            None,
-            capabilities,
-        )?,
-    )
+    Ok(ExtensionPackage::from_manifest_with_inline_dynamic_schemas(
+        manifest,
+        root,
+        None,
+        capabilities,
+    )?)
 }
 
 /// Trust policy for MCP integration tests: first-party builtins + user-trusted

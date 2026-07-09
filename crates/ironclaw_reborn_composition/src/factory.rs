@@ -167,8 +167,8 @@ use crate::extension_host::{
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
-        ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
-        restore_extension_lifecycle_state,
+        ActiveExtensionPublisher, ExtensionCapabilityAuthorityCleanup, ExtensionCredentialCleanup,
+        RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
     },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
@@ -1850,14 +1850,30 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
-    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        extension_filesystem,
-        available_extensions,
-        extension_installation_store,
-        extension_lifecycle_service,
-        active_extensions,
-        Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
-    ));
+    let extension_persistent_approval_policies: Arc<
+        dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+    > = store_graph
+        .local_runtime
+        .persistent_approval_policies
+        .clone();
+    let extension_tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::CapabilityPermissionOverrideStore,
+    > = store_graph.local_runtime.tool_permission_overrides.clone();
+    let extension_management = Arc::new(
+        RebornLocalExtensionManagementPort::new_with_metadata_safety(
+            extension_filesystem,
+            available_extensions,
+            extension_installation_store,
+            extension_lifecycle_service,
+            active_extensions,
+            ExtensionCapabilityAuthorityCleanup::new(
+                extension_persistent_approval_policies,
+                extension_tool_permission_overrides,
+            ),
+            Arc::new(ironclaw_safety::Sanitizer::new()),
+            Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
+        ),
+    );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,

@@ -288,9 +288,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
         }
-        if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
+        if let Some(host_runtime_http_egress) = &local_runtime.host_runtime_http_egress {
             lifecycle_facade =
-                lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
+                lifecycle_facade.with_host_runtime_http_egress(host_runtime_http_egress.clone());
         }
         if let Some(product_auth) = &services.product_auth {
             lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(

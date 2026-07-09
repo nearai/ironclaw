@@ -289,16 +289,16 @@ impl ExtensionPackage {
         })
     }
 
-    pub fn from_host_bundled_manifest_with_inline_dynamic_schemas(
+    pub fn from_manifest_with_inline_dynamic_schemas(
         manifest: ExtensionManifest,
         root: VirtualPath,
         manifest_digest: Option<String>,
         capabilities: Vec<CapabilityDescriptor>,
     ) -> Result<Self, ExtensionError> {
-        if manifest.source != ManifestSource::HostBundled {
+        if !manifest.source.allows_inline_dynamic_schemas() {
             return Err(ExtensionError::InvalidManifest {
                 reason:
-                    "inline dynamic descriptor schemas are only supported for host-bundled packages"
+                    "inline dynamic descriptor schemas are unsupported for this manifest source"
                         .to_string(),
             });
         }
@@ -338,7 +338,7 @@ impl ExtensionPackage {
         let consistent = match self.descriptor_schema_mode {
             CapabilityDescriptorSchemaMode::ManifestRefs => self.capabilities == expected,
             CapabilityDescriptorSchemaMode::InlineDynamic => {
-                self.manifest.source == ManifestSource::HostBundled
+                self.manifest.source.allows_inline_dynamic_schemas()
                     && descriptors_match_except_schema(&self.capabilities, &expected)
             }
         };
@@ -418,7 +418,9 @@ pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
 };
 pub use hosted_mcp_discovery::{
-    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, HostedMcpPackageBuild,
+    HostedMcpToolCandidate, HostedMcpToolPublicationDisposition, HostedMcpToolQuarantineReason,
+    HostedMcpToolRejection, HostedMcpToolRejectionReason, is_hosted_http_mcp_package,
     package_with_discovered_hosted_mcp_tools,
 };
 pub use v2::{

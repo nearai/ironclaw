@@ -1,16 +1,12 @@
-//! MCP-registration spec test #6 (boot-order restore), RED for T1
-//! (docs/plans/2026-07-08-mcp-reg-t1-plan.md). Sibling test file (module-split
+//! MCP-registration boot-order restore regression tests. Sibling test file (module-split
 //! mandate: overlay/composition logic — and its tests — may not land in the
 //! 5505-line `extension_lifecycle.rs`), wired the same way
 //! `extension_lifecycle_capabilities_auth_tests.rs` is
 //! (`extension_host/mod.rs`'s `#[cfg(test)] pub(crate) mod ...;`).
 //!
-//! SCOPE LIMIT (plan risk 4): capability publication is tenant-global today
-//! (`active_model_visible_capabilities` filters by the global installation
-//! store, not by owner), pre-existing and out of scope for T1. This file
-//! asserts only that restore publishes the owner's registered extension after
-//! a reboot-like rebuild — it does NOT assert cross-actor publication
-//! isolation, which T1 does not provide.
+//! Registered capabilities are discovered from the remote server at activation
+//! time. Restore therefore keeps a durable owner registration but disables it
+//! until an explicit activation performs fresh discovery.
 
 use std::sync::Arc;
 
@@ -20,8 +16,10 @@ use ironclaw_extensions::{
     ExtensionManifestRef, ExtensionRegistry, ExtensionRuntimeV2,
     InMemoryExtensionInstallationStore, ManifestHash, ManifestSource, SharedExtensionRegistry,
 };
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, HostPath, UserId, VirtualPath, sha256_digest_token};
+use ironclaw_filesystem::{CasExpectation, Entry, LocalFilesystem, RootFilesystem};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, HostPath, UserId, VirtualPath, sha256_digest_token,
+};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 use tokio::sync::Mutex;
@@ -54,15 +52,11 @@ transport = "http"
 url = "http://127.0.0.1:9/mcp"
 "#;
 
-/// Boot-order restore: an owner-registered extension's installation must
-/// survive a reboot (fresh in-memory `ExtensionLifecycleService` +
-/// `ActiveExtensionPublisher` over the SAME durable filesystem +
-/// installation store) even though the static `AvailableExtensionCatalog`
-/// never contains `UserRegistered` packages (T1's fix for the boot-leak
-/// blocker in the plan). Today `restore_extension_lifecycle_state` has no
-/// registered-store fallback on `catalog.resolve()` miss, so this fails.
+/// Boot-order restore keeps an owner-registered extension installed, but does
+/// not publish its persisted zero-capability descriptor. An explicit activation
+/// must rediscover the remote server's current tools first.
 #[tokio::test]
-async fn restore_publishes_owner_registered_extension_without_static_catalog_entry() {
+async fn restore_disables_owner_registered_extension_until_explicit_rediscovery() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
     std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
@@ -98,7 +92,7 @@ async fn restore_publishes_owner_registered_extension_without_static_catalog_ent
     // the clean path. Seeding `None` would instead force restore through
     // `migrate_host_bundled_manifest_hash`, which is HostBundled-only and
     // aborts for a `UserRegistered` source — unrelated to what this test pins
-    // (registered-store fallback + publish).
+    // (registered-store fallback + safe disabled restore).
     let manifest_hash = ManifestHash::new(sha256_digest_token(REGISTERED_MANIFEST_TOML.as_bytes()))
         .expect("valid manifest hash");
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
@@ -165,12 +159,28 @@ async fn restore_publishes_owner_registered_extension_without_static_catalog_ent
          entry for an owner-registered extension (RED until RegisteredExtensionStore lands)",
     );
 
+    let restored_installation = installation_store
+        .get_installation(
+            &ExtensionInstallationId::new(REGISTERED_EXTENSION_ID).expect("valid installation id"),
+        )
+        .await
+        .expect("read restored installation")
+        .expect("restored installation remains");
+    assert_eq!(
+        restored_installation.activation_state(),
+        ExtensionActivationState::Disabled,
+        "registered tools are runtime-discovered, so restart must require explicit rediscovery"
+    );
+    assert!(
+        !lifecycle_service.lock().await.is_enabled(&extension_id),
+        "restored registered lifecycle package must be disabled"
+    );
     assert!(
         active_registry
             .snapshot()
             .get_extension(&extension_id)
-            .is_some(),
-        "owner-registered extension's capability must be published after restore"
+            .is_none(),
+        "persisted zero-capability registered descriptor must not publish on restore"
     );
 }
 
@@ -772,11 +782,252 @@ async fn registered_hosted_mcp_delete_descriptor_is_idempotent() {
     assert!(packages.is_empty());
 }
 
+#[tokio::test]
+async fn discovered_capability_inventory_survives_descriptor_delete_and_filesystem_reopen() {
+    let (filesystem, storage_root) = mounted_registered_store_filesystem();
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+    let other_owner = UserId::new(OTHER_OWNER_USER_ID).expect("valid other owner");
+    let put = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        RegisterHostedMcpDescriptorInput {
+            name: "Inventory MCP".to_string(),
+            url: "https://inventory.example.com/mcp".to_string(),
+        },
+    )
+    .await
+    .expect("put descriptor");
+    let extension_id = put.descriptor.extension_id;
+    let capability_a =
+        CapabilityId::new(format!("{}.alpha", extension_id.as_str())).expect("valid capability");
+    let capability_z =
+        CapabilityId::new(format!("{}.zeta", extension_id.as_str())).expect("valid capability");
+    let other_capability =
+        CapabilityId::new(format!("{}.other", extension_id.as_str())).expect("valid capability");
+
+    RegisteredExtensionStore::replace_discovered_capability_ids(
+        filesystem.as_ref(),
+        &owner,
+        &extension_id,
+        &[
+            capability_z.clone(),
+            capability_a.clone(),
+            capability_a.clone(),
+        ],
+    )
+    .await
+    .expect("replace owner inventory");
+    RegisteredExtensionStore::replace_discovered_capability_ids(
+        filesystem.as_ref(),
+        &other_owner,
+        &extension_id,
+        std::slice::from_ref(&other_capability),
+    )
+    .await
+    .expect("replace other owner inventory");
+
+    RegisteredExtensionStore::delete_descriptor(filesystem.as_ref(), &owner, &extension_id)
+        .await
+        .expect("delete descriptor before authority cleanup");
+    drop(filesystem);
+
+    let reopened = mount_registered_store_filesystem_at(&storage_root);
+    assert_eq!(
+        RegisteredExtensionStore::load_discovered_capability_ids(
+            reopened.as_ref(),
+            &owner,
+            &extension_id,
+        )
+        .await
+        .expect("reopen owner inventory"),
+        vec![capability_a, capability_z],
+        "replacement must persist a sorted, duplicate-free current set"
+    );
+    assert_eq!(
+        RegisteredExtensionStore::load_discovered_capability_ids(
+            reopened.as_ref(),
+            &other_owner,
+            &extension_id,
+        )
+        .await
+        .expect("reopen other owner inventory"),
+        vec![other_capability.clone()],
+        "same extension id inventories remain owner isolated"
+    );
+
+    RegisteredExtensionStore::delete_discovered_capability_ids(
+        reopened.as_ref(),
+        &owner,
+        &extension_id,
+    )
+    .await
+    .expect("delete cleanup intent last");
+    assert!(
+        RegisteredExtensionStore::load_discovered_capability_ids(
+            reopened.as_ref(),
+            &owner,
+            &extension_id,
+        )
+        .await
+        .expect("load deleted inventory")
+        .is_empty(),
+        "inventory delete is idempotent and maps absence to an empty current set"
+    );
+    RegisteredExtensionStore::delete_discovered_capability_ids(
+        reopened.as_ref(),
+        &owner,
+        &extension_id,
+    )
+    .await
+    .expect("delete absent cleanup intent");
+    assert_eq!(
+        RegisteredExtensionStore::load_discovered_capability_ids(
+            reopened.as_ref(),
+            &other_owner,
+            &extension_id,
+        )
+        .await
+        .expect("other owner inventory after owner delete"),
+        vec![other_capability],
+        "deleting one owner's cleanup intent must preserve another owner's"
+    );
+}
+
+#[tokio::test]
+async fn discovered_capability_inventory_rejects_corruption_foreign_ids_and_bounds() {
+    let (filesystem, _storage_root) = mounted_registered_store_filesystem();
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+    let extension_id = ExtensionId::new("mcp-inventory").expect("valid extension id");
+    let inventory_path = VirtualPath::new(format!(
+        "/system/extensions/registered-cleanup/{}/{}/discovered-capability-ids.json",
+        owner.as_str(),
+        extension_id.as_str()
+    ))
+    .expect("valid inventory path");
+
+    filesystem
+        .put(
+            &inventory_path,
+            Entry::bytes(b"{not-json".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed corrupt inventory");
+    let corrupt_error = RegisteredExtensionStore::load_discovered_capability_ids(
+        filesystem.as_ref(),
+        &owner,
+        &extension_id,
+    )
+    .await
+    .expect_err("corrupt inventory must fail closed");
+    assert!(
+        corrupt_error.to_string().contains("inventory"),
+        "unexpected corruption error: {corrupt_error}"
+    );
+
+    let injected_tool_definition = serde_json::json!({
+        "schema_version": "registered_mcp.discovered_capability_ids.v1",
+        "owner": owner.as_str(),
+        "extension_id": extension_id.as_str(),
+        "capability_ids": [format!("{}.search", extension_id.as_str())],
+        "tools": [{
+            "description": "untrusted persisted tool text",
+            "input_schema": {"type": "object"}
+        }],
+    });
+    filesystem
+        .put(
+            &inventory_path,
+            Entry::bytes(
+                serde_json::to_vec(&injected_tool_definition)
+                    .expect("serialize injected tool definition"),
+            ),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed inventory with forbidden tool definition");
+    RegisteredExtensionStore::load_discovered_capability_ids(
+        filesystem.as_ref(),
+        &owner,
+        &extension_id,
+    )
+    .await
+    .expect_err("inventory must reject persisted tool definitions");
+
+    let foreign = CapabilityId::new("other-extension.search").expect("valid foreign id");
+    let foreign_error = RegisteredExtensionStore::replace_discovered_capability_ids(
+        filesystem.as_ref(),
+        &owner,
+        &extension_id,
+        &[foreign],
+    )
+    .await
+    .expect_err("foreign extension capability must be rejected");
+    assert!(
+        foreign_error.to_string().contains("does not belong"),
+        "unexpected foreign-id error: {foreign_error}"
+    );
+
+    let over_limit = (0..129)
+        .map(|index| {
+            CapabilityId::new(format!("{}.tool-{index}", extension_id.as_str()))
+                .expect("valid bounded capability")
+        })
+        .collect::<Vec<_>>();
+    let bounds_error = RegisteredExtensionStore::replace_discovered_capability_ids(
+        filesystem.as_ref(),
+        &owner,
+        &extension_id,
+        &over_limit,
+    )
+    .await
+    .expect_err("129 capabilities must exceed the discovery bound");
+    assert!(
+        bounds_error.to_string().contains("maximum 128"),
+        "unexpected bounds error: {bounds_error}"
+    );
+
+    let oversized_record = serde_json::json!({
+        "schema_version": "registered_mcp.discovered_capability_ids.v1",
+        "owner": owner.as_str(),
+        "extension_id": extension_id.as_str(),
+        "capability_ids": over_limit,
+    });
+    filesystem
+        .put(
+            &inventory_path,
+            Entry::bytes(
+                serde_json::to_vec(&oversized_record).expect("serialize oversized inventory"),
+            ),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed oversized stored inventory");
+    let stored_bounds_error = RegisteredExtensionStore::load_discovered_capability_ids(
+        filesystem.as_ref(),
+        &owner,
+        &extension_id,
+    )
+    .await
+    .expect_err("oversized stored inventory must fail closed");
+    assert!(
+        stored_bounds_error.to_string().contains("maximum 128"),
+        "unexpected stored bounds error: {stored_bounds_error}"
+    );
+}
+
 fn mounted_registered_store_filesystem() -> (Arc<dyn RootFilesystem>, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.keep().join("local-dev");
     std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
+    (
+        mount_registered_store_filesystem_at(&storage_root),
+        storage_root,
+    )
+}
+
+fn mount_registered_store_filesystem_at(storage_root: &std::path::Path) -> Arc<dyn RootFilesystem> {
     let mut local_filesystem = LocalFilesystem::new();
     local_filesystem
         .mount_local(
@@ -784,5 +1035,5 @@ fn mounted_registered_store_filesystem() -> (Arc<dyn RootFilesystem>, std::path:
             HostPath::from_path_buf(storage_root.join("system/extensions")),
         )
         .expect("mount system extensions");
-    (Arc::new(local_filesystem), storage_root)
+    Arc::new(local_filesystem)
 }

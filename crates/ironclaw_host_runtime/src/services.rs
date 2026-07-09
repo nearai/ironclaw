@@ -402,6 +402,7 @@ where
             self.secret_store.clone(),
         )
         .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress))
+        .with_host_runtime_http_egress(self.host_runtime_http_egress_port())
         .with_runtime_secret_material_stager(Some(self.runtime_secret_material_stager()));
         if let Some(audit_sink) = &self.audit_sink {
             invocation_services_resolver =
@@ -483,6 +484,7 @@ where
         Some(HostRuntimeHttpEgressPort::new(
             self.runtime_http_egress()?,
             self.obligation_handler(),
+            Arc::clone(&self.network_policy_store),
             self.runtime_secret_material_stager(),
         ))
     }

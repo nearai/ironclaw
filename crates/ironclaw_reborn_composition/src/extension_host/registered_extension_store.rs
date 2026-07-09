@@ -7,8 +7,6 @@
 //! Its `search`/`resolve` do no owner filtering, so a registered package
 //! reachable through it is installable by any owner. Every helper here reads
 //! the owner overlay separately and merges at the call site.
-//!
-//! The write side (`put`/`delete`) lands with the register verb in T3.
 
 use std::collections::BTreeSet;
 
@@ -16,10 +14,10 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallationError, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionRuntime, ManifestSource,
 };
-use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, UserId, VirtualPath, sha256_digest_token};
+use ironclaw_filesystem::{CasExpectation, Entry, FileType, FilesystemError, RootFilesystem};
+use ironclaw_host_api::{CapabilityId, ExtensionId, UserId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
@@ -28,11 +26,13 @@ use crate::extension_host::available_extensions::{
 use crate::extension_host::mcp::HostedMcpEndpoint;
 
 const REGISTERED_ROOT: &str = "/system/extensions/registered";
-#[allow(dead_code)] // T3-reg write helpers land before route/lifecycle callers.
+const REGISTERED_CLEANUP_ROOT: &str = "/system/extensions/registered-cleanup";
+const DISCOVERED_CAPABILITY_IDS_SCHEMA_VERSION: &str =
+    "registered_mcp.discovered_capability_ids.v1";
+const DISCOVERED_CAPABILITY_IDS_LIMIT: usize = 128;
+const DISCOVERED_CAPABILITY_IDS_MAX_BYTES: usize = 128 * 1024;
 const REGISTERED_OWNER_DESCRIPTOR_LIMIT: usize = 32;
-#[allow(dead_code)] // T3-reg write helpers land before route/lifecycle callers.
 const REGISTERED_MANIFEST_VERSION: &str = "0.1.0";
-#[allow(dead_code)] // T3-reg write helpers land before route/lifecycle callers.
 const REGISTERED_MANIFEST_DESCRIPTION: &str = "User-registered hosted MCP server";
 
 /// True for a package owned by a user's registered store. Such a package must
@@ -125,7 +125,6 @@ impl RegisteredExtensionStore {
         VirtualPath::new(format!("{REGISTERED_ROOT}/{}", owner.as_str())).map_err(map_binding_error)
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     fn descriptor_root(
         owner: &UserId,
         extension_id: &ExtensionId,
@@ -138,7 +137,6 @@ impl RegisteredExtensionStore {
         .map_err(map_binding_error)
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     fn manifest_path(
         owner: &UserId,
         extension_id: &ExtensionId,
@@ -151,14 +149,144 @@ impl RegisteredExtensionStore {
         .map_err(map_binding_error)
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
+    /// Durable unregister cleanup intent. This path must remain outside the
+    /// descriptor subtree so deleting
+    /// `/system/extensions/registered/<owner>/<extension_id>` cannot erase the
+    /// capability ids needed to revoke approval authority on a retry.
+    fn discovered_capability_ids_path(
+        owner: &UserId,
+        extension_id: &ExtensionId,
+    ) -> Result<VirtualPath, ProductWorkflowError> {
+        VirtualPath::new(format!(
+            "{REGISTERED_CLEANUP_ROOT}/{}/{}/discovered-capability-ids.json",
+            owner.as_str(),
+            extension_id.as_str()
+        ))
+        .map_err(map_binding_error)
+    }
+
+    /// Load the current discovered capability-id set. Absence means no cleanup
+    /// intent. Stored bytes are schema-, owner-, extension-, size-, and
+    /// canonical-order validated before any id can be used as an approval key.
+    pub(crate) async fn load_discovered_capability_ids<F>(
+        fs: &F,
+        owner: &UserId,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<CapabilityId>, ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        let path = Self::discovered_capability_ids_path(owner, extension_id)?;
+        let versioned = match fs.get(&path).await {
+            Ok(Some(versioned)) => versioned,
+            Ok(None)
+            | Err(FilesystemError::NotFound { .. })
+            | Err(FilesystemError::MountNotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ProductWorkflowError::Transient {
+                    reason: format!("failed to load registered MCP capability inventory: {error}"),
+                });
+            }
+        };
+        if versioned.entry.body.len() > DISCOVERED_CAPABILITY_IDS_MAX_BYTES {
+            return Err(invalid_stored_inventory(format!(
+                "inventory exceeds {DISCOVERED_CAPABILITY_IDS_MAX_BYTES} bytes"
+            )));
+        }
+        let stored: StoredDiscoveredCapabilityIds = serde_json::from_slice(&versioned.entry.body)
+            .map_err(|_error| {
+            invalid_stored_inventory("inventory JSON is invalid".to_string())
+        })?;
+        if stored.schema_version != DISCOVERED_CAPABILITY_IDS_SCHEMA_VERSION {
+            return Err(invalid_stored_inventory(
+                "unsupported schema version".to_string(),
+            ));
+        }
+        if &stored.owner != owner || &stored.extension_id != extension_id {
+            return Err(invalid_stored_inventory(
+                "stored owner or extension does not match the inventory path".to_string(),
+            ));
+        }
+        let canonical = canonical_discovered_capability_ids(extension_id, &stored.capability_ids)
+            .map_err(invalid_stored_inventory)?;
+        if canonical != stored.capability_ids {
+            return Err(invalid_stored_inventory(
+                "capability ids are not sorted and duplicate-free".to_string(),
+            ));
+        }
+        Ok(canonical)
+    }
+
+    /// Atomically replace one owner's complete current discovered-id set.
+    ///
+    /// The lifecycle aggregate serializes this call with its existing
+    /// operation lock. A single filesystem `put` is the atomic replacement
+    /// boundary; no read-modify-write or per-capability files are involved.
+    pub(crate) async fn replace_discovered_capability_ids<F>(
+        fs: &F,
+        owner: &UserId,
+        extension_id: &ExtensionId,
+        capability_ids: &[CapabilityId],
+    ) -> Result<(), ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        let capability_ids = canonical_discovered_capability_ids(extension_id, capability_ids)
+            .map_err(|reason| ProductWorkflowError::InvalidBindingRequest { reason })?;
+        let stored = StoredDiscoveredCapabilityIds {
+            schema_version: DISCOVERED_CAPABILITY_IDS_SCHEMA_VERSION.to_string(),
+            owner: owner.clone(),
+            extension_id: extension_id.clone(),
+            capability_ids,
+        };
+        let bytes = serde_json::to_vec_pretty(&stored).map_err(|error| {
+            ProductWorkflowError::Transient {
+                reason: format!("failed to serialize registered MCP capability inventory: {error}"),
+            }
+        })?;
+        if bytes.len() > DISCOVERED_CAPABILITY_IDS_MAX_BYTES {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "registered MCP capability inventory exceeds {DISCOVERED_CAPABILITY_IDS_MAX_BYTES} bytes"
+                ),
+            });
+        }
+        let path = Self::discovered_capability_ids_path(owner, extension_id)?;
+        fs.put(&path, Entry::bytes(bytes), CasExpectation::Any)
+            .await
+            .map(|_| ())
+            .map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("failed to replace registered MCP capability inventory: {error}"),
+            })
+    }
+
+    /// Delete cleanup intent after every other unregister step succeeds.
+    /// Missing intent is success so a completed unregister remains retry-safe.
+    pub(crate) async fn delete_discovered_capability_ids<F>(
+        fs: &F,
+        owner: &UserId,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        let path = Self::discovered_capability_ids_path(owner, extension_id)?;
+        match fs.delete(&path).await {
+            Ok(())
+            | Err(FilesystemError::NotFound { .. })
+            | Err(FilesystemError::MountNotFound { .. }) => Ok(()),
+            Err(error) => Err(ProductWorkflowError::Transient {
+                reason: format!("failed to delete registered MCP capability inventory: {error}"),
+            }),
+        }
+    }
+
     pub(crate) fn mint_hosted_mcp_extension_id(
         owner: &UserId,
         url: &str,
     ) -> Result<ExtensionId, ProductWorkflowError> {
         let normalized_url = normalized_hosted_mcp_url(url)?;
-        let mut input =
-            Vec::with_capacity(owner.as_str().len() + 1 + normalized_url.as_bytes().len());
+        let mut input = Vec::with_capacity(owner.as_str().len() + 1 + normalized_url.len());
         input.extend_from_slice(owner.as_str().as_bytes());
         input.push(0x1f);
         input.extend_from_slice(normalized_url.as_bytes());
@@ -172,7 +300,6 @@ impl RegisteredExtensionStore {
         ExtensionId::new(format!("mcp-{suffix}")).map_err(map_binding_error)
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     pub(crate) fn synthesize_hosted_mcp_manifest_toml(
         owner: &UserId,
         input: &RegisterHostedMcpDescriptorInput,
@@ -198,15 +325,17 @@ impl RegisteredExtensionStore {
                 reason: format!("failed to serialize registered extension manifest: {error}"),
             })?;
         let manifest_record = parse_registered_manifest(owner, manifest_toml.clone(), None)?;
+        #[cfg(not(test))]
+        let _ = manifest_record;
         Ok(RegisteredHostedMcpDescriptorDraft {
             extension_id,
             normalized_url,
             manifest_toml,
+            #[cfg(test)]
             manifest_record,
         })
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     pub(crate) async fn put_hosted_mcp_descriptor<F>(
         fs: &F,
         owner: &UserId,
@@ -249,7 +378,6 @@ impl RegisteredExtensionStore {
         })
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     pub(crate) async fn delete_descriptor<F>(
         fs: &F,
         owner: &UserId,
@@ -270,7 +398,6 @@ impl RegisteredExtensionStore {
         }
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     pub(crate) async fn find_same_owner_same_name_descriptor<F>(
         fs: &F,
         owner: &UserId,
@@ -287,11 +414,17 @@ impl RegisteredExtensionStore {
                 let ExtensionRuntime::Mcp { url: Some(url), .. } = &manifest.runtime else {
                     continue;
                 };
+                #[cfg(test)]
                 let normalized_url = normalized_hosted_mcp_url(url)?;
+                #[cfg(not(test))]
+                normalized_hosted_mcp_url(url)?;
                 return Ok(Some(RegisteredHostedMcpDescriptor {
                     extension_id: manifest.id.clone(),
+                    #[cfg(test)]
                     normalized_url,
+                    #[cfg(test)]
                     manifest_toml: package.manifest_toml.clone(),
+                    #[cfg(test)]
                     manifest_record: parse_registered_manifest(owner, package.manifest_toml, None)?,
                 }));
             }
@@ -355,7 +488,6 @@ impl RegisteredExtensionStore {
         Ok(packages)
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     async fn descriptor_count_for_owner<F>(
         fs: &F,
         owner: &UserId,
@@ -382,7 +514,6 @@ impl RegisteredExtensionStore {
             .count())
     }
 
-    #[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
     async fn descriptor_exists<F>(
         fs: &F,
         owner: &UserId,
@@ -404,19 +535,56 @@ impl RegisteredExtensionStore {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDiscoveredCapabilityIds {
+    schema_version: String,
+    owner: UserId,
+    extension_id: ExtensionId,
+    capability_ids: Vec<CapabilityId>,
+}
+
+fn canonical_discovered_capability_ids(
+    extension_id: &ExtensionId,
+    capability_ids: &[CapabilityId],
+) -> Result<Vec<CapabilityId>, String> {
+    let prefix = format!("{}.", extension_id.as_str());
+    let mut canonical = BTreeSet::new();
+    for capability_id in capability_ids {
+        if !capability_id.as_str().starts_with(&prefix) {
+            return Err(format!(
+                "registered MCP capability does not belong to extension {}",
+                extension_id.as_str()
+            ));
+        }
+        canonical.insert(capability_id.clone());
+    }
+    if canonical.len() > DISCOVERED_CAPABILITY_IDS_LIMIT {
+        return Err(format!(
+            "registered MCP capability inventory limit exceeded: maximum {DISCOVERED_CAPABILITY_IDS_LIMIT}"
+        ));
+    }
+    Ok(canonical.into_iter().collect())
+}
+
+fn invalid_stored_inventory(reason: String) -> ProductWorkflowError {
+    ProductWorkflowError::Transient {
+        reason: format!("registered MCP capability inventory is invalid: {reason}"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 pub(crate) struct RegisterHostedMcpDescriptorInput {
     pub(crate) name: String,
     pub(crate) url: String,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 pub(crate) struct RegisteredHostedMcpDescriptorDraft {
     extension_id: ExtensionId,
     normalized_url: String,
     manifest_toml: String,
+    #[cfg(test)]
     manifest_record: ExtensionManifestRecord,
 }
 
@@ -436,31 +604,34 @@ impl RegisteredHostedMcpDescriptorDraft {
     fn into_descriptor(self) -> RegisteredHostedMcpDescriptor {
         RegisteredHostedMcpDescriptor {
             extension_id: self.extension_id,
+            #[cfg(test)]
             normalized_url: self.normalized_url,
+            #[cfg(test)]
             manifest_toml: self.manifest_toml,
+            #[cfg(test)]
             manifest_record: self.manifest_record,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 pub(crate) struct RegisteredHostedMcpDescriptor {
     pub(crate) extension_id: ExtensionId,
+    #[cfg(test)]
     pub(crate) normalized_url: String,
+    #[cfg(test)]
     pub(crate) manifest_toml: String,
+    #[cfg(test)]
     pub(crate) manifest_record: ExtensionManifestRecord,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 pub(crate) struct RegisteredHostedMcpDescriptorPut {
     pub(crate) descriptor: RegisteredHostedMcpDescriptor,
     pub(crate) prior_same_name: Option<RegisteredHostedMcpDescriptor>,
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 struct RegisteredHostedMcpManifestDto {
     schema_version: String,
     id: String,
@@ -472,14 +643,12 @@ struct RegisteredHostedMcpManifestDto {
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 struct RegisteredHostedMcpRuntimeDto {
     kind: String,
     transport: String,
     url: String,
 }
 
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 fn validate_registered_name(name: &str) -> Result<(), ProductWorkflowError> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -490,7 +659,6 @@ fn validate_registered_name(name: &str) -> Result<(), ProductWorkflowError> {
     Ok(())
 }
 
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 fn normalized_hosted_mcp_url(url: &str) -> Result<String, ProductWorkflowError> {
     HostedMcpEndpoint::parse(url).ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
         reason: "registered MCP URL must be an https URL without credentials, query, or fragment"
@@ -511,7 +679,6 @@ fn normalized_hosted_mcp_url(url: &str) -> Result<String, ProductWorkflowError> 
     Ok(format!("https://{host}{port}{path}"))
 }
 
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 fn normalize_mcp_path(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -521,7 +688,6 @@ fn normalize_mcp_path(path: &str) -> String {
     }
 }
 
-#[allow(dead_code)] // T3-reg write helper; wired by the register verb slice.
 fn parse_registered_manifest(
     owner: &UserId,
     manifest_toml: String,

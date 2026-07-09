@@ -289,6 +289,7 @@ async fn host_runtime_http_egress_port_denies_before_network_when_obligation_fai
     let port = HostRuntimeHttpEgressPort::new(
         runtime_http_egress,
         Arc::new(DenyingObligationHandler),
+        Arc::new(NetworkObligationPolicyStore::new()),
         secret_stager,
     );
 

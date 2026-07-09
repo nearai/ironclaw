@@ -126,6 +126,7 @@ mod tests {
             services: InvocationServices {
                 filesystem: Arc::new(InMemoryBackend::new()),
                 runtime_http_egress: None,
+                host_runtime_http_egress: None,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
                 process: Arc::new(LocalHostProcessPort::new()),

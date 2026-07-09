@@ -17,8 +17,8 @@ use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionSto
 use crate::{ToolCallHttpEgress, http_body::RuntimeHttpBodyStore};
 
 pub use host_port::{
-    HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
-    RuntimeSecretMaterialStager, RuntimeSecretStageError,
+    BoundHostRuntimeHttpEgress, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort,
+    HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager, RuntimeSecretStageError,
 };
 
 #[derive(Clone)]
