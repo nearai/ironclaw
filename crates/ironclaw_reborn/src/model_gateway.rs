@@ -61,6 +61,11 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
+const PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX: &str =
+    "failed to parse tool-call arguments JSON:";
+const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid tool-call arguments";
+const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
+    "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
@@ -1786,6 +1791,19 @@ fn provider_tool_call_from_llm(
     provider_turn_id: String,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<ProviderToolCall, HostManagedModelError> {
+    if let Some(parse_error) = tool_call.arguments_parse_error.as_deref() {
+        let safe_summary = provider_tool_arguments_parse_error_summary(parse_error);
+        debug!(
+            provider_call_id = tool_call.id.as_str(),
+            tool_name = tool_call.name.as_str(),
+            safe_summary = safe_summary.as_str(),
+            "reborn model gateway rejected malformed provider tool arguments"
+        );
+        return Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            safe_summary,
+        ));
+    }
     let name = ProviderToolName::new(tool_call.name).map_err(|error| {
         debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
@@ -1804,6 +1822,19 @@ fn provider_tool_call_from_llm(
         reasoning: tool_call.reasoning,
         signature: tool_call.signature,
     })
+}
+
+fn provider_tool_arguments_parse_error_summary(parse_error: &str) -> String {
+    let summary_line = parse_error.lines().next().unwrap_or(parse_error);
+    let sanitized = sanitize_model_visible_text(summary_line.to_string());
+    let sanitized = sanitized.trim();
+    if sanitized.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        && LoopSafeSummary::new(sanitized).is_ok()
+    {
+        sanitized.to_string()
+    } else {
+        PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY.to_string()
+    }
 }
 
 fn provider_turn_id(provider_turn_scope: &str, tool_calls: &[ToolCall]) -> String {
@@ -1910,7 +1941,13 @@ fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModel
 
 fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bool {
     error.kind == HostManagedModelErrorKind::InvalidOutput
-        && is_provider_arguments_too_large_summary(&error.safe_summary)
+        && (is_provider_arguments_too_large_summary(&error.safe_summary)
+            || is_provider_tool_arguments_parse_error_summary(&error.safe_summary))
+}
+
+fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
+    safe_summary.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        || safe_summary == PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY
 }
 
 fn provider_tool_repair_messages(
@@ -1936,16 +1973,30 @@ fn provider_tool_repair_messages(
             ChatMessage::tool_result(
                 tool_call.id.clone(),
                 tool_call.name.clone(),
-                format!(
-                    "Tool call batch rejected by host: {safe_summary}. None of this response's tool calls were executed. Retry with smaller arguments or answer directly without this tool if it is not needed."
-                ),
+                provider_tool_repair_result_content(tool_call, safe_summary),
             )
         }))
         .collect()
 }
 
+fn provider_tool_repair_result_content(tool_call: &ToolCall, safe_summary: &str) -> String {
+    let mut content = format!("Tool call batch rejected by host: {safe_summary}.");
+    if let Some(parse_error) = tool_call.arguments_parse_error.as_deref() {
+        content.push_str("\n\nMalformed tool-call argument details for this rejected call:\n");
+        content.push_str(parse_error);
+    }
+    content.push_str(
+        "\n\nNone of this response's tool calls were executed. Retry with valid JSON arguments or answer directly without this tool if it is not needed.",
+    );
+    content
+}
+
 fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
-    let arguments = if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
+    let arguments = if tool_call.arguments_parse_error.is_some() {
+        serde_json::json!({
+            "error": PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER,
+        })
+    } else if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
         serde_json::json!({
             "error": PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER,
         })
@@ -1959,7 +2010,7 @@ fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
         arguments,
         reasoning: tool_call.reasoning.clone(),
         signature: tool_call.signature.clone(),
-        arguments_parse_error: tool_call.arguments_parse_error.clone(),
+        arguments_parse_error: None,
     }
 }
 
@@ -2774,6 +2825,36 @@ mod tests {
             Some(expected_reasoning),
             "recovery must preserve typed reasoning_details onto the recovered response"
         );
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_falls_back_for_unknown_metadata() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "raw_provider_secret api_key=sk-live-secret malformed payload",
+        );
+
+        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_drops_raw_repair_detail() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3\nRaw malformed tool-call arguments (verbatim, 42 bytes):\n{\"api_key\":\"sk-live-secret\"",
+        );
+
+        assert_eq!(
+            summary,
+            "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3"
+        );
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_rejects_unsafe_parser_detail() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "failed to parse tool-call arguments JSON: expected `,` or `}` at line 1 column 2",
+        );
+
+        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
     }
 
     #[test]
