@@ -15,7 +15,7 @@ use ironclaw_hooks::middleware::{
     HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
     HookedLoopTranscriptPort,
 };
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{CapabilityId, ExtensionId};
 use ironclaw_loop_support::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
@@ -54,6 +54,13 @@ const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 const USER_PROFILE_WARMUP_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn should_fetch_communication_context(context: &LoopRunContext) -> bool {
+    !matches!(
+        context.product_context.as_ref().map(|ctx| ctx.origin),
+        Some(ironclaw_turns::TurnOriginKind::WebUi)
+    )
+}
 
 fn trace_host_factory_latency_ok(
     operation: &'static str,
@@ -201,6 +208,17 @@ impl CapabilitySurfaceState {
         Ok(())
     }
 
+    fn clear_current(&self) -> Result<(), AgentLoopHostError> {
+        let mut current = self.current.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "capability surface state is unavailable",
+            )
+        })?;
+        *current = None;
+        Ok(())
+    }
+
     fn current(&self) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
         self.current
             .lock()
@@ -226,6 +244,13 @@ impl SurfaceTrackingLoopCapabilityPort {
             surface_state,
         }
     }
+}
+
+fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
+    matches!(
+        capability_id.as_str(),
+        "builtin.extension_activate" | "builtin.extension_remove"
+    )
 }
 
 #[async_trait]
@@ -275,14 +300,27 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        self.inner.invoke_capability(request).await
+        let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
+        let outcome = self.inner.invoke_capability(request).await?;
+        if may_change_surface {
+            self.surface_state.clear_current()?;
+        }
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        self.inner.invoke_capability_batch(request).await
+        let may_change_surface = request
+            .invocations
+            .iter()
+            .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
+        let outcome = self.inner.invoke_capability_batch(request).await?;
+        if may_change_surface {
+            self.surface_state.clear_current()?;
+        }
+        Ok(outcome)
     }
 }
 
@@ -1463,20 +1501,21 @@ where
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
 
-        // Kick off the advisory communication-context fetch immediately so its
-        // latency + timeout budget overlaps the gate/dispatcher construction and
-        // capability-surface computation below, rather than blocking prompt
-        // construction. Joined (and stamped with `delivery_tools_visible`) at the
-        // prompt-build site once the surface is known.
-        let communication_fetch = self
-            .communication_context_provider
-            .as_ref()
-            .map(|provider| {
-                provider.begin_communication_context(
-                    run_context.scope.clone(),
-                    run_context.actor().cloned(),
-                )
-            });
+        // Kick off advisory communication-context fetches only for origins that
+        // can use delivery/channel context. WebUI chat renders its origin without
+        // touching the provider, so plain chat prompts avoid unrelated reads.
+        let communication_fetch = if should_fetch_communication_context(&run_context) {
+            self.communication_context_provider
+                .as_ref()
+                .map(|provider| {
+                    provider.begin_communication_context(
+                        run_context.scope.clone(),
+                        run_context.actor().cloned(),
+                    )
+                })
+        } else {
+            None
+        };
         let user_profile_source = Arc::clone(&self.user_profile_source);
         let user_profile_run_context = run_context.clone();
         let user_profile_fetch = tokio::spawn(async move {
@@ -1698,6 +1737,7 @@ where
         // should warm the cache in the background instead of spending any
         // prompt critical-path budget.
         let user_profile_started_at = ironclaw_observability::live_latency_started_at();
+        tokio::task::yield_now().await;
         let user_profile = match user_profile_fetch.now_or_never() {
             Some(Ok(profile)) => profile,
             Some(Err(error)) => {

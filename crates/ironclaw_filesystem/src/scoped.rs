@@ -114,16 +114,37 @@ fn scoped_path_class(path: &ScopedPath) -> PathClass {
 }
 
 fn scoped_path_detail(path: &ScopedPath) -> &'static str {
-    let depth = path
+    let segments = path
         .as_str()
         .split('/')
         .filter(|segment| !segment.is_empty())
-        .count();
-    match depth {
-        0 => "root",
-        1 => "top_level",
-        2 => "one_level",
-        _ => "nested",
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["turns", "state.json"] => "turn_state_snapshot",
+        ["resources", "snapshot.json"] => "resource_governor_snapshot",
+        ["resources", "budget-gates.json"] => "budget_gate_snapshot",
+        ["approvals", "capability-permissions", ..] => "approval_capability_permissions",
+        ["approvals", "auto-approve", ..] => "approval_auto_approve",
+        ["approvals", "persistent", ..] => "approval_persistent_policy",
+        ["authorization", "leases", ..] => "authorization_leases",
+        ["events", ..] => "events",
+        ["processes", ..] => "processes",
+        ["run-state", ..] => "run_state",
+        ["secrets", ..] => "secrets",
+        ["skills", ..] => "skill_bundles",
+        ["system", "skills", ..] => "system_skill_bundles",
+        ["threads", ..] => "threads",
+        ["turns", ..]
+        | ["resources", ..]
+        | ["approvals", ..]
+        | ["authorization", ..]
+        | ["system", ..] => "unknown",
+        _ => match segments.len() {
+            0 => "root",
+            1 => "top_level",
+            2 => "one_level",
+            _ => "nested",
+        },
     }
 }
 

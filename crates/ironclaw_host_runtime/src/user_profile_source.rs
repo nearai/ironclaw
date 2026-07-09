@@ -200,7 +200,7 @@ impl MemoryBackedUserProfileSource {
     }
 
     fn store_cached_profile(&self, key: UserProfileCacheKey, profile: Option<UserProfileContext>) {
-        if self.cache_ttl.is_zero() {
+        if self.cache_ttl.is_zero() || profile.is_none() {
             return;
         }
         if let Ok(mut cache) = self.cache.lock() {
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_cache_serves_misses_until_ttl_expires() {
+    async fn profile_cache_does_not_serve_misses_after_profile_is_created() {
         let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
         let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
             Arc::clone(&fs),
@@ -494,10 +494,8 @@ mod tests {
         assert!(source.resolve_user_profile(&run_ctx).await.is_none());
 
         write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"en-US"}"#).await;
-        assert!(
-            source.resolve_user_profile(&run_ctx).await.is_none(),
-            "negative cache should avoid rereading the filesystem inside the TTL"
-        );
+        let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("en-US"));
     }
 
     #[tokio::test]
