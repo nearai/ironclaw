@@ -72,6 +72,13 @@ function userScopedPrefix(currentUser: WorkspaceCurrentUser) {
   return `tenants/${tenantId}/users/${userId}`;
 }
 
+function scopedUserUnavailable(
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
+  return requireScopedWorkspace && !userScopedPrefix(currentUser);
+}
+
 function emptyDirectoryResponse() {
   return { entries: [] };
 }
@@ -135,7 +142,12 @@ async function resolveWorkspaceRootWithOptions(
   requireScopedWorkspace: boolean,
 ) {
   const prefix = userScopedPrefix(currentUser);
-  if (!prefix) return { prefix: "", rootResponse: null };
+  if (!prefix) {
+    return {
+      prefix: "",
+      rootResponse: requireScopedWorkspace ? emptyDirectoryResponse() : null,
+    };
+  }
   try {
     const rootResponse = await fetchFsList(WORKSPACE_MOUNT, prefix);
     return { prefix, rootResponse };
@@ -154,6 +166,9 @@ async function resolveWorkspaceDirectory(
   currentUser: WorkspaceCurrentUser,
   requireScopedWorkspace: boolean,
 ) {
+  if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) {
+    return { actualPath: "", response: emptyDirectoryResponse() };
+  }
   const resolved = await resolveWorkspaceRootWithOptions(
     currentUser,
     requireScopedWorkspace,
@@ -204,9 +219,16 @@ async function collapseMemoryDirectory(actualPath, response) {
   return { actualPath: nextPath, response: nextResponse };
 }
 
-async function resolveMemoryDirectory(relativePath, currentUser: WorkspaceCurrentUser) {
+async function resolveMemoryDirectory(
+  relativePath,
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
   const prefix = userScopedPrefix(currentUser);
   if (!prefix) {
+    if (requireScopedWorkspace) {
+      return { actualPath: "", response: emptyDirectoryResponse() };
+    }
     return { actualPath: relativePath, response: await fetchFsList(MEMORY_MOUNT, relativePath) };
   }
 
@@ -234,11 +256,20 @@ async function resolveMemoryDirectory(relativePath, currentUser: WorkspaceCurren
   return { actualPath, response };
 }
 
-async function resolveMemoryPath(relativePath, currentUser: WorkspaceCurrentUser) {
+async function resolveMemoryPath(
+  relativePath,
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
   const segments = splitRelative(relativePath);
   const basename = segments.pop();
+  if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) return "";
   if (!basename || !userScopedPrefix(currentUser)) return relativePath;
-  const { actualPath } = await resolveMemoryDirectory(segments.join("/"), currentUser);
+  const { actualPath } = await resolveMemoryDirectory(
+    segments.join("/"),
+    currentUser,
+    requireScopedWorkspace,
+  );
   return joinRelative(actualPath, basename);
 }
 
@@ -251,7 +282,7 @@ async function resolveDirectory(
     return resolveWorkspaceDirectory(path, currentUser, requireScopedWorkspace);
   }
   if (mount === MEMORY_MOUNT) {
-    return resolveMemoryDirectory(path, currentUser);
+    return resolveMemoryDirectory(path, currentUser, requireScopedWorkspace);
   }
   return { actualPath: path, response: await fetchFsList(mount, path) };
 }
@@ -265,7 +296,7 @@ async function resolveFilePath(
     return resolveWorkspacePath(path, currentUser, requireScopedWorkspace);
   }
   if (mount === MEMORY_MOUNT) {
-    return resolveMemoryPath(path, currentUser);
+    return resolveMemoryPath(path, currentUser, requireScopedWorkspace);
   }
   return path;
 }
@@ -381,6 +412,12 @@ export async function readWorkspaceFile(
   const { mount, path } = splitQualified(qualifiedPath);
   if (!mount || !path) {
     // A mount root is a directory, not a previewable file.
+    return { kind: "directory", path: qualifiedPath };
+  }
+  if (
+    (mount === WORKSPACE_MOUNT || mount === MEMORY_MOUNT) &&
+    scopedUserUnavailable(currentUser, requireScopedWorkspace)
+  ) {
     return { kind: "directory", path: qualifiedPath };
   }
 

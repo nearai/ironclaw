@@ -207,6 +207,23 @@ test("hosted workspace hides a raw shared root when scoped projection is require
   }
 });
 
+test("hosted workspace stays empty before caller identity is resolved", async () => {
+  const harness = installFetch((path) => {
+    throw new Error(`unexpected fetch ${path}`);
+  });
+
+  try {
+    const response = await listWorkspace("workspace", {
+      requireScopedWorkspace: true,
+    });
+
+    assert.deepEqual(response, { entries: [] });
+    assert.deepEqual(harness.calls, []);
+  } finally {
+    harness.restore();
+  }
+});
+
 test("workspace file preview reads through the hidden caller subtree when it exists", async () => {
   const harness = installFetch((path) => {
     if (path === `/api/webchat/v2/fs/list?mount=workspace&path=${SCOPED_USER_QUERY}`) {
@@ -279,6 +296,26 @@ test("hosted workspace file preview does not read the raw shared root", async ()
   }
 });
 
+test("hosted workspace file preview waits for caller identity instead of statting raw root", async () => {
+  const harness = installFetch((path) => {
+    throw new Error(`unexpected fetch ${path}`);
+  });
+
+  try {
+    const response = await readWorkspaceFile("workspace/shared.txt", {
+      requireScopedWorkspace: true,
+    });
+
+    assert.deepEqual(response, {
+      kind: "directory",
+      path: "workspace/shared.txt",
+    });
+    assert.deepEqual(harness.calls, []);
+  } finally {
+    harness.restore();
+  }
+});
+
 test("memory lists the caller subtree without exposing storage wrapper folders", async () => {
   const harness = installFetch((path) => {
     const response = memoryScopeListResponse(path, [
@@ -295,6 +332,23 @@ test("memory lists the caller subtree without exposing storage wrapper folders",
     assert.deepEqual(response, {
       entries: [{ name: "hello.md", path: "memory/hello.md", is_dir: false }],
     });
+  } finally {
+    harness.restore();
+  }
+});
+
+test("hosted memory stays empty before caller identity is resolved", async () => {
+  const harness = installFetch((path) => {
+    throw new Error(`unexpected fetch ${path}`);
+  });
+
+  try {
+    const response = await listWorkspace("memory", {
+      requireScopedWorkspace: true,
+    });
+
+    assert.deepEqual(response, { entries: [] });
+    assert.deepEqual(harness.calls, []);
   } finally {
     harness.restore();
   }
