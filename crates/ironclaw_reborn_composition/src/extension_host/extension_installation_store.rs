@@ -9,6 +9,8 @@ use ironclaw_host_api::{ExtensionId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
 
 pub(crate) struct FilesystemExtensionInstallationStore {
@@ -228,8 +230,8 @@ impl WireManifestRecord {
     fn into_manifest_record(self) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
         let host_ports = ironclaw_host_runtime::default_host_port_catalog()
             .map_err(invalid_installation_error)?;
-        let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
-            .map_err(invalid_installation_error)?;
+        let contracts =
+            product_extension_host_api_contract_registry().map_err(invalid_installation_error)?;
         ExtensionManifestRecord::from_toml_with_contracts(
             self.raw_toml,
             self.source.into_manifest_source(),

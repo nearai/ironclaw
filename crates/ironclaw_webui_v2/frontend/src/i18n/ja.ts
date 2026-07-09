@@ -217,6 +217,7 @@ registerPack("ja", {
 
   // Settings tabs
   "settings.inference": "推論",
+  "settings.appearance": "外観",
   "settings.agent": "エージェント",
   "settings.channels": "チャネル",
   "settings.networking": "ネットワーク",
@@ -252,6 +253,10 @@ registerPack("ja", {
   "traceCommons.lastSyncDesc": "最終同期時点のローカル表示",
   "traceCommons.never": "なし",
   "traceCommons.recentExplanations": "最近のクレジット明細",
+  "traceCommons.openAccount": "Trace Commons アカウントを開く",
+  "traceCommons.openingAccount": "開いています…",
+  "traceCommons.openAccountFailed":
+    "Trace Commons アカウントを開けませんでした。登録状況を確認して再試行してください。",
   "traceCommons.submittedTracesTitle": "送信したトレース",
   "traceCommons.tracesLoadFailed": "送信したトレースを読み込めませんでした。",
   "traceCommons.traceStatus": "ステータス",
@@ -280,6 +285,9 @@ registerPack("ja", {
   "settings.restartNow": "今すぐ再起動します",
   "settings.restartStarting": "再起動中...",
   "settings.restartUnavailable": "ウェブ UI からの再起動はまだ利用できません。保留中の変更を適用するには、ゲートウェイプロセスを手動で再起動してください。",
+  "settings.field.showChatTerminalShortcut": "チャットのターミナルショートカットを表示",
+  "settings.field.showChatTerminalShortcutDesc":
+    "チャットスレッド内にフローティングのターミナル/ログアイコンを表示します。",
 
   // Restart dialog
   "restart.title": "IronClaw を再起動",

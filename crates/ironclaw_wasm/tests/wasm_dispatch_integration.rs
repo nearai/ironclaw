@@ -19,11 +19,11 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
+use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
 use ironclaw_wasm::{
     PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
-use ironclaw_wasm_sandbox_core::SandboxLimits;
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;

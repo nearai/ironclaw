@@ -249,7 +249,14 @@ async fn require_approval_for_profile_policy(
     let expected_grantee = Principal::Extension(descriptor.provider.clone());
     let durable_auto_approval_eligible =
         permission_mode_allows_persistent_approval(descriptor.default_permission);
-    // 6. A settings-scope per-tool always-allow policy satisfies the gate.
+    // 6. Global auto-approve bypasses an otherwise-gated eligible tool. Check
+    // this before per-tool always-allow because it is the default-on common
+    // path for new users; if enabled, both branches return the same Allow.
+    if durable_auto_approval_eligible && settings.global_auto_approve(&context.resource_scope).await
+    {
+        return decision;
+    }
+    // 7. A settings-scope per-tool always-allow policy satisfies the gate.
     //    The provider verifies the active settings-page persistent policy
     //    directly, keyed to the capability provider rather than the caller
     //    extension, so this does not depend on whether that policy was also
@@ -260,11 +267,6 @@ async fn require_approval_for_profile_policy(
         && settings
             .tool_always_allow(&context.resource_scope, &descriptor.id, &expected_grantee)
             .await
-    {
-        return decision;
-    }
-    // 7. Global auto-approve bypasses an otherwise-gated eligible tool.
-    if durable_auto_approval_eligible && settings.global_auto_approve(&context.resource_scope).await
     {
         return decision;
     }

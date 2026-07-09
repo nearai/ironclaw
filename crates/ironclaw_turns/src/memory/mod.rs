@@ -25,17 +25,18 @@ use crate::{
     TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
     TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord,
     TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
-    TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken,
+    TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
+    TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -1822,29 +1823,31 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
         let mut inner = self.lock_inner()?;
-        let Some(run_id) = inner.pop_matching_queued_run(request.scope_filter.as_ref()) else {
-            return Ok(None);
-        };
-        let mut record = inner.take_record(run_id)?;
-        let now = Utc::now();
-        let transition = record.status.set(TurnStatus::Running);
-        record.runner_id = Some(request.runner_id);
-        record.lease_token = Some(request.lease_token);
-        record.lease_expires_at = Some(inner.next_lease_expiry(now));
-        record.last_heartbeat_at = Some(now);
-        record.claim_count = record.claim_count.saturating_add(1);
-        record.event_cursor = inner.next_cursor();
-        inner.update_active_lock(&record, now);
-        inner.apply_status_transition(transition, &record);
-        let claimed = ClaimedTurnRun {
-            state: record.state(),
-            resolved_run_profile: record.profile.resolved.clone(),
-            runner_id: request.runner_id,
-            lease_token: request.lease_token,
-        };
-        inner.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
-        inner.records.insert(run_id, record);
-        Ok(Some(claimed))
+        inner.claim_matching_queued_run(
+            request.runner_id,
+            request.lease_token,
+            request.scope_filter.as_ref(),
+        )
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let mut claimed_runs = Vec::new();
+        for _ in 0..request.max_runs {
+            let Some(claimed) = inner.claim_matching_queued_run(
+                request.runner_id,
+                TurnLeaseToken::new(),
+                request.scope_filter.as_ref(),
+            )?
+            else {
+                break;
+            };
+            claimed_runs.push(claimed);
+        }
+        Ok(claimed_runs)
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
@@ -2680,6 +2683,37 @@ impl Inner {
             self.queued_runs.push_back(run_id);
         }
         None
+    }
+
+    fn claim_matching_queued_run(
+        &mut self,
+        runner_id: crate::TurnRunnerId,
+        lease_token: TurnLeaseToken,
+        scope_filter: Option<&TurnScope>,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        let Some(run_id) = self.pop_matching_queued_run(scope_filter) else {
+            return Ok(None);
+        };
+        let mut record = self.take_record(run_id)?;
+        let now = Utc::now();
+        let transition = record.status.set(TurnStatus::Running);
+        record.runner_id = Some(runner_id);
+        record.lease_token = Some(lease_token);
+        record.lease_expires_at = Some(self.next_lease_expiry(now));
+        record.last_heartbeat_at = Some(now);
+        record.claim_count = record.claim_count.saturating_add(1);
+        record.event_cursor = self.next_cursor();
+        self.update_active_lock(&record, now);
+        self.apply_status_transition(transition, &record);
+        let claimed = ClaimedTurnRun {
+            state: record.state(),
+            resolved_run_profile: record.profile.resolved.clone(),
+            runner_id,
+            lease_token,
+        };
+        self.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
+        self.records.insert(run_id, record);
+        Ok(Some(claimed))
     }
 
     fn remove_queued_run(&mut self, run_id: TurnRunId) {

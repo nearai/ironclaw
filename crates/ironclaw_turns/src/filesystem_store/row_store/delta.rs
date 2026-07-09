@@ -65,6 +65,43 @@ impl RowSnapshotState {
         self.latest_event_cursor
     }
 
+    pub(super) fn run_record(&self, scope: &TurnScope, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        let key = run_id.to_string();
+        let index = self.indexes.runs.get(&key).copied()?;
+        let record = self.snapshot.runs.get(index)?.clone();
+        (record.scope == *scope).then_some(record)
+    }
+
+    pub(super) fn run_record_by_id(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        let key = run_id.to_string();
+        let index = self.indexes.runs.get(&key).copied()?;
+        self.snapshot.runs.get(index).cloned()
+    }
+
+    pub(super) fn turn_record_for_run(
+        &self,
+        scope: &TurnScope,
+        run: &TurnRunRecord,
+    ) -> Result<TurnRecord, TurnError> {
+        let key = run.turn_id.to_string();
+        let Some(index) = self.indexes.turns.get(&key).copied() else {
+            return Err(TurnError::Unavailable {
+                reason: "turn run references missing cached turn row".to_string(),
+            });
+        };
+        let Some(record) = self.snapshot.turns.get(index).cloned() else {
+            return Err(TurnError::Unavailable {
+                reason: "row-store snapshot turn index is out of bounds".to_string(),
+            });
+        };
+        if record.scope != *scope {
+            return Err(TurnError::Unavailable {
+                reason: "turn run references turn row outside requested scope".to_string(),
+            });
+        }
+        Ok(record)
+    }
+
     pub(super) fn apply_delta(
         &mut self,
         delta: SnapshotDelta,

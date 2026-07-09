@@ -28,7 +28,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
     CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef,
     GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, ProductTurnContext,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExitMapping, ProductTurnContext,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     RunOriginAdapter, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
     SanitizedFailure, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
@@ -38,8 +38,9 @@ use ironclaw_turns::{
     TurnStateStore, TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
-        BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        ApplyValidatedLoopExitRequest, BlockRunRequest, ClaimRunRequest, CompleteRunRequest,
+        FailRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -2534,6 +2535,122 @@ async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable(
             .iter()
             .any(|event| event.run_id == first_run_id && event.kind == TurnEventKind::Failed),
         "durable event rows should remain queryable after restart"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_queryable() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let limits = InMemoryTurnStateStoreLimits {
+        max_events: 2,
+        max_terminal_records: 1,
+        max_idempotency_records: 1,
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let first_scope = turn_scope("thread-fs-row-loop-exit-terminal-1");
+    let first_response = store
+        .submit_turn(
+            submit_request_for(first_scope.clone(), "idem-fs-row-loop-exit-1"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let first_run_id = accepted_run_id(&first_response);
+    let first_runner_id = TurnRunnerId::new();
+    let first_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: first_runner_id,
+            lease_token: first_lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            run_id: first_run_id,
+            runner_id: first_runner_id,
+            lease_token: first_lease_token,
+            mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed),
+        })
+        .await
+        .unwrap();
+
+    let second_scope = turn_scope("thread-fs-row-loop-exit-terminal-2");
+    let second_response = store
+        .submit_turn(
+            submit_request_for(second_scope, "idem-fs-row-loop-exit-2"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let second_run_id = accepted_run_id(&second_response);
+    let second_runner_id = TurnRunnerId::new();
+    let second_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: second_runner_id,
+            lease_token: second_lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            run_id: second_run_id,
+            runner_id: second_runner_id,
+            lease_token: second_lease_token,
+            mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed),
+        })
+        .await
+        .unwrap();
+
+    let hot_snapshot = store.persistence_snapshot().await.unwrap();
+    assert!(
+        !hot_snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == first_run_id),
+        "validated loop-exit completion should still evict old terminal runs from the hot snapshot"
+    );
+
+    let completed = store
+        .get_run_state(GetRunStateRequest {
+            scope: first_scope.clone(),
+            run_id: first_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(completed.status, TurnStatus::Completed);
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped).with_limits(limits);
+    let reopened_completed = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: first_scope.clone(),
+            run_id: first_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reopened_completed.status, TurnStatus::Completed);
+    let reopened_events = reopened
+        .read_turn_events_after(&first_scope, None, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(reopened_events.rebase_required, None);
+    assert!(
+        reopened_events
+            .entries
+            .iter()
+            .any(|event| event.run_id == first_run_id && event.kind == TurnEventKind::Completed),
+        "validated loop-exit completion events should remain durable after cache eviction and restart"
     );
 }
 

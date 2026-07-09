@@ -151,6 +151,20 @@ impl RunnerLeaseStore {
         .await
     }
 
+    pub(super) async fn retire_runner_lease_from_run_record(
+        &self,
+        run: TurnRunRecord,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+        retired_status: TurnStatus,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
+        self.with_timeout(
+            self.write_status_from_run_record(run, Some((runner_id, lease_token)), retired_status),
+            "retire runner lease",
+        )
+        .await
+    }
+
     pub(super) async fn restore_if_current_status(
         &self,
         previous: RunnerLeaseRecord,
@@ -386,6 +400,33 @@ impl RunnerLeaseStore {
         status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let fallback = runner_lease_from_snapshot(snapshot, run_id)?;
+        self.write_status_from_fallback(fallback, run_id, expected_runner, status)
+            .await
+    }
+
+    async fn write_status_from_run_record(
+        &self,
+        run: TurnRunRecord,
+        expected_runner: Option<(crate::TurnRunnerId, crate::TurnLeaseToken)>,
+        status: TurnStatus,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
+        let run_id = run.run_id;
+        let from = run.status;
+        let fallback = runner_lease_from_run(&run).ok_or(TurnError::InvalidTransition {
+            from,
+            to: TurnStatus::Running,
+        })?;
+        self.write_status_from_fallback(fallback, run_id, expected_runner, status)
+            .await
+    }
+
+    async fn write_status_from_fallback(
+        &self,
+        fallback: RunnerLeaseRecord,
+        run_id: TurnRunId,
+        expected_runner: Option<(crate::TurnRunnerId, crate::TurnLeaseToken)>,
+        status: TurnStatus,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let mut leases = self.leases.write().await;
         let existing = leases.get(&run_id).cloned().unwrap_or(fallback);
         if let Some((runner_id, lease_token)) = expected_runner {

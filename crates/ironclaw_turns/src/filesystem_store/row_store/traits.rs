@@ -12,10 +12,10 @@ use crate::{
     TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -201,6 +201,15 @@ where
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.read_run_state_from_durable_rows(&request)
+            .await?
+            .ok_or(TurnError::ScopeNotFound)
+    }
+
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.read_run_state_for_cancellation(&request)
             .await?
             .ok_or(TurnError::ScopeNotFound)
     }
@@ -426,6 +435,35 @@ where
         .await
     }
 
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let span = turn_state_write_span("claim_next_runs", request.scope_filter.as_ref(), None);
+        async move {
+            let claimed = self
+                .apply(RunnerLeaseOverlay::None, |store| {
+                    let request = request.clone();
+                    async move { store.claim_next_runs(request).await }
+                })
+                .await?;
+            for run in &claimed {
+                if let Err(error) = self
+                    .seed_runner_lease_from_cached_run(run.state.run_id)
+                    .await
+                {
+                    for claimed_run in &claimed {
+                        self.compensate_failed_claim(claimed_run).await;
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(claimed)
+        }
+        .instrument(span)
+        .await
+    }
+
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
         self.heartbeat_runner_lease(request).await
     }
@@ -631,15 +669,38 @@ where
         &self,
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
+        let max_terminal_records = self.limits.max_terminal_records;
+        self.apply_run_state_transition_with_targeted_delta(
             "apply_validated_loop_exit",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            retired_status_for_loop_exit(&request.mapping),
+            RunStateTransitionTarget {
+                run_id: request.run_id,
+                runner_id: request.runner_id,
+                lease_token: request.lease_token,
+                retired_status: retired_status_for_loop_exit(&request.mapping),
+            },
             |store| {
                 let request = request.clone();
                 async move { store.apply_validated_loop_exit(request).await }
+            },
+            move |snapshot, latest_event_cursor, store, state| {
+                let terminal_records = snapshot
+                    .runs
+                    .iter()
+                    .filter(|record| record.status.is_terminal())
+                    .count();
+                if state.status.is_terminal() && terminal_records >= max_terminal_records {
+                    return full_snapshot_delta(snapshot, store);
+                }
+                if state.status.is_blocked() {
+                    return blocked_run_targeted_delta(snapshot, latest_event_cursor, store, state);
+                }
+                run_state_targeted_delta(
+                    snapshot,
+                    latest_event_cursor,
+                    store,
+                    state.run_id,
+                    &state.scope,
+                )
             },
         )
         .await

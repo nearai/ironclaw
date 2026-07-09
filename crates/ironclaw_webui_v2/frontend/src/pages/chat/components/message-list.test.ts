@@ -36,10 +36,7 @@ function messageListSourceForTest() {
 globalThis.__testExports = {
   BOTTOM_FOLLOW_THRESHOLD_PX,
   FLOATING_CONTROL_BOTTOM_OFFSET_PX,
-  FLOATING_CONTROL_SIZE_PX,
-  FLOATING_CONTROL_SPACER_HEIGHT_PX,
   FLOATING_CONTROL_STYLE,
-  FLOATING_CONTROL_SPACER_STYLE,
   distanceFromBottom,
   isNearBottom,
   scrollToBottom,
@@ -177,10 +174,7 @@ test("MessageList observes content growth from streamed markdown layout", () => 
 test("MessageList renders a floating thread logs shortcut", () => {
   const {
     FLOATING_CONTROL_BOTTOM_OFFSET_PX,
-    FLOATING_CONTROL_SIZE_PX,
-    FLOATING_CONTROL_SPACER_HEIGHT_PX,
     FLOATING_CONTROL_STYLE,
-    FLOATING_CONTROL_SPACER_STYLE,
   } = loadHelpers();
 
   assert.match(
@@ -213,19 +207,12 @@ test("MessageList renders a floating thread logs shortcut", () => {
     /bottom-\[\$\{|h-\[\$\{|bottom-\[128px\]|h-\[164px\]/,
     "floating controls should not rely on Tailwind generated arbitrary classes",
   );
-  assert.equal(FLOATING_CONTROL_BOTTOM_OFFSET_PX, 128);
-  assert.equal(FLOATING_CONTROL_SIZE_PX, 36);
-  assert.equal(
-    FLOATING_CONTROL_SPACER_HEIGHT_PX,
-    FLOATING_CONTROL_BOTTOM_OFFSET_PX + FLOATING_CONTROL_SIZE_PX,
-    "spacer height should track the floating control offset plus control size",
-  );
-  assert.equal(FLOATING_CONTROL_STYLE.bottom, 128);
-  assert.equal(FLOATING_CONTROL_SPACER_STYLE.height, 164);
-  assert.match(
+  assert.equal(FLOATING_CONTROL_BOTTOM_OFFSET_PX, 16);
+  assert.equal(FLOATING_CONTROL_STYLE.bottom, 16);
+  assert.doesNotMatch(
     messageListSource,
-    /className="hidden shrink-0 sm:block"[\s\S]*style=\{FLOATING_CONTROL_SPACER_STYLE\}/,
-    "floating logs control should reserve style-driven end-of-content space only when the desktop logs button is visible",
+    /FLOATING_CONTROL_SPACER|className="hidden shrink-0 sm:block"/,
+    "floating controls should use the scroll area's existing bottom padding instead of adding a visible gap after the last message",
   );
   assert.match(
     messageListSource,

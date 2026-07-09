@@ -18,7 +18,7 @@
 #   reason = "why this whole crate is out of scope for this report"
 #   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
 
-# Four crates below are v1-only (consumed exclusively by root `ironclaw`, no
+# Three crates below are v1-only (consumed exclusively by root `ironclaw`, no
 # crates/*/Cargo.toml dependents); already covered by .github/workflows/test.yml ("Tests (Legacy)"). Tracked by #5657.
 
 [[exemption]]
@@ -29,11 +29,6 @@ issue  = "https://github.com/nearai/ironclaw/issues/5657"
 [[exemption]]
 crate  = "ironclaw_gateway"
 reason = "v1-only: consumed only by root `ironclaw` (src/channels/web/platform/static_files.rs, src/channels/web/handlers/frontend.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
-issue  = "https://github.com/nearai/ironclaw/issues/5657"
-
-[[exemption]]
-crate  = "ironclaw_oauth"
-reason = "v1-only: consumed only by root `ironclaw` (src/auth/oauth.rs); no crates/* dependents. Crate's own doc comment confirms v1-only. Covered by \"Tests (Legacy)\"."
 issue  = "https://github.com/nearai/ironclaw/issues/5657"
 
 [[exemption]]

@@ -849,6 +849,7 @@ fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
                 "thread-a",
                 vec![ProductProjectionItem::Text {
                     id: format!("text-{cursor}"),
+                    run_id: None,
                     body: text.to_string(),
                 }],
             )

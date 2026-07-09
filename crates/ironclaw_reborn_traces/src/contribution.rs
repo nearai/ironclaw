@@ -3992,7 +3992,10 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
-fn trace_contribution_dir_for_scope_at(base: &std::path::Path, scope: Option<&str>) -> PathBuf {
+pub(crate) fn trace_contribution_dir_for_scope_at(
+    base: &std::path::Path,
+    scope: Option<&str>,
+) -> PathBuf {
     let contributions = base.join("trace_contributions");
     match scope {
         Some(scope) if !scope.trim().is_empty() => {
@@ -4258,6 +4261,24 @@ fn resolve_trace_credentials_at(
     }
 
     Ok(None)
+}
+
+/// Explicit per-user Trace Commons opt-out: write (or update) the scope's
+/// policy with `enabled = false`, which the resolver treats as an explicit
+/// opt-out that blocks the instance fallback for this user — WITHOUT touching
+/// the instance-level (scope-`None`) policy. This is the primitive a per-user
+/// opt-out surface must use: flipping the root policy would disenroll the
+/// entire instance.
+pub fn opt_out_user_scope_at(base: &std::path::Path, scope: &str) -> anyhow::Result<()> {
+    let mut policy =
+        read_trace_policy_for_scope_if_present_at(base, Some(scope))?.unwrap_or_default();
+    policy.enabled = false;
+    write_trace_policy_for_scope_at(base, Some(scope), &policy)
+}
+
+/// [`opt_out_user_scope_at`] against the process base dir.
+pub fn opt_out_user_scope(scope: &str) -> anyhow::Result<()> {
+    opt_out_user_scope_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
 }
 
 /// Pick the user's own (personal-invite) enrollment when present and enabled,
@@ -5525,6 +5546,7 @@ pub struct ContributionHttpRequest {
     pub timeout_ms: u32,
 }
 
+#[derive(Debug)]
 pub struct ContributionHttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
@@ -5550,6 +5572,90 @@ impl std::fmt::Display for ContributionHttpError {
 }
 
 impl std::error::Error for ContributionHttpError {}
+
+/// Direct-transport [`ContributionHttpSink`] for trusted non-agent surfaces
+/// (WebUI facades, CLI). Applies the same hardening as the other direct
+/// clients in this module: per-request pinned DNS resolution with
+/// private/internal-IP rejection (`resolve_trace_upload_claim_issuer_host`),
+/// no redirects, the request's own timeout, and a body read bounded DURING
+/// streaming by the request's `response_body_limit`. Agent-path callers must
+/// keep using the host-egress sink instead.
+/// INVARIANT: request URLs handed to this sink must be derived from the
+/// enrolled policy's trust-anchored endpoints (`account_login_links_url`,
+/// `account_traces_url`, …) — never from caller/request input. The sink
+/// attaches the caller's bearer to whatever URL it is given; keeping it
+/// crate-private confines that to the vetted derivations in this module.
+pub(crate) struct DirectPinnedContributionSink;
+
+#[async_trait]
+impl ContributionHttpSink for DirectPinnedContributionSink {
+    async fn execute(
+        &self,
+        request: ContributionHttpRequest,
+    ) -> Result<ContributionHttpResponse, ContributionHttpError> {
+        let url = reqwest::Url::parse(&request.url)
+            .map_err(|e| ContributionHttpError::new(format!("invalid request URL: {e}")))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ContributionHttpError::new("request URL requires a host"))?
+            .to_ascii_lowercase();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| ContributionHttpError::new("request URL requires a known port"))?;
+        let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port)
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("host resolution rejected: {e}")))?;
+        let timeout = Duration::from_millis(u64::from(request.timeout_ms));
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(timeout.min(Duration::from_secs(3)))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("ironclaw-trace-commons-client")
+            .resolve_to_addrs(&host, &resolved_addrs)
+            .build()
+            .map_err(|e| ContributionHttpError::new(format!("failed to build client: {e}")))?;
+
+        let method = match request.method {
+            ContributionHttpMethod::Get => reqwest::Method::GET,
+            ContributionHttpMethod::Post => reqwest::Method::POST,
+            ContributionHttpMethod::Put => reqwest::Method::PUT,
+            ContributionHttpMethod::Delete => reqwest::Method::DELETE,
+        };
+        let mut builder = client
+            .request(method, url)
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(token) = request.bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        if let Some(body) = request.json_body {
+            builder = builder
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
+        }
+        let mut response = builder
+            .send()
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("request failed: {e}")))?;
+        let status = response.status().as_u16();
+        // Enforce the cap DURING the chunked read so a hostile server cannot
+        // force a large allocation by streaming an oversized body.
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("response read failed: {e}")))?
+        {
+            if body.len() as u64 + chunk.len() as u64 > request.response_body_limit {
+                return Err(ContributionHttpError::new(format!(
+                    "response body exceeds the {} byte limit",
+                    request.response_body_limit
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(ContributionHttpResponse { status, body })
+    }
+}
 
 /// Decode a host-egress response body into a bounded UTF-8 string, capping at
 /// `TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES` (the host egress already enforced the
@@ -6638,6 +6744,40 @@ pub async fn mint_account_login_link_via_sink(
     .await
 }
 
+/// Direct (non-agent) counterpart to [`mint_account_login_link_via_sink`]
+/// for WebUI facades and other trusted product surfaces: mints the one-time
+/// login link through the [`DirectPinnedContributionSink`] (pinned DNS,
+/// private-IP filtering) instead of a host-egress sink.
+///
+/// Delivery contract: the link is returned ONLY in the result — it is never
+/// persisted to a local delivery file. Hosted multi-tenant users cannot read
+/// host files; the caller (an authenticated WebUI response) is the delivery
+/// channel. The URL must never be logged or placed on any model-visible
+/// surface.
+pub async fn mint_account_login_link(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
+    // Typed at the public boundary so callers can't transpose tenant/user;
+    // stringify only when handing off to the dir-parameterised core.
+    mint_account_login_link_direct(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id.as_str(),
+        user_id.as_str(),
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`mint_account_login_link`] (direct path).
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn mint_account_login_link_direct(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
+    mint_account_login_link_inner(base_dir, tenant_id, user_id, &DirectPinnedContributionSink).await
+}
+
 /// Dir-parameterised core for [`mint_account_login_link_via_sink`].
 /// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
 async fn mint_account_login_link_inner(
@@ -6672,6 +6812,13 @@ async fn mint_account_login_link_inner(
     }
     let url = account_login_links_url(&resolution.policy)
         .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
+    // Parsed once up front: the join base for a relative `url` in the response
+    // (its origin is the trust-anchored issuer origin).
+    let endpoint_url = reqwest::Url::parse(&url).map_err(|e| {
+        AccountLoginLinkError::EnrollmentIncomplete(
+            anyhow::Error::new(e).context("login-links URL is not a valid URL"),
+        )
+    })?;
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     // Mint the bearer THROUGH the sink: on the agent path the upload-claim
@@ -6726,9 +6873,37 @@ async fn mint_account_login_link_inner(
             AccountLoginLinkError::Backend(anyhow::anyhow!("login-link response missing url"))
         })?
         .to_string();
+    // The server may return a relative path (e.g. `/account/login?code=…`).
+    // Resolve it against the login-links endpoint — whose origin is the
+    // trust-anchored issuer origin — so every delivery channel (browser
+    // navigation, local delivery file) receives an absolute URL instead of
+    // one that would resolve against the WRONG origin (e.g. the IronClaw
+    // WebUI's own host).
+    let resolved = match reqwest::Url::parse(&link_url) {
+        Ok(absolute) => absolute,
+        Err(_) => endpoint_url.join(&link_url).map_err(|e| {
+            AccountLoginLinkError::Backend(
+                anyhow::Error::new(e).context("login-link response url is not resolvable"),
+            )
+        })?,
+    };
+    // ORIGIN PIN: the caller navigates an authenticated user's browser to this
+    // URL. A hostile or compromised issuer response must not be able to steer
+    // that navigation anywhere else — the final URL must stay on the
+    // trust-anchored issuer origin (same scheme + host + port as the
+    // login-links endpoint; this also excludes non-HTTP(S) schemes such as
+    // `javascript:`) and must carry no userinfo.
+    let same_origin = resolved.scheme() == endpoint_url.scheme()
+        && resolved.host_str() == endpoint_url.host_str()
+        && resolved.port_or_known_default() == endpoint_url.port_or_known_default();
+    if !same_origin || !resolved.username().is_empty() || resolved.password().is_some() {
+        return Err(AccountLoginLinkError::Backend(anyhow::anyhow!(
+            "login-link response url is not on the issuer origin"
+        )));
+    }
     Ok(AccountLoginLink {
         account_id,
-        url: link_url,
+        url: resolved.to_string(),
     })
 }
 
@@ -15904,6 +16079,47 @@ mod tests {
     }
 
     #[test]
+    fn opt_out_user_scope_blocks_only_that_user_never_the_instance() {
+        // Regression (PR #5858 review): the CLI's opt-out used to flip the
+        // ROOT policy too — which, under instance enrollment, disenrolled the
+        // ENTIRE instance when one user opted out. The per-user opt-out
+        // primitive must write only the user's scoped policy.
+        let dir = tempfile::tempdir().unwrap();
+        write_policy_at(
+            dir.path(),
+            None,
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+
+        let alice = trace_scope_key("tenant-a", "alice");
+        opt_out_user_scope_at(dir.path(), &alice).expect("opt-out writes");
+
+        // The instance policy is untouched on disk.
+        let instance = read_trace_policy_for_scope_at(dir.path(), None).expect("instance reads");
+        assert!(
+            instance.enabled,
+            "per-user opt-out must never disable the instance enrollment"
+        );
+        // Alice is out on every resolution surface…
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+                .unwrap()
+                .is_none(),
+            "opted-out user must not resolve instance credentials"
+        );
+        // …while other users still inherit the instance enrollment.
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "bob")
+                .unwrap()
+                .is_some(),
+            "other users must keep inheriting the instance enrollment"
+        );
+    }
+
+    #[test]
     fn resolver_explicit_user_opt_out_blocks_instance_fallback() {
         // `traces opt-out` writes the user's scoped policy with enabled=false.
         // That explicit opt-out must win over an enabled instance policy on
@@ -16301,7 +16517,10 @@ mod tests {
             .unwrap();
 
         // ── assertions ───────────────────────────────────────────────────────
-        assert_eq!(link.url, "/account/login?code=abc");
+        // The server returned a RELATIVE url; it must come back absolutized
+        // against the trust-anchored issuer origin, never left relative (a
+        // relative URL would resolve against the consuming surface's origin).
+        assert_eq!(link.url, format!("http://{addr}/account/login?code=abc"));
         assert_eq!(link.account_id, "11111111-1111-1111-1111-111111111111");
 
         // Egress invariant: on the agent path BOTH network calls — the
@@ -16324,17 +16543,58 @@ mod tests {
             );
         }
 
-        let bodies = captured.lock().unwrap();
-        assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
-        let expected_subject = salted_pseudonymous_contributor_id_at(
-            base.path(),
-            &trace_scope_key("tenant-dev", "alice"),
-        )
-        .unwrap();
+        {
+            let bodies = captured.lock().unwrap();
+            assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
+            let expected_subject = salted_pseudonymous_contributor_id_at(
+                base.path(),
+                &trace_scope_key("tenant-dev", "alice"),
+            )
+            .unwrap();
+            assert_eq!(
+                bodies[0]["subject"],
+                serde_json::Value::String(expected_subject),
+                "posted subject must be per-user pseudonymous id for instance enrollment"
+            );
+        }
+
+        // ── direct (WebUI facade) variant ────────────────────────────────────
+        // Same enrollment, no sink: the hosted-WebUI path mints through the
+        // pinned direct client. The link is delivered ONLY in the return value
+        // (the authenticated HTTP response) — it must never be persisted to a
+        // local delivery file, which hosted users cannot read.
+        let direct = mint_account_login_link_direct(base.path(), "tenant-dev", "alice")
+            .await
+            .expect("direct login-link mint succeeds");
+        assert_eq!(direct.url, format!("http://{addr}/account/login?code=abc"));
+        assert_eq!(direct.account_id, "11111111-1111-1111-1111-111111111111");
+        let mut delivery_files = Vec::new();
+        let mut stack = vec![base.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("account_login_link."))
+                {
+                    delivery_files.push(path);
+                }
+            }
+        }
+        assert!(
+            delivery_files.is_empty(),
+            "direct mint must not write a local delivery file; found {delivery_files:?}"
+        );
         assert_eq!(
-            bodies[0]["subject"],
-            serde_json::Value::String(expected_subject),
-            "posted subject must be per-user pseudonymous id for instance enrollment"
+            captured.lock().unwrap().len(),
+            2,
+            "direct mint must POST to login-links too"
         );
     }
 
@@ -16505,6 +16765,188 @@ mod tests {
         assert_eq!(
             profiles[0]["display_handle"],
             serde_json::json!("pilot_alice")
+        );
+    }
+
+    /// Helper: instance-enroll a tempdir against a mock whose
+    /// `/v1/account/login-links` returns `link_url`, then mint via the direct
+    /// path. Pins the origin-anchoring contract for hostile response URLs.
+    async fn mint_login_link_with_response_url(
+        link_url: &str,
+    ) -> (Result<AccountLoginLink, AccountLoginLinkError>, String) {
+        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "k1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+        let link_url = link_url.to_string();
+        let app = axum::Router::new()
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_for_mock.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt, "token_type": "Bearer", "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/login-links",
+                axum::routing::post(move || {
+                    let url = link_url.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "account_id": "11111111-1111-1111-1111-111111111111",
+                            "url": url
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = tempfile::tempdir().unwrap();
+        enroll_instance_with_device_key(base.path(), addr);
+        let result = mint_account_login_link_direct(base.path(), "tenant-dev", "alice").await;
+        (result, format!("http://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn mint_account_login_link_pins_url_to_issuer_origin() {
+        // Relative url: absolutized against the trust-anchored issuer origin.
+        let (result, origin) = mint_login_link_with_response_url("/account/login?code=rel").await;
+        let link = result.expect("relative url absolutizes");
+        assert_eq!(link.url, format!("{origin}/account/login?code=rel"));
+
+        // Cross-origin ABSOLUTE url: a hostile issuer response must not steer
+        // the authenticated browser to another origin.
+        let (result, _) =
+            mint_login_link_with_response_url("https://attacker.example/account/login").await;
+        let error = result.expect_err("cross-origin absolute url must be rejected");
+        assert!(
+            error.to_string().to_lowercase().contains("login link")
+                || matches!(error, AccountLoginLinkError::Backend(_)),
+            "cross-origin rejection surfaces as a Backend error: {error}"
+        );
+
+        // Non-HTTP(S) scheme: must be rejected (javascript: would execute in
+        // the opened tab's context).
+        let (result, _) =
+            mint_login_link_with_response_url("javascript:alert(document.domain)").await;
+        result.expect_err("non-http scheme must be rejected");
+
+        // Userinfo smuggling: rejected even when the host would match. (The
+        // mock's port isn't knowable before it binds, so a same-host+userinfo
+        // URL can't be fabricated exactly — but userinfo is rejected before
+        // the origin comparison, which cross-host coverage above pins anyway.)
+        let (result, _) =
+            mint_login_link_with_response_url("http://user:pass@127.0.0.1/account/login").await;
+        result.expect_err("userinfo in the login-link url must be rejected");
+    }
+
+    #[tokio::test]
+    async fn direct_pinned_sink_rejects_private_hosts_and_bounds_bodies() {
+        // Disallowed (link-local/metadata) host: rejected at resolution, before
+        // any request is built.
+        let error = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: "http://169.254.169.254/v1/anything".to_string(),
+                bearer_token: Some("secret".to_string()),
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 2_000,
+            })
+            .await
+            .expect_err("link-local host must be rejected");
+        assert!(
+            error.to_string().contains("resolution rejected")
+                || error.to_string().contains("rejected"),
+            "rejection must come from host resolution: {error}"
+        );
+
+        // Redirects are NOT followed: the 3xx surfaces as the response status
+        // and the Location target is never contacted.
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hit_for_target = hit.clone();
+        let target_app = axum::Router::new().route(
+            "/stolen",
+            axum::routing::get(move || {
+                let hit = hit_for_target.clone();
+                async move {
+                    hit.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    "leaked"
+                }
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(target_listener, target_app).await;
+        });
+        let redirect_to = format!("http://{target_addr}/stolen");
+        let redirect_app = axum::Router::new().route(
+            "/hop",
+            axum::routing::get(move || {
+                let location = redirect_to.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, location)],
+                        "",
+                    )
+                }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(redirect_listener, redirect_app).await;
+        });
+        let response = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: format!("http://{redirect_addr}/hop"),
+                bearer_token: Some("secret".to_string()),
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 2_000,
+            })
+            .await
+            .expect("redirect response surfaces, not followed");
+        assert_eq!(response.status, 302, "3xx must surface as the status");
+        assert_eq!(
+            hit.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the redirect target must never be contacted"
+        );
+
+        // Oversized body: rejected DURING the read, not buffered.
+        let big_app = axum::Router::new().route(
+            "/big",
+            axum::routing::get(|| async { "x".repeat(64 * 1024) }),
+        );
+        let big_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let big_addr = big_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(big_listener, big_app).await;
+        });
+        let error = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: format!("http://{big_addr}/big"),
+                bearer_token: None,
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 5_000,
+            })
+            .await
+            .expect_err("oversized body must be rejected");
+        assert!(
+            error.to_string().contains("exceeds"),
+            "rejection names the byte limit: {error}"
         );
     }
 

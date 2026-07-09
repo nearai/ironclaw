@@ -37,8 +37,7 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
-// Durable filesystem-backed idempotency ledger (folded in from the former
-// `ironclaw_product_workflow_storage` crate). Gated behind `storage` so the
+// Durable filesystem-backed idempotency ledger. Gated behind `storage` so the
 // facade surface stays free of the `ironclaw_filesystem` dependency unless a
 // consumer opts into a durable backend.
 #[cfg(feature = "storage")]
@@ -169,13 +168,14 @@ pub use reborn_services::{
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
     ProductAgentBoundCaller, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RebornAccountTrace, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
-    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    ProjectServiceError, RebornAccountLoginLinkResponse, RebornAccountTrace,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
@@ -216,14 +216,14 @@ pub use reborn_services::{
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
-    SkillsProductFacade, StaticConnectableChannelsProductFacade, StaticOperatorStatusService,
-    TriggerRunThreadScope, UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
-    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
-    normalize_operator_log_context_value,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
+    SettingsToolPermissionState, SkillsProductFacade, StaticConnectableChannelsProductFacade,
+    StaticOperatorStatusService, TriggerRunThreadScope, UnsupportedAutomationProductFacade,
+    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
+    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
+    UpsertLlmProviderRequest, normalize_operator_log_context_value,
 };
 
 pub use webui_inbound::{

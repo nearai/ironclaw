@@ -445,10 +445,6 @@ where
         Ok(head.unwrap_or(SeqNo::ZERO))
     }
 
-    async fn next_delta_log_seq(&self) -> Result<SeqNo, TurnError> {
-        Ok(self.delta_log_head_seq().await?.next())
-    }
-
     async fn read_row_collection<T>(&self, collection: &'static str) -> Result<Vec<T>, TurnError>
     where
         T: DeserializeOwned,
@@ -536,6 +532,28 @@ where
             .ok_or_else(|| TurnError::Unavailable {
                 reason: "turn run references missing durable turn row".to_string(),
             })?;
+        let run = self.runner_lease_store().overlay_run_record(run).await?;
+        Ok(Some(projection::run_state_from_record(run, turn.actor)))
+    }
+
+    pub(crate) async fn read_run_state_for_cancellation(
+        &self,
+        request: &GetRunStateRequest,
+    ) -> Result<Option<TurnRunState>, TurnError> {
+        let (run, turn) = {
+            let mut guard = self.snapshot_state.lock().await;
+            if guard.is_none() {
+                *guard = Some(self.load_snapshot_from_rows().await?);
+            }
+            let Some(state) = guard.as_ref() else {
+                return Ok(None);
+            };
+            let Some(run) = state.run_record(&request.scope, request.run_id) else {
+                return Ok(None);
+            };
+            let turn = state.turn_record_for_run(&request.scope, &run)?;
+            (run, turn)
+        };
         let run = self.runner_lease_store().overlay_run_record(run).await?;
         Ok(Some(projection::run_state_from_record(run, turn.actor)))
     }
@@ -681,15 +699,18 @@ where
         lease_token: crate::TurnLeaseToken,
         retired_status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
-        let (snapshot, _version) = self.read_snapshot().await?;
+        let run = self
+            .with_cached_snapshot(|snapshot| {
+                snapshot
+                    .runs
+                    .iter()
+                    .find(|record| record.run_id == run_id)
+                    .cloned()
+            })
+            .await?
+            .ok_or(TurnError::ScopeNotFound)?;
         self.runner_lease_store()
-            .retire_runner_lease_from_snapshot(
-                &snapshot,
-                run_id,
-                runner_id,
-                lease_token,
-                retired_status,
-            )
+            .retire_runner_lease_from_run_record(run, runner_id, lease_token, retired_status)
             .await
     }
 
@@ -741,10 +762,10 @@ where
             let mut refreshed_after_stale_error = false;
             loop {
                 self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
-                let baseline = guard
+                let (baseline, current_journal_seq) = guard
                     .as_ref()
-                    .map(|state| state.snapshot.clone())
-                    .unwrap_or_default();
+                    .map(|state| (state.snapshot.clone(), state.journal_seq))
+                    .unwrap_or_else(|| (TurnPersistenceSnapshot::default(), SeqNo::ZERO));
                 let (overlaid_snapshot, _) = self
                     .runner_lease_store()
                     .overlay((baseline.clone(), None), overlay)
@@ -782,7 +803,7 @@ where
                     }
                 };
                 let persist_delta = row_store_durable_delta(delta.clone());
-                let reservation_seq = self.next_delta_log_seq().await?;
+                let reservation_seq = current_journal_seq.next();
                 let next_state = RowSnapshotState::new(new_snapshot, store, reservation_seq)?;
                 let (run_row_reservations, active_lock_reservations) = match self
                     .reserve_preappend_rows(&baseline, &persist_delta, reservation_seq)
@@ -1589,12 +1610,7 @@ where
                     let overlay_baseline =
                         matches!(overlay, RunnerLeaseOverlay::All).then(|| state.snapshot.clone());
                     let overlay_run = match overlay {
-                        RunnerLeaseOverlay::Run(run_id) => state
-                            .snapshot
-                            .runs
-                            .iter()
-                            .find(|record| record.run_id == run_id)
-                            .cloned(),
+                        RunnerLeaseOverlay::Run(run_id) => state.run_record_by_id(run_id),
                         RunnerLeaseOverlay::None | RunnerLeaseOverlay::All => None,
                     };
                     (
@@ -1638,7 +1654,7 @@ where
                 let build_delta = build_delta.take().ok_or_else(|| TurnError::Unavailable {
                     reason: "turn state row-store targeted delta builder was reused".to_string(),
                 })?;
-                let (delta, persist_delta, reservation_baseline) = {
+                let (delta, persist_delta, reservation_baseline, reservation_seq) = {
                     let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
                         reason: "row snapshot cache was not initialized".to_string(),
                     })?;
@@ -1648,9 +1664,13 @@ where
                     let reservation_baseline = self
                         .preappend_row_reservations
                         .then(|| state.snapshot.clone());
-                    (delta, persist_delta, reservation_baseline)
+                    (
+                        delta,
+                        persist_delta,
+                        reservation_baseline,
+                        state.journal_seq.next(),
+                    )
                 };
-                let reservation_seq = self.next_delta_log_seq().await?;
                 let (run_row_reservations, active_lock_reservations) =
                     if let Some(baseline) = reservation_baseline.as_ref() {
                         match self
