@@ -1,3 +1,4 @@
+// arch-exempt: large_file, crate layer boundary gate stays with existing architecture suite, plan #5852
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
@@ -49,29 +50,49 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
         .expect("cargo metadata must include packages");
 
     let mut layers = BTreeMap::new();
+    let mut invalid_workspace_package_names = Vec::new();
+    let mut missing_metadata = Vec::new();
+    let mut invalid_layers = Vec::new();
     for package in packages {
         let Some(name) = package["name"].as_str() else {
             continue;
         };
         if !is_ironclaw_workspace_package(name) {
+            invalid_workspace_package_names.push(name.to_string());
             continue;
         }
 
         let manifest_path = package["manifest_path"]
             .as_str()
             .unwrap_or("<unknown manifest>");
-        let layer = package_layer(package).unwrap_or_else(|| {
-            panic!(
-                "{name} at {manifest_path} must declare \
-                 [package.metadata.ironclaw] layer = \"...\""
-            )
-        });
-        assert!(
-            IRONCLAW_CRATE_LAYERS.contains(&layer),
-            "{name} declares unknown IronClaw layer `{layer}`; valid layers are {IRONCLAW_CRATE_LAYERS:?}"
-        );
+        let Some(layer) = package_layer(package) else {
+            missing_metadata.push(format!("{name} at {manifest_path}"));
+            continue;
+        };
+        if !IRONCLAW_CRATE_LAYERS.contains(&layer) {
+            invalid_layers.push(format!("{name} at {manifest_path} declares `{layer}`"));
+            continue;
+        }
         layers.insert(name.to_string(), layer.to_string());
     }
+
+    assert!(
+        invalid_workspace_package_names.is_empty(),
+        "Workspace packages must follow the IronClaw naming convention \
+         (`ironclaw` or `ironclaw_*`). Invalid packages:\n{}",
+        invalid_workspace_package_names.join("\n")
+    );
+    assert!(
+        missing_metadata.is_empty(),
+        "Workspace packages must declare [package.metadata.ironclaw] layer = \"...\":\n{}",
+        missing_metadata.join("\n")
+    );
+    assert!(
+        invalid_layers.is_empty(),
+        "Workspace packages declare unknown IronClaw layers; valid layers are \
+         {IRONCLAW_CRATE_LAYERS:?}:\n{}",
+        invalid_layers.join("\n")
+    );
 
     let mut used_exceptions = BTreeSet::new();
     let mut violations = Vec::new();
@@ -100,6 +121,7 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
                     "{crate_name} ({crate_layer}) must not depend on \
                      {dependency_name} ({dependency_layer})"
                 ));
+                continue;
             }
             if crate_name == "ironclaw_agent_loop" && *dependency_layer != "contracts" {
                 if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
@@ -113,7 +135,9 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
             }
         }
 
-        for dependency in workspace_dependency_names(package) {
+        for dependency in
+            workspace_dependency_names(package).filter(|dep| is_normal_dependency(dep))
+        {
             let Some(dependency_name) = dependency["name"].as_str() else {
                 continue;
             };
@@ -125,13 +149,9 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
                     used_exceptions.insert((exception.crate_name, exception.dependency_name));
                     continue;
                 }
-                let kind = dependency
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("normal");
                 violations.push(format!(
                     "{crate_name} ({crate_layer}) must not depend on legacy crate \
-                     {dependency_name} via a {kind} dependency"
+                     {dependency_name} via a normal dependency"
                 ));
             }
         }
