@@ -5593,9 +5593,37 @@ output_schema_ref = "schemas/write.output.json"
                     }
                 }
 
-                let request = String::from_utf8_lossy(&buffer);
-                let request_line = request.lines().next().unwrap_or_default();
-                let auth_header = request
+                let header_end = buffer
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                    .unwrap_or(buffer.len());
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                let request_len = header_end.saturating_add(content_length);
+                while buffer.len() < request_len {
+                    let mut chunk = [0_u8; 1024];
+                    let read = stream.read(&mut chunk).await.expect("read test body");
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+
+                let body = &buffer[header_end..buffer.len().min(request_len)];
+                let request_json = serde_json::from_slice::<serde_json::Value>(body).ok();
+                let wants_stream = request_json
+                    .as_ref()
+                    .and_then(|value| value.get("stream"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let request_line = headers.lines().next().unwrap_or_default();
+                let auth_header = headers
                     .lines()
                     .filter_map(|line| line.split_once(':'))
                     .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
@@ -5603,26 +5631,41 @@ output_schema_ref = "schemas/write.output.json"
                     .unwrap_or_default()
                     .to_string();
                 let is_chat_completion = request_line.contains("/v1/chat/completions");
-                let body = if is_chat_completion {
-                    r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                if is_chat_completion && wants_stream {
+                    let body = concat!(
+                        r#"data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                        "\n\n",
+                        "data: [DONE]\n\n"
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{}",
+                        body
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write test streaming response");
                 } else {
-                    r#"{"data":[]}"#
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write test response");
+                    let body = if is_chat_completion {
+                        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    } else {
+                        r#"{"data":[]}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write test response");
+                }
 
                 if is_chat_completion {
                     if let Some(auth_tx) = auth_tx.take() {
                         let _ = auth_tx.send(auth_header);
                     }
-                    break;
                 }
             }
         });
