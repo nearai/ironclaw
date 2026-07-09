@@ -1,5 +1,5 @@
 [package]
-name = "ironclaw_reborn"
+name = "ironclaw_runner"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -19,7 +19,7 @@ root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
 # Bare libSQL dependency toggle, mirroring the root `ironclaw` crate's `libsql`
 # feature. CI lints/builds the whole workspace with `--all --features libsql`
 # (e.g. code_style's `libsql-only` leg and platform-and-compat); without this,
-# feature resolution fails because `ironclaw_reborn` is the lone workspace
+# feature resolution fails because `ironclaw_runner` is the lone workspace
 # member that enables libSQL only through the more specific features below.
 libsql = ["dep:libsql"]
 libsql-secrets = [
@@ -38,7 +38,7 @@ filesystem-goal-store = ["dep:ironclaw_filesystem"]
 webui-user-store = ["dep:libsql"]
 filesystem-local-trigger-access = ["dep:ironclaw_filesystem"]
 # Opt-in because the restart coverage opens real libSQL-backed turn/thread stores.
-# Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_reborn`
+# Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_runner`
 # stays fast, while CI can exercise process-restart persistence explicitly.
 libsql-restart-tests = [
     "dep:libsql",

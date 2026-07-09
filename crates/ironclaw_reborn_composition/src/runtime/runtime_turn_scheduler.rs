@@ -1,4 +1,4 @@
-use ironclaw_reborn::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
+use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -1,4 +1,4 @@
-# Agent Map — ironclaw_reborn
+# Agent Map — ironclaw_runner
 
 ## Start Here
 
@@ -30,7 +30,7 @@
 
 ## Validation
 
-- Fast local check: `cargo test -p ironclaw_reborn`
+- Fast local check: `cargo test -p ironclaw_runner`
 - Run specific integration tests when touched: `driver_registry`, `planned_driver_e2e`, `loop_driver_host`, `model_routes`, `production_readiness`.
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
 

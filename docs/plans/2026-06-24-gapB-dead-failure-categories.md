@@ -38,12 +38,12 @@ Exhaustive set of values `sanitized_reason` can take when status is
   `compaction_unavailable`
 - `LoopExitViolationKind::failure_category()` (`loop_exit.rs:692-703`):
   `interrupted_unexpectedly`, `driver_protocol_violation`
-- `RebornTurnRunExecutor` (`crates/ironclaw_reborn/src/turn_run_executor.rs`,
+- `RebornTurnRunExecutor` (`crates/ironclaw_runner/src/turn_run_executor.rs`,
   `turn_runner.rs`): `driver_not_found`, `host_creation_failed`,
   `route_snapshot_persistence_failed`, `driver_invalid_request`,
   `driver_unavailable`, `driver_failed`, `model_credits_exhausted`,
   `model_credentials_unavailable`, `unknown_failure`, `exit_application_failed`
-- `TurnRunScheduler` (`crates/ironclaw_reborn/src/turn_scheduler.rs:655,668`):
+- `TurnRunScheduler` (`crates/ironclaw_runner/src/turn_scheduler.rs:655,668`):
   **`scheduler_executor_panic`**, **`scheduler_heartbeat_failed`**
 - store paths (`crates/ironclaw_turns/src/memory/mod.rs:2284,2990`):
   `interrupted_unexpectedly`, `lease_expired`

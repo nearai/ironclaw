@@ -69,16 +69,22 @@ use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
-use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_reborn::loop_exit_applier::{
+use ironclaw_reborn_composition::build_default_budget_accountant;
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::{
+    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
+    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
+};
+use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_runner::loop_exit_applier::{
     LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
 };
-use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-use ironclaw_reborn::runtime::{
+use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
     ToolDisclosureMode, build_default_planned_runtime,
 };
-use ironclaw_reborn::subagent::{
+use ironclaw_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
@@ -86,13 +92,7 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
-use ironclaw_reborn::turn_scheduler::TurnRunSchedulerHandle;
-use ironclaw_reborn_composition::build_default_budget_accountant;
-use ironclaw_reborn_config::BudgetDefaults;
-use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
-    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
-};
+use ironclaw_runner::turn_scheduler::TurnRunSchedulerHandle;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
@@ -718,7 +718,7 @@ impl RebornIntegrationGroupBuilder {
             turn_state_for_evidence,
             Arc::clone(&loop_checkpoint_store),
             Arc::clone(&await_edge_store)
-                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             group_thread_scope.clone(),
         )
         .with_checkpoint_state_store(checkpoint_state_store.clone());
@@ -827,7 +827,7 @@ impl RebornIntegrationGroupBuilder {
             subagent_await_edge_settler: await_edge_resolver
                 as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
-                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,

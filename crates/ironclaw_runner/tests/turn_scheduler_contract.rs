@@ -17,11 +17,11 @@ use ironclaw_host_runtime::{
     ProductionWiringIssueKind,
 };
 use ironclaw_processes::ProcessServices;
-use ironclaw_reborn::turn_scheduler::{
+use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_runner::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig,
 };
-use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,

@@ -3,7 +3,7 @@
 //! This module is the bridge from the runner-facing `AgentLoopDriver` trait to
 //! the sealed `ironclaw_agent_loop` framework. It intentionally holds an opaque
 //! `LoopFamily` and the canonical executor; it does not expose planner slots to
-//! `ironclaw_reborn`.
+//! `ironclaw_runner`.
 
 use std::sync::Arc;
 

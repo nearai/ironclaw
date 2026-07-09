@@ -12,7 +12,7 @@
 ## Agent-loop touch points
 
 - Production wiring validates the trusted turn-run transition port consumed by
-  `ironclaw_reborn`; it does not construct or own the scheduler/executor.
+  `ironclaw_runner`; it does not construct or own the scheduler/executor.
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
 - `production.rs` and `services.rs` compose runtime services and readiness
   evidence used by Reborn loop wiring.
@@ -28,7 +28,7 @@
 - Add a first-party tool file per capability, except for tightly-coupled
   v1-compatible coding-tool families that share one legacy surface contract.
 - Keep readiness checks near the runtime service they validate; driver/product
-  readiness belongs in `ironclaw_reborn`.
+  readiness belongs in `ironclaw_runner`.
 
 ## Common mistakes
 

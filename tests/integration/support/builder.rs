@@ -39,8 +39,8 @@ use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, Product
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
-use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_reborn::runtime::ToolDisclosureMode;
+use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_turns::{
@@ -1766,7 +1766,7 @@ pub(crate) fn apply_hermetic_env() {
             // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
             // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
             // never ambient (see `tool_disclosure.rs`'s negative control).
-            std::env::remove_var(ironclaw_reborn::runtime::REBORN_TOOL_DISCLOSURE_ENV);
+            std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
 }
