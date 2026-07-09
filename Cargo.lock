@@ -4962,7 +4962,6 @@ dependencies = [
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
- "ironclaw_skill_learning",
  "ironclaw_skills",
  "ironclaw_slack_v2_adapter",
  "ironclaw_threads",
@@ -5293,16 +5292,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_skill_learning"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ironclaw_skills",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
