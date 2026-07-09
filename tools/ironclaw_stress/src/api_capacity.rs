@@ -26,6 +26,7 @@ use crate::{
 };
 
 const DEFAULT_READ_MIX: &str = "list_threads=50,timeline=45,session=5";
+const BACKGROUND_FLOW_MARKER: &str = "ironclaw-stress-background";
 const MAX_ERROR_BODY_CHARS: usize = 512;
 const MAX_MOCK_LLM_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_READ_WORKER_SLEEP: Duration = Duration::from_secs(3600);
@@ -40,6 +41,10 @@ pub(crate) struct ApiCapacitySummary {
     pub(crate) read_workers: usize,
     pub(crate) read_mix: String,
     pub(crate) page_size: u32,
+    pub(crate) background_users: usize,
+    pub(crate) background_concurrency: usize,
+    pub(crate) background_operations_per_user: usize,
+    pub(crate) background_start_delay_ms: u64,
     pub(crate) wait_for_assistant: bool,
     pub(crate) terminal_timeout_ms: u64,
     pub(crate) poll_interval_ms: u64,
@@ -53,13 +58,20 @@ pub(crate) struct MockLlmSummary {
     pub(crate) base_url: String,
     pub(crate) model: String,
     pub(crate) latency_ms: u64,
+    pub(crate) background_latency_ms: u64,
     pub(crate) jitter_ms: u64,
     pub(crate) output_bytes: usize,
     pub(crate) failure_rate: f64,
     pub(crate) requests: u64,
+    pub(crate) foreground_requests: u64,
+    pub(crate) background_requests: u64,
     pub(crate) max_in_flight: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) request_latency: Option<LatencySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) foreground_request_latency: Option<LatencySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) background_request_latency: Option<LatencySummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) first_request_offset_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +209,7 @@ struct MockLlmConfig {
     bind: SocketAddr,
     model: String,
     latency_ms: u64,
+    background_latency_ms: u64,
     jitter_ms: u64,
     output_bytes: usize,
     failure_rate: f64,
@@ -206,14 +219,19 @@ struct MockLlmConfig {
 struct MockLlmState {
     model: String,
     latency_ms: u64,
+    background_latency_ms: u64,
     jitter_ms: u64,
     output_bytes: usize,
     failure_rate: f64,
     counter: AtomicU64,
+    foreground_counter: AtomicU64,
+    background_counter: AtomicU64,
     in_flight: AtomicU64,
     max_in_flight: AtomicU64,
     started_at: Instant,
     request_latencies: Mutex<Vec<Duration>>,
+    foreground_request_latencies: Mutex<Vec<Duration>>,
+    background_request_latencies: Mutex<Vec<Duration>>,
     request_start_offsets: Mutex<Vec<Duration>>,
 }
 
@@ -224,11 +242,16 @@ impl MockLlmState {
             .lock()
             .map(|latencies| latencies.clone())
             .unwrap_or_default();
-        let mut request_latency_us = request_latencies
-            .iter()
-            .map(Duration::as_micros)
-            .collect::<Vec<_>>();
-        request_latency_us.sort_unstable();
+        let foreground_request_latencies = self
+            .foreground_request_latencies
+            .lock()
+            .map(|latencies| latencies.clone())
+            .unwrap_or_default();
+        let background_request_latencies = self
+            .background_request_latencies
+            .lock()
+            .map(|latencies| latencies.clone())
+            .unwrap_or_default();
         let request_start_offsets = self
             .request_start_offsets
             .lock()
@@ -240,21 +263,30 @@ impl MockLlmState {
             base_url,
             model: self.model.clone(),
             latency_ms: self.latency_ms,
+            background_latency_ms: self.resolved_background_latency_ms(),
             jitter_ms: self.jitter_ms,
             output_bytes: self.output_bytes,
             failure_rate: self.failure_rate,
             requests: self.counter.load(Ordering::Relaxed),
+            foreground_requests: self.foreground_counter.load(Ordering::Relaxed),
+            background_requests: self.background_counter.load(Ordering::Relaxed),
             max_in_flight: self.max_in_flight.load(Ordering::Relaxed),
-            request_latency: if request_latency_us.is_empty() {
-                None
-            } else {
-                Some(latency_summary(&request_latency_us))
-            },
+            request_latency: duration_latency_summary(&request_latencies),
+            foreground_request_latency: duration_latency_summary(&foreground_request_latencies),
+            background_request_latency: duration_latency_summary(&background_request_latencies),
             first_request_offset_ms: first_request_offset.map(|duration| duration.as_millis()),
             last_request_offset_ms: last_request_offset.map(|duration| duration.as_millis()),
             request_start_spread_ms: first_request_offset
                 .zip(last_request_offset)
                 .map(|(first, last)| last.saturating_sub(first).as_millis()),
+        }
+    }
+
+    fn resolved_background_latency_ms(&self) -> u64 {
+        if self.background_latency_ms == 0 {
+            self.latency_ms
+        } else {
+            self.background_latency_ms
         }
     }
 
@@ -264,9 +296,21 @@ impl MockLlmState {
         }
     }
 
-    fn record_request_latency(&self, latency: Duration) {
+    fn record_request_latency(&self, kind: MockRequestKind, latency: Duration) {
         if let Ok(mut latencies) = self.request_latencies.lock() {
             latencies.push(latency);
+        }
+        match kind {
+            MockRequestKind::Foreground => {
+                if let Ok(mut latencies) = self.foreground_request_latencies.lock() {
+                    latencies.push(latency);
+                }
+            }
+            MockRequestKind::Background => {
+                if let Ok(mut latencies) = self.background_request_latencies.lock() {
+                    latencies.push(latency);
+                }
+            }
         }
     }
 
@@ -280,17 +324,37 @@ impl MockLlmState {
     }
 }
 
+fn duration_latency_summary(latencies: &[Duration]) -> Option<LatencySummary> {
+    if latencies.is_empty() {
+        return None;
+    }
+    let mut latency_us = latencies
+        .iter()
+        .map(Duration::as_micros)
+        .collect::<Vec<_>>();
+    latency_us.sort_unstable();
+    Some(latency_summary(&latency_us))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MockRequestKind {
+    Foreground,
+    Background,
+}
+
 struct MockRequestGuard {
     state: Arc<MockLlmState>,
+    kind: MockRequestKind,
     started_at: Instant,
 }
 
 impl MockRequestGuard {
-    fn new(state: &Arc<MockLlmState>) -> Self {
+    fn new(state: &Arc<MockLlmState>, kind: MockRequestKind) -> Self {
         state.record_request_start(state.started_at.elapsed());
         state.enter_request();
         Self {
             state: Arc::clone(state),
+            kind,
             started_at: Instant::now(),
         }
     }
@@ -298,7 +362,8 @@ impl MockRequestGuard {
 
 impl Drop for MockRequestGuard {
     fn drop(&mut self) {
-        self.state.record_request_latency(self.started_at.elapsed());
+        self.state
+            .record_request_latency(self.kind, self.started_at.elapsed());
         self.state.exit_request();
     }
 }
@@ -328,11 +393,37 @@ pub(crate) async fn run(
 ) -> Result<ApiCapacityRun, String> {
     let _mock_llm = start_mock_llm(args).await?;
     let harness = ApiHarness::new(args)?;
-    let identities = load_identities(args).await?;
+    let identity_count = args.users.saturating_add(args.api_background_users).max(1);
+    let identities = load_identities(args, identity_count).await?;
     let identities = provision_missing_identities(args, run_id, &harness, identities).await?;
-    let users = setup_users(args, run_id, &harness, identities).await?;
+    let foreground_identities = select_identities(&identities, 0, args.users);
+    let background_identities =
+        select_identities(&identities, args.users, args.api_background_users);
+    let users = setup_users(
+        args,
+        run_id,
+        &harness,
+        foreground_identities,
+        args.users,
+        "fg",
+    )
+    .await?;
+    let background_users = if args.api_background_users == 0 {
+        Vec::new()
+    } else {
+        setup_users(
+            args,
+            run_id,
+            &harness,
+            background_identities,
+            args.api_background_users,
+            "background",
+        )
+        .await?
+    };
     let read_mix = ReadMix::parse(&args.api_read_mix)?;
     let read_workers = read_worker_count(args);
+    let background_concurrency = background_concurrency_limit(args, background_users.len());
 
     if let Some(warmup_args) = args.warmup_args() {
         eprintln!(
@@ -349,6 +440,7 @@ pub(crate) async fn run(
             &warmup_namespace,
             &harness,
             Arc::new(users.clone()),
+            Arc::new(background_users.clone()),
             &read_mix,
             warmup_progress,
         )
@@ -362,6 +454,7 @@ pub(crate) async fn run(
         &measured_namespace,
         &harness,
         Arc::new(users),
+        Arc::new(background_users),
         &read_mix,
         progress,
     )
@@ -373,6 +466,12 @@ pub(crate) async fn run(
         "full_flow".to_string(),
         summarize_flow_samples(&window.flow_samples, elapsed),
     );
+    if !window.background_flow_samples.is_empty() {
+        endpoints.insert(
+            "background_full_flow".to_string(),
+            summarize_flow_samples(&window.background_flow_samples, elapsed),
+        );
+    }
     let summary = ApiCapacitySummary {
         base_url: harness.base_url.clone(),
         virtual_users: args.users,
@@ -381,6 +480,10 @@ pub(crate) async fn run(
         read_workers,
         read_mix: read_mix.spec,
         page_size: args.api_page_size,
+        background_users: args.api_background_users,
+        background_concurrency,
+        background_operations_per_user: args.api_background_operations,
+        background_start_delay_ms: args.api_background_start_delay_ms,
         wait_for_assistant: args.api_wait_for_assistant,
         terminal_timeout_ms: args.api_terminal_timeout_ms,
         poll_interval_ms: args.api_poll_interval_ms,
@@ -398,6 +501,7 @@ pub(crate) async fn run(
 
 struct WindowResult {
     flow_samples: Vec<Sample>,
+    background_flow_samples: Vec<Sample>,
     api_samples: Vec<ApiRequestSample>,
 }
 
@@ -433,12 +537,32 @@ async fn run_window(
     operation_namespace: &str,
     harness: &ApiHarness,
     users: Arc<Vec<ApiUser>>,
+    background_users: Arc<Vec<ApiUser>>,
     read_mix: &ReadMix,
     progress: Arc<ProgressCounters>,
 ) -> Result<WindowResult, String> {
+    let mut background_tasks = JoinSet::new();
     let mut writer_tasks = JoinSet::new();
     let mut read_tasks = JoinSet::new();
     let stop_reads = Arc::new(ReadShutdown::new());
+
+    let background_limit = background_concurrency_limit(args, background_users.len());
+    let mut next_background_index = 0usize;
+    while next_background_index < background_users.len()
+        && background_tasks.len() < background_limit
+    {
+        let user = background_users[next_background_index].clone();
+        next_background_index += 1;
+        let harness = harness.clone();
+        let args = args.clone();
+        let operation_namespace = operation_namespace.to_string();
+        background_tasks.spawn(async move {
+            run_background_user(&args, &operation_namespace, harness, user).await
+        });
+    }
+    if !background_tasks.is_empty() && args.api_background_start_delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(args.api_background_start_delay_ms)).await;
+    }
 
     let writer_limit = writer_concurrency_limit(args, users.len());
     let writer_user_count = writer_user_count_for_window(args, users.len(), writer_limit);
@@ -470,10 +594,12 @@ async fn run_window(
     }
 
     let mut flow_samples = Vec::new();
+    let mut background_flow_samples = Vec::new();
     let mut api_samples = Vec::new();
     while let Some(joined) = writer_tasks.join_next().await {
         let result = joined.map_err(|error| format!("api task join failed: {error}"))??;
         flow_samples.extend(result.flow_samples);
+        background_flow_samples.extend(result.background_flow_samples);
         api_samples.extend(result.api_samples);
 
         if next_writer_index < writer_user_count {
@@ -493,11 +619,31 @@ async fn run_window(
     while let Some(joined) = read_tasks.join_next().await {
         let result = joined.map_err(|error| format!("api read task join failed: {error}"))??;
         flow_samples.extend(result.flow_samples);
+        background_flow_samples.extend(result.background_flow_samples);
         api_samples.extend(result.api_samples);
+    }
+
+    while let Some(joined) = background_tasks.join_next().await {
+        let result =
+            joined.map_err(|error| format!("api background task join failed: {error}"))??;
+        background_flow_samples.extend(result.background_flow_samples);
+        api_samples.extend(result.api_samples);
+
+        if next_background_index < background_users.len() {
+            let user = background_users[next_background_index].clone();
+            next_background_index += 1;
+            let harness = harness.clone();
+            let args = args.clone();
+            let operation_namespace = operation_namespace.to_string();
+            background_tasks.spawn(async move {
+                run_background_user(&args, &operation_namespace, harness, user).await
+            });
+        }
     }
 
     Ok(WindowResult {
         flow_samples,
+        background_flow_samples,
         api_samples,
     })
 }
@@ -514,9 +660,60 @@ fn writer_user_count_for_window(args: &Args, user_count: usize, writer_limit: us
     }
 }
 
+fn background_concurrency_limit(args: &Args, background_user_count: usize) -> usize {
+    if background_user_count == 0 {
+        0
+    } else if args.api_background_concurrency == 0 {
+        background_user_count.min(8)
+    } else {
+        args.api_background_concurrency
+            .max(1)
+            .min(background_user_count)
+    }
+}
+
 struct TaskResult {
     flow_samples: Vec<Sample>,
+    background_flow_samples: Vec<Sample>,
     api_samples: Vec<ApiRequestSample>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiFlowKind {
+    Foreground,
+    Background,
+}
+
+impl ApiFlowKind {
+    fn send_sample_name(self) -> &'static str {
+        match self {
+            Self::Foreground => "send_message",
+            Self::Background => "background_send_message",
+        }
+    }
+
+    fn timeline_sample_name(self) -> &'static str {
+        match self {
+            Self::Foreground => "timeline",
+            Self::Background => "background_timeline",
+        }
+    }
+
+    fn wait_sample_name(self) -> &'static str {
+        match self {
+            Self::Foreground => "wait_for_assistant",
+            Self::Background => "background_wait_for_assistant",
+        }
+    }
+
+    fn payload_prefix(self, operation_ref: &str) -> String {
+        match self {
+            Self::Foreground => format!("api stress message {operation_ref}"),
+            Self::Background => {
+                format!("{BACKGROUND_FLOW_MARKER} api stress background message {operation_ref}")
+            }
+        }
+    }
 }
 
 async fn run_virtual_user(
@@ -545,6 +742,7 @@ async fn run_virtual_user(
             operation_index,
             &operation_ref,
             expected_finalized_assistant_count,
+            ApiFlowKind::Foreground,
         )
         .await;
         expected_finalized_assistant_count = updated_finalized_assistant_count;
@@ -561,6 +759,44 @@ async fn run_virtual_user(
 
     Ok(TaskResult {
         flow_samples,
+        background_flow_samples: Vec::new(),
+        api_samples,
+    })
+}
+
+async fn run_background_user(
+    args: &Args,
+    operation_namespace: &str,
+    harness: ApiHarness,
+    user: ApiUser,
+) -> Result<TaskResult, String> {
+    let mut expected_finalized_assistant_count = 0usize;
+    let mut background_flow_samples = Vec::with_capacity(args.api_background_operations);
+    let mut api_samples = Vec::new();
+
+    for operation_index in 0..args.api_background_operations {
+        let operation_ref = format!(
+            "{operation_namespace}:background:{}:{}:{}",
+            user.label, user.index, operation_index
+        );
+        let (flow, mut operation_api_samples, updated_finalized_assistant_count) = run_full_flow(
+            args,
+            &harness,
+            &user,
+            operation_index,
+            &operation_ref,
+            expected_finalized_assistant_count,
+            ApiFlowKind::Background,
+        )
+        .await;
+        expected_finalized_assistant_count = updated_finalized_assistant_count;
+        api_samples.append(&mut operation_api_samples);
+        background_flow_samples.push(flow);
+    }
+
+    Ok(TaskResult {
+        flow_samples: Vec::new(),
+        background_flow_samples,
         api_samples,
     })
 }
@@ -572,20 +808,21 @@ async fn run_full_flow(
     operation_index: usize,
     operation_ref: &str,
     expected_finalized_assistant_count: usize,
+    flow_kind: ApiFlowKind,
 ) -> (Sample, Vec<ApiRequestSample>, usize) {
     let started = Instant::now();
     let mut api_samples = Vec::new();
     let body = json!({
         "client_action_id": format!("ironclaw-stress-api:{operation_ref}"),
         "content": stress_payload(
-            format!("api stress message {operation_ref}"),
+            flow_kind.payload_prefix(operation_ref),
             args.user_message_bytes,
         ),
     });
     let send = harness
         .request_json(
             user,
-            "send_message",
+            flow_kind.send_sample_name(),
             Method::POST,
             &format!("/api/webchat/v2/threads/{}/messages", user.thread_id),
             Some(body),
@@ -604,11 +841,12 @@ async fn run_full_flow(
                     user,
                     operation_index,
                     target_finalized_count,
+                    flow_kind,
                     &mut api_samples,
                 )
                 .await;
                 api_samples.push(ApiRequestSample {
-                    name: "wait_for_assistant",
+                    name: flow_kind.wait_sample_name(),
                     latency: wait_started.elapsed(),
                     failure: wait.as_ref().err().cloned(),
                 });
@@ -656,7 +894,7 @@ async fn run_full_flow(
             } else {
                 Some(FailureCause::new(
                     "api_submit_not_accepted",
-                    "send_message",
+                    flow_kind.send_sample_name(),
                     compact_json(&value),
                 ))
             }
@@ -684,11 +922,14 @@ async fn wait_for_assistant(
     user: &ApiUser,
     operation_index: usize,
     target_finalized_count: usize,
+    flow_kind: ApiFlowKind,
     api_samples: &mut Vec<ApiRequestSample>,
 ) -> Result<usize, FailureCause> {
     let deadline = Instant::now() + Duration::from_millis(args.api_terminal_timeout_ms);
     loop {
-        let timeline = harness.timeline(user).await;
+        let timeline = harness
+            .timeline_with_name(user, flow_kind.timeline_sample_name())
+            .await;
         let value = timeline.value.clone();
         api_samples.push(timeline.sample);
         match value {
@@ -755,6 +996,7 @@ async fn run_read_worker(
 
     Ok(TaskResult {
         flow_samples: Vec::new(),
+        background_flow_samples: Vec::new(),
         api_samples,
     })
 }
@@ -856,9 +1098,13 @@ impl ApiHarness {
     }
 
     async fn timeline(&self, user: &ApiUser) -> ApiCallResult {
+        self.timeline_with_name(user, "timeline").await
+    }
+
+    async fn timeline_with_name(&self, user: &ApiUser, name: &'static str) -> ApiCallResult {
         self.request_json(
             user,
-            "timeline",
+            name,
             Method::GET,
             &format!(
                 "/api/webchat/v2/threads/{}/timeline?limit={}",
@@ -964,17 +1210,19 @@ async fn setup_users(
     run_id: &str,
     harness: &ApiHarness,
     identities: Vec<ApiIdentity>,
+    user_count: usize,
+    thread_label: &str,
 ) -> Result<Vec<ApiUser>, String> {
     let setup_concurrency = args.api_setup_concurrency.max(1);
     let mut next_index = 0;
     let mut join_set = JoinSet::new();
-    let mut users = Vec::with_capacity(args.users);
+    let mut users = Vec::with_capacity(user_count);
 
-    while next_index < args.users || !join_set.is_empty() {
-        while next_index < args.users && join_set.len() < setup_concurrency {
+    while next_index < user_count || !join_set.is_empty() {
+        while next_index < user_count && join_set.len() < setup_concurrency {
             let harness = harness.clone();
             let identity = identities[next_index % identities.len()].clone();
-            let thread_id = format!("stress-{run_id}-{next_index}");
+            let thread_id = format!("stress-{run_id}-{thread_label}-{next_index}");
             let user_index = next_index;
             join_set.spawn(async move {
                 let create = harness.create_thread(&identity, &thread_id).await;
@@ -1004,6 +1252,19 @@ async fn setup_users(
 
     users.sort_by_key(|user| user.index);
     Ok(users)
+}
+
+fn select_identities(
+    identities: &[ApiIdentity],
+    start_index: usize,
+    count: usize,
+) -> Vec<ApiIdentity> {
+    if count == 0 {
+        return Vec::new();
+    }
+    (0..count)
+        .map(|offset| identities[(start_index + offset) % identities.len()].clone())
+        .collect()
 }
 
 async fn provision_missing_identities(
@@ -1181,12 +1442,12 @@ async fn prepare_admin_provisioners(
         .collect()
 }
 
-async fn load_identities(args: &Args) -> Result<Vec<ApiIdentity>, String> {
+async fn load_identities(args: &Args, identity_count: usize) -> Result<Vec<ApiIdentity>, String> {
     if let Some(path) = &args.api_users_jsonl {
         return load_identity_file(path).await;
     }
     let bearer_token = generated_identity_bearer_token(args);
-    Ok((0..args.users)
+    Ok((0..identity_count)
         .map(|index| ApiIdentity {
             label: format!("user-{index}"),
             bearer_token: bearer_token.clone(),
@@ -1509,6 +1770,7 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
         bind,
         model: args.mock_llm_model.clone(),
         latency_ms: args.mock_llm_latency_ms,
+        background_latency_ms: args.mock_llm_background_latency_ms,
         jitter_ms: args.mock_llm_jitter_ms,
         output_bytes: args.mock_llm_output_bytes,
         failure_rate: args.mock_llm_failure_rate,
@@ -1522,14 +1784,19 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
     let state = Arc::new(MockLlmState {
         model: config.model.clone(),
         latency_ms: config.latency_ms,
+        background_latency_ms: config.background_latency_ms,
         jitter_ms: config.jitter_ms,
         output_bytes: config.output_bytes,
         failure_rate: config.failure_rate,
         counter: AtomicU64::new(0),
+        foreground_counter: AtomicU64::new(0),
+        background_counter: AtomicU64::new(0),
         in_flight: AtomicU64::new(0),
         max_in_flight: AtomicU64::new(0),
         started_at: Instant::now(),
         request_latencies: Mutex::new(Vec::new()),
+        foreground_request_latencies: Mutex::new(Vec::new()),
+        background_request_latencies: Mutex::new(Vec::new()),
         request_start_offsets: Mutex::new(Vec::new()),
     });
     let (stop_sender, mut stop_receiver) = oneshot::channel();
@@ -1640,8 +1907,17 @@ async fn handle_mock_completion(
     body: &[u8],
     state: Arc<MockLlmState>,
 ) -> Result<(), String> {
-    let _request_guard = MockRequestGuard::new(&state);
+    let request_kind = classify_mock_request(body);
+    let _request_guard = MockRequestGuard::new(&state, request_kind);
     let request_index = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
+    match request_kind {
+        MockRequestKind::Foreground => {
+            state.foreground_counter.fetch_add(1, Ordering::Relaxed);
+        }
+        MockRequestKind::Background => {
+            state.background_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     if should_fail_mock_request(state.failure_rate, request_index) {
         write_mock_response(
             stream,
@@ -1657,7 +1933,11 @@ async fn handle_mock_completion(
     } else {
         deterministic_jitter_ms(request_index, state.jitter_ms)
     };
-    let wait = state.latency_ms.saturating_add(jitter);
+    let base_latency_ms = match request_kind {
+        MockRequestKind::Foreground => state.latency_ms,
+        MockRequestKind::Background => state.resolved_background_latency_ms(),
+    };
+    let wait = base_latency_ms.saturating_add(jitter);
     if wait > 0 {
         tokio::time::sleep(Duration::from_millis(wait)).await;
     }
@@ -1674,6 +1954,14 @@ async fn handle_mock_completion(
     } else {
         let response = mock_completion_response(&state.model, request_index, content);
         write_json_response(stream, 200, &response).await
+    }
+}
+
+fn classify_mock_request(body: &[u8]) -> MockRequestKind {
+    if std::str::from_utf8(body).is_ok_and(|body| body.contains(BACKGROUND_FLOW_MARKER)) {
+        MockRequestKind::Background
+    } else {
+        MockRequestKind::Foreground
     }
 }
 
@@ -1955,6 +2243,29 @@ mod tests {
         assert_eq!(
             writer_user_count_for_window(&args, args.users, writer_limit),
             10
+        );
+    }
+
+    #[test]
+    fn background_concurrency_auto_caps_at_trigger_default_shape() {
+        let args = parsed_api_args(&["--api-background-users", "100"]);
+
+        assert_eq!(background_concurrency_limit(&args, 100), 8);
+        assert_eq!(background_concurrency_limit(&args, 4), 4);
+        assert_eq!(background_concurrency_limit(&args, 0), 0);
+    }
+
+    #[test]
+    fn mock_request_classifier_detects_background_marker() {
+        assert_eq!(
+            classify_mock_request(br#"{"messages":[{"content":"hello"}]}"#),
+            MockRequestKind::Foreground
+        );
+        assert_eq!(
+            classify_mock_request(
+                br#"{"messages":[{"content":"ironclaw-stress-background long task"}]}"#
+            ),
+            MockRequestKind::Background
         );
     }
 }

@@ -245,6 +245,22 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 16)]
     pub(crate) api_setup_concurrency: usize,
 
+    /// Background long-running API users to run alongside foreground api-user-capacity sends.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_background_users: usize,
+
+    /// Max concurrently active background API users. 0 auto-scales from --api-background-users.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_background_concurrency: usize,
+
+    /// Full-flow operations per background API user.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) api_background_operations: usize,
+
+    /// Delay after launching background users before foreground sends start.
+    #[arg(long, default_value_t = 250)]
+    pub(crate) api_background_start_delay_ms: u64,
+
     /// Optional bind address for the built-in OpenAI-compatible mock LLM sidecar.
     #[arg(long)]
     pub(crate) mock_llm_bind: Option<SocketAddr>,
@@ -256,6 +272,10 @@ pub(crate) struct Args {
     /// Base latency added by the built-in mock LLM.
     #[arg(long, default_value_t = 0)]
     pub(crate) mock_llm_latency_ms: u64,
+
+    /// Latency for mock LLM requests tagged as API background load. 0 uses --mock-llm-latency-ms.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) mock_llm_background_latency_ms: u64,
 
     /// Deterministic jitter ceiling added by the built-in mock LLM.
     #[arg(long, default_value_t = 0)]
@@ -1120,6 +1140,12 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.api_admin_provisioners == 0 {
         return Err("--api-admin-provisioners must be greater than 0".to_string());
+    }
+    if args.api_background_users > 0 && args.api_background_operations == 0 {
+        return Err(
+            "--api-background-operations must be greater than 0 when background users are enabled"
+                .to_string(),
+        );
     }
     api_capacity::validate_read_mix(&args.api_read_mix)?;
     if !(0.0..=1.0).contains(&args.mock_llm_failure_rate) {
