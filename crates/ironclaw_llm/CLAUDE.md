@@ -270,7 +270,7 @@ Raw provider
 
 ## Streaming Support
 
-No streaming support. All providers use non-streaming (blocking) Chat Completions requests. The `complete()` and `complete_with_tools()` methods return only after the full response is available.
+`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Providers that do not override these methods inherit the blocking `complete()` / `complete_with_tools()` fallback, so callers must treat streaming as opportunistic. The NEAR AI chat provider currently implements OpenAI-compatible SSE streaming for live assistant text; the final response remains authoritative for finish reason, tool calls, and usage accounting.
 
 ## Trace Recording
 

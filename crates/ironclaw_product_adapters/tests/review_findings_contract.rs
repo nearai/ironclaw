@@ -436,6 +436,7 @@ fn projection_payloads_have_single_cursor_and_renderable_state() {
         "thread-1",
         vec![ProductProjectionItem::Text {
             id: "message-1".into(),
+            run_id: None,
             body: "hello".into(),
         }],
     )

@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
+import { CONNECTION_STATUS } from "../lib/connection-status.js";
+
 function loadConnectionStatusForTest() {
   const source = readFileSync(new URL("./connection-status.tsx", import.meta.url), "utf8");
   const body = source
@@ -12,6 +14,7 @@ function loadConnectionStatusForTest() {
     .join("\n")
     .replace("export function ConnectionStatus", "function ConnectionStatus");
   const context = {
+    CONNECTION_STATUS,
     html: (strings, ...values) => ({ strings, values }),
     useT: () => (key) => key,
     globalThis: {},
@@ -23,11 +26,22 @@ function loadConnectionStatusForTest() {
   return context.globalThis.__testExports.ConnectionStatus;
 }
 
-test("ConnectionStatus suppresses transient initial connecting state", () => {
+test("ConnectionStatus suppresses non-actionable transport states", () => {
   const ConnectionStatus = loadConnectionStatusForTest();
 
-  assert.equal(ConnectionStatus({ status: "connecting" }), null);
-  const reconnecting = ConnectionStatus({ status: "reconnecting" });
-  assert.notEqual(reconnecting, null);
-  assert.equal(typeof reconnecting, "object");
+  for (const status of [
+    undefined,
+    CONNECTION_STATUS.IDLE,
+    CONNECTION_STATUS.CONNECTING,
+    CONNECTION_STATUS.CONNECTED,
+    CONNECTION_STATUS.RECONNECTING,
+    CONNECTION_STATUS.DISCONNECTED,
+    CONNECTION_STATUS.PAUSED,
+  ]) {
+    assert.equal(ConnectionStatus({ status }), null, status);
+  }
+
+  const unknown = ConnectionStatus({ status: "blocked" });
+  assert.notEqual(unknown, null);
+  assert.equal(typeof unknown, "object");
 });

@@ -258,7 +258,7 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
         .map(|services| services as std::sync::Arc<dyn SlackPersonalCredentialCleanup>);
     let channel_connection = slack_mounts
         .map(|mounts| slack_channel_connection_facade(mounts, personal_credential_cleanup));
-    crate::webui::build_webui_services_with_channel_connection(
+    crate::webui::facade::build_webui_services_with_channel_connection(
         runtime,
         event_stream,
         channel_connection,
