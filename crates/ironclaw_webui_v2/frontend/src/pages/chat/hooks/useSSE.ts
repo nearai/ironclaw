@@ -1,5 +1,9 @@
 import React from "react";
 import { openEventStream } from "../../../lib/api";
+import {
+  CONNECTION_STATUS,
+  type ConnectionStatus,
+} from "../lib/connection-status";
 
 // v2 SSE emits `WebChatV2EventFrame` JSON, tagged with a typed
 // event name (`event: accepted`, `event: final_reply`, etc.) so
@@ -25,8 +29,32 @@ const V2_EVENT_NAMES = [
   "keep_alive",
   "error",
 ];
+
+const EVENT_SOURCE_CLOSED = 2;
+const EVENT_SOURCE_OPEN = 1;
+
+function eventSourceReadyStateConstant(staticValue: unknown, fallback: number) {
+  return typeof staticValue === "number" ? staticValue : fallback;
+}
+
+function isEventSourceClosed(source) {
+  const closedState = typeof EventSource === "function"
+    ? eventSourceReadyStateConstant(EventSource.CLOSED, EVENT_SOURCE_CLOSED)
+    : EVENT_SOURCE_CLOSED;
+  return source?.readyState === closedState;
+}
+
+function isEventSourceOpen(source) {
+  const openState = typeof EventSource === "function"
+    ? eventSourceReadyStateConstant(EventSource.OPEN, EVENT_SOURCE_OPEN)
+    : EVENT_SOURCE_OPEN;
+  return source?.readyState === openState;
+}
+
 export function useSSE({ threadId, onEvent, enabled }) {
-  const [status, setStatus] = React.useState("idle");
+  const [status, setStatus] = React.useState<ConnectionStatus>(
+    CONNECTION_STATUS.IDLE,
+  );
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
   // Last cursor we successfully received. EventSource sends
@@ -39,7 +67,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
   React.useEffect(() => {
     if (!enabled || !threadId) {
-      setStatus("idle");
+      setStatus(CONNECTION_STATUS.IDLE);
       return;
     }
     // New thread → drop the prior thread's cursor before the first
@@ -49,15 +77,56 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
     let es = null;
     let reconnectTimer = null;
+    let reconnectWatchdog = null;
     let reconnectAttempts = 0;
     const maxReconnectDelay = 30_000;
+    const nativeReconnectWatchdogDelay = 10_000;
+
+    function clearReconnectWatchdog() {
+      if (reconnectWatchdog) {
+        clearTimeout(reconnectWatchdog);
+        reconnectWatchdog = null;
+      }
+    }
+
+    function reconnectWithTimer() {
+      if (es) {
+        es.close();
+        es = null;
+      }
+      clearReconnectWatchdog();
+      setStatus(CONNECTION_STATUS.DISCONNECTED);
+      reconnectAttempts++;
+      const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
+      reconnectTimer = setTimeout(connect, delay);
+    }
+
+    function scheduleNativeReconnectWatchdog(source) {
+      if (reconnectWatchdog) return;
+      reconnectWatchdog = setTimeout(() => {
+        reconnectWatchdog = null;
+        if (es !== source || !source) {
+          return;
+        }
+        if (isEventSourceOpen(source)) {
+          reconnectAttempts = 0;
+          setStatus(CONNECTION_STATUS.CONNECTED);
+          return;
+        }
+        reconnectWithTimer();
+      }, nativeReconnectWatchdogDelay);
+    }
 
     function connect() {
       if (document.visibilityState === "hidden") {
-        setStatus("paused");
+        setStatus(CONNECTION_STATUS.PAUSED);
         return;
       }
-      setStatus(reconnectAttempts > 0 ? "reconnecting" : "connecting");
+      setStatus(
+        reconnectAttempts > 0
+          ? CONNECTION_STATUS.RECONNECTING
+          : CONNECTION_STATUS.CONNECTING,
+      );
 
       es = openEventStream({
         threadId,
@@ -65,16 +134,19 @@ export function useSSE({ threadId, onEvent, enabled }) {
       });
 
       es.onopen = () => {
+        clearReconnectWatchdog();
         reconnectAttempts = 0;
-        setStatus("connected");
+        setStatus(CONNECTION_STATUS.CONNECTED);
       };
 
       es.onerror = () => {
-        if (es) es.close();
-        setStatus("disconnected");
-        reconnectAttempts++;
-        const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
-        reconnectTimer = setTimeout(connect, delay);
+        if (!es) return;
+        if (!isEventSourceClosed(es)) {
+          setStatus(CONNECTION_STATUS.RECONNECTING);
+          scheduleNativeReconnectWatchdog(es);
+          return;
+        }
+        reconnectWithTimer();
       };
 
       const dispatchFrame = (event, fallbackType) => {
@@ -115,11 +187,12 @@ export function useSSE({ threadId, onEvent, enabled }) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      clearReconnectWatchdog();
       if (es) {
         es.close();
         es = null;
       }
-      setStatus("paused");
+      setStatus(CONNECTION_STATUS.PAUSED);
     }
 
     function handleVisibilityChange() {
@@ -136,6 +209,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearReconnectWatchdog();
       if (es) es.close();
     };
   }, [enabled, threadId]);

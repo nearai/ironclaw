@@ -22,7 +22,7 @@
 - `Cargo.toml` (workspace root) — **modify**: add the new crate to members.
 - `crates/ironclaw_conversations/{Cargo.toml,src/inbound.rs}` — **modify**: depend on `product_context`; call `resolve_inbound`.
 - `crates/ironclaw_product_workflow/{Cargo.toml,src/inbound_turn.rs,src/reborn_services.rs}` — **modify**: depend on `product_context`; call resolver.
-- `crates/ironclaw_reborn_composition/{Cargo.toml,src/runtime.rs,src/communication_context.rs}` — **modify**: depend on `product_context`; resolver at local-dev webui; provider passes context.
+- `crates/ironclaw_reborn_composition/{Cargo.toml,src/runtime.rs,src/root/communication_context.rs}` — **modify**: depend on `product_context`; resolver at local-dev webui; provider passes context.
 - `crates/ironclaw_reborn/src/loop_driver_host.rs`, `crates/ironclaw_turns/src/run_profile/runtime_context.rs` — **modify**: carry/render `product_context`.
 
 ---
@@ -474,7 +474,7 @@ git commit -m "refactor: resolve product_context at the four ingress submit site
 **Files:**
 - Modify: `crates/ironclaw_reborn/src/loop_driver_host.rs` (create_host ~2035; provider call ~1525)
 - Modify: `crates/ironclaw_turns/src/run_profile/runtime_context.rs` (`CommunicationRuntimeContext`, `CommunicationContextProvider`, `render_model_content`)
-- Modify: `crates/ironclaw_reborn_composition/src/communication_context.rs` (provider impl)
+- Modify: `crates/ironclaw_reborn_composition/src/root/communication_context.rs` (provider impl)
 - Modify: tests in `crates/ironclaw_reborn/tests/loop_driver_host.rs`
 
 - [ ] **Step 1: create_host carries product_context** — `loop_driver_host.rs:2035`, replace the `with_run_origin` block:

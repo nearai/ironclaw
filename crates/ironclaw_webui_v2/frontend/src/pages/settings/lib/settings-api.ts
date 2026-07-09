@@ -226,6 +226,13 @@ export function fetchTraceCredits() {
 export function fetchAccountTraces() {
   return apiFetch("/api/webchat/v2/traces/account");
 }
+// Mint a one-time Trace Commons browser login link for the authenticated
+// caller. The returned URL is a single-use account credential delivered only
+// over this authenticated response — open it immediately, never log or store
+// it. Unenrolled callers get { minted: false, enrolled: false }.
+export function mintAccountLoginLink() {
+  return apiFetch("/api/webchat/v2/traces/account-login-link", { method: "POST" });
+}
 // Authorize a held (manual-review) trace for submission. No request body —
 // the submission id is in the path. Returns { authorized: bool }.
 export function authorizeTraceHold(submissionId) {
