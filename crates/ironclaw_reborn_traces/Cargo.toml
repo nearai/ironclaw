@@ -6,6 +6,9 @@ rust-version.workspace = true
 license = "MIT OR Apache-2.0"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
