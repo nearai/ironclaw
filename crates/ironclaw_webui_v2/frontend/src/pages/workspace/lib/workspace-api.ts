@@ -9,8 +9,8 @@
 // so the tree itself doubles as the mount picker. Strictly read-only: there is
 // no write/save path here.
 
-import { apiFetch, fetchAttachmentBlob, fetchAttachmentDataUrl } from "../../../lib/api.js";
-import { areaDisplayName } from "./workspace-presenters.js";
+import { apiFetch, fetchAttachmentBlob, fetchAttachmentDataUrl } from "../../../lib/api";
+import { areaDisplayName } from "./workspace-presenters";
 
 const FS_BASE = "/api/webchat/v2/fs";
 

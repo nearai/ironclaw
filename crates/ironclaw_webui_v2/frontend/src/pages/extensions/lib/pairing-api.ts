@@ -1,6 +1,6 @@
 // @ts-nocheck
-import { apiFetch } from "../../../lib/api.js";
-import { notifyChannelConnected } from "../../../lib/channel-connection-events.js";
+import { apiFetch } from "../../../lib/api";
+import { notifyChannelConnected } from "../../../lib/channel-connection-events";
 
 // SCAFFOLDING: no Reborn backend mounts this route today. The only mount was
 // the Slack-only pairing redeem removed by PR #5604 (Slack now connects via

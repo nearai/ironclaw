@@ -29,6 +29,7 @@ mod scenario_triggered_chained_gate;
 mod scenario_triggered_gate;
 mod scenario_verbs_lifecycle;
 mod scenario_webui_automations_list;
+mod scenario_webui_automations_rename;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
@@ -55,6 +56,12 @@ async fn triggers_group_e2e() {
     report.record(
         "webui_automations_list",
         scenario_webui_automations_list::run(&g).await,
+    );
+    // W5-WEBUI-API-2: create a trigger, rename it through the real WebUI
+    // automations route, then list it back from the shared trigger repo.
+    report.record(
+        "webui_automations_rename",
+        scenario_webui_automations_rename::run(&g).await,
     );
 
     // Triggered-turn coverage map (E-TRIGGERED-SUBMIT via `submit_triggered_turn`)

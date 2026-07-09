@@ -1,5 +1,5 @@
-import { React } from "../../../lib/html.js";
-import { sortRoutines } from "../lib/routines-presenters.js";
+import React from "react";
+import { sortRoutines } from "../lib/routines-presenters";
 
 export function useRoutineFilters(routines) {
   const [search, setSearch] = React.useState("");

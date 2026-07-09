@@ -20,7 +20,9 @@ export function failureMessageForRequestError(error) {
   return message || "The request failed before it could be sent.";
 }
 
-export function failureMessageForStreamError({ error, kind, retryable } = {}) {
+export function failureMessageForStreamError(
+  { error, kind, retryable }: any = {},
+) {
   const detail = humanizeFailureToken(kind || error || "stream_error");
   return retryable
     ? `The chat stream hit a retryable error: ${detail}.`

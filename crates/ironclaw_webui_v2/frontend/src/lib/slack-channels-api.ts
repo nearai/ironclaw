@@ -1,4 +1,4 @@
-import { apiFetch } from "./api.js";
+import { apiFetch } from "./api";
 
 export const SLACK_ALLOWED_CHANNELS_PATH = "/api/webchat/v2/channels/slack/allowed";
 export const SLACK_ROUTABLE_SUBJECTS_PATH = "/api/webchat/v2/channels/slack/subjects";

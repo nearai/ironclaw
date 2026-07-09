@@ -4,14 +4,14 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, test } from "vitest";
-import { setAuthScope } from "./auth-scope.ts";
+import { setAuthScope } from "./auth-scope";
 import {
   approvalThreadNotificationId,
   approvalThreadNotifications,
   getNotificationState,
   isApprovalThread,
   markNotificationIdsSeen,
-} from "./notifications.ts";
+} from "./notifications";
 
 let testScopeId = 0;
 

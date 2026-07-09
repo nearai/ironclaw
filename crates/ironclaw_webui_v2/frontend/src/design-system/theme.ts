@@ -1,4 +1,4 @@
-import { React } from "../lib/html.js";
+import React from "react";
 
 const THEME_STORAGE_KEY = "ironclaw:v2-theme";
 
