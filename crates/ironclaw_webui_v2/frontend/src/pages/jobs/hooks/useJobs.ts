@@ -1,13 +1,13 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchJobs,
   fetchJobsSummary,
   cancelJob as cancelJobRequest,
   restartJob as restartJobRequest,
-} from "../lib/jobs-api.js";
-import { truncateJobId } from "../lib/jobs-presenters.js";
+} from "../lib/jobs-api";
+import { truncateJobId } from "../lib/jobs-presenters";
 
 export function useJobs() {
   const queryClient = useQueryClient();

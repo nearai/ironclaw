@@ -1,8 +1,8 @@
 // @ts-nocheck
 import { useLocation } from "react-router";
-import { React } from "../../../lib/html.js";
-import { queryLogs, queryOperatorLogs } from "../../../lib/api.js";
-import { normalizeOperatorLogsResponse } from "../lib/logs-data.js";
+import React from "react";
+import { queryLogs, queryOperatorLogs } from "../../../lib/api";
+import { normalizeOperatorLogsResponse } from "../lib/logs-data";
 
 const POLL_INTERVAL_MS = 2000;
 const LOG_LIMIT = 500;

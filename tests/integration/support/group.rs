@@ -80,7 +80,11 @@ use ironclaw_reborn::runtime::{
     ToolDisclosureMode, build_default_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    await_edge::{
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+        store::FilesystemAwaitEdgeStore,
+    },
+    flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn_composition::build_default_budget_accountant;
@@ -642,12 +646,11 @@ impl RebornIntegrationGroupBuilder {
         if let Some(ttl) = self.runner_lease_ttl_override {
             turn_state_limits.runner_lease_ttl = ttl;
         }
+        let turns_scoped_fs =
+            scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
         let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateStore::new(scoped_turns_fs_composite(
-                Arc::clone(&base.composite),
-                &base.canonical_binding,
-            )?)
-            .with_limits(turn_state_limits),
+            FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs))
+                .with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
@@ -691,13 +694,31 @@ impl RebornIntegrationGroupBuilder {
         // `.with_checkpoint_state_store` is the de-mask fix: without it a
         // genuinely-`Failed` run is reported as the masking
         // `driver_protocol_violation` instead of its true failure category.
-        let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
+        // mount) — the await-edge tree lives at
+        // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
+        // "one shared handle, never a per-store fixed view" rule.
+        let await_edge_store =
+            Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
+        let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+            Arc::clone(&await_edge_store),
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+            capability_result_writer.clone(),
+            group_thread_harness.service.clone(),
+        ));
+        let await_edge_driver = Arc::new(ScopeRecoveryDriver::new(
+            Arc::clone(&await_edge_resolver),
+            Arc::clone(&await_edge_store),
+        ));
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
         let mut evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             group_thread_harness.service.clone(),
             turn_state_for_evidence,
             Arc::clone(&loop_checkpoint_store),
-            subagent_gate_store.clone(),
+            Arc::clone(&await_edge_store)
+                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             group_thread_scope.clone(),
         )
         .with_checkpoint_state_store(checkpoint_state_store.clone());
@@ -800,8 +821,13 @@ impl RebornIntegrationGroupBuilder {
             capability_factory,
             capability_surface_resolver,
             capability_result_writer,
-            subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-            subagent_gate_store,
+            subagent_goal_store: await_edge_goal_store,
+            subagent_await_edge_writer: await_edge_driver
+                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+            subagent_await_edge_settler: await_edge_resolver
+                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+            subagent_await_edge_evidence: await_edge_store
+                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,

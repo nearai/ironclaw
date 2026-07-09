@@ -1,5 +1,5 @@
-import { queryClient } from "../../../lib/query-client.js";
-import { normalizeSidebarTitle } from "../../../lib/thread-title.js";
+import { queryClient } from "../../../lib/query-client";
+import { normalizeSidebarTitle } from "../../../lib/thread-title";
 
 const THREADS_QUERY_KEY = ["threads"];
 const TITLE_MAX_CHARS = 60;

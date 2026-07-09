@@ -813,6 +813,17 @@ where
         request: NewCredentialAccount,
         cas: CasExpectation,
     ) -> Result<CredentialAccount, AuthProductError> {
+        self.create_account_with_id_and_provider_identity(account_id, request, None, cas)
+            .await
+    }
+
+    async fn create_account_with_id_and_provider_identity(
+        &self,
+        account_id: CredentialAccountId,
+        request: NewCredentialAccount,
+        provider_identity: Option<ironclaw_auth::OAuthProviderIdentity>,
+        cas: CasExpectation,
+    ) -> Result<CredentialAccount, AuthProductError> {
         validate_new_credential_account(&request)?;
         let now = Utc::now();
         let account = CredentialAccount {
@@ -827,6 +838,7 @@ where
             access_secret: request.access_secret,
             refresh_secret: request.refresh_secret,
             scopes: request.scopes,
+            provider_identity,
             created_at: now,
             updated_at: now,
         };

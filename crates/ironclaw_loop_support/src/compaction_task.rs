@@ -787,6 +787,8 @@ mod tests {
             sequence: 1,
             kind,
             status: MessageStatus::Finalized,
+            created_at: None,
+            updated_at: None,
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,

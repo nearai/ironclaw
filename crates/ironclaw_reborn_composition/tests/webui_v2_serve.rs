@@ -648,188 +648,6 @@ mod openai_compat_mount_tests {
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing_mount_tests {
-    use super::*;
-    use ironclaw_product_adapters::AdapterInstallationId;
-    use ironclaw_product_workflow::{
-        ChannelConnectionResumeService, ProductWorkflowError, ResumeChannelConnectionRequest,
-        ResumeChannelConnectionResponse,
-    };
-    use ironclaw_reborn_composition::slack_serve::SlackUserId;
-    use ironclaw_reborn_composition::{
-        IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackInstallationSelector,
-        SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallenge,
-        SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
-        SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
-        SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
-        SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
-        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-    };
-
-    /// No-op resume: this test exercises route mounting/auth, not resume.
-    struct NoopChannelConnectionResume;
-
-    #[async_trait::async_trait]
-    impl ChannelConnectionResumeService for NoopChannelConnectionResume {
-        async fn resume_channel_connection(
-            &self,
-            _request: ResumeChannelConnectionRequest,
-        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
-            Ok(ResumeChannelConnectionResponse {
-                resumed_runs: Vec::new(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn pairing_route_mounted_when_config_provided() {
-        let binding_store = Arc::new(RecordingBindingStore::default());
-        let pairing = SlackPersonalBindingPairingService::new(
-            SlackPersonalUserBindingService::new(
-                [SlackPersonalBindingInstallation {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    installation_id: installation("install-a"),
-                    selector: SlackInstallationSelector::app_team("A-app", "T-team"),
-                }],
-                binding_store.clone(),
-            ),
-            Arc::new(StaticChallengeStore),
-            Arc::new(NoopNotifier),
-        );
-        let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
-        let config = WebuiServeConfig::new(
-            TenantId::new(TENANT).expect("tenant"),
-            Arc::new(OnlyValidToken),
-            vec![HeaderValue::from_static("http://localhost:1234")],
-        )
-        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(
-            pairing,
-            Arc::new(NoopChannelConnectionResume),
-        ));
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
-
-        let unauthenticated = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-
-        let authenticated = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(authenticated.status(), StatusCode::OK);
-        assert_eq!(binding_store.bound_user_ids(), vec![USER.to_string()]);
-    }
-
-    fn installation(value: &str) -> AdapterInstallationId {
-        AdapterInstallationId::new(value).expect("installation")
-    }
-
-    #[derive(Default)]
-    struct RecordingBindingStore {
-        bindings: Mutex<Vec<RebornUserIdentityBinding>>,
-    }
-
-    impl RecordingBindingStore {
-        fn bound_user_ids(&self) -> Vec<String> {
-            self.bindings
-                .lock()
-                .expect("bindings lock should not be poisoned")
-                .iter()
-                .map(|binding| binding.user_id.to_string())
-                .collect()
-        }
-    }
-
-    #[async_trait]
-    impl RebornUserIdentityBindingStore for RecordingBindingStore {
-        async fn bind_user_identity(
-            &self,
-            binding: RebornUserIdentityBinding,
-        ) -> Result<(), RebornUserIdentityBindingError> {
-            self.bindings
-                .lock()
-                .expect("bindings lock should not be poisoned")
-                .push(binding);
-            Ok(())
-        }
-    }
-
-    struct StaticChallengeStore;
-
-    #[async_trait]
-    impl SlackPersonalBindingPairingChallengeStore for StaticChallengeStore {
-        async fn issue_challenge(
-            &self,
-            challenge: SlackPersonalBindingPairingChallenge,
-        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            Ok(IssuedSlackPersonalBindingPairingChallenge {
-                code: SlackPersonalBindingPairingCode::new("ABC12345").expect("code"),
-                challenge,
-            })
-        }
-
-        async fn get_challenge(
-            &self,
-            code: &SlackPersonalBindingPairingCode,
-        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            if code.as_str() != "ABC12345" {
-                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
-            }
-            Ok(SlackPersonalBindingPairingChallenge {
-                installation_id: installation("install-a"),
-                slack_user_id: SlackUserId::new("U123"),
-                setup_revision: None,
-            })
-        }
-
-        async fn consume_challenge(
-            &self,
-            code: &SlackPersonalBindingPairingCode,
-        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            self.get_challenge(code).await
-        }
-    }
-
-    struct NoopNotifier;
-
-    #[async_trait]
-    impl SlackPersonalBindingPairingNotifier for NoopNotifier {
-        async fn send_pairing_challenge(
-            &self,
-            _notification: SlackPersonalBindingPairingNotification,
-        ) -> Result<(), SlackPersonalBindingPairingError> {
-            Ok(())
-        }
-    }
-}
-
 #[derive(Default)]
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
@@ -1212,7 +1030,7 @@ fn build_app_with_authenticator(
 }
 
 async fn read_body_string(response: axum::response::Response) -> String {
-    let bytes = to_bytes(response.into_body(), 64 * 1024)
+    let bytes = to_bytes(response.into_body(), 256 * 1024)
         .await
         .expect("body bytes");
     String::from_utf8_lossy(&bytes).into_owned()
@@ -2454,11 +2272,11 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
         "OAuth auth card must reject non-HTTPS authorization URLs before opening"
     );
     assert!(
-        body.contains("className=\"auth-oauth\""),
+        body.contains("className:`auth-oauth`"),
         "OAuth auth card must keep the UI-test selector on the authorization control"
     );
     assert!(
-        body.contains("href=${s?e.authorizationUrl:void 0}"),
+        body.contains("href:") && body.contains("authorizationUrl:void 0"),
         "OAuth auth card must expose the HTTPS authorization URL as a link href"
     );
     assert!(
@@ -2471,10 +2289,10 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
     let body = served_app_javascript().await;
 
-    assert!(
-        body.contains("ironclaw:product-auth:oauth-complete"),
-        "chat hook must listen for the OAuth callback completion signal"
-    );
+    // The Vite app bundle must retain the shared OAuth completion transport and
+    // the chat hook's gate-matching behavior. Source-level details for the
+    // shared transport live in the frontend Vitest suite; this caller-level test
+    // protects the served bundle path.
     assert!(
         body.contains("ironclaw-product-auth")
             && body.contains("new window.BroadcastChannel(")
@@ -2486,7 +2304,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
     );
     assert!(
-        body.contains("window.localStorage?.getItem?.("),
+        body.contains("localStorage?.getItem?.("),
         "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
     );
     assert!(
@@ -2496,6 +2314,10 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
     assert!(
         body.contains("auth_required") && body.contains("oauth_url") && body.contains("?null:e"),
         "OAuth callback completion must clear only a pending OAuth auth gate"
+    );
+    assert!(
+        body.contains("ironclaw:product-auth:oauth-complete"),
+        "shared OAuth events module must define the callback completion signal in the served bundle"
     );
 }
 
@@ -2581,7 +2403,7 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // the deferred JS/e2e scaffold.
     let body = served_app_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
-    let provider_segment = bundle_segment(&body, "createContext({lang:", "function Yr");
+    let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
 
     assert!(
         provider_segment.contains(".useState(()=>")
@@ -3057,11 +2879,11 @@ async fn static_automations_run_row_spaces_action_button_icons() {
     let body = served_app_javascript().await;
 
     assert!(
-        body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
         "the Open run button icon must be spaced away from its label"
     );
     assert!(
-        body.contains("name=\"file\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`file`,className:`mr-1.5 h-4 w-4`"),
         "the Logs button icon must be spaced away from its label"
     );
 }

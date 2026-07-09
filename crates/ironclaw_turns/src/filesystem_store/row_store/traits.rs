@@ -286,14 +286,34 @@ where
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         self.apply(RunnerLeaseOverlay::None, |store| async move {
             store
-                .release_tree_descendants(scope, root_run_id, delta)
+                .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
                 .await
         })
         .instrument(turn_state_write_span(
             "release_tree_descendants",
+            Some(scope),
+            Some(&root_run_id),
+        ))
+        .await
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.apply(RunnerLeaseOverlay::None, |store| async move {
+            store
+                .prune_released_child(scope, root_run_id, child_run_id)
+                .await
+        })
+        .instrument(turn_state_write_span(
+            "prune_released_child",
             Some(scope),
             Some(&root_run_id),
         ))
