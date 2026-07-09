@@ -625,7 +625,7 @@ where
         let Some(source) = self.setup_marker_source.as_deref() else {
             return Ok(HashSet::new());
         };
-        source.satisfied_setup_markers(run_context, &markers).await
+        source.satisfied_setup_markers(run_context, markers).await
     }
 
     async fn load_activation_candidates(
