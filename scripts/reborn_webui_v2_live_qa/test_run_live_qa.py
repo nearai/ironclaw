@@ -3560,6 +3560,194 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "exactly-once probes must ASSERT the Slack tools surface "
                 "precondition; without it the duplicate arm passes vacuously",
             )
+            self.assertIn(
+                "expect_one_shot_schedule=True",
+                source,
+                "exactly-once probes must verify the PERSISTED schedule is a "
+                "once-schedule; prompt wording alone cannot prevent a cron "
+                "trigger from fabricating a duplicate-delivery red",
+            )
+            self.assertIn(
+                'follow_up_timezone_instruction="Use the UTC timezone',
+                source,
+                "UTC-pinned one-shot probes must answer timezone clarifying "
+                "questions with UTC; the default London instruction can shift "
+                "the fire ~1h outside the delivery wait window",
+            )
+
+    def test_slack_delivery_case_verifies_schedule_outcome_from_trigger_record(self):
+        import inspect
+
+        source = inspect.getsource(run_live_qa._slack_delivery_routine_case)
+        self.assertIn("schedule_kind", source)
+        self.assertIn("_trigger_record_snapshot", source)
+        self.assertIn(
+            "record_count",
+            source,
+            "the probe must reject duplicate same-name trigger records: two "
+            "live one-shots each deliver once and read as a duplicate",
+        )
+        self.assertIn(
+            "_outbound_final_reply_targets",
+            source,
+            "per-trigger routing must assert the user-wide default target was "
+            "NOT rewritten — otherwise a default-mutating server passes",
+        )
+
+    def test_outbound_final_reply_targets_reads_preference_rows(self):
+        import sqlite3 as sqlite3_module
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            db_dir = home / "local-dev"
+            db_dir.mkdir(parents=True)
+            db_path = db_dir / "reborn-local-dev.db"
+            with sqlite3_module.connect(db_path) as db:
+                db.execute(
+                    "CREATE TABLE root_filesystem_entries "
+                    "(path TEXT, contents TEXT, is_dir INTEGER)"
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries VALUES "
+                    "('/tenants/t/users/u/outbound/communication-preferences/a.json', "
+                    "'{\"final_reply_target\": \"reply:adapter:slack\"}', 0)"
+                )
+            targets = run_live_qa._outbound_final_reply_targets(home)
+            self.assertEqual(
+                targets,
+                {
+                    "/tenants/t/users/u/outbound/communication-preferences/a.json": (
+                        "reply:adapter:slack"
+                    )
+                },
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                run_live_qa._outbound_final_reply_targets(Path(tmp)), {}
+            )
+
+    def test_exactly_once_case_specs_gate_on_personal_auth_and_stay_dispatch_only(self):
+        for case_name in (
+            "qa_9b_routine_dm_delivery_exactly_once",
+            "qa_9d_routine_per_trigger_delivery_target",
+        ):
+            spec = run_live_qa.CASES[case_name]
+            self.assertTrue(
+                spec.requires_slack_personal_auth,
+                f"{case_name} sweeps with the personal token; without the "
+                "workspace-mismatch gate the sweep can search the wrong "
+                "workspace and pass structurally blind",
+            )
+        for case_name in (
+            "qa_9b_routine_dm_delivery_exactly_once",
+            "qa_9c_slack_digest_names_not_ids",
+            "qa_9d_routine_per_trigger_delivery_target",
+        ):
+            self.assertFalse(
+                run_live_qa.CASES[case_name].default_enabled,
+                f"{case_name} is expected-red on pre-fix servers and must "
+                "stay out of bare local default runs until promoted",
+            )
+
+    def test_exc_text_preserves_type_for_empty_str_exceptions(self):
+        self.assertEqual(run_live_qa._exc_text(ValueError("boom")), "boom")
+        # asyncio timeouts stringify to "" — the previous formatting produced
+        # probe failures with an empty error field.
+        self.assertEqual(run_live_qa._exc_text(TimeoutError()), "TimeoutError()")
+
+    def test_parse_epoch_seconds_handles_trigger_store_timestamps(self):
+        parsed = run_live_qa._parse_epoch_seconds("2026-07-09T21:16:11.000000000Z")
+        self.assertIsNotNone(parsed)
+        self.assertAlmostEqual(parsed, 1783631771.0, delta=1.0)
+        self.assertIsNone(run_live_qa._parse_epoch_seconds(None))
+        self.assertIsNone(run_live_qa._parse_epoch_seconds("not-a-time"))
+
+    def test_trigger_record_snapshot_reads_schedule_and_delivery_target(self):
+        import sqlite3 as sqlite3_module
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            db_dir = home / "local-dev"
+            db_dir.mkdir(parents=True)
+            db_path = db_dir / "reborn-local-dev.db"
+            with sqlite3_module.connect(db_path) as db:
+                db.execute(
+                    "CREATE TABLE trigger_records ("
+                    "name TEXT, schedule_kind TEXT, next_run_at TEXT, "
+                    "delivery_target TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO trigger_records VALUES "
+                    "('probe', 'once', '2026-07-09T21:16:11.000000000Z', "
+                    "'slack:personal-dm:T1:me')"
+                )
+            snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
+            self.assertTrue(snapshot["checked"])
+            self.assertEqual(snapshot["record_count"], 1)
+            self.assertEqual(snapshot["schedule_kind"], "once")
+            self.assertEqual(snapshot["delivery_target"], "slack:personal-dm:T1:me")
+            self.assertFalse(snapshot["delivery_target_column_missing"])
+
+    def test_trigger_record_snapshot_flags_missing_delivery_target_column(self):
+        import sqlite3 as sqlite3_module
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            db_dir = home / "local-dev"
+            db_dir.mkdir(parents=True)
+            db_path = db_dir / "reborn-local-dev.db"
+            with sqlite3_module.connect(db_path) as db:
+                db.execute(
+                    "CREATE TABLE trigger_records ("
+                    "name TEXT, schedule_kind TEXT, next_run_at TEXT)"
+                )
+                db.execute(
+                    "INSERT INTO trigger_records VALUES "
+                    "('probe', 'cron', '2026-07-09T21:16:11.000000000Z')"
+                )
+            snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
+            # Pre-fix server: schedule facts still readable, delivery target
+            # column reported missing (NOT an opaque sqlite error).
+            self.assertTrue(snapshot["checked"])
+            self.assertTrue(snapshot["delivery_target_column_missing"])
+            self.assertEqual(snapshot["schedule_kind"], "cron")
+            self.assertIsNone(snapshot["delivery_target"])
+
+    def test_trigger_record_snapshot_reports_unreadable_db(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = run_live_qa._trigger_record_snapshot(Path(tmp), "probe")
+            self.assertFalse(snapshot["checked"])
+            self.assertIn("error", snapshot)
+
+    def test_raw_slack_user_id_pattern_requires_id_shape(self):
+        self.assertEqual(
+            run_live_qa._raw_slack_user_ids_in_text(
+                "digest mentions U0BDC16TML3 twice: U0BDC16TML3"
+            ),
+            ["U0BDC16TML3", "U0BDC16TML3"],
+        )
+        self.assertEqual(
+            run_live_qa._raw_slack_user_ids_in_text(
+                "UPDATE the digest for benjamin.kurrek and u0bdc16tml3"
+            ),
+            [],
+        )
+
+    def test_routine_confirmation_follow_up_respects_timezone_instruction(self):
+        text = "I can create that routine — should I go ahead?"
+        default_reply = run_live_qa._routine_confirmation_follow_up_for_text(text)
+        self.assertIn("Europe/London", default_reply)
+        utc_reply = run_live_qa._routine_confirmation_follow_up_for_text(
+            text,
+            schedule_timezone_instruction="Use the UTC timezone for the schedule.",
+        )
+        self.assertIn("UTC", utc_reply)
+        self.assertNotIn("Europe/London", utc_reply)
 
     def test_default_suite_includes_github_connect_after_generated_auth_seed(self):
         self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
