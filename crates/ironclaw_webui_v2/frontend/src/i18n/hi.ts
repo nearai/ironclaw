@@ -1092,6 +1092,8 @@ registerPack("hi", {
   "admin.users.filter.active": "सक्रिय",
   "admin.users.filter.suspended": "निलंबित",
   "admin.users.filter.admins": "व्यवस्थापक",
+  "admin.users.status.active": "सक्रिय",
+  "admin.users.status.suspended": "निलंबित",
   "admin.users.newUser": "नया उपयोगकर्ता",
   "admin.users.createUser": "उपयोगकर्ता बनाएं",
   "admin.users.creating": "बनाया जा रहा है…",

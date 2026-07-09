@@ -1092,6 +1092,8 @@ registerPack("uk", {
   "admin.users.filter.active": "Активні",
   "admin.users.filter.suspended": "Призупинені",
   "admin.users.filter.admins": "Адміни",
+  "admin.users.status.active": "Активний",
+  "admin.users.status.suspended": "Призупинений",
   "admin.users.newUser": "Новий користувач",
   "admin.users.createUser": "Створити користувача",
   "admin.users.creating": "Створення…",

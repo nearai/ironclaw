@@ -1092,6 +1092,8 @@ registerPack("fr", {
   "admin.users.filter.active": "Actifs",
   "admin.users.filter.suspended": "Suspendus",
   "admin.users.filter.admins": "Administrateurs",
+  "admin.users.status.active": "Actif",
+  "admin.users.status.suspended": "Suspendu",
   "admin.users.newUser": "Nouvel utilisateur",
   "admin.users.createUser": "Créer un utilisateur",
   "admin.users.creating": "Création…",

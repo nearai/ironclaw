@@ -1092,6 +1092,8 @@ registerPack("ko", {
   "admin.users.filter.active": "활성",
   "admin.users.filter.suspended": "정지",
   "admin.users.filter.admins": "관리자",
+  "admin.users.status.active": "활성",
+  "admin.users.status.suspended": "정지",
   "admin.users.newUser": "새 사용자",
   "admin.users.createUser": "사용자 생성",
   "admin.users.creating": "생성 중…",

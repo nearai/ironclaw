@@ -1092,6 +1092,8 @@ registerPack("ja", {
   "admin.users.filter.active": "アクティブ",
   "admin.users.filter.suspended": "停止",
   "admin.users.filter.admins": "管理者",
+  "admin.users.status.active": "アクティブ",
+  "admin.users.status.suspended": "停止",
   "admin.users.newUser": "新規ユーザー",
   "admin.users.createUser": "ユーザー作成",
   "admin.users.creating": "作成中…",

@@ -1092,6 +1092,8 @@ registerPack("ar", {
   "admin.users.filter.active": "نشط",
   "admin.users.filter.suspended": "موقوف",
   "admin.users.filter.admins": "مسؤولون",
+  "admin.users.status.active": "نشط",
+  "admin.users.status.suspended": "موقوف",
   "admin.users.newUser": "مستخدم جديد",
   "admin.users.createUser": "إنشاء مستخدم",
   "admin.users.creating": "جارٍ الإنشاء…",

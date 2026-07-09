@@ -1092,6 +1092,8 @@ registerPack("zh-CN", {
   "admin.users.filter.active": "活跃",
   "admin.users.filter.suspended": "已停用",
   "admin.users.filter.admins": "管理员",
+  "admin.users.status.active": "活跃",
+  "admin.users.status.suspended": "已停用",
   "admin.users.newUser": "新建用户",
   "admin.users.createUser": "创建用户",
   "admin.users.creating": "创建中…",

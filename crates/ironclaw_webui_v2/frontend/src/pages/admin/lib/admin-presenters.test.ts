@@ -14,8 +14,8 @@ function keyedT(key, params = {}) {
 test("user role and status labels use i18n keys", () => {
   assert.equal(formatUserRole("admin", keyedT), "admin.users.admin");
   assert.equal(formatUserRole("member", keyedT), "admin.users.member");
-  assert.equal(formatUserStatus("active", keyedT), "admin.users.filter.active");
-  assert.equal(formatUserStatus("suspended", keyedT), "admin.users.filter.suspended");
+  assert.equal(formatUserStatus("active", keyedT), "admin.users.status.active");
+  assert.equal(formatUserStatus("suspended", keyedT), "admin.users.status.suspended");
 });
 
 test("relative admin timestamps use i18n keys", () => {

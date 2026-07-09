@@ -5,24 +5,34 @@ function tx(t, key, params = {}, fallback = key) {
   return typeof t === "function" ? t(key, params) : interpolateParams(fallback, params);
 }
 
+const USER_ROLE = Object.freeze({
+  MEMBER: "member",
+  ADMIN: "admin",
+});
+
+const USER_STATUS = Object.freeze({
+  ACTIVE: "active",
+  SUSPENDED: "suspended",
+});
+
 const USER_ROLE_LABELS = {
-  member: "Member",
-  admin: "Admin",
+  [USER_ROLE.MEMBER]: "Member",
+  [USER_ROLE.ADMIN]: "Admin",
 };
 
 const USER_ROLE_KEYS = {
-  member: "admin.users.member",
-  admin: "admin.users.admin",
+  [USER_ROLE.MEMBER]: "admin.users.member",
+  [USER_ROLE.ADMIN]: "admin.users.admin",
 };
 
 const USER_STATUS_LABELS = {
-  active: "Active",
-  suspended: "Suspended",
+  [USER_STATUS.ACTIVE]: "Active",
+  [USER_STATUS.SUSPENDED]: "Suspended",
 };
 
 const USER_STATUS_KEYS = {
-  active: "admin.users.filter.active",
-  suspended: "admin.users.filter.suspended",
+  [USER_STATUS.ACTIVE]: "admin.users.status.active",
+  [USER_STATUS.SUSPENDED]: "admin.users.status.suspended",
 };
 
 export function formatTokenCount(n) {
@@ -74,43 +84,43 @@ export function truncateId(id) {
 }
 
 export function statusTone(status) {
-  if (status === "active") return "success";
-  if (status === "suspended") return "danger";
+  if (status === USER_STATUS.ACTIVE) return "success";
+  if (status === USER_STATUS.SUSPENDED) return "danger";
   return "muted";
 }
 
 export function roleTone(role) {
-  if (role === "admin") return "signal";
+  if (role === USER_ROLE.ADMIN) return "signal";
   return "muted";
 }
 
 export function formatUserRole(role, t) {
-  const value = String(role || "member").toLowerCase();
+  const value = String(role || USER_ROLE.MEMBER).toLowerCase();
   const fallback = USER_ROLE_LABELS[value];
-  if (!fallback) return String(role || USER_ROLE_LABELS.member);
+  if (!fallback) return String(role || USER_ROLE_LABELS[USER_ROLE.MEMBER]);
   return tx(t, USER_ROLE_KEYS[value], {}, fallback);
 }
 
 export function formatUserStatus(status, t) {
-  const value = String(status || "active").toLowerCase();
+  const value = String(status || USER_STATUS.ACTIVE).toLowerCase();
   const fallback = USER_STATUS_LABELS[value];
-  if (!fallback) return String(status || USER_STATUS_LABELS.active);
+  if (!fallback) return String(status || USER_STATUS_LABELS[USER_STATUS.ACTIVE]);
   return tx(t, USER_STATUS_KEYS[value], {}, fallback);
 }
 
 export function summarizeUsers(users) {
   const total = users.length;
-  const active = users.filter((u) => u.status === "active").length;
-  const suspended = users.filter((u) => u.status === "suspended").length;
-  const admins = users.filter((u) => u.role === "admin").length;
+  const active = users.filter((u) => u.status === USER_STATUS.ACTIVE).length;
+  const suspended = users.filter((u) => u.status === USER_STATUS.SUSPENDED).length;
+  const admins = users.filter((u) => u.role === USER_ROLE.ADMIN).length;
   return { total, active, suspended, admins };
 }
 
 export function filterUsers(users, { search = "", filter = "all" }) {
   let result = users;
-  if (filter === "active") result = result.filter((u) => u.status === "active");
-  else if (filter === "suspended") result = result.filter((u) => u.status === "suspended");
-  else if (filter === "admin") result = result.filter((u) => u.role === "admin");
+  if (filter === USER_STATUS.ACTIVE) result = result.filter((u) => u.status === USER_STATUS.ACTIVE);
+  else if (filter === USER_STATUS.SUSPENDED) result = result.filter((u) => u.status === USER_STATUS.SUSPENDED);
+  else if (filter === USER_ROLE.ADMIN) result = result.filter((u) => u.role === USER_ROLE.ADMIN);
 
   if (search.trim()) {
     const q = search.toLowerCase();
