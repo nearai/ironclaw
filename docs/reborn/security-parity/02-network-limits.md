@@ -58,7 +58,7 @@ default.
 - `ironclaw_reborn_webui_ingress/src/auth/pending.rs::tests`: state TTL,
   1024-entry eviction, single-use, redirect/CRLF/fragment sanitization
   (rows 3, 4).
-- `ironclaw_reborn_composition/src/webui_rate_limit.rs::tests`: PerIp
+- `ironclaw_reborn_composition/src/webui/webui_rate_limit.rs::tests`: PerIp
   uses transport peer not forwarded headers, fail-closed on missing
   peer, unsupported scope rejected at composition (rows 6, 8).
 - `ironclaw_webui_v2/src/sse_capacity.rs::tests`: 3-stream per-caller

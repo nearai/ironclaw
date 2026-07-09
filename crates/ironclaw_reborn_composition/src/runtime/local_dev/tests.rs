@@ -41,10 +41,10 @@ mod tests {
         AcceptedMessageRef, LoopMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
         RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef,
-            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-            InMemoryRunProfileResolver, ModelProfileId, RegisterProviderToolCallRequest,
-            VisibleCapabilityRequest,
+            CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
+            CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, ModelProfileId,
+            RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
 
@@ -320,6 +320,118 @@ mod tests {
                 HostManagedModelErrorKind::Unavailable,
                 "test gateway is not wired",
             ))
+        }
+    }
+
+    #[derive(Default)]
+    struct ProgressRecordingModelGateway {
+        calls: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl ProgressRecordingModelGateway {
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls
+                .lock()
+                .expect("progress gateway calls lock")
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HostManagedModelGateway for ProgressRecordingModelGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            panic!("progress gateway should receive the streaming method")
+        }
+
+        async fn stream_model_with_progress(
+            &self,
+            _request: HostManagedModelRequest,
+            sink: Arc<dyn HostManagedModelStreamSink>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.calls
+                .lock()
+                .expect("progress gateway calls lock")
+                .push("progress");
+            sink.safe_text_update("partial".to_string()).await;
+            Ok(HostManagedModelResponse::assistant_reply("complete"))
+        }
+
+        async fn stream_model_with_capabilities_and_progress(
+            &self,
+            _request: HostManagedModelRequest,
+            _capabilities: Arc<dyn LoopCapabilityPort>,
+            sink: Arc<dyn HostManagedModelStreamSink>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.calls
+                .lock()
+                .expect("progress gateway calls lock")
+                .push("capabilities_progress");
+            sink.safe_text_update("partial".to_string()).await;
+            Ok(HostManagedModelResponse::assistant_reply("complete"))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingStreamSink {
+        updates: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingStreamSink {
+        fn updates(&self) -> Vec<String> {
+            self.updates
+                .lock()
+                .expect("stream sink updates lock")
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HostManagedModelStreamSink for RecordingStreamSink {
+        async fn safe_text_update(&self, safe_text: String) {
+            self.updates
+                .lock()
+                .expect("stream sink updates lock")
+                .push(safe_text);
+        }
+    }
+
+    struct UnusedCapabilityPort;
+
+    #[async_trait::async_trait]
+    impl LoopCapabilityPort for UnusedCapabilityPort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            panic!("progress forwarding test should not query capabilities")
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            panic!("progress forwarding test should not invoke capabilities")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            panic!("progress forwarding test should not invoke capability batches")
+        }
+    }
+
+    fn empty_host_model_request() -> HostManagedModelRequest {
+        HostManagedModelRequest {
+            model_profile_id: ModelProfileId::new("interactive_model").expect("model profile"),
+            messages: Vec::new(),
+            surface_version: None,
+            resolved_model_route: None,
+            run_id: TurnRunId::new(),
+            turn_id: TurnId::new(),
         }
     }
 
@@ -3520,6 +3632,47 @@ mod tests {
         assert!(!output.contains('}'));
         assert!(!output.contains('/'));
         assert!(output.contains("ignore previous instructions"));
+    }
+
+    #[tokio::test]
+    async fn local_dev_result_hydrating_model_gateway_forwards_progress_sink() {
+        let inner = Arc::new(ProgressRecordingModelGateway::default());
+        let gateway = LocalDevResultHydratingModelGateway::new(
+            inner.clone(),
+            Arc::new(LocalDevCapabilityIo::default()),
+        );
+        let sink = Arc::new(RecordingStreamSink::default());
+
+        gateway
+            .stream_model_with_progress(empty_host_model_request(), sink.clone())
+            .await
+            .expect("progress method forwards to inner gateway");
+
+        assert_eq!(sink.updates(), vec!["partial"]);
+        assert_eq!(inner.calls(), vec!["progress"]);
+    }
+
+    #[tokio::test]
+    async fn local_dev_result_hydrating_model_gateway_forwards_capability_progress_sink() {
+        let inner = Arc::new(ProgressRecordingModelGateway::default());
+        let gateway = LocalDevResultHydratingModelGateway::new(
+            inner.clone(),
+            Arc::new(LocalDevCapabilityIo::default()),
+        );
+        let sink = Arc::new(RecordingStreamSink::default());
+        let capabilities = Arc::new(UnusedCapabilityPort);
+
+        gateway
+            .stream_model_with_capabilities_and_progress(
+                empty_host_model_request(),
+                capabilities,
+                sink.clone(),
+            )
+            .await
+            .expect("capability progress method forwards to inner gateway");
+
+        assert_eq!(sink.updates(), vec!["partial"]);
+        assert_eq!(inner.calls(), vec!["capabilities_progress"]);
     }
 
     #[tokio::test]

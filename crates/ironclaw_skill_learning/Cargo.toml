@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
+[package.metadata.ironclaw]
+layer = "loops"
+
 [package.metadata.dist]
 dist = false
 

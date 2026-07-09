@@ -997,7 +997,7 @@ pub(crate) fn slack_provider_identity_actor_resolver(
     lookup: Arc<dyn RebornUserIdentityLookup>,
 ) -> ProviderIdentityActorResolver {
     ProviderIdentityActorResolver::new(
-        crate::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
+        crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
         ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID,
         ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND,
         lookup,

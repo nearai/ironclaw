@@ -217,6 +217,7 @@ registerPack("uk", {
 
   // Settings tabs
   "settings.inference": "Інференс",
+  "settings.appearance": "Вигляд",
   "settings.agent": "Агент",
   "settings.channels": "Канали",
   "settings.networking": "Мережа",
@@ -252,6 +253,10 @@ registerPack("uk", {
   "traceCommons.lastSyncDesc": "Локальний перегляд станом на останню синхронізацію",
   "traceCommons.never": "ніколи",
   "traceCommons.recentExplanations": "Останні пояснення кредитів",
+  "traceCommons.openAccount": "Відкрити обліковий запис Trace Commons",
+  "traceCommons.openingAccount": "Відкриття…",
+  "traceCommons.openAccountFailed":
+    "Не вдалося відкрити ваш обліковий запис Trace Commons. Перевірте реєстрацію та спробуйте ще раз.",
   "traceCommons.submittedTracesTitle": "Надіслані трейси",
   "traceCommons.tracesLoadFailed": "Не вдалося завантажити ваші надіслані трейси.",
   "traceCommons.traceStatus": "Статус",
@@ -280,6 +285,9 @@ registerPack("uk", {
   "settings.restartNow": "Перезапустити зараз",
   "settings.restartStarting": "Перезапустити...",
   "settings.restartUnavailable": "Перезапуск через вебінтерфейс ще недоступний. Перезапустіть процес шлюзу вручну, щоб застосувати незавершені зміни.",
+  "settings.field.showChatTerminalShortcut": "Показувати ярлик термінала в чаті",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Показує плаваючу піктограму термінала/журналів у гілках чату.",
 
   // Restart dialog
   "restart.title": "Перезапустити IronClaw",
