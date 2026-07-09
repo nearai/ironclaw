@@ -275,6 +275,27 @@ where
     Ok((state, latest))
 }
 
+fn rebuild_active_holds_from_reservations(state: &mut ResourceState) {
+    state.reserved_by_account.clear();
+    for record in state.reservations.values() {
+        if record.status == ReservationStatus::Active {
+            for account in &record.accounts {
+                state
+                    .reserved_by_account
+                    .entry(account.clone())
+                    .or_default()
+                    .add_assign(&record.tally);
+            }
+        }
+    }
+}
+
+fn delta_log_path() -> Result<ScopedPath, ResourceError> {
+    ScopedPath::new(DELTA_LOG_PATH.to_string()).map_err(|error| {
+        storage_error(format!("invalid resource governor delta log path: {error}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -418,25 +439,4 @@ mod tests {
 
         pending.wait()
     }
-}
-
-fn rebuild_active_holds_from_reservations(state: &mut ResourceState) {
-    state.reserved_by_account.clear();
-    for record in state.reservations.values() {
-        if record.status == ReservationStatus::Active {
-            for account in &record.accounts {
-                state
-                    .reserved_by_account
-                    .entry(account.clone())
-                    .or_default()
-                    .add_assign(&record.tally);
-            }
-        }
-    }
-}
-
-fn delta_log_path() -> Result<ScopedPath, ResourceError> {
-    ScopedPath::new(DELTA_LOG_PATH.to_string()).map_err(|error| {
-        storage_error(format!("invalid resource governor delta log path: {error}"))
-    })
 }

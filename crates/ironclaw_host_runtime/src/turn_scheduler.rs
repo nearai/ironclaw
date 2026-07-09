@@ -631,7 +631,7 @@ async fn drain_queued_runs(
                     claim_started_at,
                     &claimed_runs,
                 );
-                for (claimed, permit) in claimed_runs.into_iter().zip(permits.into_iter()) {
+                for (claimed, permit) in claimed_runs.into_iter().zip(permits) {
                     let run_id = claimed.state.run_id;
                     active_runs.insert(
                         run_id,

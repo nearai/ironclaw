@@ -211,10 +211,10 @@ struct UserProfileCache {
 impl UserProfileCache {
     fn get(&mut self, key: &UserProfileCacheKey) -> Option<Option<UserProfileContext>> {
         let now = Instant::now();
-        if let Some(entry) = self.entries.get(key) {
-            if entry.expires_at > now {
-                return Some(entry.profile.clone());
-            }
+        if let Some(entry) = self.entries.get(key)
+            && entry.expires_at > now
+        {
+            return Some(entry.profile.clone());
         }
         self.entries.remove(key);
         None
