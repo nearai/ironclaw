@@ -2441,21 +2441,45 @@ mod tests {
     impl crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore
         for RecordingBindingStore
     {
+        async fn user_identity_bindings_for_user(
+            &self,
+            provider: &str,
+            user_id: &ironclaw_host_api::UserId,
+            provider_user_id_prefix: Option<&str>,
+        ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
+            let bindings = self.bindings.lock().expect("binding store lock");
+            Ok(bindings
+                .iter()
+                .filter(|binding| {
+                    binding.provider.as_str() == provider
+                        && binding.user_id == *user_id
+                        && provider_user_id_prefix.is_none_or(|prefix| {
+                            binding.provider_user_id.as_str().starts_with(prefix)
+                        })
+                })
+                .cloned()
+                .collect())
+        }
+
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,
             user_id: &ironclaw_host_api::UserId,
             provider_user_id_prefix: Option<&str>,
-        ) -> Result<usize, RebornUserIdentityBindingError> {
+        ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
             let mut bindings = self.bindings.lock().expect("binding store lock");
-            let before = bindings.len();
+            let mut deleted = Vec::new();
             bindings.retain(|binding| {
-                !(binding.provider.as_str() == provider
+                let should_delete = binding.provider.as_str() == provider
                     && binding.user_id == *user_id
                     && provider_user_id_prefix
-                        .is_none_or(|prefix| binding.provider_user_id.as_str().starts_with(prefix)))
+                        .is_none_or(|prefix| binding.provider_user_id.as_str().starts_with(prefix));
+                if should_delete {
+                    deleted.push(binding.clone());
+                }
+                !should_delete
             });
-            Ok(before - bindings.len())
+            Ok(deleted)
         }
     }
 

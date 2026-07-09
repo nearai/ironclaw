@@ -392,6 +392,8 @@ pub enum SlackHostBetaBuildError {
     DurableHostStateUnavailable,
     #[error("Slack host-beta outbound delivery target registration failed: {reason}")]
     OutboundDeliveryTargetRegistration { reason: String },
+    #[error("Slack host-beta conversation store unavailable: {reason}")]
+    ConversationStoreUnavailable { reason: String },
     #[error("Slack host-beta personal OAuth binding requires [slack].api_app_id")]
     TenantAppSelectorRequired,
     #[error("invalid Slack host-beta config field {field}: {reason}")]
@@ -412,6 +414,10 @@ pub struct SlackHostBetaMounts {
     /// Personal identity delete handle used when a caller uninstalls the
     /// Slack channel extension from the WebUI.
     pub(crate) user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    /// Actor-pairing handle for revoking personal Slack DM conversation state
+    /// when a caller removes the Slack channel extension.
+    pub(crate) conversation_actor_pairings:
+        Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     /// Personal Slack DM target store used by the same disconnect path, so
     /// outbound targets no longer show a stale Slack DM after uninstall.
     pub(crate) personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
@@ -732,15 +738,22 @@ pub fn build_slack_host_beta_mounts(
             config.installation_id.clone(),
             Arc::clone(&channel_route_store),
         ));
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let conversation_actor_pairings: Arc<
+        dyn ironclaw_conversations::ConversationActorPairingService,
+    > = conversations.clone();
+    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    let record = build_slack_installation_record_with_resolvers(
+        &parts,
+        config.clone(),
+        actor_user_resolver,
+        Some(subject_route_resolver),
+        SlackConversationServices::from_shared(conversations),
+    )?;
     // Build the installation resolver once so the events route has a single
     // source of truth for the Slack signing identity.
     let resolver: Arc<dyn SlackInstallationResolver> =
-        build_slack_installation_resolver_with_resolvers(
-            runtime,
-            config.clone(),
-            actor_user_resolver,
-            Some(subject_route_resolver),
-        )?;
+        Arc::new(StaticSlackInstallationResolver::new([record]));
     let events =
         slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::clone(&resolver)));
     let allowed_route_subjects = std::iter::once(config.user_id.clone())
@@ -837,6 +850,7 @@ pub fn build_slack_host_beta_mounts(
             personal_oauth_binder,
             user_identity_lookup: user_identity_lookup.clone(),
             user_identity_delete_store: user_identity_delete_store.clone(),
+            conversation_actor_pairings: conversation_actor_pairings.clone(),
             personal_dm_target_store: personal_dm_target_store.clone(),
             outbound_delivery_target_provider,
             outbound_delivery_target_provider_registered: true,
@@ -875,6 +889,7 @@ pub fn build_slack_host_beta_mounts(
         personal_oauth_binder,
         user_identity_lookup: user_identity_lookup.clone(),
         user_identity_delete_store,
+        conversation_actor_pairings,
         personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,

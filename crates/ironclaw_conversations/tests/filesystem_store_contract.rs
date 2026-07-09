@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationBindingService, ConversationRouteKind,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundTurnError,
     RebornFilesystemConversationServices, ResolveConversationRequest,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
@@ -135,6 +135,83 @@ async fn filesystem_conversation_services_round_trip_persisted_state_on_reopen()
         .unwrap();
     assert_eq!(resolution.tenant_id, tenant_id("tenant-a"));
     assert_eq!(resolution.actor.user_id, user_id("alice"));
+}
+
+#[tokio::test]
+async fn filesystem_conversation_services_persist_unpair_revocation_on_reopen() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .unwrap();
+    services
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user_id("alice"),
+        )
+        .await
+        .unwrap();
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-unpair-persisted"),
+            "event-before-unpair",
+        ))
+        .await
+        .unwrap();
+    services
+        .unpair_external_actor(
+            &tenant_id("tenant-a"),
+            &telegram(),
+            &default_installation(),
+            &external_actor("telegram-user-1"),
+        )
+        .await
+        .unwrap();
+    drop(services);
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .unwrap();
+    reopened
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user_id("alice"),
+        )
+        .await
+        .unwrap();
+    let stale = reopened
+        .lookup_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-unpair-persisted"),
+            "event-after-reopen-lookup",
+        ))
+        .await
+        .expect_err("old direct binding should remain revoked after reopen");
+    assert!(matches!(stale, InboundTurnError::BindingRequired { .. }));
+
+    let rebound = reopened
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-unpair-persisted"),
+            "event-after-reopen-repair",
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "re-pair after persisted unpair should create a fresh direct route"
+    );
 }
 
 /// Regression for the `ScopedFilesystem` migration: two

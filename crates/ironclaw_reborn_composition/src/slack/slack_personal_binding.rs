@@ -90,12 +90,19 @@ pub trait RebornUserIdentityBindingStore: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait RebornUserIdentityBindingDeleteStore: Send + Sync {
+    async fn user_identity_bindings_for_user(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError>;
+
     async fn delete_user_identity_bindings_for_user(
         &self,
         provider: &str,
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
-    ) -> Result<usize, RebornUserIdentityBindingError>;
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -65,6 +65,16 @@ pub trait ConversationActorPairingService: Send + Sync {
         external_actor_ref: ExternalActorRef,
         user_id: ironclaw_host_api::UserId,
     ) -> Result<(), InboundTurnError>;
+
+    /// Remove a host-trusted external actor pairing and revoke direct
+    /// conversation routes owned by that actor.
+    async fn unpair_external_actor(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+    ) -> Result<(), InboundTurnError>;
 }
 
 #[async_trait]

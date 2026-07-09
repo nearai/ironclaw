@@ -4015,7 +4015,46 @@ async fn actor_user_resolver_accepts_user_message_without_legacy_pairing() {
         .next()
         .expect("turn should be submitted");
     assert_eq!(submission.actor.user_id.as_str(), "user:resolved-slack");
-    assert_eq!(actor_resolver.calls().len(), 1);
+    assert_eq!(
+        actor_resolver.calls().len(),
+        2,
+        "resolver-backed actor bindings are rechecked before the turn is submitted"
+    );
+}
+
+#[tokio::test]
+async fn actor_user_resolver_rewrites_pairing_after_explicit_unpair() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let (binding, _actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations.clone(),
+        [(
+            actor_ref.clone(),
+            UserId::new("user:resolved-slack").expect("user"),
+        )],
+    );
+
+    binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "resolver-before-unpair",
+        )))
+        .await
+        .expect("initial resolved actor binding");
+    conversations
+        .unpair_external_actor(
+            &TenantId::new("tenant:alpha").expect("tenant"),
+            &ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            &ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            &ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+        )
+        .await;
+
+    binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "resolver-after-unpair",
+        )))
+        .await
+        .expect("same-process reconnect should rewrite the resolved actor pairing");
 }
 
 #[tokio::test]
@@ -4051,6 +4090,81 @@ async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
             retryable: false,
             ..
         }
+    ));
+}
+
+#[tokio::test]
+async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let actor_resolver = Arc::new(RevokingProductActorUserResolver::new(
+        actor_ref,
+        UserId::new("user:resolved-slack").expect("user"),
+    ));
+    let binding = product_binding_service_with_actor_user_resolver_arc(
+        conversations.clone(),
+        actor_resolver.clone(),
+    );
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(DefaultInboundTurnService::new(
+            binding.clone(),
+            InMemorySessionThreadService::default(),
+            coordinator.clone(),
+        )),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let err = workflow
+        .accept_inbound(sample_envelope("resolver-revoked-mid-resolution"))
+        .await
+        .expect_err("revoked actor should be rejected before turn submission");
+
+    assert!(coordinator.submissions().is_empty());
+    assert_eq!(
+        actor_resolver.calls(),
+        2,
+        "the second resolver call catches revocation after the initial stale read"
+    );
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            ..
+        }
+    ));
+
+    let stale = conversations
+        .lookup_binding(ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: TenantId::new("tenant:alpha").expect("tenant"),
+            adapter_kind: ironclaw_conversations::AdapterKind::new("test_adapter")
+                .expect("adapter"),
+            adapter_installation_id: ironclaw_conversations::AdapterInstallationId::new(
+                "install_alpha",
+            )
+            .expect("install"),
+            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+                .expect("actor"),
+            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+                None, "conv1", None, None,
+            )
+            .expect("conversation"),
+            external_event_id: ironclaw_conversations::ExternalEventId::new(
+                "evt:resolver-revoked-mid-resolution-lookup",
+            )
+            .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            requested_agent_id: Some(AgentId::new("agent:alpha").expect("agent")),
+            requested_project_id: Some(ProjectId::new("project:alpha").expect("project")),
+        })
+        .await
+        .expect_err("revalidation should roll back the stale pairing and direct route");
+    assert!(matches!(
+        stale,
+        ironclaw_conversations::InboundTurnError::BindingRequired { .. }
     ));
 }
 
@@ -6261,6 +6375,42 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request.clone());
         Ok(self.bindings.get(&request.external_actor_ref).cloned())
+    }
+}
+
+#[derive(Debug)]
+struct RevokingProductActorUserResolver {
+    actor_ref: ExternalActorRef,
+    user_id: UserId,
+    calls: AtomicUsize,
+}
+
+impl RevokingProductActorUserResolver {
+    fn new(actor_ref: ExternalActorRef, user_id: UserId) -> Self {
+        Self {
+            actor_ref,
+            user_id,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ProductActorUserResolver for RevokingProductActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 && request.external_actor_ref == self.actor_ref {
+            Ok(Some(self.user_id.clone()))
+        } else {
+            Ok(None)
+        }
     }
 }
 

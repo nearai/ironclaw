@@ -162,6 +162,170 @@ async fn lookup_binding_does_not_create_missing_conversation_binding() {
 }
 
 #[tokio::test]
+async fn unpair_external_actor_revokes_direct_conversation_bindings() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-1");
+    let conversation = external_conversation("chat-unpair-revoke", None);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-before-unpair",
+        ))
+        .await
+        .expect("first direct binding");
+
+    services
+        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor)
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+
+    let stale_reply_target = services
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            first.turn_scope.thread_id.clone(),
+            first.reply_target_binding_ref,
+        ))
+        .await
+        .expect_err("old reply target should be revoked with the direct binding");
+    assert!(matches!(
+        stale_reply_target,
+        InboundTurnError::ThreadNotFound { .. }
+    ));
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "telegram-event-after-repair-lookup",
+        ))
+        .await
+        .expect_err("old direct conversation binding should be gone after re-pair");
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            conversation,
+            "telegram-event-after-repair",
+        ))
+        .await
+        .expect("re-paired actor should create a fresh binding");
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "unpair must not silently reuse the pre-removal Slack DM thread route"
+    );
+}
+
+#[tokio::test]
+async fn unpair_external_actor_preserves_shared_conversation_routes() {
+    let services = InMemoryConversationServices::default();
+    let alice_actor = external_actor("alice-telegram");
+    let bob_actor = external_actor("bob-telegram");
+    let conversation = external_conversation("shared-chat-unpair-preserve", Some("topic-a"));
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            alice_actor.clone(),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            bob_actor.clone(),
+            user("bob"),
+        )
+        .await;
+    let mut alice_request = resolve_request(
+        telegram(),
+        alice_actor.clone(),
+        conversation.clone(),
+        "shared-chat-alice",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let alice_resolution = services
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("alice creates shared binding");
+    services
+        .add_thread_participant(
+            &tenant(),
+            &alice_resolution.turn_scope.thread_id,
+            user("bob"),
+        )
+        .await
+        .expect("bob participant");
+    let mut bob_before_unpair = resolve_request(
+        telegram(),
+        bob_actor.clone(),
+        conversation.clone(),
+        "shared-chat-bob-before-unpair",
+    );
+    bob_before_unpair.route_kind = ConversationRouteKind::Shared;
+    let bob_before_unpair = services
+        .resolve_or_create_binding(bob_before_unpair)
+        .await
+        .expect("bob can use shared binding before alice unpairs");
+
+    services
+        .unpair_external_actor(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &alice_actor,
+        )
+        .await;
+
+    let mut bob_after_unpair = resolve_request(
+        telegram(),
+        bob_actor,
+        conversation,
+        "shared-chat-bob-after-unpair",
+    );
+    bob_after_unpair.route_kind = ConversationRouteKind::Shared;
+    let bob_after_unpair = services
+        .resolve_or_create_binding(bob_after_unpair)
+        .await
+        .expect("alice unpair must not remove the shared conversation route");
+
+    assert_eq!(
+        bob_before_unpair.turn_scope.thread_id,
+        alice_resolution.turn_scope.thread_id
+    );
+    assert_eq!(
+        bob_after_unpair.turn_scope.thread_id,
+        alice_resolution.turn_scope.thread_id
+    );
+}
+
+#[tokio::test]
 async fn lookup_binding_miss_does_not_reserve_external_event_route() {
     let services = InMemoryConversationServices::default();
     services

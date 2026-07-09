@@ -1,9 +1,6 @@
 //! Adapter from product workflow binding requests to `ironclaw_conversations`.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
@@ -15,8 +12,6 @@ use crate::{
     ConversationBindingService, ProductConversationRouteKind, ProductWorkflowError,
     ResolveBindingRequest, ResolvedBinding,
 };
-
-const RESOLVED_ACTOR_PAIRING_CACHE_LIMIT: usize = 50_000;
 
 /// Tenant-scoped installation identity used before external actor/conversation
 /// refs enter the conversation binding layer.
@@ -408,45 +403,12 @@ impl StaticProductInstallationResolver {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ResolvedActorCacheKey {
-    adapter_id: ProductAdapterId,
-    installation_id: AdapterInstallationId,
-    external_actor_ref: ExternalActorRef,
-    user_id: UserId,
-}
-
-#[derive(Debug, Default)]
-struct ResolvedActorPairingCache {
-    set: HashSet<ResolvedActorCacheKey>,
-    order: VecDeque<ResolvedActorCacheKey>,
-}
-
-impl ResolvedActorPairingCache {
-    fn contains(&self, key: &ResolvedActorCacheKey) -> bool {
-        self.set.contains(key)
-    }
-
-    fn insert(&mut self, key: ResolvedActorCacheKey) {
-        if !self.set.insert(key.clone()) {
-            return;
-        }
-        self.order.push_back(key);
-        while self.set.len() > RESOLVED_ACTOR_PAIRING_CACHE_LIMIT {
-            if let Some(oldest) = self.order.pop_front() {
-                self.set.remove(&oldest);
-            }
-        }
-    }
-}
-
 /// Product workflow binding service backed by the canonical conversations
 /// service. Tenant selection comes only from trusted installation config.
 #[derive(Clone)]
 pub struct ProductConversationBindingService {
     conversations: Arc<dyn ironclaw_conversations::ConversationBindingService>,
     installations: StaticProductInstallationResolver,
-    resolved_actor_pairing_cache: Arc<Mutex<ResolvedActorPairingCache>>,
 }
 
 impl ProductConversationBindingService {
@@ -457,9 +419,6 @@ impl ProductConversationBindingService {
         Self {
             conversations,
             installations,
-            resolved_actor_pairing_cache: Arc::new(
-                Mutex::new(ResolvedActorPairingCache::default()),
-            ),
         }
     }
 
@@ -469,17 +428,6 @@ impl ProductConversationBindingService {
         request: &ResolveBindingRequest,
         user_id: &UserId,
     ) -> Result<(), ProductWorkflowError> {
-        let cache_key = resolved_actor_cache_key(request, user_id.clone());
-        if self
-            .resolved_actor_pairing_cache
-            .lock()
-            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
-                reason: "resolved actor binding cache lock poisoned".into(),
-            })?
-            .contains(&cache_key)
-        {
-            return Ok(());
-        };
         let ProductActorBindingPolicy::ResolveActor { actor_pairings, .. } =
             &installation_scope.actor_binding_policy
         else {
@@ -495,13 +443,43 @@ impl ProductConversationBindingService {
             )
             .await
             .map_err(map_conversation_error)?;
-        self.resolved_actor_pairing_cache
-            .lock()
-            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
-                reason: "resolved actor binding cache lock poisoned".into(),
-            })?
-            .insert(cache_key);
         Ok(())
+    }
+
+    async fn ensure_resolved_actor_binding_still_current(
+        &self,
+        installation_scope: &ProductInstallationScope,
+        request: &ResolveBindingRequest,
+        expected_user_id: Option<&UserId>,
+    ) -> Result<(), ProductWorkflowError> {
+        let Some(expected_user_id) = expected_user_id else {
+            return Ok(());
+        };
+        let ProductActorBindingPolicy::ResolveActor {
+            resolver,
+            actor_pairings,
+        } = &installation_scope.actor_binding_policy
+        else {
+            return Ok(());
+        };
+        let current_user_id = resolver
+            .resolve_product_actor_user(actor_user_resolution_request(request))
+            .await?;
+        if current_user_id.as_ref() == Some(expected_user_id) {
+            return Ok(());
+        }
+        actor_pairings
+            .unpair_external_actor(
+                installation_scope.tenant_id.clone(),
+                conversation_adapter_kind(&request.adapter_id)?,
+                conversation_installation_id(&request.installation_id)?,
+                conversation_actor_ref(&request.external_actor_ref)?,
+            )
+            .await
+            .map_err(map_conversation_error)?;
+        Err(ProductWorkflowError::BindingRequired {
+            reason: "external actor binding was revoked while resolving this message".into(),
+        })
     }
 }
 
@@ -513,18 +491,6 @@ fn actor_user_resolution_request(
         request.installation_id.clone(),
         request.external_actor_ref.clone(),
     )
-}
-
-fn resolved_actor_cache_key(
-    request: &ResolveBindingRequest,
-    user_id: UserId,
-) -> ResolvedActorCacheKey {
-    ResolvedActorCacheKey {
-        adapter_id: request.adapter_id.clone(),
-        installation_id: request.installation_id.clone(),
-        external_actor_ref: request.external_actor_ref.clone(),
-        user_id,
-    }
 }
 
 async fn resolve_actor_user(
@@ -605,6 +571,12 @@ impl ConversationBindingService for ProductConversationBindingService {
                         expected_user_id.as_ref(),
                         &resolution,
                     )?;
+                    self.ensure_resolved_actor_binding_still_current(
+                        &installation_scope,
+                        &request,
+                        expected_user_id.as_ref(),
+                    )
+                    .await?;
 
                     return resolved_binding_from_resolution(resolution, request.route_kind);
                 }
@@ -635,6 +607,12 @@ impl ConversationBindingService for ProductConversationBindingService {
             .await
             .map_err(map_conversation_error)?;
         ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
+        self.ensure_resolved_actor_binding_still_current(
+            &installation_scope,
+            &request,
+            expected_user_id.as_ref(),
+        )
+        .await?;
 
         resolved_binding_from_resolution(resolution, request.route_kind)
     }

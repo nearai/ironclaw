@@ -87,6 +87,20 @@ pub(super) async fn build_runtime_mounts(
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
+    let conversation_services = Arc::new(
+        RebornFilesystemConversationServices::new(Arc::clone(
+            &parts.local_runtime.host_state_filesystem,
+        ))
+        .await
+        .map_err(
+            |error| SlackHostBetaBuildError::ConversationStoreUnavailable {
+                reason: error.to_string(),
+            },
+        )?,
+    );
+    let conversation_actor_pairings: Arc<
+        dyn ironclaw_conversations::ConversationActorPairingService,
+    > = conversation_services.clone();
     let dynamic_binding_service: Arc<dyn SlackPersonalUserBinder> = Arc::new(
         DynamicSlackPersonalUserBinder::new(Arc::clone(&setup_service), Arc::clone(&binding_store)),
     );
@@ -116,6 +130,7 @@ pub(super) async fn build_runtime_mounts(
         Arc::clone(&setup_service),
         state.clone(),
         Arc::clone(&channel_route_store),
+        Arc::clone(&conversation_services),
     );
     let mut channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
         Arc::clone(&channel_route_store),
@@ -195,6 +210,7 @@ pub(super) async fn build_runtime_mounts(
         personal_oauth_binder,
         user_identity_lookup,
         user_identity_delete_store,
+        conversation_actor_pairings,
         personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
@@ -563,6 +579,7 @@ struct DynamicSlackInstallationResolver {
     setup_service: Arc<SlackSetupService>,
     state: Arc<dyn RebornUserIdentityLookup>,
     channel_route_store: Arc<dyn SlackChannelRouteStore>,
+    conversation_services: Arc<RebornFilesystemConversationServices>,
     live_resolvers: Arc<Mutex<DynamicSlackInstallationResolverLifecycle>>,
 }
 
@@ -572,12 +589,14 @@ impl DynamicSlackInstallationResolver {
         setup_service: Arc<SlackSetupService>,
         state: Arc<dyn RebornUserIdentityLookup>,
         channel_route_store: Arc<dyn SlackChannelRouteStore>,
+        conversation_services: Arc<RebornFilesystemConversationServices>,
     ) -> Self {
         Self {
             parts,
             setup_service,
             state,
             channel_route_store,
+            conversation_services,
             live_resolvers: Arc::new(Mutex::new(
                 DynamicSlackInstallationResolverLifecycle::default(),
             )),
@@ -650,26 +669,12 @@ impl DynamicSlackInstallationResolver {
                 config.installation_id.clone(),
                 Arc::clone(&self.channel_route_store),
             ));
-        // Durable, filesystem-backed conversation binding store so Slack
-        // conversation continuity survives a process restart. Backend
-        // (libSQL / Postgres / local disk) is a property of the host-state
-        // root filesystem, shared with the idempotency ledger.
-        let conversations = RebornFilesystemConversationServices::new(Arc::clone(
-            &self.parts.local_runtime.host_state_filesystem,
-        ))
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "Slack durable conversation store unavailable");
-            SlackIngressError::ConversationStoreUnavailable {
-                reason: error.to_string(),
-            }
-        })?;
         let record = build_slack_installation_record_with_resolvers(
             &self.parts,
             config,
             actor_user_resolver,
             Some(subject_route_resolver),
-            SlackConversationServices::from_shared(Arc::new(conversations)),
+            SlackConversationServices::from_shared(Arc::clone(&self.conversation_services)),
         )
         .map_err(map_build_error_to_ingress_not_found(
             "build Slack installation resolver",

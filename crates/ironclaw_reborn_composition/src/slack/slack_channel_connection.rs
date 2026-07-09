@@ -12,18 +12,25 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
     SecretCleanupReport, SecretCleanupRequest,
 };
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
+use ironclaw_conversations::{AdapterKind, ConversationActorPairingService, ExternalActorRef};
+use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
 };
+use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 
 use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
     extension_host::available_extensions::SLACK_BOT_EXTENSION_ID,
-    slack::slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER},
+    slack::slack_actor_identity::{
+        RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER,
+        parse_slack_user_identity_provider_user_id,
+    },
     slack::slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack::slack_outbound_targets::SlackPersonalDmTargetStore,
-    slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore,
+    slack::slack_personal_binding::{
+        RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    },
 };
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
@@ -67,6 +74,7 @@ struct SlackChannelConnectionFacade {
     personal_connection_scope_resolver: Option<Arc<dyn SlackPersonalConnectionScopeResolver>>,
     user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
     personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
     // Genuinely optional (not an `optional_arc` smell): compositions without
     // product auth cannot have minted a `slack_personal` credential in the
@@ -85,6 +93,60 @@ impl SlackChannelConnectionFacade {
                 .map_err(RebornServicesError::internal_from);
         }
         Ok(self.personal_connection_scope.clone())
+    }
+
+    async fn unpair_slack_identity_bindings(
+        &self,
+        bindings: &[RebornUserIdentityBinding],
+    ) -> Result<(), RebornServicesError> {
+        let adapter_kind = AdapterKind::new(SLACK_V2_ADAPTER_ID)
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        for binding in bindings {
+            let Some((installation_id, external_actor_ref)) =
+                slack_identity_conversation_actor(binding)?
+            else {
+                continue;
+            };
+            self.conversation_actor_pairings
+                .unpair_external_actor(
+                    self.tenant_id.clone(),
+                    adapter_kind.clone(),
+                    installation_id,
+                    external_actor_ref,
+                )
+                .await
+                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn delete_slack_identity_bindings_after_unpair(
+        &self,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<(), RebornServicesError> {
+        let bindings = self
+            .user_identity_delete_store
+            .user_identity_bindings_for_user(
+                SLACK_IDENTITY_PROVIDER,
+                user_id,
+                provider_user_id_prefix,
+            )
+            .await
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        self.unpair_slack_identity_bindings(&bindings).await?;
+
+        let deleted = self
+            .user_identity_delete_store
+            .delete_user_identity_bindings_for_user(
+                SLACK_IDENTITY_PROVIDER,
+                user_id,
+                provider_user_id_prefix,
+            )
+            .await
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+
+        self.unpair_slack_identity_bindings(&deleted).await
     }
 }
 
@@ -138,22 +200,15 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
                     )?)
                     .await?;
             }
-            self.user_identity_delete_store
-                .delete_user_identity_bindings_for_user(
-                    SLACK_IDENTITY_PROVIDER,
-                    &caller.user_id,
-                    None,
-                )
-                .await
-                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            self.delete_slack_identity_bindings_after_unpair(&caller.user_id, None)
+                .await?;
             return Ok(());
         };
-        // Ordering: credential revoke → DM targets → identity binding. The
-        // binding is the "connected" signal and deletes last (commit point);
-        // the credential revokes first so a mid-sequence failure leaves the
-        // caller visibly connected with every step retryable — deleting DM
-        // targets before a failing revoke would silently break proactive DMs
-        // while the UI still shows connected.
+        // Ordering: credential revoke → DM targets → conversation unpair →
+        // identity binding. The identity binding is the "connected" signal and
+        // deletes last (commit point); actor bindings are revoked before and
+        // after the delete so a concurrent inbound that re-pairs from a binding
+        // deleted in the same call is cleaned up too.
         if let Some(cleanup) = &self.personal_credential_cleanup {
             cleanup
                 .cleanup_credentials_for_lifecycle(personal_credential_cleanup_request(&caller)?)
@@ -169,14 +224,11 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
             .await
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
         let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
-        self.user_identity_delete_store
-            .delete_user_identity_bindings_for_user(
-                SLACK_IDENTITY_PROVIDER,
-                &caller.user_id,
-                Some(provider_user_id_prefix.as_str()),
-            )
-            .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        self.delete_slack_identity_bindings_after_unpair(
+            &caller.user_id,
+            Some(provider_user_id_prefix.as_str()),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -221,15 +273,46 @@ pub(crate) fn slack_channel_connection_facade(
         personal_connection_scope_resolver: Some(mounts.personal_connection_scope_resolver.clone()),
         user_identity_lookup: mounts.user_identity_lookup.clone(),
         user_identity_delete_store: mounts.user_identity_delete_store.clone(),
+        conversation_actor_pairings: mounts.conversation_actor_pairings.clone(),
         personal_dm_target_store: mounts.personal_dm_target_store.clone(),
         personal_credential_cleanup,
     })
+}
+
+fn slack_identity_conversation_actor(
+    binding: &RebornUserIdentityBinding,
+) -> Result<
+    Option<(
+        ironclaw_conversations::AdapterInstallationId,
+        ExternalActorRef,
+    )>,
+    RebornServicesError,
+> {
+    if binding.provider.as_str() != SLACK_IDENTITY_PROVIDER {
+        return Ok(None);
+    }
+    let Some((installation_id, slack_user_id)) =
+        parse_slack_user_identity_provider_user_id(binding.provider_user_id.as_str())
+    else {
+        tracing::warn!(
+            provider_user_id = binding.provider_user_id.as_str(),
+            "skipping Slack conversation unpair for malformed identity provider user id"
+        );
+        return Ok(None);
+    };
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new(installation_id.as_str())
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+    let external_actor_ref = ExternalActorRef::new(SLACK_USER_ACTOR_KIND, slack_user_id)
+        .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+    Ok(Some((installation_id, external_actor_ref)))
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
+    use ironclaw_conversations::AdapterInstallationId as ConversationAdapterInstallationId;
     use ironclaw_host_api::{AgentId, TenantId, UserId};
     use ironclaw_product_adapters::AdapterInstallationId;
     use ironclaw_product_workflow::WebUiAuthenticatedCaller;
@@ -259,6 +342,7 @@ mod tests {
             user_id.clone(),
         )]));
         let dm_target_store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
         let dm_target_key = SlackPersonalDmTargetKey::new(
             tenant_id.clone(),
             installation_id.clone(),
@@ -287,6 +371,7 @@ mod tests {
             personal_connection_scope_resolver: None,
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: actor_pairings.clone(),
             personal_dm_target_store: dm_target_store.clone(),
             personal_credential_cleanup: Some(cleanup.clone()),
         };
@@ -350,6 +435,26 @@ mod tests {
                 .expect("dm target lookup after disconnect"),
             None
         );
+        assert_eq!(
+            actor_pairings.unpairs(),
+            vec![
+                (
+                    expected_tenant_id.clone(),
+                    AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
+                    ConversationAdapterInstallationId::new("install-alpha")
+                        .expect("installation id"),
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                ),
+                (
+                    expected_tenant_id.clone(),
+                    AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
+                    ConversationAdapterInstallationId::new("install-alpha")
+                        .expect("installation id"),
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                )
+            ],
+            "disconnect must revoke before and after identity deletion to close re-pair races"
+        );
 
         // Retry convergence for extension removal: `remove_extension` runs the
         // caller disconnect before `ExtensionRemove`, so a failed removal
@@ -373,6 +478,11 @@ mod tests {
             2,
             "the removal-retry repeat disconnect re-issues the (idempotent) credential cleanup"
         );
+        assert_eq!(
+            actor_pairings.unpairs().len(),
+            2,
+            "repeat disconnect has no remaining identity records to unpair"
+        );
     }
 
     #[tokio::test]
@@ -395,6 +505,9 @@ mod tests {
             personal_connection_scope_resolver: None,
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: Arc::new(
+                RecordingConversationActorPairingService::default(),
+            ),
             personal_dm_target_store: Arc::new(FailingSlackPersonalDmTargetStore),
             personal_credential_cleanup: None,
         };
@@ -420,6 +533,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_channel_connection_facade_keeps_identity_when_conversation_unpair_fails() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let team_id = SlackTeamId::new("T123");
+        let user_id = UserId::new("user:alice").expect("user");
+        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            slack_provider_user_id,
+            user_id.clone(),
+        )]));
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: tenant_id.clone(),
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id,
+                team_id,
+            }),
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: Arc::new(FailingConversationActorPairingService),
+            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_credential_cleanup: None,
+        };
+        let caller =
+            WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
+
+        assert!(
+            facade
+                .disconnect_channel_for_caller(caller.clone(), "slack")
+                .await
+                .is_err(),
+            "conversation unpair failure must fail the disconnect"
+        );
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup after failed disconnect"),
+            HashMap::from([("slack".to_string(), true)]),
+            "identity binding must remain until conversation bindings are revoked"
+        );
+        assert_eq!(
+            identity_store.deletes(),
+            Vec::new(),
+            "identity delete is the commit point and must not run after an unpair failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_channel_connection_facade_retries_after_identity_delete_failure() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let team_id = SlackTeamId::new("T123");
+        let user_id = UserId::new("user:alice").expect("user");
+        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            slack_provider_user_id,
+            user_id.clone(),
+        )]));
+        identity_store.fail_next_delete();
+        let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: tenant_id.clone(),
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id,
+                team_id,
+            }),
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: actor_pairings.clone(),
+            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_credential_cleanup: None,
+        };
+        let caller =
+            WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
+
+        assert!(
+            facade
+                .disconnect_channel_for_caller(caller.clone(), "slack")
+                .await
+                .is_err(),
+            "identity delete failure must fail the disconnect"
+        );
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller.clone())
+                .await
+                .expect("connection lookup after failed delete"),
+            HashMap::from([("slack".to_string(), true)]),
+            "identity remains connected so a removal retry can run the full cleanup"
+        );
+
+        facade
+            .disconnect_channel_for_caller(caller.clone(), "slack")
+            .await
+            .expect("retry succeeds after transient identity delete failure");
+
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup after retry"),
+            HashMap::from([("slack".to_string(), false)])
+        );
+        assert_eq!(
+            actor_pairings.unpairs().len(),
+            3,
+            "retry should unpair before identity delete, then unpair deleted identities again"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_channel_connection_facade_unpairs_identity_added_during_delete() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let team_id = SlackTeamId::new("T123");
+        let user_id = UserId::new("user:alice").expect("user");
+        let original_provider_user_id =
+            slack_user_identity_provider_user_id(&installation_id, "U123");
+        let concurrent_provider_user_id =
+            slack_user_identity_provider_user_id(&installation_id, "U999");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            original_provider_user_id,
+            user_id.clone(),
+        )]));
+        identity_store.insert_before_next_delete([(concurrent_provider_user_id, user_id.clone())]);
+        let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: tenant_id.clone(),
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id,
+                team_id,
+            }),
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: actor_pairings.clone(),
+            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_credential_cleanup: None,
+        };
+        let caller =
+            WebUiAuthenticatedCaller::new(tenant_id.clone(), user_id, None::<AgentId>, None);
+
+        facade
+            .disconnect_channel_for_caller(caller, "slack")
+            .await
+            .expect("disconnect succeeds");
+
+        let mut unpaired_actor_ids = actor_pairings
+            .unpairs()
+            .into_iter()
+            .map(|(_, _, _, actor)| actor.id().to_string())
+            .collect::<Vec<_>>();
+        unpaired_actor_ids.sort();
+        assert_eq!(
+            unpaired_actor_ids,
+            vec!["U123".to_string(), "U123".to_string(), "U999".to_string()],
+            "same identities are unpaired before and after delete, and identities added during delete are unpaired too"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_identity_conversation_actor_parses_delimited_installation_ids() {
+        let installation_id =
+            AdapterInstallationId::new("org:install-alpha").expect("installation id");
+        let binding = RebornUserIdentityBinding {
+            provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
+                SLACK_IDENTITY_PROVIDER,
+            )
+            .expect("provider"),
+            provider_user_id:
+                crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                    slack_user_identity_provider_user_id(&installation_id, "U123"),
+                )
+                .expect("provider user id"),
+            user_id: UserId::new("user:alice").expect("user"),
+        };
+
+        let parsed = slack_identity_conversation_actor(&binding)
+            .expect("parse succeeds")
+            .expect("slack binding");
+
+        assert_eq!(
+            parsed.0,
+            ConversationAdapterInstallationId::new("org:install-alpha")
+                .expect("conversation installation id")
+        );
+        assert_eq!(
+            parsed.1,
+            ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+        );
+    }
+
+    #[tokio::test]
     async fn slack_channel_connection_facade_requires_current_installation_scope() {
         let tenant_id = TenantId::new("tenant:test").expect("tenant");
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
@@ -442,6 +750,9 @@ mod tests {
             personal_connection_scope_resolver: None,
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: Arc::new(
+                RecordingConversationActorPairingService::default(),
+            ),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
             personal_credential_cleanup: None,
         };
@@ -474,12 +785,14 @@ mod tests {
             user_id.clone(),
         )]));
         let cleanup = Arc::new(RecordingCleanupService::default());
+        let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
         let facade = SlackChannelConnectionFacade {
             tenant_id: tenant_id.clone(),
             personal_connection_scope: None,
             personal_connection_scope_resolver: None,
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: actor_pairings.clone(),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
             personal_credential_cleanup: Some(cleanup.clone()),
         };
@@ -518,6 +831,26 @@ mod tests {
             vec![(SLACK_IDENTITY_PROVIDER.to_string(), user_id, None)],
             "caller's slack bindings are cleaned without an installation prefix"
         );
+        assert_eq!(
+            actor_pairings.unpairs(),
+            vec![
+                (
+                    expected_tenant_id.clone(),
+                    AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
+                    ConversationAdapterInstallationId::new("install-alpha")
+                        .expect("installation id"),
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                ),
+                (
+                    expected_tenant_id,
+                    AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
+                    ConversationAdapterInstallationId::new("install-alpha")
+                        .expect("installation id"),
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                )
+            ],
+            "no-scope disconnect still revokes conversation actor state before and after delete"
+        );
     }
 
     #[tokio::test]
@@ -540,6 +873,9 @@ mod tests {
             personal_connection_scope_resolver: None,
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: Arc::new(
+                RecordingConversationActorPairingService::default(),
+            ),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
             personal_credential_cleanup: None,
         };
@@ -579,6 +915,9 @@ mod tests {
             personal_connection_scope_resolver: None,
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
+            conversation_actor_pairings: Arc::new(
+                RecordingConversationActorPairingService::default(),
+            ),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
             personal_credential_cleanup: Some(Arc::new(FailingCleanupService)),
         };
@@ -639,10 +978,88 @@ mod tests {
         }
     }
 
+    type RecordedUnpair = (
+        TenantId,
+        AdapterKind,
+        ConversationAdapterInstallationId,
+        ExternalActorRef,
+    );
+
+    #[derive(Default)]
+    struct RecordingConversationActorPairingService {
+        unpairs: Mutex<Vec<RecordedUnpair>>,
+    }
+
+    impl RecordingConversationActorPairingService {
+        fn unpairs(&self) -> Vec<RecordedUnpair> {
+            self.unpairs.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConversationActorPairingService for RecordingConversationActorPairingService {
+        async fn pair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: ConversationAdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Ok(())
+        }
+
+        async fn unpair_external_actor(
+            &self,
+            tenant_id: TenantId,
+            adapter_kind: AdapterKind,
+            adapter_installation_id: ConversationAdapterInstallationId,
+            external_actor_ref: ExternalActorRef,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            self.unpairs.lock().expect("lock").push((
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+            ));
+            Ok(())
+        }
+    }
+
+    struct FailingConversationActorPairingService;
+
+    #[async_trait::async_trait]
+    impl ConversationActorPairingService for FailingConversationActorPairingService {
+        async fn pair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: ConversationAdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Ok(())
+        }
+
+        async fn unpair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: ConversationAdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "conversation unpair unavailable".to_string(),
+            })
+        }
+    }
+
     #[derive(Default)]
     struct RecordingSlackIdentityStore {
         bindings: Mutex<HashMap<String, UserId>>,
         deletes: Mutex<Vec<(String, UserId, Option<String>)>>,
+        fail_delete_once: Mutex<bool>,
+        insert_before_delete: Mutex<Vec<(String, UserId)>>,
     }
 
     impl RecordingSlackIdentityStore {
@@ -650,11 +1067,24 @@ mod tests {
             Self {
                 bindings: Mutex::new(bindings.into_iter().collect()),
                 deletes: Mutex::new(Vec::new()),
+                fail_delete_once: Mutex::new(false),
+                insert_before_delete: Mutex::new(Vec::new()),
             }
         }
 
         fn deletes(&self) -> Vec<(String, UserId, Option<String>)> {
             self.deletes.lock().expect("lock").clone()
+        }
+
+        fn fail_next_delete(&self) {
+            *self.fail_delete_once.lock().expect("lock") = true;
+        }
+
+        fn insert_before_next_delete(&self, bindings: impl IntoIterator<Item = (String, UserId)>) {
+            self.insert_before_delete
+                .lock()
+                .expect("lock")
+                .extend(bindings);
         }
     }
 
@@ -707,26 +1137,89 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RebornUserIdentityBindingDeleteStore for RecordingSlackIdentityStore {
+        async fn user_identity_bindings_for_user(
+            &self,
+            provider: &str,
+            user_id: &UserId,
+            provider_user_id_prefix: Option<&str>,
+        ) -> Result<
+            Vec<crate::slack::slack_personal_binding::RebornUserIdentityBinding>,
+            RebornUserIdentityBindingError,
+        > {
+            let bindings = self.bindings.lock().expect("lock");
+            Ok(bindings
+                .iter()
+                .filter(|(provider_user_id, bound_user_id)| {
+                    let prefix_matches = provider_user_id_prefix
+                        .map(|prefix| provider_user_id.starts_with(prefix))
+                        .unwrap_or(true);
+                    provider == SLACK_IDENTITY_PROVIDER
+                        && *bound_user_id == user_id
+                        && prefix_matches
+                })
+                .map(|(provider_user_id, bound_user_id)| {
+                    crate::slack::slack_personal_binding::RebornUserIdentityBinding {
+                        provider:
+                            crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
+                                provider,
+                            )
+                            .expect("provider"),
+                        provider_user_id:
+                            crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                                provider_user_id.clone(),
+                            )
+                            .expect("provider user id"),
+                        user_id: bound_user_id.clone(),
+                    }
+                })
+                .collect())
+        }
+
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,
             user_id: &UserId,
             provider_user_id_prefix: Option<&str>,
-        ) -> Result<usize, RebornUserIdentityBindingError> {
+        ) -> Result<
+            Vec<crate::slack::slack_personal_binding::RebornUserIdentityBinding>,
+            RebornUserIdentityBindingError,
+        > {
             self.deletes.lock().expect("lock").push((
                 provider.to_string(),
                 user_id.clone(),
                 provider_user_id_prefix.map(ToString::to_string),
             ));
+            let mut fail_delete_once = self.fail_delete_once.lock().expect("lock");
+            if *fail_delete_once {
+                *fail_delete_once = false;
+                return Err(RebornUserIdentityBindingError::Backend(
+                    "identity delete unavailable".to_string(),
+                ));
+            }
+            drop(fail_delete_once);
             let mut bindings = self.bindings.lock().expect("lock");
-            let before = bindings.len();
+            bindings.extend(self.insert_before_delete.lock().expect("lock").drain(..));
+            let mut deleted = Vec::new();
             bindings.retain(|provider_user_id, bound_user_id| {
                 let prefix_matches = provider_user_id_prefix
                     .map(|prefix| provider_user_id.starts_with(prefix))
                     .unwrap_or(true);
-                !(bound_user_id == user_id && prefix_matches)
+                let should_delete = bound_user_id == user_id && prefix_matches;
+                if should_delete {
+                    deleted.push(crate::slack::slack_personal_binding::RebornUserIdentityBinding {
+                        provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(provider)
+                            .expect("provider"),
+                        provider_user_id:
+                            crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                                provider_user_id.clone(),
+                            )
+                            .expect("provider user id"),
+                        user_id: bound_user_id.clone(),
+                    });
+                }
+                !should_delete
             });
-            Ok(before - bindings.len())
+            Ok(deleted)
         }
     }
 

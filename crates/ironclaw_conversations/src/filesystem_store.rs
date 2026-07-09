@@ -490,6 +490,23 @@ impl ConversationActorPairingService for RebornFilesystemConversationServices {
             )
             .await
     }
+
+    async fn unpair_external_actor(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+    ) -> Result<(), InboundTurnError> {
+        self.inner
+            .try_unpair_external_actor(
+                &tenant_id,
+                &adapter_kind,
+                &adapter_installation_id,
+                &external_actor_ref,
+            )
+            .await
+    }
 }
 
 #[async_trait]

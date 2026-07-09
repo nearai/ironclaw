@@ -122,6 +122,7 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
     any(feature = "libsql", feature = "postgres")
 ))]
 use ironclaw_turns::FilesystemTurnStateBlockPersistence;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStoreKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
@@ -5044,6 +5045,18 @@ mod tests {
             _adapter_installation_id: AdapterInstallationId,
             _external_actor_ref: ExternalActorRef,
             _user_id: UserId,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
+        async fn unpair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
         ) -> Result<(), ironclaw_conversations::InboundTurnError> {
             Err(ironclaw_conversations::InboundTurnError::DurableState {
                 reason: "raw durable store error".to_string(),

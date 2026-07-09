@@ -122,15 +122,16 @@ impl InMemoryConversationServices {
         let old_state = self.lock_state()?.clone();
         let snapshot = {
             let mut state = self.lock_state()?;
-            state.pairings.insert(
-                ActorKey::new(
-                    &tenant_id,
-                    &adapter_kind,
-                    &adapter_installation_id,
-                    &external_actor_ref,
-                ),
-                user_id,
+            let actor_key = ActorKey::new(
+                &tenant_id,
+                &adapter_kind,
+                &adapter_installation_id,
+                &external_actor_ref,
             );
+            if state.pairings.get(&actor_key) == Some(&user_id) {
+                return Ok(());
+            }
+            state.pairings.insert(actor_key, user_id);
             state.clone()
         };
         self.persist_state(old_state, snapshot).await
@@ -172,12 +173,14 @@ impl InMemoryConversationServices {
         let old_state = self.lock_state()?.clone();
         let snapshot = {
             let mut state = self.lock_state()?;
-            state.pairings.remove(&ActorKey::new(
+            let actor_key = ActorKey::new(
                 tenant_id,
                 adapter_kind,
                 adapter_installation_id,
                 external_actor_ref,
-            ));
+            );
+            state.pairings.remove(&actor_key);
+            state.revoke_direct_bindings_for_actor(&actor_key);
             state.clone()
         };
         self.persist_state(old_state, snapshot).await
@@ -223,6 +226,22 @@ impl ConversationActorPairingService for InMemoryConversationServices {
             adapter_installation_id,
             external_actor_ref,
             user_id,
+        )
+        .await
+    }
+
+    async fn unpair_external_actor(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+    ) -> Result<(), InboundTurnError> {
+        self.try_unpair_external_actor(
+            &tenant_id,
+            &adapter_kind,
+            &adapter_installation_id,
+            &external_actor_ref,
         )
         .await
     }
@@ -875,6 +894,39 @@ impl InMemoryState {
         self.bindings.insert(binding_key, binding);
     }
 
+    fn revoke_direct_bindings_for_actor(&mut self, actor_key: &ActorKey) {
+        let removed_binding_keys: Vec<_> = self
+            .bindings
+            .iter()
+            .filter_map(|(binding_key, binding)| {
+                binding
+                    .route_access
+                    .is_direct_owner(actor_key)
+                    .then(|| binding_key.clone())
+            })
+            .collect();
+        let mut removed_conversations = std::collections::HashSet::new();
+        for binding_key in removed_binding_keys {
+            if let Some(binding) = self.bindings.remove(&binding_key) {
+                removed_conversations.insert(binding.external_conversation_identity.clone());
+                self.source_bindings
+                    .remove(binding.source_binding_ref.as_str());
+                self.reply_targets
+                    .remove(binding.reply_target_binding_ref.as_str());
+            }
+        }
+        self.source_bindings
+            .retain(|_, binding| !binding.route_access.is_direct_owner(actor_key));
+        self.reply_targets
+            .retain(|_, binding| !binding.route_access.is_direct_owner(actor_key));
+        self.external_event_routes.retain(|route_key, identity| {
+            route_key.tenant_id != actor_key.tenant_id
+                || route_key.adapter_kind != actor_key.adapter_kind
+                || route_key.adapter_installation_id != actor_key.adapter_installation_id
+                || !removed_conversations.contains(identity)
+        });
+    }
+
     fn widen_binding_route_access(
         &mut self,
         binding_key: &BindingKey,
@@ -1204,6 +1256,10 @@ impl ReplyRouteAccess {
     fn allows(&self, actor_key: &ActorKey, route_kind: ConversationRouteKind) -> bool {
         self.owner_actor_key == *actor_key
             || (self.shared && route_kind == ConversationRouteKind::Shared)
+    }
+
+    fn is_direct_owner(&self, actor_key: &ActorKey) -> bool {
+        self.owner_actor_key == *actor_key && !self.shared
     }
 }
 

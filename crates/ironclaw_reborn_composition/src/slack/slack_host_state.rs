@@ -967,20 +967,30 @@ impl<F> RebornUserIdentityBindingDeleteStore for FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
+    async fn user_identity_bindings_for_user(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
+        self.user_identity_bindings_for_user_inner(provider, user_id, provider_user_id_prefix)
+            .await
+    }
+
     async fn delete_user_identity_bindings_for_user(
         &self,
         provider: &str,
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
-    ) -> Result<usize, RebornUserIdentityBindingError> {
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
         let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
             .map_err(map_binding_fs_error)?;
         let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
             Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => return Ok(0),
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
             Err(error) => return Err(map_binding_fs_error(error)),
         };
-        let mut deleted = 0;
+        let mut deleted = Vec::new();
         for entry in entries {
             if !entry.name.ends_with(".json") {
                 continue;
@@ -1028,13 +1038,18 @@ where
             }
             match self.delete_record(&path).await {
                 Ok(()) => {
-                    deleted += 1;
+                    let deleted_binding = current.binding().ok_or_else(|| {
+                        RebornUserIdentityBindingError::Backend(
+                            "stored Slack user identity is invalid".to_string(),
+                        )
+                    })?;
                     self.delete_user_binding_index_marker(
                         provider,
                         user_id.as_str(),
                         &current.provider_user_id,
                     )
                     .await;
+                    deleted.push(deleted_binding);
                 }
                 Err(FilesystemError::NotFound { .. }) => {}
                 Err(error) => return Err(map_binding_fs_error(error)),
@@ -1048,6 +1063,54 @@ impl<F> FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
+    async fn user_identity_bindings_for_user_inner(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
+        let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
+            .map_err(map_binding_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(map_binding_fs_error(error)),
+        };
+        let mut bindings = Vec::new();
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_path(&format!(
+                "{IDENTITY_ROOT}/{}/{}",
+                path_segment(provider),
+                entry.name
+            ))
+            .map_err(map_binding_fs_error)?;
+            let Some((candidate, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&path)
+                .await
+                .map_err(map_binding_fs_error)?
+            else {
+                continue;
+            };
+            if !identity_record_matches_user_binding(
+                &candidate,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                continue;
+            }
+            bindings.push(candidate.binding().ok_or_else(|| {
+                RebornUserIdentityBindingError::Backend(
+                    "stored Slack user identity is invalid".to_string(),
+                )
+            })?);
+        }
+        Ok(bindings)
+    }
+
     async fn reconcile_identity_version_mismatch(
         &self,
         path: &ScopedPath,
@@ -1397,7 +1460,6 @@ impl StoredSlackUserIdentity {
         }
     }
 
-    #[cfg(test)]
     fn binding(&self) -> Option<RebornUserIdentityBinding> {
         Some(RebornUserIdentityBinding {
             provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
@@ -1875,7 +1937,8 @@ mod tests {
             .await
             .expect("delete succeeds");
 
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].provider_user_id.as_str(), "install-alpha:U123");
         assert_eq!(
             state
                 .resolve_user_identity("slack", "install-alpha:U123")
