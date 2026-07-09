@@ -1284,10 +1284,7 @@ async fn trace_credits_reports_enrolled_for_caller_with_enabled_policy() {
     let user_id = unique_trace_credits_user();
     let scope = trace_scope_key(TENANT, user_id.as_str());
     let _cleanup = TraceScopeCleanup(scope.clone());
-    let policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ..StandingTraceContributionPolicy::default()
-    };
+    let policy = StandingTraceContributionPolicy::default().set_enabled(true);
     write_trace_policy_for_scope(Some(scope.as_str()), &policy).expect("write trace policy");
 
     let (app, _services) = build_app_with_authenticator(Arc::new(FixedUserToken {

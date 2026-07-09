@@ -473,32 +473,23 @@ fn write_policy_at_dir(
     response: &OnboardResponse,
     consents: OnboardConsents,
 ) -> Result<(), OnboardError> {
-    use std::collections::BTreeSet;
-
-    let policy = StandingTraceContributionPolicy {
-        enabled: true,
-        auth_mode: TraceUploadAuthMode::DeviceKey,
-        device_key_id: Some(key.device_key_id.clone()),
-        ingestion_endpoint: Some(response.ingest_url.clone()),
-        // upload_token_issuer_url must be the full claim endpoint that
-        // fetch_trace_upload_claim_from_issuer POSTs to as-is. The issuer
-        // serves upload claims at UPLOAD_CLAIM_PATH, same origin as /v1/onboard.
-        // Trust-anchoring still uses invite.origin (origin-only compare in step 5);
-        // the allowed-host check is path-independent.
-        upload_token_issuer_url: Some(format!("{}{UPLOAD_CLAIM_PATH}", invite.origin)),
-        upload_token_issuer_allowed_hosts: {
-            let mut s = BTreeSet::new();
-            s.insert(invite.issuer_host.clone());
-            s
-        },
-        upload_token_audience: Some(response.audience.clone()),
-        upload_token_tenant_id: Some(response.tenant_id.clone()),
-        include_message_text: consents.include_message_text,
-        include_tool_payloads: consents.include_tool_payloads,
-        // default_scope is already ConsentScope::DebuggingEvaluation in Default.
-        default_scope: ConsentScope::DebuggingEvaluation,
-        ..StandingTraceContributionPolicy::default()
-    };
+    // upload_token_issuer_url must be the full claim endpoint that
+    // fetch_trace_upload_claim_from_issuer POSTs to as-is. The issuer serves
+    // upload claims at UPLOAD_CLAIM_PATH, same origin as /v1/onboard.
+    // Trust-anchoring still uses invite.origin (origin-only compare in step 5);
+    // the allowed-host check is path-independent.
+    let policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+        .set_device_key_id(key.device_key_id.clone())
+        .set_ingestion_endpoint(response.ingest_url.clone())
+        .set_upload_token_issuer_url(format!("{}{UPLOAD_CLAIM_PATH}", invite.origin))
+        .set_upload_token_issuer_allowed_hosts([invite.issuer_host.clone()])
+        .set_upload_token_audience(response.audience.clone())
+        .set_upload_token_tenant_id(response.tenant_id.clone())
+        .set_include_message_text(consents.include_message_text)
+        .set_include_tool_payloads(consents.include_tool_payloads)
+        .set_default_scope(ConsentScope::DebuggingEvaluation);
 
     crate::contribution::write_json_file(&dir.join("policy.json"), &policy, "trace policy").map_err(
         |e| OnboardError::Persist {

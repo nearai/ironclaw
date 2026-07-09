@@ -2397,12 +2397,10 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_survives_concurrent_ful
 async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let limits = InMemoryTurnStateStoreLimits {
-        max_events: 2,
-        max_terminal_records: 1,
-        max_idempotency_records: 1,
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_max_events(2)
+        .set_max_terminal_records(1)
+        .set_max_idempotency_records(1);
     let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let resolver = InMemoryRunProfileResolver::default();
 

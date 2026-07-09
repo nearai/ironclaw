@@ -673,10 +673,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     let filesystem = LocalFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_process_count(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -786,10 +783,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
     let filesystem = LocalFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -907,10 +901,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");
@@ -1039,10 +1030,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(1);
     let reservation = governor
         .reserve(scope.clone(), estimate.clone())
         .expect("test reservation should be created");

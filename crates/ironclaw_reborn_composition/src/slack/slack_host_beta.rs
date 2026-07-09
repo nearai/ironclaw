@@ -4605,10 +4605,10 @@ mod tests {
                 .with_model_gateway_override(Arc::new(StaticGateway))
                 .with_trigger_poller_settings(
                     crate::TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test()
-                        .with_worker_config(TriggerPollerWorkerConfig {
-                            poll_interval: std::time::Duration::from_millis(20),
-                            ..TriggerPollerWorkerConfig::default()
-                        }),
+                        .with_worker_config(
+                            TriggerPollerWorkerConfig::default()
+                                .set_poll_interval(std::time::Duration::from_millis(20)),
+                        ),
                 ),
         )
         .await
