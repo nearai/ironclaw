@@ -395,6 +395,9 @@ impl TestHarnessBuilder {
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             runtime_policy: None,
+            retriever: None,
+            embeddings: None,
+            retrieval: Default::default(),
         };
 
         TestHarness {

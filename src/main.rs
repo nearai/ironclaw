@@ -1321,6 +1321,13 @@ async fn async_main() -> anyhow::Result<()> {
         ))
     });
 
+    let retriever = ironclaw::tools::retrieval::build_if_enabled(
+        &components.tools,
+        components.embeddings.as_ref(),
+        &config.retrieval,
+    )
+    .await;
+
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
         settings_store: components.settings_store.clone(),
@@ -1367,6 +1374,9 @@ async fn async_main() -> anyhow::Result<()> {
         // capabilities (e.g. provider-host shell under hosted multi-tenant)
         // are hidden before the model call. (#3045 PR 4 + PR 5).
         runtime_policy: Some(config.runtime.effective_policy.clone()),
+        retriever,
+        embeddings: components.embeddings.clone(),
+        retrieval: config.retrieval.clone(),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

@@ -92,6 +92,94 @@ impl ToolRetriever {
     }
 }
 
+use std::collections::HashSet;
+
+/// Narrow an already-policy-filtered tool `baseline` down to `core ∪ top-K` for this
+/// message. Fails toward capability: when retrieval is disabled, unconfigured, or errors,
+/// the full `baseline` is returned unchanged (never fewer tools than today).
+pub async fn narrow_tools(
+    baseline: Vec<ToolDefinition>,
+    retriever: Option<&ToolRetriever>,
+    embeddings: Option<&dyn EmbeddingProvider>,
+    enabled: bool,
+    message: Option<&str>,
+) -> Vec<ToolDefinition> {
+    // If any precondition is missing, return baseline unchanged.
+    if !enabled {
+        return baseline;
+    }
+    let (retriever, embeddings, message) = match (retriever, embeddings, message) {
+        (Some(r), Some(e), Some(m)) => (r, e, m),
+        // silent-ok: retrieval disabled/unconfigured, fail toward full capability
+        _ => return baseline,
+    };
+    match retriever.select(message, embeddings).await {
+        Ok(names) => {
+            let keep: HashSet<&str> = names.iter().map(String::as_str).collect();
+            baseline
+                .into_iter()
+                .filter(|d| keep.contains(d.name.as_str()))
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!("tool retrieval failed ({e}); using all tools");
+            baseline
+        }
+    }
+}
+
+use crate::config::RetrievalConfig;
+use crate::tools::registry::ToolRegistry;
+use std::sync::Arc;
+
+/// Build a `ToolRetriever` from the registry's current tool set, or `None` when retrieval is
+/// disabled, no embeddings provider is available, or the build fails (fail toward all-tools).
+pub async fn build_if_enabled(
+    registry: &ToolRegistry,
+    embeddings: Option<&Arc<dyn EmbeddingProvider>>,
+    config: &RetrievalConfig,
+) -> Option<Arc<ToolRetriever>> {
+    if !config.enabled {
+        return None;
+    }
+    let embed = embeddings?;
+    let defs = registry.tool_definitions().await;
+    match ToolRetriever::build(
+        &defs,
+        config.core_set.clone(),
+        config.top_k,
+        config.min_score,
+        embed.as_ref(),
+    )
+    .await
+    {
+        Ok(r) => Some(Arc::new(r)),
+        Err(e) => {
+            tracing::warn!("tool retriever build failed ({e}); retrieval disabled this run");
+            None
+        }
+    }
+}
+
+use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
+
+/// Compute the model-facing tool list: policy-visible baseline, narrowed by retrieval.
+/// This is the single seam every injection site will call in Task 4b.
+pub async fn resolve_available_tools(
+    registry: &ToolRegistry,
+    policy: Option<&EffectiveRuntimePolicy>,
+    retriever: Option<&ToolRetriever>,
+    embeddings: Option<&dyn EmbeddingProvider>,
+    enabled: bool,
+    message: Option<&str>,
+) -> Vec<ToolDefinition> {
+    let baseline = match policy {
+        Some(p) => registry.tool_definitions_visible_under(p).await,
+        None => registry.tool_definitions().await,
+    };
+    narrow_tools(baseline, retriever, embeddings, enabled, message).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +271,97 @@ mod tests {
             rank_top_k(&[1.0, 0.0], &items, 5, 0.5),
             vec!["a".to_string()]
         );
+    }
+
+    fn three_tool_baseline() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                name: "create_trip".to_string(),
+                description: "plan a trip / travel itinerary".to_string(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "ocr_image".to_string(),
+                description: "read text from an image".to_string(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "memory_search".to_string(),
+                description: "search memory".to_string(),
+                parameters: serde_json::json!({}),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn narrow_tools_narrows_to_core_plus_relevant() {
+        let embed = KeywordEmbeddings;
+        let baseline = three_tool_baseline();
+        let r = ToolRetriever::build(
+            &baseline,
+            vec!["memory_search".to_string()],
+            1,
+            -1.0,
+            &embed,
+        )
+        .await
+        .expect("build should succeed");
+
+        let result = narrow_tools(
+            baseline,
+            Some(&r),
+            Some(&embed),
+            true,
+            Some("plan a trip to Tokyo"),
+        )
+        .await;
+
+        let names: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"create_trip"));
+        assert!(names.contains(&"memory_search"));
+        assert!(!names.contains(&"ocr_image"));
+    }
+
+    #[tokio::test]
+    async fn narrow_tools_disabled_returns_baseline() {
+        let embed = KeywordEmbeddings;
+        let baseline = three_tool_baseline();
+        let r = ToolRetriever::build(
+            &baseline,
+            vec!["memory_search".to_string()],
+            1,
+            -1.0,
+            &embed,
+        )
+        .await
+        .expect("build should succeed");
+
+        let result = narrow_tools(
+            three_tool_baseline(),
+            Some(&r),
+            Some(&embed),
+            false,
+            Some("plan a trip to Tokyo"),
+        )
+        .await;
+
+        let names: Vec<&str> = result.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"create_trip"));
+        assert!(names.contains(&"ocr_image"));
+        assert!(names.contains(&"memory_search"));
+    }
+
+    #[tokio::test]
+    async fn build_if_enabled_disabled_is_none() {
+        let registry = crate::tools::registry::ToolRegistry::new();
+        let config = crate::config::RetrievalConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let result = build_if_enabled(&registry, None, &config).await;
+
+        assert!(result.is_none());
     }
 }

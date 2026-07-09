@@ -528,6 +528,12 @@ pub struct AgentDeps {
     /// hosted-multi-tenant deployments cannot expose provider-host shell
     /// affordances to the model.
     pub runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    /// Per-turn semantic tool retriever. `None` disables retrieval (fall back to all tools).
+    pub retriever: Option<Arc<crate::tools::retrieval::ToolRetriever>>,
+    /// Embeddings provider used to embed the per-turn message for retrieval.
+    pub embeddings: Option<Arc<dyn ironclaw_embeddings::EmbeddingProvider>>,
+    /// Resolved retrieval config (enabled flag, top_k, min_score, core set).
+    pub retrieval: crate::config::RetrievalConfig,
 }
 
 /// The main agent that coordinates all components.
@@ -2637,6 +2643,9 @@ mod tests {
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             runtime_policy: None,
+            retriever: None,
+            embeddings: None,
+            retrieval: Default::default(),
         };
 
         Agent::new(

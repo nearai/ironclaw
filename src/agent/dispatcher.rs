@@ -2171,6 +2171,9 @@ mod tests {
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             runtime_policy: None,
+            retriever: None,
+            embeddings: None,
+            retrieval: Default::default(),
         };
 
         Agent::new(
@@ -2481,6 +2484,9 @@ mod tests {
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             runtime_policy: None,
+            retriever: None,
+            embeddings: None,
+            retrieval: Default::default(),
         };
 
         let agent = Agent::new(
@@ -3601,6 +3607,9 @@ mod tests {
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             runtime_policy: None,
+            retriever: None,
+            embeddings: None,
+            retrieval: Default::default(),
         };
 
         Agent::new(
@@ -3751,6 +3760,9 @@ mod tests {
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             runtime_policy: None,
+            retriever: None,
+            embeddings: None,
+            retrieval: Default::default(),
         };
 
         let agent = Agent::new(
@@ -3887,6 +3899,9 @@ mod tests {
                 llm_backend: "nearai".to_string(),
                 tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
                 runtime_policy: None,
+                retriever: None,
+                embeddings: None,
+                retrieval: Default::default(),
             };
 
             Agent::new(
