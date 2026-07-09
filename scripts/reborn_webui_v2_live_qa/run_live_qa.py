@@ -1660,6 +1660,31 @@ def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) ->
     return int(value)
 
 
+ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS = 120.0
+ROUTINE_TRIGGER_RECORD_POLL_SECONDS = 2.0
+
+
+async def _wait_for_trigger_record_after_count(
+    reborn_home: Path,
+    routine_name: str | None,
+    *,
+    before_count: int,
+    timeout: float = ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS,
+    poll_interval: float = ROUTINE_TRIGGER_RECORD_POLL_SECONDS,
+) -> tuple[int, int]:
+    started = time.monotonic()
+    deadline = started + timeout
+    last_count = _trigger_record_count(reborn_home, routine_name)
+    while last_count <= before_count:
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        await asyncio.sleep(min(poll_interval, deadline - now))
+        last_count = _trigger_record_count(reborn_home, routine_name)
+    waited_ms = int((time.monotonic() - started) * 1000)
+    return last_count, waited_ms
+
+
 def _trigger_run_rows(reborn_home: Path, routine_name: str) -> list[dict[str, object]]:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
@@ -3280,13 +3305,25 @@ async def _routine_creation_case(
             extra_details=details,
             routine_confirmation_follow_up=True,
         )
-    after_count = _trigger_record_count(ctx.reborn_home, count_name)
+    if result.success:
+        after_count, wait_ms = await _wait_for_trigger_record_after_count(
+            ctx.reborn_home,
+            count_name,
+            before_count=before_count,
+        )
+    else:
+        after_count = _trigger_record_count(ctx.reborn_home, count_name)
+        wait_ms = 0
     result.details["trigger_records_after"] = after_count
+    result.details["trigger_record_wait_ms"] = wait_ms
+    result.details["trigger_record_wait_timeout_ms"] = int(
+        ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS * 1000
+    )
     if result.success and after_count <= before_count:
         result.success = False
         result.details["error"] = (
-            f"assistant returned success but routine scope {routine_name!r} "
-            "did not add a trigger_record"
+            "assistant matched required routine text before trigger_create completed; "
+            f"routine scope {routine_name!r} did not add a trigger_record"
         )
     return result
 

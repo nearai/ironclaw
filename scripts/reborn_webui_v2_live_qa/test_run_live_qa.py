@@ -762,7 +762,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_live_chat_case",
                 side_effect=fake_live_chat_case,
             ),
-            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 0]),
+            patch.object(run_live_qa, "_trigger_record_count", return_value=0),
+            patch.object(
+                run_live_qa,
+                "_wait_for_trigger_record_after_count",
+                return_value=(0, 25),
+            ),
         ):
             result = asyncio.run(
                 run_live_qa._routine_creation_case(
@@ -779,7 +784,41 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured_prompts, ["original sheet prompt"])
         self.assertEqual(captured_follow_up_flags, [True])
         self.assertEqual(result.details["trigger_records_after"], 0)
+        self.assertEqual(result.details["trigger_record_wait_ms"], 25)
         self.assertIn("did not add a trigger_record", result.details["error"])
+
+    def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
+        counts = iter([0, 0, 1])
+        observed_sleeps: list[float] = []
+
+        def fake_trigger_record_count(_home: Path, routine_name: str | None) -> int:
+            self.assertIsNone(routine_name)
+            return next(counts)
+
+        async def fake_sleep(seconds: float) -> None:
+            observed_sleeps.append(seconds)
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_trigger_record_count",
+                side_effect=fake_trigger_record_count,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+        ):
+            after_count, waited_ms = asyncio.run(
+                run_live_qa._wait_for_trigger_record_after_count(
+                    Path("/tmp/reborn-home"),
+                    None,
+                    before_count=0,
+                    timeout=10.0,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertEqual(after_count, 1)
+        self.assertGreaterEqual(len(observed_sleeps), 1)
+        self.assertGreaterEqual(waited_ms, 0)
 
     def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
         text = (
