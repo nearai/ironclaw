@@ -1622,18 +1622,37 @@ mod postgres_tests {
     use ironclaw_host_api::VirtualPath;
 
     async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
+        postgres_pool_with_application_name(None).await
+    }
+
+    async fn postgres_pool_with_application_name(
+        application_name: Option<&str>,
+    ) -> Option<deadpool_postgres::Pool> {
         if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
             return None;
         }
         let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .ok()?;
-        let config = url.parse::<tokio_postgres::Config>().ok()?;
+        let mut config = url.parse::<tokio_postgres::Config>().ok()?;
+        if let Some(application_name) = application_name {
+            config.application_name(application_name);
+        }
         let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
         deadpool_postgres::Pool::builder(manager)
             .max_size(4)
             .build()
             .ok()
+    }
+
+    async fn postgres_root_with_application_name(
+        application_name: &str,
+    ) -> Option<(PostgresRootFilesystem, String)> {
+        let pool = postgres_pool_with_application_name(Some(application_name)).await?;
+        let fs = PostgresRootFilesystem::new(pool);
+        fs.run_migrations().await.ok()?;
+        let prefix = format!("/secrets/leases/pgtest_{}", uuid::Uuid::new_v4().simple());
+        Some((fs, prefix))
     }
 
     /// Build a fresh Postgres-backed filesystem with migrations applied.
@@ -1652,6 +1671,42 @@ mod postgres_tests {
         // between runs.
         let prefix = format!("/secrets/leases/pgtest_{}", uuid::Uuid::new_v4().simple());
         Some((fs, prefix))
+    }
+
+    async fn wait_for_delete_if_version_lock_wait(
+        pool: &deadpool_postgres::Pool,
+        application_name: &str,
+    ) {
+        let client = pool
+            .get()
+            .await
+            .expect("observer connection must be available on the same reachable Postgres");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting: bool = client
+                .query_one(
+                    "SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_stat_activity
+                        WHERE application_name = $1
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE '%FOR UPDATE OF entry%'
+                          AND query LIKE '%root_filesystem_entries%'
+                    )",
+                    &[&application_name],
+                )
+                .await
+                .expect("observe delete_if_version lock wait")
+                .get(0);
+            if waiting {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "delete_if_version did not reach its row-lock wait before the test deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
@@ -1932,10 +1987,15 @@ mod postgres_tests {
     /// freshly-recreated row.
     #[tokio::test]
     async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race() {
-        let Some((fs, prefix)) = postgres_root().await else {
+        let application_name = format!("ironclaw_cas_delete_{}", uuid::Uuid::new_v4().simple());
+        let Some((fs, prefix)) = postgres_root_with_application_name(&application_name).await
+        else {
             return;
         };
         let Some(racer_pool) = postgres_pool().await else {
+            return;
+        };
+        let Some(observer_pool) = postgres_pool().await else {
             return;
         };
         let path = vpath(&prefix, "cas_delete_race");
@@ -1950,6 +2010,7 @@ mod postgres_tests {
             .expect("racer connection must be available on the same reachable Postgres");
         let path_str = path.as_str().to_string();
         let (deleted_tx, deleted_rx) = tokio::sync::oneshot::channel::<()>();
+        let (recreate_tx, recreate_rx) = tokio::sync::oneshot::channel::<()>();
 
         let racer = tokio::spawn(async move {
             racer_client.batch_execute("BEGIN").await.unwrap();
@@ -1965,10 +2026,10 @@ mod postgres_tests {
             // it until we commit. Signal so the test doesn't call
             // `delete_if_version` before this DELETE has actually run.
             let _ = deleted_tx.send(());
-            // Give `delete_if_version` time to reach `FOR UPDATE` and start
-            // waiting on our uncommitted DELETE's row lock before we
-            // recreate + commit.
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if recreate_rx.await.is_err() {
+                let _ = racer_client.batch_execute("ROLLBACK").await;
+                return;
+            }
             racer_client
                 .execute(
                     "INSERT INTO root_filesystem_entries (path, version) VALUES ($1, 999)",
@@ -1982,10 +2043,15 @@ mod postgres_tests {
         deleted_rx
             .await
             .expect("racer must signal after its DELETE runs");
-        // Head start so `delete_if_version`'s `FOR UPDATE` actually reaches
-        // and blocks on the racer's uncommitted DELETE before it recreates.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let result = fs.delete_if_version(&path, v1).await;
+        let delete_path = path.clone();
+        let delete_task = tokio::spawn(async move { fs.delete_if_version(&delete_path, v1).await });
+        wait_for_delete_if_version_lock_wait(&observer_pool, &application_name).await;
+        recreate_tx
+            .send(())
+            .expect("racer task must still be waiting to recreate");
+        let result = delete_task
+            .await
+            .expect("delete_if_version task must not panic");
 
         racer.await.expect("racer task must not panic");
 
