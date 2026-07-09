@@ -29,6 +29,7 @@ pub struct StdioMcpTransport {
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     stderr_handle: Mutex<Option<JoinHandle<()>>>,
     child: Arc<Mutex<Child>>,
+    timeout: Duration,
 }
 
 impl StdioMcpTransport {
@@ -107,7 +108,14 @@ impl StdioMcpTransport {
             reader_handle: Mutex::new(Some(reader_handle)),
             stderr_handle: Mutex::new(Some(stderr_handle)),
             child: Arc::new(Mutex::new(child)),
+            timeout: Duration::from_secs(30),
         })
+    }
+
+    /// Override the per-request timeout (default 30s).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -123,7 +131,7 @@ impl McpTransport for StdioMcpTransport {
             &self.pending,
             request,
             &self.server_name,
-            Duration::from_secs(30),
+            self.timeout,
         )
         .await
     }
@@ -192,6 +200,22 @@ mod tests {
 
         // Verify shutdown completes without error.
         transport.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn stdio_transport_uses_configured_timeout() {
+        // A transport constructed with a 7s override reports 7s.
+        // (Construct via the same path spawn() uses; assert the stored field.)
+        let t = StdioMcpTransport::spawn(
+            "t",
+            "cat",
+            Vec::<String>::new(),
+            Vec::<(String, String)>::new(),
+        )
+        .await
+        .expect("spawn cat")
+        .with_timeout(std::time::Duration::from_secs(7));
+        assert_eq!(t.timeout, std::time::Duration::from_secs(7));
     }
 
     #[tokio::test]

@@ -68,6 +68,18 @@ impl HttpMcpTransport {
         }
     }
 
+    /// Override the HTTP request timeout (default 30s).
+    // Wired into the MCP transport factory in Task 3 (per-server
+    // effective_timeout); allow the transient dead-code gap until then.
+    #[allow(dead_code)]
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.http_client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("Failed to create HTTP client"); // safety: rustls init cannot fail
+        self
+    }
+
     /// Attach a session manager for Mcp-Session-Id tracking.
     pub fn with_session_manager(
         mut self,
@@ -742,6 +754,54 @@ mod tests {
             method: method.to_string(),
             params: None,
         }
+    }
+
+    /// Regression: `with_timeout` must actually rebuild the client with the
+    /// override applied, not just store the duration. A server that sleeps
+    /// longer than the configured timeout must cause `send` to fail quickly
+    /// rather than hang for the default 30s.
+    #[tokio::test]
+    async fn test_with_timeout_enforces_shorter_deadline() {
+        use axum::{Router, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn slow_response() -> axum::http::StatusCode {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            axum::http::StatusCode::ACCEPTED
+        }
+
+        let app = Router::new().route("/", post(slow_response));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind to an ephemeral port");
+        let addr = listener
+            .local_addr()
+            .expect("Failed to get listener's local address");
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("Test server failed to run");
+        });
+
+        let transport = HttpMcpTransport::new(&url, "slow-test")
+            .with_timeout(std::time::Duration::from_millis(200));
+        let request = notification_request("notifications/initialized");
+
+        let start = std::time::Instant::now();
+        let result = transport.send(&request, &HashMap::new()).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "request should time out before the server responds"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "timeout override should fire well before the default 30s or the server's 5s sleep, took {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]
