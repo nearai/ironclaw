@@ -1,7 +1,17 @@
 # MCP Background Jobs — Per-Server Timeouts + Generic MCP→Job Bridge
 
 **Date:** 2026-07-08
-**Status:** Approved design, pre-implementation
+**Status:** SHIPPED 2026-07-09 (Phase 1 + Phase 2 complete on `reborn-integration`, local — not pushed). See the SDD ledger `.superpowers/sdd/mcp-jobs-progress.md` for the task-by-task record.
+
+**Shipped notes / deviations:**
+- **"mode" storage:** carried in `JobContext.metadata` (`{"mode":"mcp_tool",...}`) rather than a new `JobMode` enum variant, as planned (Task 6). **But** the startup reconcile (Task 11) and the `/api/jobs` surface (Task 12) identify MCP jobs by the **durable `mcp:` title prefix** (`worker::mcp_job::MCP_JOB_TITLE_PREFIX`) instead of `metadata.mode`, because the **libSQL backend does not persist `JobContext.metadata`** (`save_job` omits it; `get_job` returns `Null`). The metadata mode still works at runtime via the in-memory `ContextManager`; the title prefix is the cross-backend-durable signal.
+- **Testable seams:** `McpCaller` (runner) and `BackgroundPolicy` (tools) trait seams keep the logic unit-testable without live MCP clients or PostgreSQL.
+- **`tool_job_start` interface:** takes **separate `server` + `tool` params**, not a joined prefixed name (`mcp_tool_id` is a lossy, non-invertible single-underscore join).
+- **Live smoke (spec Step 2)** — building + deploying the release binary and running a real >120s async turn — is a deploy step, pending a redeploy of the live service.
+
+---
+
+**(original) Status:** Approved design, pre-implementation
 **Scope:** Two composable changes — (1) per-MCP-server configurable call timeout, and (2) a generic bridge that runs a long-running MCP tool call as a first-class, durable IronClaw job with auto-resume of the originating agent thread.
 
 ## Problem

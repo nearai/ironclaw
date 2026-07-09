@@ -105,6 +105,17 @@ subset that can later be replaced by a typed `Deps` alias.
 | GET | `/api/jobs/{id}/files/list` | List files in job workspace |
 | GET | `/api/jobs/{id}/files/read` | Read a file from job workspace |
 
+`GET /api/jobs` merges sandbox jobs and agent jobs. Each `JobInfo` carries an
+optional `mode` field, omitted for ordinary jobs and set to `"mcp_tool"` for
+**MCP background jobs** (a long MCP tool call run as a durable job via the
+`tool_job_start` builtin). MCP jobs are identified by their durable `mcp:`
+title prefix (`worker::mcp_job::MCP_JOB_TITLE_PREFIX`), not `metadata.mode` —
+job metadata is not persisted on the libSQL backend. The agent starts one with
+`tool_job_start(server, tool, arguments)` (returns a `job_id` immediately; the
+safety-scanned result is injected back into the originating thread on
+completion) and polls it with `tool_job_status(job_id)`. Only servers added
+with `--allow-background` are eligible.
+
 ### Skills
 | Method | Path | Description |
 |--------|------|-------------|
