@@ -98,6 +98,8 @@ The existing harness wires **three** backends separately (`product`/`thread` on 
 
 `TraceLlm` (`tests/support/trace_llm.rs`, impl `LlmProvider`) was built to replay *recorded* JSON traces (`RecordingLlm` → JSON → `from_file`) for the v1 replay gate — that recorded-fixture path is backed by many JSON fixtures under `tests/fixtures/llm_traces/`. But `TraceLlm` also accepts **hand-built in-memory** traces via `LlmTrace::new` + `TraceLlm::from_trace`, and several v1-stack test files use exactly that in-memory pattern (e.g. `e2e_response_order.rs`, `e2e_tool_param_coercion.rs`, `multi_tenant_system_prompt.rs`). So in-memory scripting through `TraceLlm`'s engine is a supported, exercised path — reusing it for Reborn is not a repurposing. The recorded-only fields (`memory_snapshot`, `http_exchanges`) default empty and are ignored by in-memory builders.
 
+Historical note: this section originally cited 113 trace JSON fixtures. The v1 coverage fixture cleanup in #5830 removed orphaned legacy coverage traces and reduced the local count to 79; the exact count is not the design invariant, only that the recorded replay path remains substantial and exercised.
+
 (Note: the Reborn tier has **no** prior `TraceLlm` usage — this design introduces it at the raw-provider seam. The existing `reborn_qa_recorded_behavior.rs` uses `RebornTraceReplayModelGateway` at the *gateway* seam, which is the higher-level mock this design deliberately moves below.)
 
 Reusing the engine avoids reimplementing sequential replay, tool-call steps, hint-based scanning (concurrent threads), and template substitution. `StubLlm` was rejected: it returns one fixed string with `tool_calls: Vec::new()` and can never script a tool-call → text sequence.
