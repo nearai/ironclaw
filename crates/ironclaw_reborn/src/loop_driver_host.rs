@@ -1496,15 +1496,15 @@ where
                 .await
         });
         // Build the live cancellation handle in parallel with the rest of host
-        // setup. The factory performs a durable seed read to close the
-        // missed-wake window, but that read does not need to sit at the end of
-        // the model-prompt critical path.
+        // setup. The claimed run state is already validated by the scheduler, so
+        // the turn-state-backed factory can avoid a synchronous durable seed
+        // read on the host construction path while still registering for wake
+        // flips and the polling fallback.
         let cancellation_factory = Arc::clone(&self.cancellation_factory);
-        let cancellation_scope = run_context.scope.clone();
-        let cancellation_run_id = run_context.run_id;
+        let cancellation_state = request.claimed_run.state.clone();
         let cancellation_handle_fetch = tokio::spawn(async move {
             cancellation_factory
-                .handle_for_run(&cancellation_scope, cancellation_run_id)
+                .handle_for_claimed_run(&cancellation_state)
                 .await
         });
 

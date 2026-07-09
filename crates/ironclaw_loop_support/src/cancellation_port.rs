@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_turns::{
-    GetRunStateRequest, TurnRunId, TurnRunWake, TurnRunWakeNotifier, TurnScope, TurnStateStore,
-    TurnStatus,
+    GetRunStateRequest, TurnRunId, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnScope,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, LoopCancelReasonKind, LoopCancellationPort,
         LoopCancellationSignal,
@@ -162,6 +162,19 @@ pub trait RunCancellationFactory: Send + Sync {
         run_id: TurnRunId,
     ) -> Result<RunCancellationHandle, AgentLoopHostError>;
 
+    /// Build a handle for an already-claimed run.
+    ///
+    /// Implementations that can trust the claimed state may use it as the
+    /// initial cancellation seed to keep host construction off a durable
+    /// turn-state read. The default preserves the strict durable-read path for
+    /// implementations without a claimed-state fast path.
+    async fn handle_for_claimed_run(
+        &self,
+        state: &TurnRunState,
+    ) -> Result<RunCancellationHandle, AgentLoopHostError> {
+        self.handle_for_run(&state.scope, state.run_id).await
+    }
+
     /// Observe a `TurnRunWake` published by the turn coordinator.
     ///
     /// **Called synchronously on the wake publisher's thread** by
@@ -306,9 +319,7 @@ impl TurnStateRunCancellationFactory {
         run_id: TurnRunId,
     ) -> Result<TurnStatus, AgentLoopHostError> {
         let status = self.read_run_status(scope, run_id).await?;
-        if status == TurnStatus::CancelRequested {
-            requester.request(LoopCancelReasonKind::UserRequested);
-        }
+        self.seed_requester_from_status(requester, status);
         Ok(status)
     }
 
@@ -318,6 +329,12 @@ impl TurnStateRunCancellationFactory {
             .entry(run_id)
             .or_default()
             .push(requester);
+    }
+
+    fn seed_requester_from_status(&self, requester: &RunCancellationRequester, status: TurnStatus) {
+        if status == TurnStatus::CancelRequested {
+            requester.request(LoopCancelReasonKind::UserRequested);
+        }
     }
 
     fn remove_run(&self, run_id: TurnRunId) {
@@ -397,6 +414,22 @@ impl RunCancellationFactory for TurnStateRunCancellationFactory {
                 self.remove_run(run_id);
                 return Err(error);
             }
+        }
+        Ok(handle)
+    }
+
+    async fn handle_for_claimed_run(
+        &self,
+        state: &TurnRunState,
+    ) -> Result<RunCancellationHandle, AgentLoopHostError> {
+        let handle = RunCancellationHandle::default();
+        let requester = handle.requester();
+        self.register(state.run_id, requester.clone());
+        self.seed_requester_from_status(&requester, state.status);
+        if state.status == TurnStatus::CancelRequested || state.status.is_terminal() {
+            self.remove_run(state.run_id);
+        } else {
+            self.spawn_polling_fallback(state.scope.clone(), state.run_id, requester);
         }
         Ok(handle)
     }
@@ -840,6 +873,22 @@ mod tests {
             .unwrap();
 
         assert!(handle.is_requested());
+        let port = RunStateLoopCancellationPort::new(handle);
+        let signal = port.observe_cancellation().expect("cancel signal");
+        assert_eq!(signal.reason_kind, LoopCancelReasonKind::UserRequested);
+    }
+
+    #[tokio::test]
+    async fn turn_state_factory_seeds_claimed_cancel_requested_run_without_store_read() {
+        let state = test_run_state(TurnStatus::CancelRequested);
+        let store = Arc::new(CountingTurnStateStore::new(state.clone()));
+        let factory = TurnStateRunCancellationFactory::new(store.clone());
+
+        let handle = factory.handle_for_claimed_run(&state).await.unwrap();
+
+        assert!(handle.is_requested());
+        assert_eq!(store.get_run_state_calls(), 0);
+        assert_eq!(factory.registered_run_count(), 0);
         let port = RunStateLoopCancellationPort::new(handle);
         let signal = port.observe_cancellation().expect("cancel signal");
         assert_eq!(signal.reason_kind, LoopCancelReasonKind::UserRequested);

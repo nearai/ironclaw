@@ -669,15 +669,38 @@ where
         &self,
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
+        let max_terminal_records = self.limits.max_terminal_records;
+        self.apply_run_state_transition_with_targeted_delta(
             "apply_validated_loop_exit",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            retired_status_for_loop_exit(&request.mapping),
+            RunStateTransitionTarget {
+                run_id: request.run_id,
+                runner_id: request.runner_id,
+                lease_token: request.lease_token,
+                retired_status: retired_status_for_loop_exit(&request.mapping),
+            },
             |store| {
                 let request = request.clone();
                 async move { store.apply_validated_loop_exit(request).await }
+            },
+            move |snapshot, latest_event_cursor, store, state| {
+                let terminal_records = snapshot
+                    .runs
+                    .iter()
+                    .filter(|record| record.status.is_terminal())
+                    .count();
+                if state.status.is_terminal() && terminal_records >= max_terminal_records {
+                    return full_snapshot_delta(snapshot, store);
+                }
+                if state.status.is_blocked() {
+                    return blocked_run_targeted_delta(snapshot, latest_event_cursor, store, state);
+                }
+                run_state_targeted_delta(
+                    snapshot,
+                    latest_event_cursor,
+                    store,
+                    state.run_id,
+                    &state.scope,
+                )
             },
         )
         .await
