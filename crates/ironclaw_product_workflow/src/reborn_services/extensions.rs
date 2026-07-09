@@ -13,7 +13,8 @@ use crate::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
     RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    RebornRegisterExtensionRequest, RebornRegisterExtensionResponse, RebornServicesError,
+    WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -114,6 +115,30 @@ pub(super) async fn install_extension(
     Ok(action_response(&lifecycle, None, projection.as_ref()))
 }
 
+pub(super) async fn register_extension(
+    facade: &dyn LifecycleProductFacade,
+    caller: WebUiAuthenticatedCaller,
+    request: RebornRegisterExtensionRequest,
+) -> Result<RebornRegisterExtensionResponse, RebornServicesError> {
+    let context = lifecycle_surface_context(caller);
+    let lifecycle = execute_lifecycle(
+        facade,
+        context,
+        LifecycleProductAction::ExtensionRegister {
+            name: request.name,
+            url: request.url,
+        },
+    )
+    .await?;
+    let package_ref = lifecycle.package_ref.ok_or_else(|| {
+        RebornServicesError::internal_from("extension register did not return a package ref")
+    })?;
+    Ok(RebornRegisterExtensionResponse {
+        extension_id: package_ref.id.as_str().to_string(),
+        package_ref,
+    })
+}
+
 pub(super) async fn activate_extension(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
@@ -162,6 +187,21 @@ pub(super) async fn remove_extension(
         facade,
         context,
         LifecycleProductAction::ExtensionRemove { package_ref },
+    )
+    .await?;
+    Ok(action_response(&lifecycle, None, None))
+}
+
+pub(super) async fn unregister_extension(
+    facade: &dyn LifecycleProductFacade,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: LifecyclePackageRef,
+) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    let context = lifecycle_surface_context(caller);
+    let lifecycle = execute_lifecycle(
+        facade,
+        context,
+        LifecycleProductAction::ExtensionUnregister { package_ref },
     )
     .await?;
     Ok(action_response(&lifecycle, None, None))

@@ -17,8 +17,8 @@ use std::sync::Arc;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifestRecord,
-    ExtensionManifestRef, ExtensionRegistry, InMemoryExtensionInstallationStore, ManifestHash,
-    ManifestSource, SharedExtensionRegistry,
+    ExtensionManifestRef, ExtensionRegistry, ExtensionRuntimeV2,
+    InMemoryExtensionInstallationStore, ManifestHash, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, HostPath, UserId, VirtualPath, sha256_digest_token};
@@ -30,7 +30,9 @@ use crate::extension_host::available_extensions::AvailableExtensionCatalog;
 use crate::extension_host::extension_lifecycle::{
     ActiveExtensionPublisher, restore_extension_lifecycle_state,
 };
-use crate::extension_host::registered_extension_store::RegisteredExtensionStore;
+use crate::extension_host::registered_extension_store::{
+    RegisterHostedMcpDescriptorInput, RegisteredExtensionStore,
+};
 
 const OWNER_USER_ID: &str = "3eee560a-7fe5-474c-965a-67cb69df3d04";
 const REGISTERED_EXTENSION_ID: &str = "acme-mcp-boot";
@@ -520,4 +522,267 @@ fn owner_user_id_rejects_path_traversal_segments_for_registered_store_paths() {
             "/system/extensions/registered/{OWNER_USER_ID}/{REGISTERED_EXTENSION_ID}/manifest.toml"
         )
     );
+}
+
+#[test]
+fn registered_hosted_mcp_id_is_deterministic_owner_scoped_normalized_and_path_safe() {
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+    let other_owner = UserId::new(OTHER_OWNER_USER_ID).expect("valid other owner");
+
+    let id = RegisteredExtensionStore::mint_hosted_mcp_extension_id(
+        &owner,
+        "https://MCP.Example.COM:8443/mcp/",
+    )
+    .expect("mint id");
+    let same_normalized = RegisteredExtensionStore::mint_hosted_mcp_extension_id(
+        &owner,
+        "https://mcp.example.com:8443/mcp",
+    )
+    .expect("mint normalized id");
+    let other_owner_id = RegisteredExtensionStore::mint_hosted_mcp_extension_id(
+        &other_owner,
+        "https://mcp.example.com:8443/mcp",
+    )
+    .expect("mint other owner id");
+
+    let mut expected_input = Vec::new();
+    expected_input.extend_from_slice(owner.as_str().as_bytes());
+    expected_input.push(0x1f);
+    expected_input.extend_from_slice(b"https://mcp.example.com:8443/mcp");
+    let expected_digest = sha256_digest_token(&expected_input);
+    let expected_suffix = &expected_digest
+        .strip_prefix("sha256:")
+        .expect("sha256 prefix")[..16];
+
+    assert_eq!(
+        id, same_normalized,
+        "trailing slash and host case normalize"
+    );
+    assert_ne!(id, other_owner_id, "owner participates in id minting");
+    assert_eq!(id.as_str(), format!("mcp-{expected_suffix}"));
+    assert_eq!(id.as_str().len(), "mcp-".len() + 16);
+    assert!(id.as_str()[4..].chars().all(|ch| ch.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
+async fn registered_hosted_mcp_toml_injection_in_name_stays_zero_capability_mcp() {
+    let (filesystem, _storage_root) = mounted_registered_store_filesystem();
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+    let hostile_name =
+        "Acme \"quoted\"\n[[host_api]]\nid = \"ironclaw.capability_provider/v1\"\n[[capabilities]]";
+
+    let put = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        RegisterHostedMcpDescriptorInput {
+            name: hostile_name.to_string(),
+            url: "https://safe.example.com/mcp/".to_string(),
+        },
+    )
+    .await
+    .expect("put hostile display name");
+
+    let manifest = put.descriptor.manifest_record.manifest();
+    assert_eq!(manifest.name, hostile_name);
+    assert!(
+        manifest.host_apis.is_empty(),
+        "host_api text stayed inside name"
+    );
+    assert!(
+        manifest.capabilities.is_empty(),
+        "registered MCP manifest must stay zero-capability"
+    );
+    assert!(matches!(
+        manifest.runtime,
+        ExtensionRuntimeV2::Mcp {
+            ref transport,
+            command: None,
+            ref args,
+            url: Some(ref url),
+        } if transport == "http" && args.is_empty() && url == "https://safe.example.com/mcp"
+    ));
+
+    let parsed_toml: toml::Value =
+        toml::from_str(&put.descriptor.manifest_toml).expect("manifest toml parses");
+    assert!(
+        parsed_toml.get("host_api").is_none(),
+        "host_api table must not be injected"
+    );
+    assert!(
+        parsed_toml.get("capabilities").is_none(),
+        "capabilities table must not be injected"
+    );
+}
+
+#[tokio::test]
+async fn registered_hosted_mcp_hostile_invalid_url_rejects_before_write() {
+    let (filesystem, storage_root) = mounted_registered_store_filesystem();
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+
+    let error = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        RegisterHostedMcpDescriptorInput {
+            name: "Hostile URL".to_string(),
+            url: "https://safe.example.com/mcp?inject=[[host_api]]".to_string(),
+        },
+    )
+    .await
+    .expect_err("invalid hostile URL rejected");
+
+    assert!(
+        error.to_string().contains("registered MCP URL"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !storage_root
+            .join("system/extensions/registered")
+            .join(OWNER_USER_ID)
+            .exists(),
+        "invalid URL must not create owner descriptor directory"
+    );
+}
+
+#[tokio::test]
+async fn registered_hosted_mcp_cap_32_rejects_without_partial_write() {
+    let (filesystem, storage_root) = mounted_registered_store_filesystem();
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+
+    for index in 0..32 {
+        RegisteredExtensionStore::put_hosted_mcp_descriptor(
+            filesystem.as_ref(),
+            &owner,
+            RegisterHostedMcpDescriptorInput {
+                name: format!("Server {index}"),
+                url: format!("https://server-{index}.example.com/mcp"),
+            },
+        )
+        .await
+        .expect("put descriptor under cap");
+    }
+
+    let rejected_url = "https://server-32.example.com/mcp";
+    let rejected_id = RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, rejected_url)
+        .expect("mint rejected id");
+    let error = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        RegisterHostedMcpDescriptorInput {
+            name: "Server 32".to_string(),
+            url: rejected_url.to_string(),
+        },
+    )
+    .await
+    .expect_err("33rd descriptor rejected");
+
+    assert!(
+        error.to_string().contains("maximum 32"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !storage_root
+            .join("system/extensions/registered")
+            .join(OWNER_USER_ID)
+            .join(rejected_id.as_str())
+            .exists(),
+        "cap rejection must not leave a partial descriptor directory"
+    );
+
+    let packages = RegisteredExtensionStore::list_for_owner(filesystem.as_ref(), &owner)
+        .await
+        .expect("list owner descriptors");
+    assert_eq!(packages.len(), 32);
+}
+
+#[tokio::test]
+async fn registered_hosted_mcp_same_name_different_url_reports_prior_descriptor_for_update() {
+    let (filesystem, _storage_root) = mounted_registered_store_filesystem();
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+
+    let first = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        RegisterHostedMcpDescriptorInput {
+            name: "Acme".to_string(),
+            url: "https://old.example.com/mcp".to_string(),
+        },
+    )
+    .await
+    .expect("put first descriptor");
+    let second = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        RegisterHostedMcpDescriptorInput {
+            name: "Acme".to_string(),
+            url: "https://new.example.com/mcp".to_string(),
+        },
+    )
+    .await
+    .expect("put replacement descriptor");
+
+    let prior = second
+        .prior_same_name
+        .expect("same owner same name should be reported");
+    assert_eq!(prior.extension_id, first.descriptor.extension_id);
+    assert_ne!(
+        second.descriptor.extension_id,
+        first.descriptor.extension_id
+    );
+    assert_eq!(prior.normalized_url, "https://old.example.com/mcp");
+    assert_eq!(
+        second.descriptor.normalized_url,
+        "https://new.example.com/mcp"
+    );
+}
+
+#[tokio::test]
+async fn registered_hosted_mcp_delete_descriptor_is_idempotent() {
+    let (filesystem, _storage_root) = mounted_registered_store_filesystem();
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+
+    let put = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        RegisterHostedMcpDescriptorInput {
+            name: "Delete Me".to_string(),
+            url: "https://delete.example.com/mcp".to_string(),
+        },
+    )
+    .await
+    .expect("put descriptor");
+
+    RegisteredExtensionStore::delete_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        &put.descriptor.extension_id,
+    )
+    .await
+    .expect("delete descriptor");
+    RegisteredExtensionStore::delete_descriptor(
+        filesystem.as_ref(),
+        &owner,
+        &put.descriptor.extension_id,
+    )
+    .await
+    .expect("delete descriptor again");
+
+    let packages = RegisteredExtensionStore::list_for_owner(filesystem.as_ref(), &owner)
+        .await
+        .expect("list after delete");
+    assert!(packages.is_empty());
+}
+
+fn mounted_registered_store_filesystem() -> (Arc<dyn RootFilesystem>, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.keep().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+    let mut local_filesystem = LocalFilesystem::new();
+    local_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(storage_root.join("system/extensions")),
+        )
+        .expect("mount system extensions");
+    (Arc::new(local_filesystem), storage_root)
 }

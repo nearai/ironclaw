@@ -358,6 +358,15 @@ impl RebornLocalLifecycleFacade {
                 };
                 extension_management.list_installed().await
             }
+            LifecycleProductAction::ExtensionRegister { name, url } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(None);
+                };
+                let scope = lifecycle_resource_scope(&context)?;
+                extension_management
+                    .register_hosted_mcp(&scope.user_id, name, url, &scope)
+                    .await
+            }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
@@ -425,6 +434,15 @@ impl RebornLocalLifecycleFacade {
                 // with the agent capability path).
                 let scope = lifecycle_resource_scope(&context)?;
                 extension_management.remove(package_ref, &scope).await
+            }
+            LifecycleProductAction::ExtensionUnregister { package_ref } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                let scope = lifecycle_resource_scope(&context)?;
+                extension_management
+                    .unregister_hosted_mcp(package_ref, &scope)
+                    .await
             }
             LifecycleProductAction::ExtensionAuth { package_ref }
             | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {

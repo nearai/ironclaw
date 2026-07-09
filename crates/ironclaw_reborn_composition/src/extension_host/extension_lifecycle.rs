@@ -13,7 +13,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    ManifestHash, ManifestSource,
+    ExtensionRuntime, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
@@ -84,8 +84,9 @@ use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 use crate::extension_host::registered_extension_store::{
-    is_owner_registered, manifest_visible_to_caller, owner_visible_enabled_extension_ids,
-    resolve_any_owner_for_restore, resolve_with_owner_overlay, search_with_owner_overlay,
+    RegisterHostedMcpDescriptorInput, RegisteredExtensionStore, is_owner_registered,
+    manifest_visible_to_caller, owner_visible_enabled_extension_ids, resolve_any_owner_for_restore,
+    resolve_with_owner_overlay, search_with_owner_overlay,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -567,6 +568,97 @@ impl RebornLocalExtensionManagementPort {
         ))
     }
 
+    pub(crate) async fn register_hosted_mcp(
+        &self,
+        owner: &UserId,
+        name: String,
+        url: String,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let _operation_guard = self.operation_lock.lock().await;
+        let input = RegisterHostedMcpDescriptorInput { name, url };
+        let draft = RegisteredExtensionStore::synthesize_hosted_mcp_manifest_toml(owner, &input)?;
+        let package_ref = LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            draft.extension_id().as_str(),
+        )?;
+        let installation_id =
+            ExtensionInstallationId::new(draft.extension_id().as_str().to_string())
+                .map_err(map_extension_installation_error)?;
+        if self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .is_some()
+        {
+            let available = resolve_with_owner_overlay(
+                &self.catalog,
+                self.filesystem.as_ref(),
+                Some(owner),
+                &package_ref,
+            )
+            .await?;
+            return Ok(registered_install_response(package_ref, &available));
+        }
+
+        let put = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+            self.filesystem.as_ref(),
+            owner,
+            input,
+        )
+        .await?;
+        let available = resolve_with_owner_overlay(
+            &self.catalog,
+            self.filesystem.as_ref(),
+            Some(owner),
+            &package_ref,
+        )
+        .await?;
+
+        if let Err(error) = self.install_available_locked(&available).await {
+            if let Err(rollback_error) = RegisteredExtensionStore::delete_descriptor(
+                self.filesystem.as_ref(),
+                owner,
+                &put.descriptor.extension_id,
+            )
+            .await
+            {
+                return Err(compensation_failure(
+                    "registered extension install failed and descriptor rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
+
+        if let Some(prior) = put.prior_same_name {
+            let prior_ref = LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                prior.extension_id.as_str(),
+            )?;
+            if let Err(error) = self
+                .unregister_hosted_mcp_locked(prior_ref, owner, scope)
+                .await
+            {
+                if let Err(rollback_error) = self
+                    .unregister_hosted_mcp_locked(package_ref.clone(), owner, scope)
+                    .await
+                {
+                    return Err(compensation_failure(
+                        "registered extension replacement failed and new install rollback failed",
+                        error,
+                        rollback_error,
+                    ));
+                }
+                return Err(error);
+            }
+        }
+
+        Ok(registered_install_response(package_ref, &available))
+    }
+
     async fn install_available_locked(
         &self,
         available: &AvailableExtensionPackage,
@@ -829,6 +921,85 @@ impl RebornLocalExtensionManagementPort {
                 .await;
         }
         response
+    }
+
+    pub(crate) async fn unregister_hosted_mcp(
+        &self,
+        package_ref: LifecyclePackageRef,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let _operation_guard = self.operation_lock.lock().await;
+        self.unregister_hosted_mcp_locked(package_ref, &scope.user_id, scope)
+            .await
+    }
+
+    async fn unregister_hosted_mcp_locked(
+        &self,
+        package_ref: LifecyclePackageRef,
+        owner: &UserId,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let available = resolve_with_owner_overlay(
+            &self.catalog,
+            self.filesystem.as_ref(),
+            Some(owner),
+            &package_ref,
+        )
+        .await?;
+        if !is_owner_registered(&available.package.manifest.source) {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} is not a registered MCP extension",
+                    package_ref.id.as_str()
+                ),
+            });
+        }
+        let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        if self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .is_some()
+        {
+            let restore_input = registered_descriptor_input_from_available(&available)?;
+            RegisteredExtensionStore::delete_descriptor(
+                self.filesystem.as_ref(),
+                owner,
+                &extension_id,
+            )
+            .await?;
+            let response = match self.remove_locked(package_ref).await {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Err(rollback_error) =
+                        RegisteredExtensionStore::put_hosted_mcp_descriptor(
+                            self.filesystem.as_ref(),
+                            owner,
+                            restore_input,
+                        )
+                        .await
+                    {
+                        return Err(compensation_failure(
+                            "registered extension unregister failed and descriptor restore failed",
+                            error,
+                            rollback_error,
+                        ));
+                    }
+                    return Err(error);
+                }
+            };
+            self.revoke_exclusive_credentials(scope, extension_id.as_str(), &[])
+                .await;
+            return Ok(response);
+        }
+        RegisteredExtensionStore::delete_descriptor(self.filesystem.as_ref(), owner, &extension_id)
+            .await?;
+        Ok(response_with_payload(
+            Some(package_ref),
+            LifecyclePhase::Removed,
+            LifecycleProductPayload::ExtensionRemove { removed: true },
+        ))
     }
 
     /// Credential providers the extension declares, captured before removal (its
@@ -1107,10 +1278,13 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(original_error);
         }
-        if let Err(error) = self
-            .delete_materialized_extension_files(&extension_id)
-            .await
-        {
+        let delete_files_result = if is_owner_registered(&manifest.manifest().source) {
+            Ok(())
+        } else {
+            self.delete_materialized_extension_files(&extension_id)
+                .await
+        };
+        if let Err(error) = delete_files_result {
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
                 .await
@@ -1436,6 +1610,41 @@ fn prepare_install(
     Ok(ExtensionInstallPlan {
         manifest_record,
         installation,
+    })
+}
+
+fn registered_install_response(
+    package_ref: LifecyclePackageRef,
+    available: &AvailableExtensionPackage,
+) -> LifecycleProductResponse {
+    response_with_payload(
+        Some(package_ref),
+        LifecyclePhase::Installed,
+        LifecycleProductPayload::ExtensionInstall {
+            installed: true,
+            visible_capability_ids: visible_capability_ids(available)
+                .map(|id| id.as_str().to_string())
+                .collect(),
+            next_step: "Activate the registered MCP extension to discover and publish its tools."
+                .to_string(),
+        },
+    )
+}
+
+fn registered_descriptor_input_from_available(
+    available: &AvailableExtensionPackage,
+) -> Result<RegisterHostedMcpDescriptorInput, ProductWorkflowError> {
+    let ExtensionRuntime::Mcp { url: Some(url), .. } = &available.package.manifest.runtime else {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!(
+                "registered extension {} is not a hosted MCP package",
+                available.package.id.as_str()
+            ),
+        });
+    };
+    Ok(RegisterHostedMcpDescriptorInput {
+        name: available.package.manifest.name.clone(),
+        url: url.clone(),
     })
 }
 
@@ -3995,6 +4204,408 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
+    async fn extension_register_installs_owner_descriptor_without_shared_materialization() {
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(Vec::new()),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+
+        let response = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://mcp.example.com/mcp/".to_string(),
+                },
+            )
+            .await
+            .expect("register hosted MCP");
+
+        let package_ref = response.package_ref.expect("package ref");
+        assert_eq!(response.phase, LifecyclePhase::Installed);
+        assert!(
+            package_ref.id.as_str().starts_with("mcp-"),
+            "registered id should be minted from owner/url"
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(package_ref.id.as_str())
+                .join("manifest.toml")
+                .exists(),
+            "register writes the owner-scoped descriptor"
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions")
+                .join(package_ref.id.as_str())
+                .join("manifest.toml")
+                .exists(),
+            "UserRegistered packages must not be materialized under shared catalog root"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new(package_ref.id.as_str().to_string())
+                        .expect("installation id")
+                )
+                .await
+                .expect("read installation")
+                .is_some(),
+            "register reuses lifecycle install persistence"
+        );
+        let manifest_record = installation_store
+            .get_manifest(&ExtensionId::new(package_ref.id.as_str().to_string()).expect("id"))
+            .await
+            .expect("read manifest")
+            .expect("manifest record");
+        assert!(matches!(
+            manifest_record.manifest().source,
+            ManifestSource::UserRegistered { ref owner } if owner.as_str() == "lifecycle-owner"
+        ));
+    }
+
+    #[tokio::test]
+    async fn extension_register_same_url_is_idempotent_without_deleting_existing_descriptor() {
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(Vec::new()),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let first = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://mcp.example.com/mcp".to_string(),
+                },
+            )
+            .await
+            .expect("register first");
+        let first_ref = first.package_ref.expect("first ref");
+        let second = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://mcp.example.com/mcp/".to_string(),
+                },
+            )
+            .await
+            .expect("register same normalized URL");
+        let second_ref = second.package_ref.expect("second ref");
+
+        assert_eq!(first_ref, second_ref);
+        assert!(
+            storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(first_ref.id.as_str())
+                .join("manifest.toml")
+                .exists(),
+            "repeat registration must not delete the existing descriptor"
+        );
+        assert_eq!(
+            installation_store
+                .list_installations()
+                .await
+                .expect("list installations")
+                .len(),
+            1,
+            "repeat registration must not create duplicate lifecycle records"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_register_same_name_update_removes_prior_owner_descriptor_and_install() {
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(Vec::new()),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let first = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://old.example.com/mcp".to_string(),
+                },
+            )
+            .await
+            .expect("register first");
+        let first_ref = first.package_ref.expect("first ref");
+        let second = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://new.example.com/mcp".to_string(),
+                },
+            )
+            .await
+            .expect("register replacement");
+        let second_ref = second.package_ref.expect("second ref");
+
+        assert_ne!(first_ref, second_ref);
+        assert!(
+            !storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(first_ref.id.as_str())
+                .exists(),
+            "same-name update removes prior descriptor"
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(second_ref.id.as_str())
+                .join("manifest.toml")
+                .exists(),
+            "same-name update keeps replacement descriptor"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new(first_ref.id.as_str().to_string())
+                        .expect("first installation id")
+                )
+                .await
+                .expect("read first installation")
+                .is_none(),
+            "same-name update removes prior lifecycle installation"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new(second_ref.id.as_str().to_string())
+                        .expect("second installation id")
+                )
+                .await
+                .expect("read second installation")
+                .is_some(),
+            "same-name update installs replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_register_same_name_update_rolls_back_replacement_when_prior_remove_fails() {
+        let owner = UserId::new("lifecycle-owner").expect("valid user");
+        let old_url = "https://old.example.com/mcp";
+        let new_url = "https://new.example.com/mcp";
+        let old_id = RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, old_url)
+            .expect("old id");
+        let new_id = RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, new_url)
+            .expect("new id");
+        let (dir, port, _active_registry, failing_store, _trust_policy) =
+            extension_port_with_failing_store(
+                ExtensionRegistry::new(),
+                DeleteInstallationFailingStore::fail_delete_installation_for(&old_id),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let storage_root = dir.path().join("local-dev");
+
+        port.register_hosted_mcp(
+            &owner,
+            "Acme MCP".to_string(),
+            old_url.to_string(),
+            &hosted_mcp_scope("lifecycle-owner"),
+        )
+        .await
+        .expect("register old");
+        let error = port
+            .register_hosted_mcp(
+                &owner,
+                "Acme MCP".to_string(),
+                new_url.to_string(),
+                &hosted_mcp_scope("lifecycle-owner"),
+            )
+            .await
+            .expect_err("prior removal failure rejects replacement");
+
+        assert!(
+            error
+                .to_string()
+                .contains("targeted delete installation failed"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(old_id.as_str())
+                .join("manifest.toml")
+                .exists(),
+            "prior descriptor is restored after failed replacement"
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(new_id.as_str())
+                .join("manifest.toml")
+                .exists(),
+            "replacement descriptor is rolled back"
+        );
+        assert!(
+            failing_store
+                .get_installation(
+                    &ExtensionInstallationId::new(old_id.as_str().to_string())
+                        .expect("old installation id")
+                )
+                .await
+                .expect("read old installation")
+                .is_some(),
+            "prior installation remains"
+        );
+        assert!(
+            failing_store
+                .get_installation(
+                    &ExtensionInstallationId::new(new_id.as_str().to_string())
+                        .expect("new installation id")
+                )
+                .await
+                .expect("read new installation")
+                .is_none(),
+            "replacement installation is rolled back"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_unregister_removes_owner_descriptor_and_installation() {
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(Vec::new()),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let register = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://mcp.example.com/mcp".to_string(),
+                },
+            )
+            .await
+            .expect("register");
+        let package_ref = register.package_ref.expect("package ref");
+
+        let unregister = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionUnregister {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("unregister");
+
+        assert_eq!(unregister.phase, LifecyclePhase::Removed);
+        assert!(
+            !storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(package_ref.id.as_str())
+                .exists(),
+            "unregister removes descriptor"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new(package_ref.id.as_str().to_string())
+                        .expect("installation id")
+                )
+                .await
+                .expect("read installation")
+                .is_none(),
+            "unregister removes lifecycle installation"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_unregister_descriptor_delete_failure_keeps_lifecycle_installation() {
+        let owner = UserId::new("lifecycle-owner").expect("valid user");
+        let url = "https://mcp.example.com/mcp";
+        let extension_id =
+            RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, url).expect("id");
+        let (dir, port, _active_registry, installation_store, _trust_policy) =
+            extension_port_with_file_delete_failing_filesystem();
+        let storage_root = dir.path().join("local-dev");
+
+        port.register_hosted_mcp(
+            &owner,
+            "Acme MCP".to_string(),
+            url.to_string(),
+            &hosted_mcp_scope("lifecycle-owner"),
+        )
+        .await
+        .expect("register");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
+                .expect("package ref");
+        let error = port
+            .unregister_hosted_mcp(package_ref, &hosted_mcp_scope("lifecycle-owner"))
+            .await
+            .expect_err("descriptor delete failure rejects unregister before lifecycle removal");
+
+        assert!(
+            error.to_string().contains("delete failed"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(extension_id.as_str())
+                .join("manifest.toml")
+                .exists(),
+            "descriptor remains when descriptor deletion fails"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new(extension_id.as_str().to_string())
+                        .expect("installation id")
+                )
+                .await
+                .expect("read installation")
+                .is_some(),
+            "lifecycle installation remains when descriptor deletion fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_register_rolls_back_descriptor_when_install_persistence_fails() {
+        let (dir, port, _active_registry, _failing_store, _trust_policy) =
+            extension_port_with_failing_store(
+                ExtensionRegistry::new(),
+                DeleteInstallationFailingStore::fail_upsert_installation(),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let storage_root = dir.path().join("local-dev");
+        let owner = UserId::new("lifecycle-owner").expect("valid user");
+        let url = "https://rollback.example.com/mcp";
+        let extension_id =
+            RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, url).expect("mint id");
+
+        let error = port
+            .register_hosted_mcp(
+                &owner,
+                "Rollback MCP".to_string(),
+                url.to_string(),
+                &hosted_mcp_scope("lifecycle-owner"),
+            )
+            .await
+            .expect_err("install persistence failure rejects register");
+
+        assert!(
+            error.to_string().contains("upsert installation failed"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(extension_id.as_str())
+                .exists(),
+            "descriptor write is rolled back when lifecycle install persistence fails"
+        );
+    }
+
+    #[tokio::test]
     async fn extension_activate_rejects_lifecycle_package_without_installation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -4884,53 +5495,108 @@ output_schema_ref = "schemas/search.output.json"
         }
     }
 
-    #[derive(Default)]
     struct DeleteInstallationFailingStore {
         inner: InMemoryExtensionInstallationStore,
+        fail_delete_installation: bool,
         fail_manifest_delete: bool,
         fail_set_activation_enabled: bool,
         fail_get_installation: bool,
         mismatched_get_installation: bool,
+        fail_upsert_installation: bool,
+        fail_delete_installation_for: Option<String>,
+    }
+
+    impl Default for DeleteInstallationFailingStore {
+        fn default() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_delete_installation: true,
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: false,
+                fail_get_installation: false,
+                mismatched_get_installation: false,
+                fail_upsert_installation: false,
+                fail_delete_installation_for: None,
+            }
+        }
     }
 
     impl DeleteInstallationFailingStore {
         fn fail_manifest_delete() -> Self {
             Self {
                 inner: InMemoryExtensionInstallationStore::default(),
+                fail_delete_installation: false,
                 fail_manifest_delete: true,
                 fail_set_activation_enabled: false,
                 fail_get_installation: false,
                 mismatched_get_installation: false,
+                fail_upsert_installation: false,
+                fail_delete_installation_for: None,
             }
         }
 
         fn fail_set_activation_enabled() -> Self {
             Self {
                 inner: InMemoryExtensionInstallationStore::default(),
+                fail_delete_installation: false,
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: true,
                 fail_get_installation: false,
                 mismatched_get_installation: false,
+                fail_upsert_installation: false,
+                fail_delete_installation_for: None,
             }
         }
 
         fn fail_get_installation() -> Self {
             Self {
                 inner: InMemoryExtensionInstallationStore::default(),
+                fail_delete_installation: false,
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: false,
                 fail_get_installation: true,
                 mismatched_get_installation: false,
+                fail_upsert_installation: false,
+                fail_delete_installation_for: None,
             }
         }
 
         fn mismatched_get_installation() -> Self {
             Self {
                 inner: InMemoryExtensionInstallationStore::default(),
+                fail_delete_installation: false,
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: false,
                 fail_get_installation: false,
                 mismatched_get_installation: true,
+                fail_upsert_installation: false,
+                fail_delete_installation_for: None,
+            }
+        }
+
+        fn fail_upsert_installation() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_delete_installation: false,
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: false,
+                fail_get_installation: false,
+                mismatched_get_installation: false,
+                fail_upsert_installation: true,
+                fail_delete_installation_for: None,
+            }
+        }
+
+        fn fail_delete_installation_for(extension_id: &ExtensionId) -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_delete_installation: false,
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: false,
+                fail_get_installation: false,
+                mismatched_get_installation: false,
+                fail_upsert_installation: false,
+                fail_delete_installation_for: Some(extension_id.as_str().to_string()),
             }
         }
     }
@@ -5008,6 +5674,11 @@ output_schema_ref = "schemas/search.output.json"
             &self,
             installation: ExtensionInstallation,
         ) -> Result<(), ExtensionInstallationError> {
+            if self.fail_upsert_installation {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "upsert installation failed".to_string(),
+                });
+            }
             self.inner.upsert_installation(installation).await
         }
 
@@ -5030,12 +5701,21 @@ output_schema_ref = "schemas/search.output.json"
             &self,
             installation_id: &ExtensionInstallationId,
         ) -> Result<(), ExtensionInstallationError> {
-            if self.fail_manifest_delete {
-                self.inner.delete_installation(installation_id).await
-            } else {
+            if self
+                .fail_delete_installation_for
+                .as_deref()
+                .is_some_and(|id| id == installation_id.as_str())
+            {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "targeted delete installation failed".to_string(),
+                });
+            }
+            if self.fail_delete_installation {
                 Err(ExtensionInstallationError::InvalidInstallation {
                     reason: "delete installation failed".to_string(),
                 })
+            } else {
+                self.inner.delete_installation(installation_id).await
             }
         }
 

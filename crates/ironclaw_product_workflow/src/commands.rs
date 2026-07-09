@@ -241,6 +241,7 @@ fn parse_lifecycle_command_payload(
         LifecycleCommandKind::ExtensionList => ProductCommand::Lifecycle {
             action: LifecycleProductAction::ExtensionList,
         },
+        LifecycleCommandKind::ExtensionRegister => parse_extension_register_command(payload)?,
         LifecycleCommandKind::ExtensionInstall => {
             extension_package_command(payload, |package_ref| {
                 LifecycleProductAction::ExtensionInstall { package_ref }
@@ -260,6 +261,11 @@ fn parse_lifecycle_command_payload(
                 LifecycleProductAction::ExtensionRemove { package_ref }
             })?
         }
+        LifecycleCommandKind::ExtensionUnregister => {
+            extension_package_command(payload, |package_ref| {
+                LifecycleProductAction::ExtensionUnregister { package_ref }
+            })?
+        }
         LifecycleCommandKind::SkillSearch => ProductCommand::Lifecycle {
             action: LifecycleProductAction::SkillSearch {
                 query: payload.arguments.trim().to_string(),
@@ -267,6 +273,38 @@ fn parse_lifecycle_command_payload(
         },
         LifecycleCommandKind::SkillInstall => parse_skill_install_command(payload)?,
         LifecycleCommandKind::SkillRemove => parse_skill_remove_command(payload)?,
+    })
+}
+
+fn parse_extension_register_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    let value = serde_json::from_str::<Value>(payload.arguments.trim()).map_err(|_| {
+        ProductRejection::permanent(
+            ProductRejectionKind::InvalidRequest,
+            "extension_register expects JSON arguments with string fields `name` and `url`",
+        )
+    })?;
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "extension_register requires string field `name`",
+            )
+        })?
+        .to_string();
+    let url = value
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "extension_register requires string field `url`",
+            )
+        })?
+        .to_string();
+    Ok(ProductCommand::Lifecycle {
+        action: LifecycleProductAction::ExtensionRegister { name, url },
     })
 }
 

@@ -110,7 +110,7 @@ pub(crate) struct HostedMcpEndpoint {
 }
 
 impl HostedMcpEndpoint {
-    fn parse(url: &str) -> Option<Self> {
+    pub(crate) fn parse(url: &str) -> Option<Self> {
         let parsed = url::Url::parse(url).ok()?;
         if parsed.scheme() != "https"
             || !parsed.username().is_empty()

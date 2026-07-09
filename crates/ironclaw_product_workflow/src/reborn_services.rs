@@ -153,7 +153,8 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornRegisterExtensionRequest, RebornRegisterExtensionResponse, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornRetryRunResponse,
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
@@ -2293,6 +2294,15 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
 
+    async fn register_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRegisterExtensionRequest,
+    ) -> Result<RebornRegisterExtensionResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2304,6 +2314,15 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
+
+    async fn unregister_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        let _ = (caller, package_ref);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     /// Run a step in a v2-native extension onboarding flow. Today the
     /// facade returns
@@ -4756,6 +4775,14 @@ impl RebornServicesApi for RebornServices {
         extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
+    async fn register_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRegisterExtensionRequest,
+    ) -> Result<RebornRegisterExtensionResponse, RebornServicesError> {
+        extensions::register_extension(self.lifecycle_facade.as_ref(), caller, request).await
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4776,6 +4803,14 @@ impl RebornServicesApi for RebornServices {
             package_ref,
         )
         .await
+    }
+
+    async fn unregister_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::unregister_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
     async fn setup_extension(
