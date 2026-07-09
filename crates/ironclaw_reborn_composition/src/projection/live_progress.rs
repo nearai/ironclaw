@@ -19,7 +19,8 @@ use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, Us
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
+    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
+    ProductWorkSummaryPhase,
 };
 use ironclaw_turns::{
     TurnRunId, TurnScope,
@@ -199,6 +200,13 @@ pub(super) fn product_items_for_live_update(
         .items
         .iter()
         .filter_map(|item| match item {
+            ThreadLiveProjectionItem::Text { id, run_id, body } => {
+                Some(ProductProjectionItem::Text {
+                    id: id.clone(),
+                    run_id: Some(*run_id),
+                    body: body.clone(),
+                })
+            }
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
                 Some(ProductProjectionItem::Thinking {
                     id: id.clone(),
@@ -285,6 +293,26 @@ fn live_work_summary_phase_to_product_phase(
 }
 
 impl LiveProgressMilestoneSink {
+    fn publish_text_delta(&self, milestone: &LoopHostMilestone, safe_text: &str) {
+        // The model port already sanitizes chunks before milestone emission.
+        // Re-sanitize and bound here because this path is browser-facing.
+        let body = sanitize_bounded_projection_text(safe_text, PROJECTION_TEXT_MAX_BYTES);
+        if body.is_empty() {
+            return;
+        }
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
+            &milestone.scope,
+            sequence,
+            ThreadLiveProjectionItem::Text {
+                id: text_id(milestone.run_id),
+                run_id: milestone.run_id,
+                body,
+            },
+        );
+    }
+
     fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
         // The delta is already model-visible sanitized upstream. Re-sanitize at
         // the product projection boundary so this publish path has its own
@@ -418,6 +446,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
     ) -> Result<(), AgentLoopHostError> {
         self.inner.publish_loop_milestone(milestone.clone()).await?;
         match &milestone.kind {
+            LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
+                self.publish_text_delta(&milestone, safe_text);
+            }
             LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
                 self.publish_reasoning_delta(&milestone, safe_delta);
             }
@@ -521,6 +552,10 @@ fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("thinking:{run_id}:{sequence}")
 }
 
+fn text_id(run_id: TurnRunId) -> String {
+    format!("text:{run_id}")
+}
+
 fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("work-summary:{run_id}:{sequence}")
 }
@@ -540,6 +575,18 @@ fn sanitize_bounded_model_visible_text(value: &str, max_bytes: usize) -> String 
         end -= 1;
     }
     trimmed[..end].trim_end().to_string()
+}
+
+fn sanitize_bounded_projection_text(value: &str, max_bytes: usize) -> String {
+    let sanitized = sanitize_model_visible_text(value);
+    if sanitized.len() <= max_bytes {
+        return sanitized;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    sanitized[..end].to_string()
 }
 
 fn driver_note_kind_to_live_work_summary_phase(

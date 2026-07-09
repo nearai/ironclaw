@@ -217,6 +217,7 @@ registerPack("fr", {
 
   // Settings tabs
   "settings.inference": "Inférence",
+  "settings.appearance": "Apparence",
   "settings.agent": "Agent",
   "settings.channels": "Canaux",
   "settings.networking": "Réseau",
@@ -252,6 +253,10 @@ registerPack("fr", {
   "traceCommons.lastSyncDesc": "Vue locale à la dernière synchronisation",
   "traceCommons.never": "jamais",
   "traceCommons.recentExplanations": "Explications de crédit récentes",
+  "traceCommons.openAccount": "Ouvrir le compte Trace Commons",
+  "traceCommons.openingAccount": "Ouverture…",
+  "traceCommons.openAccountFailed":
+    "Impossible d'ouvrir votre compte Trace Commons. Vérifiez l'inscription et réessayez.",
   "traceCommons.submittedTracesTitle": "Traces soumises",
   "traceCommons.tracesLoadFailed": "Impossible de charger vos traces soumises.",
   "traceCommons.traceStatus": "Statut",
@@ -280,6 +285,9 @@ registerPack("fr", {
   "settings.restartNow": "Redémarrer maintenant",
   "settings.restartStarting": "Redémarrer...",
   "settings.restartUnavailable": "Le redémarrage depuis l'interface web n'est pas encore disponible. Redémarrez le processus de passerelle manuellement pour appliquer les modifications en attente.",
+  "settings.field.showChatTerminalShortcut": "Afficher le raccourci terminal du chat",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Affiche l'icône flottante terminal/journaux dans les fils de discussion.",
 
   // Restart dialog
   "restart.title": "Redémarrer IronClaw",

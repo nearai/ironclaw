@@ -24,6 +24,7 @@ import { channelConnectionDisplayName } from "../../lib/channel-connection-event
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
+import { useInterfacePreferences } from "../../lib/interface-preferences";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -44,6 +45,16 @@ function pendingOnboardingLabel(onboarding) {
   return channelConnectionDisplayName(onboarding?.extensionName);
 }
 
+function hasVisibleStreamingAssistantText(messages, activeRunId) {
+  return (messages || []).some((message) =>
+    message?.role === "assistant" &&
+    message.isFinalReply === false &&
+    typeof message.content === "string" &&
+    message.content.length > 0 &&
+    (!activeRunId || message.turnRunId === activeRunId)
+  );
+}
+
 export function Chat({
   threads,
   activeThreadId,
@@ -55,6 +66,7 @@ export function Chat({
   globalAutoApproveEnabled = false,
 }) {
   const t = useT();
+  const { showChatLogsShortcut } = useInterfacePreferences();
   const {
     messages,
     isProcessing,
@@ -121,6 +133,15 @@ export function Chat({
   const activeThreadHasOnboarding =
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
+  const activeRunId = activeRun?.runId || null;
+  const streamingAssistantTextVisible = hasVisibleStreamingAssistantText(
+    messages,
+    activeRunId
+  );
+  const showTypingIndicator =
+    activeThreadIsProcessing &&
+    !activeThreadHasGate &&
+    !streamingAssistantTextVisible;
   const hasMessages =
     messages.length > 0 ||
     activeThreadIsProcessing ||
@@ -154,7 +175,10 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
-  const logsPath = activeThreadId ? buildScopedLogsPath({ threadId: activeThreadId }) : null;
+  const logsPath =
+    activeThreadId && showChatLogsShortcut
+      ? buildScopedLogsPath({ threadId: activeThreadId })
+      : null;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
@@ -321,8 +345,7 @@ export function Chat({
                 onRecover={recoverHistory}
               />
             )}
-            {activeThreadIsProcessing &&
-            !activeThreadHasOnboarding &&
+            {showTypingIndicator &&
             (<TypingIndicator />)}
             {activeThreadHasOnboarding &&
             (

@@ -7,7 +7,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -16,9 +16,9 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
@@ -26,9 +26,9 @@ use ironclaw_llm::{
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
-    ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadContextWindowCache,
+    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
+    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
@@ -42,10 +42,10 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
-        RegisterProviderToolCallRequest,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
+        LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
     },
 };
 use tracing::debug;
@@ -61,6 +61,11 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
+const PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX: &str =
+    "failed to parse tool-call arguments JSON:";
+const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid tool-call arguments";
+const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
+    "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
@@ -212,6 +217,28 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, None).await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, Some(progress_sink)).await
+    }
+}
+
+impl<S, G> ThreadBackedLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn stream_model_inner(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
@@ -222,7 +249,7 @@ where
             Arc::clone(&context_window_cache),
         )
         .await?;
-        ThreadBackedLoopModelPort::new(
+        let mut port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             request.context,
@@ -230,10 +257,26 @@ where
             self.max_messages,
         )
         .with_instruction_materialization_store(instruction_materialization_store)
-        .with_context_window_cache(context_window_cache)
-        .stream_model(request.request)
-        .await
-        .map_err(host_error_to_model_gateway_error)
+        .with_context_window_cache(context_window_cache);
+        if let Some(progress_sink) = progress_sink {
+            port = port.with_stream_sink(Arc::new(LoopProgressHostStreamSink {
+                inner: progress_sink,
+            }));
+        }
+        port.stream_model(request.request)
+            .await
+            .map_err(host_error_to_model_gateway_error)
+    }
+}
+
+struct LoopProgressHostStreamSink {
+    inner: Arc<dyn LoopModelProgressSink>,
+}
+
+#[async_trait]
+impl HostManagedModelStreamSink for LoopProgressHostStreamSink {
+    async fn safe_text_update(&self, safe_text: String) {
+        self.inner.model_text_update(safe_text).await;
     }
 }
 
@@ -363,6 +406,42 @@ where
             completion,
             None,
             None,
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let route = self
+            .policy
+            .route_for(&request.model_profile_id)
+            .ok_or_else(|| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::PolicyDenied,
+                    "model profile is not permitted",
+                )
+            })?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(model_override);
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+
+        complete_model_request(
+            self.provider.as_ref(),
+            completion,
+            None,
+            None,
+            Some(sink),
             replay_identity,
         )
         .await
@@ -401,6 +480,47 @@ where
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let route = self
+            .policy
+            .route_for(&request.model_profile_id)
+            .ok_or_else(|| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::PolicyDenied,
+                    "model profile is not permitted",
+                )
+            })?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(model_override);
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+
+        let provider_turn_scope = format!(
+            "run={run_id}\nturn={turn_id}\nmodel_call={}",
+            self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
+        );
+        complete_model_request(
+            self.provider.as_ref(),
+            completion,
+            Some(capabilities),
+            Some(provider_turn_scope),
+            Some(sink),
             replay_identity,
         )
         .await
@@ -561,7 +681,53 @@ where
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(provider.as_ref(), completion, None, None, replay_identity).await
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            None,
+            None,
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let slot = slot_for_model_profile(&request.model_profile_id)?;
+        let request_snapshot = request
+            .resolved_model_route
+            .as_ref()
+            .ok_or_else(missing_route_snapshot_error)?;
+        let policy_mode = self.validate_route_snapshot(slot, request_snapshot)?;
+        let snapshot = snapshot_from_host_request(slot, request_snapshot, policy_mode)?;
+        let provider = self.provider_pool.provider_for_route(&snapshot).await?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(
+            snapshot.route().provider_id(),
+            snapshot.route().model_id(),
+        )?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(snapshot.route().model_id().to_string());
+        validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_route_metadata(&mut completion, &snapshot);
+
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            None,
+            None,
+            Some(sink),
+            replay_identity,
+        )
+        .await
     }
 
     async fn stream_model_with_capabilities(
@@ -600,6 +766,50 @@ where
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let slot = slot_for_model_profile(&request.model_profile_id)?;
+        let request_snapshot = request
+            .resolved_model_route
+            .as_ref()
+            .ok_or_else(missing_route_snapshot_error)?;
+        let policy_mode = self.validate_route_snapshot(slot, request_snapshot)?;
+        let snapshot = snapshot_from_host_request(slot, request_snapshot, policy_mode)?;
+        let provider = self.provider_pool.provider_for_route(&snapshot).await?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(
+            snapshot.route().provider_id(),
+            snapshot.route().model_id(),
+        )?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(snapshot.route().model_id().to_string());
+        validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_route_metadata(&mut completion, &snapshot);
+
+        let provider_turn_scope = format!(
+            "run={run_id}\nturn={turn_id}\nmodel_call={}",
+            self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
+        );
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            Some(capabilities),
+            Some(provider_turn_scope),
+            Some(sink),
             replay_identity,
         )
         .await
@@ -837,9 +1047,41 @@ fn validate_replay_identity_text(
     Ok(())
 }
 
+struct ProviderStreamSink {
+    inner: Arc<dyn HostManagedModelStreamSink>,
+    accumulated_text: Mutex<String>,
+}
+
+impl ProviderStreamSink {
+    fn new(inner: Arc<dyn HostManagedModelStreamSink>) -> Self {
+        Self {
+            inner,
+            accumulated_text: Mutex::new(String::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl CompletionStreamSink for ProviderStreamSink {
+    async fn text_delta(&self, delta: String) {
+        if delta.is_empty() {
+            return;
+        }
+        let safe_text = {
+            let mut guard = match self.accumulated_text.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.push_str(&delta);
+            sanitize_model_visible_text(guard.clone())
+        };
+        self.inner.safe_text_update(safe_text).await;
+    }
+}
+
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, replay_identity),
+    skip(provider, completion, capabilities, stream_sink, replay_identity),
     fields(
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
@@ -851,6 +1093,7 @@ async fn complete_model_request<P>(
     completion: CompletionRequest,
     capabilities: Option<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
+    stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     replay_identity: ProviderReplayIdentity,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
@@ -896,7 +1139,16 @@ where
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
-            let response = match provider.complete_with_tools(tool_request.clone()).await {
+            let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+                provider
+                    .complete_with_tools_streaming(
+                        tool_request.clone(),
+                        Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+                    )
+                    .await
+            } else {
+                provider.complete_with_tools(tool_request.clone()).await
+            } {
                 Ok(response) => {
                     trace_model_latency_ok(
                         "provider_complete_with_tools",
@@ -1037,7 +1289,16 @@ where
     }
 
     let provider_started_at = live_latency_started_at();
-    let response = match provider.complete(completion).await {
+    let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+        provider
+            .complete_streaming(
+                completion,
+                Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+            )
+            .await
+    } else {
+        provider.complete(completion).await
+    } {
         Ok(response) => {
             trace_model_latency_ok(
                 "provider_complete",
@@ -1530,6 +1791,19 @@ fn provider_tool_call_from_llm(
     provider_turn_id: String,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<ProviderToolCall, HostManagedModelError> {
+    if let Some(parse_error) = tool_call.arguments_parse_error.as_deref() {
+        let safe_summary = provider_tool_arguments_parse_error_summary(parse_error);
+        debug!(
+            provider_call_id = tool_call.id.as_str(),
+            tool_name = tool_call.name.as_str(),
+            safe_summary = safe_summary.as_str(),
+            "reborn model gateway rejected malformed provider tool arguments"
+        );
+        return Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            safe_summary,
+        ));
+    }
     let name = ProviderToolName::new(tool_call.name).map_err(|error| {
         debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
@@ -1548,6 +1822,19 @@ fn provider_tool_call_from_llm(
         reasoning: tool_call.reasoning,
         signature: tool_call.signature,
     })
+}
+
+fn provider_tool_arguments_parse_error_summary(parse_error: &str) -> String {
+    let summary_line = parse_error.lines().next().unwrap_or(parse_error);
+    let sanitized = sanitize_model_visible_text(summary_line.to_string());
+    let sanitized = sanitized.trim();
+    if sanitized.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        && LoopSafeSummary::new(sanitized).is_ok()
+    {
+        sanitized.to_string()
+    } else {
+        PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY.to_string()
+    }
 }
 
 fn provider_turn_id(provider_turn_scope: &str, tool_calls: &[ToolCall]) -> String {
@@ -1654,7 +1941,13 @@ fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModel
 
 fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bool {
     error.kind == HostManagedModelErrorKind::InvalidOutput
-        && is_provider_arguments_too_large_summary(&error.safe_summary)
+        && (is_provider_arguments_too_large_summary(&error.safe_summary)
+            || is_provider_tool_arguments_parse_error_summary(&error.safe_summary))
+}
+
+fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
+    safe_summary.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        || safe_summary == PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY
 }
 
 fn provider_tool_repair_messages(
@@ -1680,16 +1973,30 @@ fn provider_tool_repair_messages(
             ChatMessage::tool_result(
                 tool_call.id.clone(),
                 tool_call.name.clone(),
-                format!(
-                    "Tool call batch rejected by host: {safe_summary}. None of this response's tool calls were executed. Retry with smaller arguments or answer directly without this tool if it is not needed."
-                ),
+                provider_tool_repair_result_content(tool_call, safe_summary),
             )
         }))
         .collect()
 }
 
+fn provider_tool_repair_result_content(tool_call: &ToolCall, safe_summary: &str) -> String {
+    let mut content = format!("Tool call batch rejected by host: {safe_summary}.");
+    if let Some(parse_error) = tool_call.arguments_parse_error.as_deref() {
+        content.push_str("\n\nMalformed tool-call argument details for this rejected call:\n");
+        content.push_str(parse_error);
+    }
+    content.push_str(
+        "\n\nNone of this response's tool calls were executed. Retry with valid JSON arguments or answer directly without this tool if it is not needed.",
+    );
+    content
+}
+
 fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
-    let arguments = if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
+    let arguments = if tool_call.arguments_parse_error.is_some() {
+        serde_json::json!({
+            "error": PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER,
+        })
+    } else if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
         serde_json::json!({
             "error": PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER,
         })
@@ -1703,7 +2010,7 @@ fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
         arguments,
         reasoning: tool_call.reasoning.clone(),
         signature: tool_call.signature.clone(),
-        arguments_parse_error: tool_call.arguments_parse_error.clone(),
+        arguments_parse_error: None,
     }
 }
 
@@ -2518,6 +2825,36 @@ mod tests {
             Some(expected_reasoning),
             "recovery must preserve typed reasoning_details onto the recovered response"
         );
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_falls_back_for_unknown_metadata() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "raw_provider_secret api_key=sk-live-secret malformed payload",
+        );
+
+        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_drops_raw_repair_detail() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3\nRaw malformed tool-call arguments (verbatim, 42 bytes):\n{\"api_key\":\"sk-live-secret\"",
+        );
+
+        assert_eq!(
+            summary,
+            "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3"
+        );
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_rejects_unsafe_parser_detail() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "failed to parse tool-call arguments JSON: expected `,` or `}` at line 1 column 2",
+        );
+
+        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
     }
 
     #[test]

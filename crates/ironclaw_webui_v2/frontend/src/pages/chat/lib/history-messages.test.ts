@@ -297,6 +297,52 @@ test("messagesFromTimeline: tool previews use timeline sequence as activity orde
   );
 });
 
+test("messagesFromTimeline: timeline keeps durable sequence order", () => {
+  const messages = messagesFromTimeline(
+    [
+      {
+        message_id: "user-1",
+        kind: "user",
+        content: "search first",
+        sequence: 1,
+        status: "accepted",
+        turn_run_id: "run-1",
+      },
+      {
+        message_id: "tool-preview-1",
+        kind: "capability_display_preview",
+        sequence: 2,
+        status: "finalized",
+        turn_run_id: "run-1",
+        content: JSON.stringify({
+          version: 1,
+          invocation_id: "invocation-web-search",
+          capability_id: "builtin.web_search",
+          status: "completed",
+          title: "web_search",
+          activity_order: 1,
+        }),
+      },
+      {
+        message_id: "assistant-1",
+        kind: "assistant",
+        content: "I answered after searching.",
+        sequence: 4,
+        status: "finalized",
+        turn_run_id: "run-1",
+      },
+    ],
+    [],
+    "thread-1",
+  );
+
+  assert.deepEqual(
+    messages.map((message) => message.id),
+    ["msg-user-1", "tool-invocation-web-search", "msg-assistant-1"],
+  );
+  assert.equal(messages[2].keepFollowingActivityAfter, undefined);
+});
+
 // Refresh-persistence contract (#3272): the timeline returns
 // `ThreadMessageRecord.attachments`; the projection must surface them as
 // render cards so they survive a reload / thread switch.

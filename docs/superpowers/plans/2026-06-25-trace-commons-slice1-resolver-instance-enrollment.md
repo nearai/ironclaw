@@ -292,7 +292,10 @@ git commit -m "feat(traces): instance-level enrollment write path (scope None)"
 > not land in the retiring v1 monolith. The crate-side entry point is
 > `ironclaw_reborn_traces::onboarding::onboard_instance_with_sink` (Task 2);
 > an admin-gated Reborn surface will wrap it when instance enrollment gets a
-> product entry point. The original task text is retained below only as a
+> product entry point. That surface now exists: `ironclaw-reborn traces
+> enroll-instance --invite <url>` wraps
+> `onboarding::onboard_instance_at_base` (host-shell possession is the admin
+> gate, matching `traces opt-in`'s trust boundary for the global policy). The original task text is retained below only as a
 > historical record of what was planned.
 
 **Files:**
@@ -392,7 +395,10 @@ git commit -m "feat(admin): AdminScope::enroll_instance_trace_commons (admin-gat
 > in the retiring v1 monolith. The crate-side entry point is
 > `ironclaw_reborn_traces::onboarding::onboard_instance_with_sink`; an
 > admin-gated Reborn surface will wrap it when instance enrollment gets a
-> product entry point.
+> product entry point. That surface now exists: `ironclaw-reborn traces
+> enroll-instance --invite <url>` wraps
+> `onboarding::onboard_instance_at_base` (host-shell possession is the admin
+> gate, matching `traces opt-in`'s trust boundary for the global policy).
 
 ---
 

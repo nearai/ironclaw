@@ -68,7 +68,7 @@ use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui_serve::ProtectedRouteMount;
+use crate::webui::webui_serve::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;
@@ -223,7 +223,7 @@ pub async fn build_openai_compat_route_mount(
     // LLM-config source the operator WebUI uses. Wired only when the root LLM
     // provider is compiled in; otherwise the route stays fail-closed (501).
     #[cfg(feature = "root-llm-provider")]
-    let router_state = match crate::webui::build_llm_config_service(runtime) {
+    let router_state = match crate::webui::facade::build_llm_config_service(runtime) {
         Some(llm_config) => {
             let catalog: Arc<dyn OpenAiCompatModelCatalog> =
                 Arc::new(LlmConfigModelCatalog::new(llm_config));
