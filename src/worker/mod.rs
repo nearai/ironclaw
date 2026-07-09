@@ -30,6 +30,7 @@ mod autonomous_recovery;
 pub mod claude_bridge;
 pub mod container;
 pub mod job;
+pub mod mcp_job;
 pub mod proxy_llm;
 
 pub use acp_bridge::AcpBridgeRuntime;
