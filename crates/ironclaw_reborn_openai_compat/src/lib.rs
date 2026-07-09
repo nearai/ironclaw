@@ -32,8 +32,7 @@ mod models_catalog;
 #[cfg(feature = "openai-compat-beta")]
 mod projection_helpers;
 mod refs;
-// Durable filesystem-backed ref store (folded in from the former
-// `ironclaw_reborn_openai_compat_storage` crate). Gated behind `storage` so the
+// Durable filesystem-backed ref store. Gated behind `storage` so the
 // contract-only surface stays free of the `ironclaw_filesystem` dependency.
 #[cfg(feature = "storage")]
 mod refs_storage;

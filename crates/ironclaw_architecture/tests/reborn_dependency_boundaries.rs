@@ -2153,8 +2153,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // FilesystemOpenAiCompatRefStore folded in from the former
-                // `ironclaw_reborn_openai_compat_storage` crate lives behind the
+                // FilesystemOpenAiCompatRefStore lives behind the
                 // `storage`/`libsql`/`postgres` features and persists opaque refs
                 // through the universal RootFilesystem port.
                 "ironclaw_gateway",

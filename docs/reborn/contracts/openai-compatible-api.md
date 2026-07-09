@@ -4,8 +4,7 @@
 Responses create/retrieve/cancel, idempotency/opaque-ref, and projection-backed
 SSE streaming slices (#4442, #4443, #4444, #4445, #4446, #4447)
 **Parent:** #3283
-**Crates:** `crates/ironclaw_reborn_openai_compat`,
-`crates/ironclaw_reborn_openai_compat_storage`
+**Crates:** `crates/ironclaw_reborn_openai_compat`
 
 ## Purpose
 
@@ -54,7 +53,7 @@ bind sockets or call `axum::serve`.
 - External ids (`chatcmpl-*`, `resp_*`) are opaque product references. They must
   not encode tenant, user, thread, run, projection cursor, or host paths.
 - Durable ref mappings are persisted behind `OpenAiCompatRefStore`; the
-  contract crate defines the port and the storage crate provides
+  route crate defines the port and its `storage` feature provides
   filesystem-backed adapters under `/engine/openai_compat/refs/` with
   per-public-id mapping records plus per-scope idempotency index records.
   Reborn local-dev host composition places the production route's tenant-owned
