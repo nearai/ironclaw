@@ -31,6 +31,7 @@ function TreeNode({
   entry,
   depth,
   currentUser,
+  requireScopedWorkspace,
   workspaceScopeKey,
   selectedPath,
   expandedPaths,
@@ -42,7 +43,10 @@ function TreeNode({
   const isExpanded = expandedPaths.has(entry.path);
   const childQuery = useQuery({
     queryKey: ["workspace-list", workspaceScopeKey, entry.path],
-    queryFn: () => listWorkspace(entry.path, { currentUser }),
+    queryFn: () => listWorkspace(entry.path, {
+      currentUser,
+      requireScopedWorkspace,
+    }),
     enabled: entry.is_dir && isExpanded,
   });
 
@@ -81,6 +85,7 @@ function TreeNode({
                     entry={child}
                     depth={depth + 1}
                     currentUser={currentUser}
+                    requireScopedWorkspace={requireScopedWorkspace}
                     workspaceScopeKey={workspaceScopeKey}
                     selectedPath={selectedPath}
                     expandedPaths={expandedPaths}
@@ -113,6 +118,7 @@ function TreeNode({
 export function WorkspaceTree({
   entries,
   currentUser,
+  requireScopedWorkspace,
   workspaceScopeKey,
   selectedPath,
   expandedPaths,
@@ -143,6 +149,7 @@ export function WorkspaceTree({
           entry={entry}
           depth={0}
           currentUser={currentUser}
+          requireScopedWorkspace={requireScopedWorkspace}
           workspaceScopeKey={workspaceScopeKey}
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}

@@ -76,6 +76,7 @@ export function WorkspacePage() {
             <WorkspaceSidebar
               rootEntries={workspace.rootEntries}
               currentUser={workspace.currentUser}
+              requireScopedWorkspace={workspaceRequiresScopedProjection}
               workspaceScopeKey={workspace.workspaceScopeKey}
               selectedPath={selectedPath}
               expandedPaths={workspace.expandedPaths}

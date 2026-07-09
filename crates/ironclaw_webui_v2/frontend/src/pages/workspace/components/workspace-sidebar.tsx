@@ -8,6 +8,7 @@ import { WorkspaceTree } from "./workspace-tree";
 export function WorkspaceSidebar({
   rootEntries,
   currentUser,
+  requireScopedWorkspace,
   workspaceScopeKey,
   selectedPath,
   expandedPaths,
@@ -33,6 +34,7 @@ export function WorkspaceSidebar({
         <WorkspaceTree
           entries={rootEntries}
           currentUser={currentUser}
+          requireScopedWorkspace={requireScopedWorkspace}
           workspaceScopeKey={workspaceScopeKey}
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
