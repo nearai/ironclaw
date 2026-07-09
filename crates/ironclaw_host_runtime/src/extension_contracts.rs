@@ -83,14 +83,30 @@ pub async fn discover_extensions_tolerant_bounded<F>(
 where
     F: RootFilesystem,
 {
-    let host_port_catalog = default_host_port_catalog()?;
     let contracts = default_host_api_contract_registry()?;
+    discover_extensions_tolerant_bounded_with_contracts(fs, root, &contracts, max_extensions).await
+}
+
+/// Tolerant + bounded discovery through caller-supplied host API contracts.
+///
+/// The host-port catalog remains host-owned, while composition layers can add
+/// product contracts without teaching host runtime about those products.
+pub async fn discover_extensions_tolerant_bounded_with_contracts<F>(
+    fs: &F,
+    root: &VirtualPath,
+    contracts: &HostApiContractRegistry,
+    max_extensions: usize,
+) -> Result<TolerantBoundedDiscovery, ExtensionError>
+where
+    F: RootFilesystem,
+{
+    let host_port_catalog = default_host_port_catalog()?;
     ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded(
         fs,
         root,
         ironclaw_extensions::ManifestSource::InstalledLocal,
         &host_port_catalog,
-        &contracts,
+        contracts,
         max_extensions,
     )
     .await
