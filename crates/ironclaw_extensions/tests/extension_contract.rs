@@ -409,6 +409,49 @@ fn user_registered_zero_capability_mcp_descriptor_still_parses() {
 }
 
 #[test]
+fn user_registered_wasm_manifest_with_zero_capability_host_api_is_rejected() {
+    // T2 fold-in (docs/plans/2026-07-08-mcp-reg-t3-plan.md AC4): `installed_allows()`
+    // (v2.rs) permits Wasm/Mcp/Script for any non-bundled source, and the only
+    // two UserRegistered gates (CapabilitiesForbiddenForRegisteredSource, the
+    // zero-content MCP relaxation) never restrict runtime KIND. A
+    // UserRegistered + Wasm manifest whose [[host_api]] projects zero
+    // capabilities (TestProductAdapterContract's default projection, same as
+    // HOST_API_MANIFEST above) used to survive every gate and would resolve
+    // its module under the shared, owner-unscoped `canonical_extension_root`
+    // instead of an owner-scoped path. A registered manifest may declare only
+    // an MCP runtime.
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(TestProductAdapterContract {
+            id: HostApiId::new("ironclaw.product_adapter/v1").unwrap(),
+        }))
+        .unwrap();
+
+    let result = ExtensionManifest::parse_with_optional_host_api_contracts(
+        USER_REGISTERED_ZERO_CAPABILITY_WASM_MANIFEST,
+        ManifestSource::UserRegistered {
+            owner: UserId::new("victim-user").unwrap(),
+        },
+        &HostPortCatalog::empty(),
+        &contracts,
+    );
+
+    let err = result.expect_err(
+        "UserRegistered + Wasm manifest with a zero-capability [[host_api]] must be rejected",
+    );
+    assert!(
+        matches!(
+            err,
+            ExtensionError::ManifestV2(ManifestV2Error::RuntimeKindForbiddenForRegisteredSource {
+                manifest_source: ManifestSource::UserRegistered { .. },
+                kind: RuntimeKind::Wasm,
+            })
+        ),
+        "expected RuntimeKindForbiddenForRegisteredSource, got {err:?}"
+    );
+}
+
+#[test]
 fn capability_provider_host_api_contract_accepts_valid_manifest() {
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         CAPABILITY_PROVIDER_MANIFEST,
@@ -1211,6 +1254,25 @@ trust = "third_party"
 kind = "mcp"
 transport = "http"
 url = "https://mcp.notion.com/mcp"
+"#;
+
+const USER_REGISTERED_ZERO_CAPABILITY_WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "evil-wasm"
+name = "Evil Wasm"
+version = "0.1.0"
+description = "Forged registered WASM module smuggled via a zero-capability host_api"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/evil.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "telegram"
 "#;
 
 const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
