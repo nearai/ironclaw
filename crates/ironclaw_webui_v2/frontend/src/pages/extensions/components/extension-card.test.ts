@@ -119,12 +119,19 @@ function makeContext() {
   };
 
   // Inline primaryExtensionAction from extension-actions.js (exact copy).
-  function primaryExtensionAction(ext) {
-    const state =
-      ext?.onboarding_state ||
-      ext?.activation_status ||
-      (ext?.active ? "active" : "installed");
+  function extensionLifecycleState(ext) {
+    const onboardingState = ext?.onboarding_state || ext?.onboardingState;
+    if (onboardingState) {
+      return onboardingState;
+    }
+    if (ext?.needs_setup === true && ext?.authenticated === false) {
+      return ext?.has_auth ? "auth_required" : "setup_required";
+    }
+    return ext?.activation_status || ext?.activationStatus || (ext?.active ? "active" : "installed");
+  }
 
+  function primaryExtensionAction(ext) {
+    const state = extensionLifecycleState(ext);
     if (!ext?.package_ref || state === "active" || state === "ready") {
       return null;
     }
@@ -147,6 +154,7 @@ function makeContext() {
     KIND_LABELS,
     STATE_TONES,
     STATE_LABELS,
+    extensionLifecycleState,
     primaryExtensionAction,
   };
 }
@@ -325,6 +333,31 @@ test("setup-required primary action reads Connect for a channel and Configure fo
     "credential extension should keep Configure",
   );
   assert.equal(renderedContainsValue(credential, "connect"), false);
+});
+
+test("active package with missing auth renders auth needed setup state", () => {
+  const rendered = renderExtensionCard({
+    package_ref: { kind: "extension", id: "slack" },
+    kind: "wasm_tool",
+    display_name: "Slack",
+    active: true,
+    authenticated: false,
+    needs_setup: true,
+    has_auth: true,
+    activation_status: "active",
+  });
+
+  assert.equal(
+    renderedContainsValue(rendered, "auth_required"),
+    true,
+    "missing Slack OAuth should show auth needed instead of active",
+  );
+  assert.equal(
+    renderedContainsValue(rendered, "configure"),
+    true,
+    "missing Slack OAuth should keep the setup action available",
+  );
+  assert.equal(renderedContainsValue(rendered, "active"), false);
 });
 
 test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async () => {

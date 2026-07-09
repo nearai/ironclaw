@@ -1,22 +1,24 @@
+import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill } from "../../../design-system/primitives";
 
 function attentionTone(item) {
   return item?.type === "failure" ? "danger" : "warning";
 }
 
-function attentionLabel(item) {
-  return item?.type === "failure" ? "failure" : "gate";
+function attentionLabel(item, t) {
+  return item?.type === "failure" ? t("projects.attention.failure") : t("projects.attention.gate");
 }
 
 export function ProjectsAttentionStrip({ items, onOpenItem }) {
+  const t = useT();
   if (!items?.length) return null;
 
   return (
     <Panel className="overflow-hidden border-amber-300/10 p-0">
       <div className="border-b border-amber-300/10 px-5 py-4 sm:px-6">
-        <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-copper">Needs attention</div>
+        <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-copper">{t("projects.attention.title")}</div>
         <p className="mt-2 max-w-[70ch] text-sm leading-6 text-iron-200">
-          Operator-visible gates and recent failures across your project workspace.
+          {t("projects.attention.desc")}
         </p>
       </div>
       <div className="grid gap-3 p-4 sm:p-5 xl:grid-cols-2">
@@ -30,14 +32,16 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
               <div>
                 <div className="text-sm font-semibold text-white">{item.project_name}</div>
                 <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
-                  {item.thread_id ? `Thread ${String(item.thread_id).slice(0, 8)}` : "Project"}
+                  {item.thread_id
+                    ? t("projects.attention.threadLabel", { id: String(item.thread_id).slice(0, 8) })
+                    : t("projects.attention.projectLabel")}
                 </div>
               </div>
-              <StatusPill tone={attentionTone(item)} label={attentionLabel(item)} />
+              <StatusPill tone={attentionTone(item)} label={attentionLabel(item, t)} />
             </div>
             <p className="mt-3 text-sm leading-6 text-iron-200">{item.message}</p>
             <div className="mt-4 text-xs uppercase tracking-[0.16em] text-signal group-hover:text-white">
-              Open project
+              {t("projects.attention.openProject")}
             </div>
           </button>
         ))}

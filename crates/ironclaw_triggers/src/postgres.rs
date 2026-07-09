@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use deadpool_postgres::GenericClient;
+use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
@@ -23,6 +24,18 @@ const TRIGGER_COLUMNS: &str = "\
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at, schedule_at";
+const RENAME_SCOPED_TRIGGER_SQL: &str = "\
+    UPDATE trigger_records
+       SET name = $6
+     WHERE tenant_id = $1
+       AND creator_user_id = $2
+       AND agent_id IS NOT DISTINCT FROM $3
+       AND project_id IS NOT DISTINCT FROM $4
+       AND trigger_id = $5
+     RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+       name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
+       state, next_run_at, last_run_at, last_fired_slot, last_status,
+       active_fire_slot, active_run_ref, created_at, schedule_at";
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
 const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
@@ -346,6 +359,40 @@ impl TriggerRepository for PostgresTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("set scoped trigger state", error))?;
+        match row {
+            Some(row) => Ok(Some(row_to_record(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let client = self.connect().await?;
+        let trigger_id = trigger_id.to_string();
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let name = name.into_inner();
+        let row = client
+            .query_opt(
+                RENAME_SCOPED_TRIGGER_SQL,
+                &[
+                    &tenant_id.as_str(),
+                    &creator_user_id.as_str(),
+                    &agent_id,
+                    &project_id,
+                    &trigger_id,
+                    &name,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("rename scoped trigger", error))?;
         match row {
             Some(row) => Ok(Some(row_to_record(&row)?)),
             None => Ok(None),

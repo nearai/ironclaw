@@ -32,7 +32,7 @@ use ironclaw_product_workflow::{
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
-    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
     InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
@@ -77,8 +77,9 @@ use ironclaw_product_workflow::{
     StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -994,6 +995,7 @@ struct ListAutomationCall {
 enum AutomationMutationAction {
     Pause,
     Resume,
+    Rename { name: AutomationName },
     Delete,
 }
 
@@ -1095,6 +1097,31 @@ impl AutomationProductFacade for RecordingAutomationFacade {
             automation: Some(automation_info(
                 "trigger-resumed",
                 "Daily status",
+                "0 9 * * *",
+                None,
+            )),
+        })
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        name: AutomationName,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Rename { name },
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-renamed",
+                "Renamed status",
                 "0 9 * * *",
                 None,
             )),
@@ -6117,6 +6144,31 @@ async fn resume_automation_rejects_missing_agent_id() {
 }
 
 #[tokio::test]
+async fn rename_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .rename_automation(
+            caller_without_agent(),
+            "trigger-alpha".to_string(),
+            WebUiRenameAutomationRequest {
+                name: Some("Renamed".to_string()),
+            },
+        )
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
 async fn delete_automation_rejects_missing_agent_id() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
     let services = RebornServices::new(
@@ -6136,7 +6188,7 @@ async fn delete_automation_rejects_missing_agent_id() {
 }
 
 #[tokio::test]
-async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade() {
+async fn automation_mutations_forward_caller_scope_to_product_facade() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -6158,6 +6210,18 @@ async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade()
         .expect("resume automation");
     assert!(resume.updated);
 
+    let rename = services
+        .rename_automation(
+            caller.clone(),
+            "trigger-alpha".to_string(),
+            WebUiRenameAutomationRequest {
+                name: Some("  Renamed status  ".to_string()),
+            },
+        )
+        .await
+        .expect("rename automation");
+    assert!(rename.updated);
+
     let delete = services
         .delete_automation(caller.clone(), "trigger-alpha".to_string())
         .await
@@ -6166,7 +6230,7 @@ async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade()
     assert!(delete.automation.is_none());
 
     let calls = automation_facade.mutation_calls();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 4);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[0].automation_id, "trigger-alpha");
     assert_eq!(calls[0].caller.tenant_id, caller.tenant_id);
@@ -6179,12 +6243,64 @@ async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade()
     assert_eq!(calls[1].caller.user_id, caller.user_id);
     assert_eq!(calls[1].caller.agent_id, expected_agent_id);
     assert_eq!(calls[1].caller.project_id, caller.project_id);
-    assert_eq!(calls[2].action, AutomationMutationAction::Delete);
+    assert_eq!(
+        calls[2].action,
+        AutomationMutationAction::Rename {
+            name: AutomationName::new("Renamed status").expect("valid automation name")
+        }
+    );
     assert_eq!(calls[2].automation_id, "trigger-alpha");
     assert_eq!(calls[2].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[2].caller.user_id, caller.user_id);
     assert_eq!(calls[2].caller.agent_id, expected_agent_id);
     assert_eq!(calls[2].caller.project_id, caller.project_id);
+    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
+    assert_eq!(calls[3].automation_id, "trigger-alpha");
+    assert_eq!(calls[3].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[3].caller.user_id, caller.user_id);
+    assert_eq!(calls[3].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[3].caller.project_id, caller.project_id);
+}
+
+#[tokio::test]
+async fn rename_automation_validates_name_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    for (request, expected_code) in [
+        (
+            WebUiRenameAutomationRequest { name: None },
+            WebUiInboundValidationCode::MissingField,
+        ),
+        (
+            WebUiRenameAutomationRequest {
+                name: Some("  ".to_string()),
+            },
+            WebUiInboundValidationCode::Blank,
+        ),
+        (
+            WebUiRenameAutomationRequest {
+                name: Some("x".repeat(257)),
+            },
+            WebUiInboundValidationCode::TooLong,
+        ),
+    ] {
+        let err = services
+            .rename_automation(caller(), "trigger-alpha".to_string(), request)
+            .await
+            .expect_err("invalid name should fail before facade");
+
+        assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(err.status_code, 400);
+        assert_eq!(err.field.as_deref(), Some("name"));
+        assert_eq!(err.validation_code, Some(expected_code));
+    }
+
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
 }
 
 #[test]

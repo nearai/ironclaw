@@ -64,6 +64,10 @@ browser-reachable.
 | `webui.v2.retry_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
 | `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N&run_limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.pause_automation` | POST | `/api/webchat/v2/automations/{automation_id}/pause` | None | `ProductWorkflow` |
+| `webui.v2.resume_automation` | POST | `/api/webchat/v2/automations/{automation_id}/resume` | None | `ProductWorkflow` |
+| `webui.v2.rename_automation` | POST | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
+| `webui.v2.delete_automation` | DELETE | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
 | `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | None | `ProjectionOnly` |
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
@@ -110,6 +114,7 @@ user's one-time API bearer exactly once in `api_token`; there is no re-issue
 endpoint for existing users.
 | `webui.v2.trace_credits` | GET | `/api/webchat/v2/traces/credit` | None | `ProductWorkflow` |
 | `webui.v2.trace_account_traces` | GET | `/api/webchat/v2/traces/account` (optional `?limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.trace_account_login_link` | POST | `/api/webchat/v2/traces/account-login-link` | None | `ProductWorkflow` |
 | `webui.v2.authorize_trace_hold` | POST | `/api/webchat/v2/traces/holds/{submission_id}/authorize` | None | `ProductWorkflow` |
 
 `webui.v2.logs` accepts bounded `limit`, `cursor`, `level`, and `target`

@@ -35,10 +35,12 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
+pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
 pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
+pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK: &str = "webui.v2.trace_account_login_link";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
 pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
 pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
@@ -128,11 +130,15 @@ pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
 pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/resume";
-pub const WEBUI_V2_PATTERN_DELETE_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
+// Intentional dual-method resource path: POST renames an automation and DELETE
+// removes it. Keep the route ids separate so host policy/audit stays action-specific.
+pub const WEBUI_V2_PATTERN_AUTOMATION_DETAIL: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
+pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK: &str =
+    "/api/webchat/v2/traces/account-login-link";
 pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
 pub const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
@@ -222,9 +228,11 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_automations_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
+        rename_automation_descriptor(),
         delete_automation_descriptor(),
         trace_credits_descriptor(),
         trace_account_traces_descriptor(),
+        trace_account_login_link_descriptor(),
         authorize_trace_hold_descriptor(),
         get_outbound_preferences_descriptor(),
         set_outbound_preferences_descriptor(),
@@ -875,11 +883,25 @@ fn resume_automation_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn rename_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RENAME_AUTOMATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn delete_automation_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_DELETE_AUTOMATION,
         NetworkMethod::Delete,
-        WEBUI_V2_PATTERN_DELETE_AUTOMATION,
+        WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
         mutation_policy(
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
@@ -926,6 +948,23 @@ fn authorize_trace_hold_descriptor() -> IngressRouteDescriptor {
             // The submission id is in the path; no request body.
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn trace_account_login_link_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK,
+        mutation_policy(
+            // Caller-scoped mint; no request body.
+            BodyLimitPolicy::NoBody,
+            // Deliberately tighter than the standard mutation limit: each
+            // call mints a one-time account-access credential server-side.
+            rate_limit_per_caller(10, 60),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,
         ),

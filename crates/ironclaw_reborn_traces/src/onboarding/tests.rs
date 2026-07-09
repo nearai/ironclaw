@@ -878,3 +878,53 @@ async fn instance_onboard_writes_instance_level_policy() {
     );
     // tempdir drops automatically — no manual cleanup needed
 }
+
+/// The admin CLI entry point: enrollment via `onboard_instance_at_base` must
+/// land the policy + device key at the INSTANCE location
+/// (`<base>/trace_contributions/`, scope `None`) — not a `users/<hash>/`
+/// scope dir — so every non-personally-enrolled user inherits it via
+/// `resolve_trace_credentials` (inheritance itself is pinned by the resolver
+/// tests in `contribution.rs`).
+#[tokio::test]
+async fn onboard_instance_at_base_targets_the_instance_dir() {
+    let base = tempfile::tempdir().unwrap();
+    let mock = spawn_mock_issuer(
+        |addr| ok_response(addr, "https://ingest.example.com"),
+        axum::http::StatusCode::OK,
+    )
+    .await;
+    let invite_url = format!("http://127.0.0.1:{}/onboard#INVADMIN1", mock.addr.port());
+    let consents = OnboardConsents {
+        include_message_text: false,
+        include_tool_payloads: false,
+    };
+
+    let outcome = onboard_instance_at_base(base.path(), &invite_url, consents)
+        .await
+        .expect("instance onboard succeeds");
+    assert_eq!(outcome.tenant_id, "tenant-a");
+
+    let instance_dir = base.path().join("trace_contributions");
+    let policy_path = instance_dir.join("policy.json");
+    assert!(
+        policy_path.exists(),
+        "policy must land at the instance (scope-None) location"
+    );
+    assert!(
+        !base.path().join("trace_contributions/users").exists(),
+        "instance enrollment must not create any per-user scope dir"
+    );
+    let policy: StandingTraceContributionPolicy =
+        serde_json::from_str(&std::fs::read_to_string(&policy_path).unwrap()).unwrap();
+    assert!(policy.enabled);
+    assert_eq!(policy.auth_mode, TraceUploadAuthMode::DeviceKey);
+    assert!(!policy.include_message_text);
+    assert!(!policy.include_tool_payloads);
+
+    // Promoted instance device key exists at the instance dir.
+    let tenant_key = instance_dir.join(format!(
+        "device_keys/{}.json",
+        device_key::tenant_hash("tenant-a")
+    ));
+    assert!(tenant_key.exists(), "instance device key must be promoted");
+}
