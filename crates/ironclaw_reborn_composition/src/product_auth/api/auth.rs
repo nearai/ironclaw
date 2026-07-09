@@ -69,6 +69,15 @@ pub trait RebornAuthContinuationDispatcher: Send + Sync {
         &self,
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError>;
+
+    /// Deny a turn gate whose backing auth flow was canceled by lifecycle
+    /// cleanup. Non-turn continuations remain cancel-only.
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +102,13 @@ impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
     }
 }
 
@@ -965,10 +981,22 @@ impl RebornProductAuthServices {
         &self,
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, RebornCredentialLifecycleError> {
-        self.cleanup_service
+        let report = self
+            .cleanup_service
             .cleanup_for_lifecycle(request)
             .await
-            .map_err(RebornCredentialLifecycleError::from)
+            .map_err(RebornCredentialLifecycleError::from)?;
+        for event in &report.canceled_turn_gate_continuations {
+            self.continuation_dispatcher
+                .dispatch_canceled_auth_continuation(event.clone())
+                .await
+                .map_err(RebornCredentialLifecycleError::from)?;
+            self.flow_manager
+                .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+                .await
+                .map_err(RebornCredentialLifecycleError::from)?;
+        }
+        Ok(report)
     }
 
     pub async fn handle_oauth_callback(

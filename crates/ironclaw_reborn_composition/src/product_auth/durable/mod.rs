@@ -20,9 +20,10 @@ use ironclaw_secrets::SecretStore;
 use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
-    AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError, AuthSessionId, AuthSurface,
-    CredentialAccount, CredentialAccountId, CredentialAccountOwnerScope,
-    CredentialAccountSelectionRequest, CredentialAccountStatus, NewCredentialAccount,
+    AuthContinuationRef, AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthFlowStatus,
+    AuthProductError, AuthSessionId, AuthSurface, CredentialAccount, CredentialAccountId,
+    CredentialAccountOwnerScope, CredentialAccountSelectionRequest, CredentialAccountStatus,
+    NewCredentialAccount,
 };
 use ironclaw_host_api::VirtualPath;
 
@@ -43,6 +44,16 @@ mod tests;
 
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
+
+fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
+    !ironclaw_auth::is_terminal_status(flow.status)
+        || (flow.status == AuthFlowStatus::Canceled
+            && flow.continuation_emitted_at.is_none()
+            && matches!(
+                flow.continuation,
+                AuthContinuationRef::TurnGateResume { .. }
+            ))
+}
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) use provider::UnavailableAuthProviderClient;
@@ -315,8 +326,8 @@ where
         Ok(flows)
     }
 
-    /// Non-terminal auth-flow records for a credential owner + provider, walked
-    /// across the owner's surfaces and sessions but NOT narrowed to a thread.
+    /// Auth-flow records still requiring lifecycle cleanup for a credential
+    /// owner + provider, walked across surfaces/sessions but not one thread.
     ///
     /// The lifecycle/disconnect analogue of [`Self::account_records_for_owner`]:
     /// flow storage is keyed by agent/project/surface/session (see `flow_root`)
@@ -325,7 +336,7 @@ where
     /// thread-less setup flows and thread-scoped turn-gate flows. Used by
     /// lifecycle cleanup to cancel the disconnected provider's stale flows so
     /// they cannot wedge the next connect. Provider-agnostic by construction.
-    async fn non_terminal_flows_for_owner_provider(
+    async fn lifecycle_flows_for_owner_provider(
         &self,
         resource: &ResourceScope,
         provider: &ironclaw_auth::AuthProviderId,
@@ -348,8 +359,7 @@ where
                     .into_iter()
                     .map(|(flow, _)| flow)
                     .filter(|flow| {
-                        &flow.provider == provider
-                            && !ironclaw_auth::is_terminal_status(flow.status)
+                        &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
                     }),
             );
             let sessions_root = surface_sessions_root(&resource, surface)?;
@@ -386,8 +396,7 @@ where
                         .into_iter()
                         .map(|(flow, _)| flow)
                         .filter(|flow| {
-                            &flow.provider == provider
-                                && !ironclaw_auth::is_terminal_status(flow.status)
+                            &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
                         }),
                 );
             }

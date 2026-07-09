@@ -220,6 +220,13 @@ impl RebornAuthContinuationDispatcher for BlockedAuthResumeFanout {
         self.fan_out(&event).await;
         primary
     }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.inner.dispatch_canceled_auth_continuation(event).await
+    }
 }
 
 #[cfg(test)]

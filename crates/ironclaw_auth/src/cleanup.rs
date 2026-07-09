@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthProductError, AuthProviderId, CredentialAccountId, scope::AuthProductScope};
+use crate::{
+    AuthContinuationEvent, AuthProductError, AuthProviderId, CredentialAccountId,
+    scope::AuthProductScope,
+};
 
 /// Lifecycle event that drives credential/session cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +48,12 @@ pub struct SecretCleanupReport {
     pub removed_grants: Vec<CredentialAccountId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quarantined_accounts: Vec<SecretCleanupQuarantine>,
+    /// Canceled turn-gate continuations that the composition layer must deny
+    /// through the canonical turn coordinator before lifecycle cleanup is
+    /// complete. This internal handoff is deliberately omitted from product
+    /// responses; it carries no secret material.
+    #[serde(skip)]
+    pub canceled_turn_gate_continuations: Vec<AuthContinuationEvent>,
 }
 
 /// Stable redacted cleanup quarantine category.

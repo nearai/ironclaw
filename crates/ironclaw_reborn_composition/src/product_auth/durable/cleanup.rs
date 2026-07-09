@@ -4,9 +4,9 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthFlowManager, AuthProductError, CredentialAccountOwnerScope, CredentialAccountStatus,
-    CredentialOwnership, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
-    SecretCleanupService,
+    AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthFlowStatus, AuthProductError,
+    CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 
 #[async_trait]
@@ -50,43 +50,81 @@ where
             if had_grant {
                 report.removed_grants.push(current.id);
             }
-            // Capture handles to purge before mutating the record so we can
-            // delete from SecretStore after the account write.
-            let (purge_access, purge_refresh) = if owns_extension_account || provider_selected {
+            let should_purge = if owns_extension_account || provider_selected {
                 match request.action {
                     SecretCleanupAction::Deactivate => {
                         current.status = CredentialAccountStatus::Inactive;
                         report.retained_accounts.push(current.id);
-                        (None, None)
+                        false
                     }
                     SecretCleanupAction::Uninstall => {
-                        let access = current.access_secret.take();
-                        let refresh = current.refresh_secret.take();
                         if current.status != CredentialAccountStatus::Revoked {
                             current.status = CredentialAccountStatus::Revoked;
                             report.revoked_accounts.push(current.id);
                         }
-                        (access, refresh)
+                        true
                     }
                 }
             } else {
                 if had_grant {
                     report.retained_accounts.push(current.id);
                 }
-                (None, None)
+                false
             };
             current.updated_at = Utc::now();
-            self.write_account(&current, CasExpectation::Version(version))
+            let mut version = self
+                .write_account(&current, CasExpectation::Version(version))
                 .await?;
-            // Purge secret material after the account record is safely persisted
-            // without the handles.  Best-effort: the account no longer references
-            // these handles so any leftover material becomes unreachable even if
-            // the delete call fails (e.g. transient backend outage).
-            if let Some(h) = &purge_access {
-                let _ = self.secret_store.delete(&current.scope.resource, h).await;
-            }
-            if let Some(h) = &purge_refresh {
-                let _ = self.secret_store.delete(&current.scope.resource, h).await;
+            if should_purge {
+                let mut delete_failed = false;
+                if let Some(handle) = current.access_secret.clone() {
+                    match self
+                        .secret_store
+                        .delete(&current.scope.resource, &handle)
+                        .await
+                    {
+                        Ok(_) => {
+                            current.access_secret = None;
+                            current.updated_at = Utc::now();
+                            version = self
+                                .write_account(&current, CasExpectation::Version(version))
+                                .await?;
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                secret_store_reason = error.stable_reason(),
+                                account_id = %current.id,
+                                "lifecycle access-secret deletion failed"
+                            );
+                            delete_failed = true;
+                        }
+                    }
+                }
+                if let Some(handle) = current.refresh_secret.clone() {
+                    match self
+                        .secret_store
+                        .delete(&current.scope.resource, &handle)
+                        .await
+                    {
+                        Ok(_) => {
+                            current.refresh_secret = None;
+                            current.updated_at = Utc::now();
+                            self.write_account(&current, CasExpectation::Version(version))
+                                .await?;
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                secret_store_reason = error.stable_reason(),
+                                account_id = %current.id,
+                                "lifecycle refresh-secret deletion failed"
+                            );
+                            delete_failed = true;
+                        }
+                    }
+                }
+                if delete_failed {
+                    return Err(AuthProductError::BackendUnavailable);
+                }
             }
         }
 
@@ -103,13 +141,34 @@ where
             && let Some(provider) = request.provider.as_ref()
         {
             for flow in self
-                .non_terminal_flows_for_owner_provider(&request.scope.resource, provider)
+                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
                 .await?
             {
-                match self.cancel_flow(&flow.scope, flow.id).await {
-                    Ok(_)
-                    | Err(AuthProductError::Canceled | AuthProductError::FlowAlreadyTerminal) => {}
-                    Err(error) => return Err(error),
+                let canceled = match flow.status {
+                    AuthFlowStatus::Canceled => flow,
+                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
+                        Ok(canceled) => canceled,
+                        Err(AuthProductError::Canceled) => flow,
+                        Err(AuthProductError::FlowAlreadyTerminal) => continue,
+                        Err(error) => return Err(error),
+                    },
+                };
+                if canceled.continuation_emitted_at.is_none()
+                    && matches!(
+                        canceled.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: canceled.id,
+                            scope: canceled.scope.clone(),
+                            continuation: canceled.continuation.clone(),
+                            provider: canceled.provider.clone(),
+                            credential_account_id: canceled.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
                 }
             }
         }

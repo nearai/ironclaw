@@ -1280,22 +1280,22 @@ mod tests {
     };
     use async_trait::async_trait;
     use axum::body::to_bytes;
+    #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_auth::{
-        AuthProviderClient, CredentialAccountRecordSource, GOOGLE_CALENDAR_READONLY_SCOPE,
-        InMemoryAuthProductServices, OAuthProviderExchange, OAuthProviderExchangeContext,
+        AuthProviderClient, OAuthProviderExchange, OAuthProviderExchangeContext,
         OAuthProviderIdentity, OAuthProviderRefresh, OAuthProviderRefreshRequest,
     };
-    use ironclaw_host_api::{
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, SecretHandle,
-    };
+    use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};
+    #[cfg(feature = "slack-v2-host-beta")]
+    use ironclaw_host_api::SecretHandle;
+    use ironclaw_host_api::{RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement};
     #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_product_adapters::AdapterInstallationId;
     use ironclaw_secrets::{InMemorySecretStore, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    #[cfg(feature = "slack-v2-host-beta")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_host_beta::{
@@ -2323,6 +2323,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Clone)]
     struct SlackIdentityProviderClient {
         provider_identity: OAuthProviderIdentity,
@@ -2330,6 +2331,7 @@ mod tests {
         cleanup_calls: Arc<AtomicUsize>,
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     impl SlackIdentityProviderClient {
         fn new(provider_identity: OAuthProviderIdentity) -> Self {
             Self {
@@ -2348,6 +2350,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl AuthProviderClient for SlackIdentityProviderClient {
         async fn exchange_callback(

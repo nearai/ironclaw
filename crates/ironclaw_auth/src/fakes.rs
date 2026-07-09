@@ -6,22 +6,23 @@ use chrono::Utc;
 use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::{
-    AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
-    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
-    AuthProductError, AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest,
-    CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountOwnerScope,
-    CredentialAccountProjection, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSelectionInput,
-    CredentialSetupService, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
-    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, binding_scope_owns_account,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowManager,
+    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProviderClient, CredentialAccount,
+    CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountListPage,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
+    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryReason,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSelectionInput, CredentialSetupService, ManualTokenCompletionInput,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, ProviderCallbackOutcome, SecretCleanupAction,
+    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
+    TurnGateAuthFlowQuery, binding_scope_owns_account,
     cleanup::SecretCleanupAction::Deactivate,
     domain::{
         PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
@@ -506,7 +507,10 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if record.status != AuthFlowStatus::Completed {
+        if !matches!(
+            record.status,
+            AuthFlowStatus::Completed | AuthFlowStatus::Canceled
+        ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if already marked by a concurrent caller, return existing record.
@@ -1062,6 +1066,43 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 }
             } else if had_grant {
                 report.retained_accounts.push(account.id);
+            }
+        }
+        if matches!(request.action, SecretCleanupAction::Uninstall)
+            && let Some(provider) = request.provider.as_ref()
+        {
+            let owner = &request.scope.resource;
+            for flow in state.flows.values_mut().filter(|flow| {
+                let resource = &flow.scope.resource;
+                &flow.provider == provider
+                    && resource.tenant_id == owner.tenant_id
+                    && resource.user_id == owner.user_id
+                    && resource.agent_id == owner.agent_id
+                    && resource.project_id == owner.project_id
+            }) {
+                if !crate::is_terminal_status(flow.status) {
+                    flow.status = AuthFlowStatus::Canceled;
+                    flow.error = Some(crate::AuthErrorCode::Canceled);
+                    flow.updated_at = Utc::now();
+                }
+                if flow.status == AuthFlowStatus::Canceled
+                    && flow.continuation_emitted_at.is_none()
+                    && matches!(
+                        flow.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: flow.id,
+                            scope: flow.scope.clone(),
+                            continuation: flow.continuation.clone(),
+                            provider: flow.provider.clone(),
+                            credential_account_id: flow.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
+                }
             }
         }
         Ok(report)

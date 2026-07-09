@@ -1,14 +1,18 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
     ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
-    RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, UserId, VirtualPath,
+    RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, Timestamp, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::RuntimeCredentialAccountRequest;
 use ironclaw_host_runtime::RuntimeCredentialAccountResolver;
-use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    SecretStoreError,
+};
 use secrecy::SecretString;
 use tokio::task::JoinSet;
 
@@ -19,7 +23,7 @@ use crate::product_auth::credentials::runtime_credentials::{
 };
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
-    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
+    AuthFlowRecordSource, AuthFlowStatus, AuthGateRef, AuthInteractionId, AuthInteractionService,
     AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
     AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountLabel,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountRecordSource,
@@ -27,6 +31,7 @@ use ironclaw_auth::{
     CredentialOwnership, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
     NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput,
     OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretSubmitRequest,
+    TurnRunRef,
 };
 
 fn test_scope() -> AuthProductScope {
@@ -53,6 +58,92 @@ fn test_service(
     secret_store: Arc<dyn SecretStore>,
 ) -> FilesystemAuthProductServices<InMemoryBackend> {
     FilesystemAuthProductServices::new(filesystem, secret_store)
+}
+
+struct FailFirstDeleteSecretStore {
+    inner: InMemorySecretStore,
+    fail_next_delete: AtomicBool,
+}
+
+impl FailFirstDeleteSecretStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemorySecretStore::new(),
+            fail_next_delete: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretStore for FailFirstDeleteSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        self.inner.put(scope, handle, material, expires_at).await
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        self.inner.metadata(scope, handle).await
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        self.inner.metadata_for_scope(scope).await
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        if self.fail_next_delete.swap(false, Ordering::SeqCst) {
+            return Err(SecretStoreError::StoreUnavailable {
+                reason: "injected transient delete failure".to_string(),
+            });
+        }
+        self.inner.delete(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        self.inner.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        self.inner.leases_for_scope(scope).await
+    }
 }
 
 fn google_provider() -> AuthProviderId {
@@ -698,13 +789,37 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
         create_pending_setup_flow(&service, &scope, &untouched).await,
         AuthFlowStatus::AwaitingUser
     );
+    let turn_flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: disconnected.clone(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new(
+                    "https://example.com/oauth/authorize?state=turn",
+                )
+                .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(10),
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string()).unwrap(),
+                gate_ref: AuthGateRef::new("gate:lifecycle-cleanup").unwrap(),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("turn-gate")),
+            pkce_verifier_hash: Some(pkce_hash("turn-gate")),
+            expires_at: Utc::now() + Duration::minutes(10),
+        })
+        .await
+        .unwrap();
 
     // The exact lifecycle cleanup an extension disconnect/remove issues for one
     // provider. Both the WebUI facade remove and the model-visible
     // `extension_remove` tool funnel through this same call
     // (`RebornProductAuthServices` -> `SecretCleanupService::cleanup_for_lifecycle`),
     // so covering it here covers both paths identically.
-    ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(
+    let report = ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(
         &service,
         ironclaw_auth::SecretCleanupRequest {
             scope: scope.clone(),
@@ -715,6 +830,11 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
     )
     .await
     .unwrap();
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
+    assert_eq!(
+        report.canceled_turn_gate_continuations[0].flow_id,
+        turn_flow.id
+    );
 
     // LLM data is never deleted: flow records are retained (filterable by their
     // terminal status), not removed.
@@ -1737,6 +1857,107 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             .unwrap()
             .is_none(),
         "Uninstall must delete refresh secret from SecretStore"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_cleanup_retries_failed_secret_deletion_without_losing_handle() {
+    use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
+
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let extension_id = ExtensionId::new("retryable-cleanup").unwrap();
+    let access = SecretHandle::new("retryable-access").unwrap();
+    let refresh = SecretHandle::new("retryable-refresh").unwrap();
+
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            access.clone(),
+            SecretString::from("access-material"),
+            None,
+        )
+        .await
+        .unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            refresh.clone(),
+            SecretString::from("refresh-material"),
+            None,
+        )
+        .await
+        .unwrap();
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(extension_id.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(access.clone()),
+            refresh_secret: Some(refresh.clone()),
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let request = SecretCleanupRequest {
+        scope: scope.clone(),
+        extension_id: extension_id.clone(),
+        provider: None,
+        action: SecretCleanupAction::Uninstall,
+    };
+
+    let first = service.cleanup_for_lifecycle(request.clone()).await;
+    assert_eq!(first, Err(AuthProductError::BackendUnavailable));
+    let after_failure = service
+        .get_account(
+            CredentialAccountLookupRequest::new(scope.clone(), account.id)
+                .for_extension(extension_id.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_failure.status, CredentialAccountStatus::Revoked);
+    assert_eq!(after_failure.access_secret, Some(access.clone()));
+    assert_eq!(after_failure.refresh_secret, None);
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &access)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &refresh)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    service.cleanup_for_lifecycle(request).await.unwrap();
+    let after_retry = service
+        .get_account(
+            CredentialAccountLookupRequest::new(scope.clone(), account.id)
+                .for_extension(extension_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_retry.access_secret, None);
+    assert_eq!(after_retry.refresh_secret, None);
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &access)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
