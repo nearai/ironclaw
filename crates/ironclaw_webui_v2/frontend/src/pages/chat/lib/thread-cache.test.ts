@@ -5,18 +5,24 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 function threadCacheSourceForTest() {
+  const titleSource = readFileSync(
+    new URL("../../../lib/thread-title.ts", import.meta.url),
+    "utf8",
+  );
   const source = readFileSync(
     new URL("./thread-cache.ts", import.meta.url),
     "utf8",
   );
   const lines = [];
-  for (const line of source.split("\n")) {
+  for (const line of `${titleSource}\n${source}`.split("\n")) {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
   return `${lines.join("\n")}
 globalThis.__testExports = {
   deriveSidebarTitle,
+  displaySidebarTitle,
+  normalizeSidebarTitle,
   touchThreadList,
   upsertThreadList,
 };`;
@@ -48,6 +54,20 @@ test("deriveSidebarTitle truncates long titles", () => {
 
   assert.equal(title.length, 60);
   assert.equal(title, `${"a".repeat(57)}...`);
+});
+
+test("normalizeSidebarTitle treats raw thread ids as missing titles", () => {
+  const { displaySidebarTitle, normalizeSidebarTitle } = loadThreadCache();
+
+  assert.equal(normalizeSidebarTitle("thread_abc123456", "thread_abc123456"), null);
+  assert.equal(normalizeSidebarTitle("thread-abc123456", "thread-abc123456"), null);
+  assert.equal(normalizeSidebarTitle("  Weekly status  ", "thread_abc123456"), "Weekly status");
+  assert.equal(normalizeSidebarTitle("thread-safety", "thread_abc123456"), "thread-safety");
+  assert.equal(normalizeSidebarTitle("thread_pool", "thread_abc123456"), "thread_pool");
+  assert.equal(
+    displaySidebarTitle({ thread_id: "thread_abc123456", title: "thread_abc123456" }),
+    "Untitled thread",
+  );
 });
 
 test("upsertThreadList inserts a created thread and preserves pagination metadata", () => {
@@ -84,6 +104,32 @@ test("upsertThreadList merges an existing thread record", () => {
         { thread_id: "thread-1", title: "Updated", created_at: "before" },
         { thread_id: "thread-newer", title: "Newer" },
         { thread_id: "thread-older", title: "Older" },
+      ],
+      next_cursor: null,
+    },
+  );
+});
+
+test("upsertThreadList preserves cached title when incoming record has raw thread id", () => {
+  const { upsertThreadList } = loadThreadCache();
+  const data = {
+    threads: [
+      { thread_id: "thread_abc123456", title: "Cached name", updated_at: "before" },
+    ],
+    next_cursor: null,
+  };
+
+  assert.deepEqual(
+    normalize(
+      upsertThreadList(data, {
+        thread_id: "thread_abc123456",
+        title: "thread_abc123456",
+        updated_at: "after",
+      }),
+    ),
+    {
+      threads: [
+        { thread_id: "thread_abc123456", title: "Cached name", updated_at: "after" },
       ],
       next_cursor: null,
     },
