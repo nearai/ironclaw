@@ -204,6 +204,8 @@ where
     activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
+    system_activation_cache:
+        Mutex<HashMap<SystemActivationCandidateCacheKey, CachedSystemActivationCandidate>>,
     active_plans_by_run: Mutex<ActivePlanCache>,
     plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), CapturedSkillActivationPlan>>,
 }
@@ -231,6 +233,7 @@ where
             activation_observer: Mutex::new(None),
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
+            system_activation_cache: Mutex::new(HashMap::new()),
             active_plans_by_run: Mutex::new(ActivePlanCache::default()),
             plans_by_run: Mutex::new(HashMap::new()),
         }
@@ -605,6 +608,9 @@ where
                     return Ok(None);
                 }
                 let descriptor = descriptor.clone();
+                if let Some(candidate) = self.system_activation_candidate_from_cache(&descriptor)? {
+                    return Ok(Some(candidate));
+                }
                 let skill_md = self
                     .bundle_source
                     .read_skill_bundle_file(
@@ -614,8 +620,9 @@ where
                     )
                     .await
                     .map_err(skill_bundle_source_error_to_selection_error)?;
-                self.activation_candidate_from_skill_md(&descriptor, skill_md)
-                    .map(Some)
+                let candidate = self.activation_candidate_from_skill_md(&descriptor, skill_md)?;
+                self.cache_system_activation_candidate(&candidate)?;
+                Ok(Some(candidate))
             })
             .buffered(MAX_CONCURRENT_SKILL_ACTIVATION_LOADS)
             .try_filter_map(|candidate| async move { Ok(candidate) })
@@ -671,6 +678,52 @@ where
             loaded,
             skill_md,
         })
+    }
+
+    fn system_activation_candidate_from_cache(
+        &self,
+        descriptor: &SkillBundleDescriptor,
+    ) -> Result<Option<ActivationCandidate>, SkillActivationSelectionError> {
+        if descriptor.id().source_kind() != SkillSourceKind::System {
+            return Ok(None);
+        }
+        let key = SystemActivationCandidateCacheKey::new(descriptor);
+        let cached = self
+            .system_activation_cache
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .get(&key)
+            .cloned();
+        Ok(cached.map(|cached| ActivationCandidate {
+            descriptor: descriptor.clone(),
+            loaded: cached.loaded,
+            skill_md: cached.skill_md,
+        }))
+    }
+
+    fn cache_system_activation_candidate(
+        &self,
+        candidate: &ActivationCandidate,
+    ) -> Result<(), SkillActivationSelectionError> {
+        if candidate.descriptor.id().source_kind() != SkillSourceKind::System {
+            return Ok(());
+        }
+        let key = SystemActivationCandidateCacheKey::new(&candidate.descriptor);
+        let mut cache = self
+            .system_activation_cache
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
+        if cache.len() >= MAX_ACTIVATION_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            CachedSystemActivationCandidate {
+                loaded: candidate.loaded.clone(),
+                skill_md: candidate.skill_md.clone(),
+            },
+        );
+        Ok(())
     }
 
     fn active_plan(
@@ -824,6 +877,12 @@ struct CachedActivationCandidate {
     loaded: LoadedSkill,
 }
 
+#[derive(Debug, Clone)]
+struct CachedSystemActivationCandidate {
+    loaded: LoadedSkill,
+    skill_md: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActivationCandidateCacheKey {
     source_kind: SkillSourceKind,
@@ -845,6 +904,29 @@ impl ActivationCandidateCacheKey {
                 .content_hash
                 .clone()
                 .unwrap_or_else(|| content_hash(skill_md)),
+            trust: descriptor.trust().copied(),
+            visibility: descriptor.visibility().copied(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SystemActivationCandidateCacheKey {
+    source_kind: SkillSourceKind,
+    name: String,
+    skill_md_path: String,
+    content_hash: Option<String>,
+    trust: Option<SkillTrust>,
+    visibility: Option<SkillVisibility>,
+}
+
+impl SystemActivationCandidateCacheKey {
+    fn new(descriptor: &SkillBundleDescriptor) -> Self {
+        Self {
+            source_kind: descriptor.id().source_kind(),
+            name: descriptor.id().name().to_string(),
+            skill_md_path: descriptor.skill_md_path().as_str().to_string(),
+            content_hash: descriptor.provenance().content_hash.clone(),
             trust: descriptor.trust().copied(),
             visibility: descriptor.visibility().copied(),
         }
@@ -2751,6 +2833,46 @@ mod tests {
             source.reads.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "cache avoids reparsing but still reads the current bundle content"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_reuses_loaded_system_skill_without_rereading_skill_md() {
+        let source = Arc::new(ReadCountingSkillBundleSource::new(vec![(
+            SkillSourceKind::System,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable = SelectableSkillContextSource::new(
+            source.clone(),
+            SkillActivationSelectorConfig::default(),
+        );
+
+        for accepted_message in ["msg:first", "msg:second"] {
+            let context = run_context_for("thread-a", accepted_message).await;
+            selectable
+                .record_user_message(
+                    context.scope.clone(),
+                    accepted_message_ref(&context),
+                    "please review this",
+                )
+                .expect("record message");
+            let selected = selectable
+                .load_skill_context_candidates(&context)
+                .await
+                .expect("system skill selection succeeds");
+            assert_eq!(selected.len(), 1);
+        }
+
+        assert_eq!(
+            source.reads(),
+            vec!["code-review".to_string()],
+            "process-stable system skills should be reused without repeated SKILL.md reads"
         );
     }
 
