@@ -19,6 +19,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
+use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
     Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
@@ -39,7 +40,7 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
 
@@ -52,8 +53,8 @@ use crate::{
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -90,8 +91,8 @@ pub use admin_users::{
 };
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
-    RebornAccountTrace, RebornAccountTracesResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse,
+    RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
 };
 
 pub use fs_browse::{
@@ -158,7 +159,8 @@ pub use types::{
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -689,6 +691,15 @@ pub trait AutomationProductFacade: Send + Sync {
         Err(automation_unavailable())
     }
 
+    async fn rename_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+        _name: AutomationName,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
     async fn delete_automation(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -763,6 +774,15 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn rename_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+        _name: AutomationName,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -1770,6 +1790,23 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError>;
 
+    fn supports_stream_events_subscription(&self) -> bool {
+        false
+    }
+
+    async fn subscribe_events(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        Err(RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ReplayUnavailable,
+            503,
+            true,
+        ))
+    }
+
     async fn cancel_run(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2006,6 +2043,16 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    async fn rename_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn delete_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2064,6 +2111,29 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
         let actor = caller.actor();
         trace_credits::account_traces_for_user(&caller.tenant_id, &actor.user_id)
+            .await
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Mint a one-time Trace Commons browser login link for the
+    /// authenticated caller, so hosted users (no host-file access) can open
+    /// their contributor account from the WebUI.
+    ///
+    /// The scope is always derived from the authenticated caller's tenant +
+    /// user id — never from request input. An unenrolled caller gets the
+    /// zero-state (`minted: false, enrolled: false`), never an error.
+    ///
+    /// SECURITY: the returned URL is a one-time account-access credential. It
+    /// travels only over this authenticated response to the caller's own
+    /// browser; it must never be logged or exposed on a model-visible
+    /// surface. The default body is the production implementation (pinned
+    /// direct client, same lane as `trace_account_traces`).
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        let actor = caller.actor();
+        trace_credits::account_login_link_for_user(&caller.tenant_id, &actor.user_id)
             .await
             .map_err(RebornServicesError::internal_from)
     }
@@ -4148,6 +4218,89 @@ impl RebornServicesApi for RebornServices {
         Ok(RebornStreamEventsResponse { events })
     }
 
+    fn supports_stream_events_subscription(&self) -> bool {
+        self.event_stream
+            .as_ref()
+            .is_some_and(|stream| stream.supports_subscription())
+    }
+
+    async fn subscribe_events(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let actor = caller.actor();
+        let access = self
+            .resolve_thread_access_for_caller(
+                caller.clone(),
+                caller.turn_scope(thread_id.clone()),
+                &actor,
+            )
+            .await?;
+        let Some(event_stream) = &self.event_stream else {
+            return Err(RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ReplayUnavailable,
+                503,
+                false,
+            ));
+        };
+        let mut subscription = event_stream
+            .subscribe(ProjectionSubscriptionRequest {
+                actor: access.run_actor,
+                scope: access.scope,
+                after_cursor: request.after_cursor,
+            })
+            .await
+            .map_err(map_projection_error)?;
+
+        let service = self.clone();
+        let caller_for_revalidation = caller.clone();
+        let actor_for_revalidation = actor;
+        let (sender, receiver) = mpsc::channel(128);
+        tokio::spawn(async move {
+            loop {
+                let next = tokio::select! {
+                    _ = sender.closed() => return,
+                    next = subscription.next() => next,
+                };
+                let Some(next) = next else {
+                    return;
+                };
+                let envelope = match next {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        let _ = sender.send(Err(map_projection_error(error))).await;
+                        return;
+                    }
+                };
+                if sender.is_closed() {
+                    return;
+                }
+                let revalidate = service
+                    .resolve_thread_access_for_caller(
+                        caller_for_revalidation.clone(),
+                        caller_for_revalidation.turn_scope(thread_id.clone()),
+                        &actor_for_revalidation,
+                    )
+                    .await;
+                if let Err(error) = revalidate {
+                    let _ = sender.send(Err(error)).await;
+                    return;
+                }
+                if sender.is_closed() {
+                    return;
+                }
+                if sender.send(Ok(envelope)).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        Ok(RebornStreamEventsSubscription::new(receiver))
+    }
+
     async fn cancel_run(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4416,6 +4569,25 @@ impl RebornServicesApi for RebornServices {
         };
         self.automation_facade
             .resume_automation(caller, automation_id)
+            .await
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let name = parse_automation_name(request)?;
+        self.automation_facade
+            .rename_automation(caller, automation_id, name)
             .await
     }
 
@@ -6463,6 +6635,30 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     clamped as usize
 }
 
+fn parse_automation_name(
+    request: WebUiRenameAutomationRequest,
+) -> Result<AutomationName, RebornServicesError> {
+    let Some(raw_name) = request.name else {
+        return Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("name", WebUiInboundValidationCode::MissingField),
+        ));
+    };
+    AutomationName::new(raw_name).map_err(automation_name_validation_error)
+}
+
+impl From<AutomationNameError> for WebUiInboundValidationCode {
+    fn from(error: AutomationNameError) -> Self {
+        match error {
+            AutomationNameError::Empty => WebUiInboundValidationCode::Blank,
+            AutomationNameError::TooLong => WebUiInboundValidationCode::TooLong,
+        }
+    }
+}
+
+fn automation_name_validation_error(error: AutomationNameError) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError::new("name", error.into()))
+}
+
 fn notification_approval_timeout_error() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
 }
@@ -6607,6 +6803,7 @@ fn map_timeline_probe_error(error: SessionThreadError) -> RebornServicesError {
     match error {
         SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::TimelineUnavailable,
@@ -6647,6 +6844,7 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => RebornServicesError::service_unavailable(true),
     }
 }

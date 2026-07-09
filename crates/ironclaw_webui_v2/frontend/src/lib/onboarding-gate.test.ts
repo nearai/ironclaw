@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { shouldRouteToOnboarding } from "./onboarding-gate.ts";
+import { shouldRouteToOnboarding } from "./onboarding-gate";
 
 test("a failed providers query (e.g. gated 404 under SSO) does NOT force onboarding", () => {
   // The regression this fix exists for: SSO users with a boot-configured

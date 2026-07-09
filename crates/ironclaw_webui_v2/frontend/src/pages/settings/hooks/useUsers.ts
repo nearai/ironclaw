@@ -1,7 +1,7 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchUsers, createUser, updateUser } from "../lib/settings-api.js";
+import { fetchUsers, createUser, updateUser } from "../lib/settings-api";
 
 export function useUsers() {
   const queryClient = useQueryClient();

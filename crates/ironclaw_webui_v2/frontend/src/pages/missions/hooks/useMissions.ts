@@ -1,14 +1,14 @@
 // @ts-nocheck
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   fetchProjectsOverview,
   fetchMissions,
   fireMission as fireMissionRequest,
   pauseMission as pauseMissionRequest,
   resumeMission as resumeMissionRequest,
-} from "../lib/missions-api.js";
-import { summarizeMissions } from "../lib/missions-presenters.js";
+} from "../lib/missions-api";
+import { summarizeMissions } from "../lib/missions-presenters";
 
 function decorateMission(mission, project) {
   return {

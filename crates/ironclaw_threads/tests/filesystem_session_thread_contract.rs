@@ -455,6 +455,86 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
 }
 
 #[tokio::test]
+async fn filesystem_list_thread_history_returns_durable_message_timestamps() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-message-timestamps", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("message-timestamps");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-message-timestamps").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let before_user = Utc::now();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("hello"),
+        })
+        .await
+        .unwrap();
+    let after_user = Utc::now();
+
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-message-timestamps".into(),
+            content: MessageContent::text("working"),
+        })
+        .await
+        .unwrap();
+    let draft_created_at = draft.created_at.expect("draft has created_at");
+    assert_eq!(draft.updated_at, Some(draft_created_at));
+
+    let finalized = service
+        .finalize_assistant_message(
+            &scope,
+            &thread.thread_id,
+            draft.message_id,
+            MessageContent::text("done"),
+        )
+        .await
+        .unwrap();
+    let final_updated_at = finalized.updated_at.expect("finalized has updated_at");
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    let user = history
+        .messages
+        .iter()
+        .find(|message| message.message_id == accepted.message_id)
+        .expect("user message is in history");
+    let user_created_at = user.created_at.expect("user message has created_at");
+    assert!(user_created_at >= before_user && user_created_at <= after_user);
+    assert_eq!(user.updated_at, Some(user_created_at));
+
+    let assistant = history
+        .messages
+        .iter()
+        .find(|message| message.message_id == draft.message_id)
+        .expect("assistant message is in history");
+    assert_eq!(assistant.created_at, Some(draft_created_at));
+    assert_eq!(assistant.updated_at, Some(final_updated_at));
+}
+
+#[tokio::test]
 async fn filesystem_append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_run() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-finalized-append", "alice");

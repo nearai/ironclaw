@@ -33,7 +33,7 @@ use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
 use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
 use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_setup::SlackPersonalSetupServiceSlot;
+use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]

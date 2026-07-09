@@ -1,16 +1,23 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
-import { gateFromEvent, gateFromProjectionGate } from "./gates.js";
+import React from "react";
+import { gateFromEvent, gateFromProjectionGate } from "./gates";
 import {
   isTerminalToolStatus,
   toolCardFromActivity,
   toolCardFromPreview,
-} from "./history-messages.js";
-import { failureMessageForRunStatus } from "./failureMessages.js";
+} from "./history-messages";
+import { failureMessageForRunStatus } from "./failureMessages";
 import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
-} from "./tool-activity-state.js";
+} from "./tool-activity-state";
+import {
+  isFinalAssistantForRun,
+  replaceAssistantReplyForRun,
+} from "./stream-order-memory";
+
+const noop = () => {};
+const emptyConnectionContext = () => ({});
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -42,6 +49,8 @@ export function useChatEvents({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
+  noteConnectionInterruptedRunId = noop,
+  connectionContextForRunFailure = emptyConnectionContext,
   onRunSettled,
 }) {
   // Track which runIds we've already settled so that SSE replays
@@ -66,6 +75,7 @@ export function useChatEvents({
         case "accepted": {
           const ack = frame.ack || {};
           if (ack.run_id) latestRunIdRef.current = ack.run_id;
+          noteConnectionInterruptedRunId(ack.run_id);
           setActiveRun?.({
             runId: ack.run_id || null,
             threadId: ack.thread_id || threadId,
@@ -80,6 +90,7 @@ export function useChatEvents({
           const progress = frame.progress || {};
           if (progress.turn_run_id) {
             latestRunIdRef.current = progress.turn_run_id;
+            noteConnectionInterruptedRunId(progress.turn_run_id);
             setActiveRun?.((current) =>
               current && current.runId === progress.turn_run_id
                 ? { ...current, status: "running" }
@@ -141,19 +152,21 @@ export function useChatEvents({
 
         case "final_reply": {
           const reply = frame.reply || {};
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `reply-${reply.turn_run_id || Date.now()}`,
-              role: "assistant",
-              content: reply.text || "",
-              timestamp: reply.generated_at || new Date().toISOString(),
-              turnRunId: reply.turn_run_id,
-              isFinalReply: true,
-            },
-          ]);
+          const turnRunId = reply.turn_run_id || null;
+          const replyMessage = {
+            id: `reply-${turnRunId || Date.now()}`,
+            role: "assistant",
+            content: reply.text || "",
+            timestamp: reply.generated_at || new Date().toISOString(),
+            turnRunId,
+            isFinalReply: true,
+          };
+          setMessages((prev) =>
+            replaceAssistantReplyForRun(prev, replyMessage, turnRunId),
+          );
           setPendingGate(null);
           setIsProcessing(false);
+          setActiveRun?.(null);
           return;
         }
 
@@ -178,6 +191,7 @@ export function useChatEvents({
             status: runState.status || "failed",
             failureCategory: failureCategoryFromRunState(runState),
             failureSummary: null,
+            connectionContextForRunFailure,
           });
           settleRun(settledRunsRef, onRunSettled, runId, false);
           return;
@@ -200,6 +214,8 @@ export function useChatEvents({
             activeRunRef,
             locallyResolvedGatesRef,
             toolActivityStateRef,
+            noteConnectionInterruptedRunId,
+            connectionContextForRunFailure,
           });
           return;
         }
@@ -218,6 +234,8 @@ export function useChatEvents({
       activeRunRef,
       locallyResolvedGatesRef,
       toolActivityStateRef,
+      noteConnectionInterruptedRunId,
+      connectionContextForRunFailure,
       onRunSettled,
     ],
   );
@@ -325,6 +343,8 @@ function applyProjectionItems({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
+  noteConnectionInterruptedRunId,
+  connectionContextForRunFailure,
 }) {
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
@@ -402,6 +422,7 @@ function applyProjectionItems({
             latestRunIdRef,
             promptRunIdRef,
             locallyResolvedGatesRef,
+            connectionContextForRunFailure,
           });
           activeRunId = null;
         }
@@ -434,6 +455,7 @@ function applyProjectionItems({
         continue;
       }
       if (runId) {
+        noteConnectionInterruptedRunId(runId);
         activeRunId = runId;
         if (!isTerminalStatus && latestRunIdRef) {
           latestRunIdRef.current = runId;
@@ -479,6 +501,7 @@ function applyProjectionItems({
             status,
             failureCategory,
             failureSummary,
+            connectionContextForRunFailure,
           });
         }
       } else if (!PROMPT_RUN_STATUSES.has(status)) {
@@ -489,15 +512,22 @@ function applyProjectionItems({
     }
 
     if (item.text) {
-      // ProductProjectionItem::Text { id, body } — the body is the
+      // ProductProjectionItem::Text { id, run_id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id and by the matching durable timeline message id so a
       // late projection cannot duplicate a reply already rendered from
-      // history. Text can arrive in the same projection snapshot as a
-      // still-blocked gate, so run_status remains the source of truth for
-      // clearing pendingGate.
+      // history. Text can stream while the run is still active or arrive in the same
+      // projection snapshot as a still-blocked gate; run_status remains the source of
+      // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
+      const textRunId = item.text.run_id || null;
       setMessages((prev) => {
+        if (
+          textRunId &&
+          prev.some((m) => isFinalAssistantForRun(m, textRunId))
+        ) {
+          return prev;
+        }
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
         const existing = prev.findIndex(
           (m) => m.id === messageId || (timelineMessageId && m.id === timelineMessageId),
@@ -508,7 +538,8 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: prev[existing]?.timestamp || new Date().toISOString(),
-          isFinalReply: true,
+          turnRunId: prev[existing]?.turnRunId || textRunId,
+          isFinalReply: false,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -517,7 +548,6 @@ function applyProjectionItems({
         }
         return [...prev, next];
       });
-      setIsProcessing(false);
     }
 
     if (item.thinking) {
@@ -604,6 +634,7 @@ function settleTerminalRunAfterResolvedPrompt({
   latestRunIdRef,
   promptRunIdRef,
   locallyResolvedGatesRef,
+  connectionContextForRunFailure,
 }) {
   setIsProcessing(false);
   setPendingGate(null);
@@ -620,6 +651,7 @@ function settleTerminalRunAfterResolvedPrompt({
       status,
       failureCategory,
       failureSummary,
+      connectionContextForRunFailure,
     });
   }
 }
@@ -640,18 +672,29 @@ function failureCategoryFromRunState(runState) {
 
 function appendRunFailureMessage(
   setMessages,
-  { runId, status, failureCategory, failureSummary },
+  {
+    runId,
+    status,
+    failureCategory,
+    failureSummary,
+    connectionContextForRunFailure,
+  },
 ) {
   // Dedup by `err-<runId>` so replays of the same projection
   // (SSE reconnect with `last-event-id`, or repeated updates carrying
   // the same terminal status) collapse to one bubble instead of stacking.
   const messageId = `err-${runId || "unknown"}`;
+  const connectionContext =
+    typeof connectionContextForRunFailure === "function"
+      ? connectionContextForRunFailure(runId) || {}
+      : {};
   setMessages((prev) => {
     const existing = prev.findIndex((m) => m.id === messageId);
     const content = failureMessageForRunStatus({
       status,
       failureCategory,
       failureSummary,
+      ...connectionContext,
     });
     if (existing >= 0) {
       const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
@@ -660,6 +703,9 @@ function appendRunFailureMessage(
       next[existing] = {
         ...next[existing],
         content,
+        failureStatus: status,
+        failureCategory,
+        failureSummary,
       };
       return next;
     }
@@ -670,6 +716,9 @@ function appendRunFailureMessage(
         role: "error",
         content,
         timestamp: new Date().toISOString(),
+        failureStatus: status,
+        failureCategory,
+        failureSummary,
       },
     ];
   });

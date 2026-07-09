@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
-import { fetchProjectsOverview } from "../lib/projects-api.js";
+import React from "react";
+import { fetchProjectsOverview } from "../lib/projects-api";
 
 export function useProjectsOverview() {
   const queryClient = useQueryClient();

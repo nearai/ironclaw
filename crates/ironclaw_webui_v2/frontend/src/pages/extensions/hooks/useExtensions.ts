@@ -1,8 +1,8 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { gatewayStatus } from "../../../lib/api.js";
-import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import { gatewayStatus } from "../../../lib/api";
+import { listConnectableChannels } from "../../../lib/channel-connect";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
@@ -10,9 +10,9 @@ import {
   openAuthPopup,
   readLatestProductAuthOAuthCompletion,
   subscribeProductAuthOAuthCompletion,
-} from "../../../lib/product-auth-oauth-events.js";
-import { useT } from "../../../lib/i18n.js";
-import { isChannelExtensionKind } from "../lib/extensions-schema.js";
+} from "../../../lib/product-auth-oauth-events";
+import { useT } from "../../../lib/i18n";
+import { isChannelExtensionKind } from "../lib/extensions-schema";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -25,7 +25,7 @@ import {
   fetchOauthFlowStatus,
   fetchPairingRequests,
   approvePairingCode,
-} from "../lib/extensions-api.js";
+} from "../lib/extensions-api";
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
@@ -432,6 +432,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       const configuredBeforeFlow = setupIsConfigured({
         allowProvidedSecrets: !requireCallbackCompletion,
       });
+      const hasFlowCompletionBackstop = Boolean(flowId);
       let stopped = false;
       let timer = null;
       let unsubscribe = () => {};
@@ -518,7 +519,11 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           return;
         }
         const timedOut = Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS;
-        const popupClosedBeforeCallback = popup && popup.closed && !requireCallbackCompletion;
+        // Current product-auth OAuth callbacks close their popup after writing
+        // durable flow status. With a flow id, popup.closed is expected and the
+        // status/event backstop owns completion.
+        const popupClosedBeforeCallback =
+          popup && popup.closed && !hasFlowCompletionBackstop && !requireCallbackCompletion;
         if (popupClosedBeforeCallback || timedOut) {
           if (timedOut) {
             // An abandoned reconnect otherwise ends after 10 minutes with no

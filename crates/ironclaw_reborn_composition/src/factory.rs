@@ -138,7 +138,6 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
-use crate::default_system_prompt::seed_default_system_prompt;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
@@ -176,6 +175,7 @@ use crate::product_auth::credentials::product_auth_providers::{
     OAuthProviderComposition, compose_provider_client,
 };
 use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::root::default_system_prompt::seed_default_system_prompt;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::web_access::register_bundled_web_access_first_party_handlers;
 use crate::{
@@ -3990,7 +3990,8 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
-    slack_personal_oauth_lazy_slot: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
+    slack_personal_oauth_lazy_slot:
+        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
@@ -4192,6 +4193,7 @@ where
 enum FilesystemProductionEventStoresInput {
     #[cfg(feature = "libsql")]
     Config(ironclaw_reborn_event_store::RebornEventStoreConfig),
+    #[cfg(feature = "postgres")]
     Prebuilt(ironclaw_reborn_event_store::RebornEventStores),
 }
 
@@ -4284,6 +4286,7 @@ where
                 )
                 .await?
         }
+        #[cfg(feature = "postgres")]
         FilesystemProductionEventStoresInput::Prebuilt(stores) => {
             services.with_production_reborn_event_stores(stores)
         }

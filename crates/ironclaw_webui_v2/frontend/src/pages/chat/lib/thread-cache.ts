@@ -1,4 +1,4 @@
-import { queryClient } from "../../../lib/query-client.js";
+import { queryClient } from "../../../lib/query-client";
 
 const THREADS_QUERY_KEY = ["threads"];
 const TITLE_MAX_CHARS = 60;

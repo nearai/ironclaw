@@ -8,13 +8,13 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
+    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
-    HostManagedToolResultContent, ThreadBackedLoopContextPort,
+    HostManagedModelStreamSink, HostManagedToolResultContent, ThreadBackedLoopContextPort,
 };
 use ironclaw_reborn::model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
@@ -98,6 +98,45 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
     assert_eq!(requests[0].messages[1].content, "hello model");
+}
+
+#[tokio::test]
+async fn gateway_stream_model_with_progress_uses_provider_streaming_and_sanitizes_updates() {
+    let provider = Arc::new(StreamingRecordingLlmProvider::new(
+        vec!["Done.".to_string(), " sk-live-secret".to_string()],
+        "Done. sk-live-secret",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let response = gateway
+        .stream_model_with_progress(model_request(interactive_model()), sink.clone())
+        .await
+        .unwrap();
+
+    assert!(
+        provider.complete_requests.lock().unwrap().is_empty(),
+        "progress path must call provider complete_streaming, not complete"
+    );
+    let streaming_requests = provider.streaming_requests.lock().unwrap();
+    assert_eq!(streaming_requests.len(), 1);
+    assert_eq!(
+        streaming_requests[0].model.as_deref(),
+        Some("host-selected-model")
+    );
+    assert_eq!(
+        sink.updates(),
+        vec!["Done.".to_string(), "Done. [redacted]".to_string()]
+    );
+    assert_eq!(
+        response.safe_text_deltas,
+        vec!["Done. [redacted]".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -1881,10 +1920,12 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
             LoopHostMilestoneKind::ModelStarted {
                 requested_model_profile_id: None
             },
+            LoopHostMilestoneKind::ModelTextDelta { safe_text },
             LoopHostMilestoneKind::ModelCompleted {
                 effective_model_profile_id
             }
-        ] if effective_model_profile_id.as_str() == "interactive_model"
+        ] if safe_text == "production response"
+            && effective_model_profile_id.as_str() == "interactive_model"
     ));
 }
 
@@ -3088,6 +3129,93 @@ impl HostManagedModelGateway for InvalidSummaryModelGateway {
             self.kind,
             self.safe_summary.clone(),
         ))
+    }
+}
+
+#[derive(Default)]
+struct RecordingHostStreamSink {
+    updates: Mutex<Vec<String>>,
+}
+
+impl RecordingHostStreamSink {
+    fn updates(&self) -> Vec<String> {
+        self.updates.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl HostManagedModelStreamSink for RecordingHostStreamSink {
+    async fn safe_text_update(&self, safe_text: String) {
+        self.updates.lock().unwrap().push(safe_text);
+    }
+}
+
+struct StreamingRecordingLlmProvider {
+    model_name: String,
+    complete_requests: Mutex<Vec<CompletionRequest>>,
+    streaming_requests: Mutex<Vec<CompletionRequest>>,
+    streaming_deltas: Vec<String>,
+    response_content: String,
+}
+
+impl StreamingRecordingLlmProvider {
+    fn new(streaming_deltas: Vec<String>, response_content: &str) -> Self {
+        Self {
+            model_name: "streaming-recording-model".to_string(),
+            complete_requests: Mutex::new(Vec::new()),
+            streaming_requests: Mutex::new(Vec::new()),
+            streaming_deltas,
+            response_content: response_content.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for StreamingRecordingLlmProvider {
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.complete_requests.lock().unwrap().push(request);
+        Err(LlmError::RequestFailed {
+            provider: self.model_name.clone(),
+            reason: "non-streaming completion is not expected".to_string(),
+        })
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.streaming_requests.lock().unwrap().push(request);
+        for delta in &self.streaming_deltas {
+            sink.text_delta(delta.clone()).await;
+        }
+        Ok(CompletionResponse {
+            content: self.response_content.clone(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            reasoning: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: self.model_name.clone(),
+            reason: "tool completion is not expected".to_string(),
+        })
     }
 }
 
