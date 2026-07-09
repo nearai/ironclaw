@@ -46,6 +46,8 @@ export const SETTINGS_SUB_ROUTES = [
   // v2 `/api/webchat/v2/llm/*` endpoints, per the unhide rule in the header
   // comment above. The rest stay hidden until their api libs leave stub state.
   { id: "inference", labelKey: "settings.inference", icon: "spark" },
+  // Appearance is browser-local UI preference state and does not need a v2 API.
+  { id: "appearance", labelKey: "settings.appearance", icon: "sun" },
   // { id: "agent", labelKey: "settings.agent", icon: "bolt" },
   // { id: "channels", labelKey: "settings.channels", icon: "send" },
   // { id: "networking", labelKey: "settings.networking", icon: "pulse" },

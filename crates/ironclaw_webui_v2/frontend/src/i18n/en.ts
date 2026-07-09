@@ -223,6 +223,7 @@ registerPack("en", {
 
   // Settings tabs
   "settings.inference": "Inference",
+  "settings.appearance": "Appearance",
   "settings.agent": "Agent",
   "settings.channels": "Channels",
   "settings.networking": "Networking",
@@ -293,6 +294,9 @@ registerPack("en", {
   "settings.restartNow": "Restart now",
   "settings.restartStarting": "Restarting...",
   "settings.restartUnavailable": "Restart from the web UI isn't available yet. Restart the gateway process manually to apply pending changes.",
+  "settings.field.showChatTerminalShortcut": "Show chat terminal shortcut",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Displays the floating terminal/logs icon inside chat threads.",
 
   // Restart dialog
   "restart.title": "Restart IronClaw",

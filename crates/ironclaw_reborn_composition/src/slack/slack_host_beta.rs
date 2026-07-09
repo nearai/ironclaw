@@ -73,7 +73,7 @@ use crate::slack::slack_serve::{
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
     slack_events_route_mount,
 };
-use crate::webui_serve::PublicRouteMount;
+use crate::webui::webui_serve::PublicRouteMount;
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";

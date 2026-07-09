@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "app"
+
 [features]
 default = []
 # Use the single-process in-memory turn-state authority for the local-dev /

@@ -217,6 +217,7 @@ registerPack("ar", {
 
   // Settings tabs
   "settings.inference": "الاستدلال",
+  "settings.appearance": "المظهر",
   "settings.agent": "الوكيل",
   "settings.channels": "القنوات",
   "settings.networking": "الشبكات",
@@ -284,6 +285,9 @@ registerPack("ar", {
   "settings.restartNow": "أعد التشغيل الآن",
   "settings.restartStarting": "إعادة التشغيل...",
   "settings.restartUnavailable": "إعادة التشغيل من واجهة الويب غير متاحة بعد. أعد تشغيل عملية البوابة يدويًا لتطبيق التغييرات المعلّقة.",
+  "settings.field.showChatTerminalShortcut": "إظهار اختصار طرفية الدردشة",
+  "settings.field.showChatTerminalShortcutDesc":
+    "يعرض أيقونة الطرفية/السجلات العائمة داخل محادثات الدردشة.",
 
   // Restart dialog
   "restart.title": "أعد تشغيل IronClaw",

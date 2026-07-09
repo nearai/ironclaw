@@ -217,6 +217,7 @@ registerPack("hi", {
 
   // Settings tabs
   "settings.inference": "अनुमान",
+  "settings.appearance": "रूप-रंग",
   "settings.agent": "एजेंट",
   "settings.channels": "चैनल",
   "settings.networking": "नेटवर्किंग",
@@ -284,6 +285,9 @@ registerPack("hi", {
   "settings.restartNow": "अभी पुनरारंभ करें",
   "settings.restartStarting": "पुनरारंभ हो रहा है...",
   "settings.restartUnavailable": "वेब UI से पुनरारंभ अभी उपलब्ध नहीं है। लंबित परिवर्तनों को लागू करने के लिए गेटवे प्रक्रिया को मैन्युअल रूप से पुनरारंभ करें।",
+  "settings.field.showChatTerminalShortcut": "चैट टर्मिनल शॉर्टकट दिखाएँ",
+  "settings.field.showChatTerminalShortcutDesc":
+    "चैट थ्रेड के भीतर फ़्लोटिंग टर्मिनल/लॉग आइकन दिखाता है।",
 
   // Restart dialog
   "restart.title": "IronClaw पुनरारंभ करें",

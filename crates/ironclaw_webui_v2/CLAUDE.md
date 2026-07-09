@@ -201,9 +201,9 @@ existence oracle.
 ### Stream-events (WebSocket)
 
 `stream_events_ws` is the WebSocket transport variant of
-`stream_events`. It drains the same `RebornServicesApi::stream_events`
-facade and emits each `ProductOutboundEnvelope` as a JSON text frame.
-The descriptor declares
+`stream_events`. It uses the same `RebornServicesApi` event stream
+surface as SSE and emits each `ProductOutboundEnvelope` as a JSON text
+frame. The descriptor declares
 `WebSocketOriginPolicy::SameOriginRequired`; host composition runs
 the same-origin check before the upgrade reaches this crate's
 handler.
@@ -252,18 +252,19 @@ boundary test enforces this.
 
 ## Streaming model
 
-`stream_events` is SSE. The facade is drain-only right now, so the
-handler drains, renders each `ProductOutboundEnvelope` into the
-browser-visible `WebChatV2EventFrame` schema with its projection cursor
-as the SSE `id`, then polls again on a 1-second cadence. The frame
-intentionally excludes adapter routing/delivery metadata. When
-`RebornServicesApi::stream_events` gains a true subscription API the
-handler can migrate without changing the descriptor or browser event
-schema.
+`stream_events` is SSE. When the facade advertises subscription support,
+the handler subscribes once through `RebornServicesApi::subscribe_events`,
+renders each `ProductOutboundEnvelope` into the browser-visible
+`WebChatV2EventFrame` schema with its projection cursor as the SSE `id`,
+and waits on the projection/event subscription instead of polling. The
+frame intentionally excludes adapter routing/delivery metadata. The
+fallback path still calls `RebornServicesApi::stream_events` for facades
+that do not support subscriptions.
 
-The per-poll ownership probe goes through `SessionThreadService::read_thread`
+The fallback ownership probe goes through `SessionThreadService::read_thread`
 (metadata-only) rather than `list_thread_history`, so an active stream does
-not reload the full message transcript every second.
+not reload the full message transcript on each drain. Subscription streams
+revalidate caller access before forwarding each envelope.
 
 `capability_activity` SSE frames are projection-derived lifecycle metadata for
 tool/capability execution. They expose the safe activity DTO

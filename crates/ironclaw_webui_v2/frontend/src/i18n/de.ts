@@ -217,6 +217,7 @@ registerPack("de", {
 
   // Settings tabs
   "settings.inference": "Inferenz",
+  "settings.appearance": "Darstellung",
   "settings.agent": "Agent",
   "settings.channels": "Kanäle",
   "settings.networking": "Netzwerk",
@@ -284,6 +285,9 @@ registerPack("de", {
   "settings.restartNow": "Jetzt neu starten",
   "settings.restartStarting": "Wird neu gestartet...",
   "settings.restartUnavailable": "Ein Neustart über die Weboberfläche ist noch nicht verfügbar. Starten Sie den Gateway-Prozess manuell neu, um ausstehende Änderungen anzuwenden.",
+  "settings.field.showChatTerminalShortcut": "Chat-Terminal-Kurzbefehl anzeigen",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Zeigt das schwebende Terminal-/Protokollsymbol in Chat-Threads an.",
 
   // Restart dialog
   "restart.title": "IronClaw neu starten",

@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
@@ -59,9 +59,9 @@ use ironclaw_product_workflow::{
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
     WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -75,7 +75,7 @@ use ironclaw_webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
 fn caller() -> WebUiAuthenticatedCaller {
@@ -307,6 +307,9 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    stream_events_subscription_enabled: Mutex<bool>,
+    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    next_stream_events_subscription: Mutex<Option<RebornStreamEventsSubscription>>,
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
@@ -385,6 +388,23 @@ impl StubServices {
             .lock()
             .expect("lock")
             .push_back(response);
+    }
+
+    fn enable_stream_events_subscription(
+        &self,
+        events: Vec<Result<ProductOutboundEnvelope, RebornServicesError>>,
+    ) {
+        let (sender, receiver) = mpsc::channel(events.len().max(1));
+        for event in events {
+            sender.try_send(event).expect("subscription test queue");
+        }
+        drop(sender);
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock") = true;
+        *self.next_stream_events_subscription.lock().expect("lock") =
+            Some(RebornStreamEventsSubscription::new(receiver));
     }
 
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
@@ -693,6 +713,29 @@ impl RebornServicesApi for StubServices {
         }
         // Empty drain; SSE handler will keep-alive until the test drops it.
         Ok(RebornStreamEventsResponse { events: Vec::new() })
+    }
+
+    fn supports_stream_events_subscription(&self) -> bool {
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock")
+    }
+
+    async fn subscribe_events(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        self.subscribe_events_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        self.next_stream_events_subscription
+            .lock()
+            .expect("lock")
+            .take()
+            .ok_or_else(|| service_unavailable_error(true))
     }
 
     async fn get_run_state(
@@ -5164,6 +5207,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                 "thread-x",
                 vec![ProductProjectionItem::Text {
                     id: "message-1".to_string(),
+                    run_id: None,
                     body: "projection body".to_string(),
                 }],
             )
@@ -5282,6 +5326,154 @@ where
         }
     }
     buf
+}
+
+#[tokio::test]
+async fn stream_events_sets_unbuffered_sse_headers() {
+    let services = Arc::new(StubServices::default());
+    services.enable_stream_events_subscription(Vec::new());
+
+    let router = router_with(services);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-transform"),
+        "SSE must opt out of intermediary transforms that can buffer chunks"
+    );
+    assert_eq!(
+        headers
+            .get(HeaderName::from_static("x-accel-buffering"))
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "SSE must ask reverse proxies not to buffer stream chunks"
+    );
+    assert!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")),
+        "SSE content type must remain event-stream"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_continues_immediately_after_non_empty_batch() {
+    let services = Arc::new(StubServices::default());
+
+    let envelope_a = make_projection_update_envelope("cursor:live-a");
+    let envelope_b = make_projection_update_envelope("cursor:live-b");
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_a],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_b],
+    }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "second SSE event must not wait for the idle poll interval; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert!(
+        calls.len() >= 2,
+        "SSE handler must immediately re-enter stream_events after a non-empty batch"
+    );
+    let expected_cursor = ProjectionCursor::new("cursor:live-a").expect("cursor");
+    assert_eq!(
+        calls[1].after_cursor.as_ref(),
+        Some(&expected_cursor),
+        "follow-up call must still preserve cursor ordering"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_uses_subscription_when_facade_supports_it() {
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:sub-b");
+    services.enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b)]);
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let cursor_a_json =
+        serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
+    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled SSE route must not call the polling drain facade"
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being
@@ -5685,6 +5877,87 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         Some(envelope_b.projection_cursor()),
         "second WS poll must advance after_cursor to the last emitted projection cursor",
     );
+}
+
+#[tokio::test]
+async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:ws-sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:ws-sub-b");
+    services
+        .enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b.clone())]);
+
+    let router = router_with(services.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let (mut ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+
+    let mut text_frames: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => break,
+            Err(_) => break,
+        }
+    }
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+
+    assert!(
+        text_frames.len() >= 2,
+        "expected subscription projection frames; got {} text frame(s): {:?}",
+        text_frames.len(),
+        text_frames,
+    );
+
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
+    assert_eq!(
+        envelope_a_json, expected_a,
+        "first WS frame must carry the first subscription envelope",
+    );
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
+    assert_eq!(
+        envelope_b_json, expected_b,
+        "second WS frame must carry the second subscription envelope",
+    );
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled WS route must not call the polling drain facade",
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 #[tokio::test]

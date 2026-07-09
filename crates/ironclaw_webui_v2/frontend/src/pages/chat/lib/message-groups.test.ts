@@ -214,6 +214,89 @@ test("groupMessages: delayed same-run activity moves before its final reply", ()
   );
 });
 
+test("groupMessages: same-run activity stays before streaming assistant text", () => {
+  const grouped = groupMessages([
+    { id: "u1", role: "user", content: "what is GPT-5.6?", turnRunId: "run-1" },
+    {
+      id: "text-text:run-1",
+      role: "assistant",
+      content: "The GPT-5.6 series is three models, not one.",
+      isFinalReply: false,
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-web-search",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(grouped.length, 3);
+  assert.deepEqual(
+    grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
+    ["u1", "activity-run-tool-web-search", "text-text:run-1"],
+  );
+  assert.deepEqual(
+    grouped[1].activity.map((item) => item.id),
+    ["tool-web-search"],
+  );
+});
+
+test("groupMessages: final reply boundary keeps same-run activity before answer", () => {
+  const grouped = groupMessages([
+    { id: "u1", role: "user", content: "what is GPT-5.6?", turnRunId: "run-1" },
+    {
+      id: "msg-final",
+      role: "assistant",
+      content: "PRETOOL text.",
+      isFinalReply: true,
+      keepFollowingActivityAfter: true,
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-web-search",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(grouped.length, 3);
+  assert.deepEqual(
+    grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
+    ["u1", "activity-run-tool-web-search", "msg-final"],
+  );
+  assert.deepEqual(
+    grouped[1].activity.map((item) => item.id),
+    ["tool-web-search"],
+  );
+});
+
+test("groupMessages: delayed different-run activity stays below streaming text", () => {
+  const grouped = groupMessages([
+    {
+      id: "text-text:run-1",
+      role: "assistant",
+      content: "Answer for run one.",
+      isFinalReply: false,
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-web-search",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-2",
+    },
+  ]);
+
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped[0].type, "message");
+  assert.equal(grouped[0].message.id, "text-text:run-1");
+  assert.equal(grouped[1].type, "activity-run");
+  assert.deepEqual(grouped[1].activity.map((item) => item.id), ["tool-web-search"]);
+});
+
 test("groupMessages: delayed different-run activity stays with the later turn", () => {
   const grouped = groupMessages([
     {
