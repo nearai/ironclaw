@@ -93,7 +93,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_product_adapters` | `ironclaw_product_adapters` | Product-adapter contracts for mapping Reborn state and events into product-facing shapes. |
 | `ironclaw_product_adapter_registry` | `ironclaw_product_adapter_registry` | ProductAdapter host-api projection and installation registry. |
 | `ironclaw_product_workflow` | `ironclaw_product_workflow` | Product-facing workflow facade: inbound turn service, idempotency ledger, binding resolution. |
-| `ironclaw_product_workflow_storage` | `ironclaw_product_workflow_storage` | Durable libSQL/PostgreSQL adapters for the product workflow idempotency ledger. |
+| `ironclaw_product_workflow` | `ironclaw_product_workflow` | Product-facing workflow facade plus feature-gated durable filesystem/libSQL/PostgreSQL idempotency ledger adapters. |
 | `ironclaw_engine` | `ironclaw_engine` | Unified thread-capability-CodeAct execution engine. It is closer to product/agent orchestration than low-level host policy. |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |
@@ -117,7 +117,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Durable event history**: use `ironclaw_events` for contracts and `ironclaw_reborn_event_store` for backend adapters.
 - **Current invocation state**: use `ironclaw_run_state`, not event logs.
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.
-- **Product workflow persistence**: keep orchestration in `ironclaw_product_workflow` and durable ledger adapters in `ironclaw_product_workflow_storage`.
+- **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters stay behind the `storage`/`libsql`/`postgres` features and the `IdempotencyLedger` port.
 - **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_support`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_reborn` depending on layer.
 - **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui_v2`, `ironclaw_reborn_webui_ingress`, or `ironclaw_tui`; keep authority and persistence in lower crates.
 
