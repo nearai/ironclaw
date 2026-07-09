@@ -1282,8 +1282,9 @@ mod tests {
     use axum::body::to_bytes;
     #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_auth::{
-        AuthProviderClient, OAuthProviderExchange, OAuthProviderExchangeContext,
-        OAuthProviderIdentity, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+        AuthProviderClient, CredentialAccountRecordSource, OAuthProviderExchange,
+        OAuthProviderExchangeContext, OAuthProviderIdentity, OAuthProviderRefresh,
+        OAuthProviderRefreshRequest,
     };
     use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};
     #[cfg(feature = "slack-v2-host-beta")]

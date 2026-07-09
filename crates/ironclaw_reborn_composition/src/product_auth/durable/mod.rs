@@ -274,6 +274,18 @@ where
             thread_id: Some(owner.thread_id.clone()),
             invocation_id: ironclaw_host_api::InvocationId::new(),
         };
+        self.flow_records_for_resource_filtered(&resource, |flow| owner.matches(flow))
+            .await
+    }
+
+    async fn flow_records_for_resource_filtered<P>(
+        &self,
+        resource: &ResourceScope,
+        predicate: P,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError>
+    where
+        P: Fn(&AuthFlowRecord) -> bool + Sync,
+    {
         let mut flows = Vec::new();
         for surface in AuthSurface::ALL {
             let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
@@ -282,13 +294,13 @@ where
                     .await?
                     .into_iter()
                     .map(|(flow, _)| flow)
-                    .filter(|flow| owner.matches(flow)),
+                    .filter(|flow| predicate(flow)),
             );
-            let sessions_root = surface_sessions_root(&resource, surface)?;
+            let sessions_root = surface_sessions_root(resource, surface)?;
             let mut entries = match self
                 .filesystem
                 .list_dir_bounded(
-                    &resource,
+                    resource,
                     &sessions_root,
                     MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
                 )
@@ -307,6 +319,7 @@ where
                     continue;
                 }
                 let Ok(session_id) = AuthSessionId::new(entry.name) else {
+                    // silent-ok: ignore an unexpected non-session directory under the bounded root.
                     continue;
                 };
                 let mut session_scope =
@@ -317,7 +330,7 @@ where
                         .await?
                         .into_iter()
                         .map(|(flow, _)| flow)
-                        .filter(|flow| owner.matches(flow)),
+                        .filter(|flow| predicate(flow)),
                 );
             }
         }
@@ -350,60 +363,10 @@ where
             thread_id: None,
             invocation_id: ironclaw_host_api::InvocationId::new(),
         };
-        let mut flows = Vec::new();
-        for surface in AuthSurface::ALL {
-            let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
-            flows.extend(
-                self.flow_records_under_scope_root(&scope)
-                    .await?
-                    .into_iter()
-                    .map(|(flow, _)| flow)
-                    .filter(|flow| {
-                        &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
-                    }),
-            );
-            let sessions_root = surface_sessions_root(&resource, surface)?;
-            let mut entries = match self
-                .filesystem
-                .list_dir_bounded(
-                    &resource,
-                    &sessions_root,
-                    MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
-                )
-                .await
-            {
-                Ok(entries) => entries,
-                Err(FilesystemError::NotFound { .. }) => continue,
-                Err(error) => return Err(fs_error(error)),
-            };
-            if entries.len() > MAX_OWNER_SESSION_ROOTS_PER_SURFACE {
-                return Err(AuthProductError::BackendUnavailable);
-            }
-            entries.sort_by(|left, right| left.name.cmp(&right.name));
-            for entry in entries {
-                if entry.file_type != FileType::Directory {
-                    continue;
-                }
-                let Ok(session_id) = AuthSessionId::new(entry.name) else {
-                    continue;
-                };
-                let mut session_scope =
-                    ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
-                session_scope.session_id = Some(session_id);
-                flows.extend(
-                    self.flow_records_under_scope_root(&session_scope)
-                        .await?
-                        .into_iter()
-                        .map(|(flow, _)| flow)
-                        .filter(|flow| {
-                            &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
-                        }),
-                );
-            }
-        }
-        flows.sort_by_key(|flow| flow.id);
-        flows.dedup_by_key(|flow| flow.id);
-        Ok(flows)
+        self.flow_records_for_resource_filtered(&resource, |flow| {
+            &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
+        })
+        .await
     }
 
     async fn read_account(
@@ -915,6 +878,23 @@ where
         provider_identity: Option<ironclaw_auth::OAuthProviderIdentity>,
         cas: CasExpectation,
     ) -> Result<CredentialAccount, AuthProductError> {
+        self.create_account_with_id_and_provider_identity_versioned(
+            account_id,
+            request,
+            provider_identity,
+            cas,
+        )
+        .await
+        .map(|(account, _)| account)
+    }
+
+    async fn create_account_with_id_and_provider_identity_versioned(
+        &self,
+        account_id: CredentialAccountId,
+        request: NewCredentialAccount,
+        provider_identity: Option<ironclaw_auth::OAuthProviderIdentity>,
+        cas: CasExpectation,
+    ) -> Result<(CredentialAccount, RecordVersion), AuthProductError> {
         validate_new_credential_account(&request)?;
         let now = Utc::now();
         let account = CredentialAccount {
@@ -933,8 +913,8 @@ where
             created_at: now,
             updated_at: now,
         };
-        self.write_account(&account, cas).await?;
-        Ok(account)
+        let version = self.write_account(&account, cas).await?;
+        Ok((account, version))
     }
 }
 

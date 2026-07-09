@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{Duration, Utc};
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::{
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+    InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
+};
 use ironclaw_host_api::{
     ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
     RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, Timestamp, UserId, VirtualPath,
@@ -14,6 +17,7 @@ use ironclaw_secrets::{
     SecretStoreError,
 };
 use secrecy::SecretString;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
 use super::*;
@@ -60,6 +64,200 @@ fn test_service(
     FilesystemAuthProductServices::new(filesystem, secret_store)
 }
 
+struct PausedAccountPutBackend {
+    inner: InMemoryBackend,
+    pause_next_account_put: AtomicBool,
+    account_put_reached: Notify,
+    resume_account_put: Notify,
+    pause_next_account_get: AtomicBool,
+    account_get_reached: Notify,
+    resume_account_get: Notify,
+    pause_next_flow_list: AtomicBool,
+    flow_list_reached: Notify,
+    resume_flow_list: Notify,
+    fail_next_flow_get: AtomicBool,
+    fail_account_put_path_fragment: std::sync::Mutex<Option<(String, usize)>>,
+}
+
+impl PausedAccountPutBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            pause_next_account_put: AtomicBool::new(false),
+            account_put_reached: Notify::new(),
+            resume_account_put: Notify::new(),
+            pause_next_account_get: AtomicBool::new(false),
+            account_get_reached: Notify::new(),
+            resume_account_get: Notify::new(),
+            pause_next_flow_list: AtomicBool::new(false),
+            flow_list_reached: Notify::new(),
+            resume_flow_list: Notify::new(),
+            fail_next_flow_get: AtomicBool::new(false),
+            fail_account_put_path_fragment: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn pause_next_account_put(&self) {
+        self.pause_next_account_put.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_account_put(&self) {
+        self.account_put_reached.notified().await;
+    }
+
+    fn resume_account_put(&self) {
+        self.resume_account_put.notify_one();
+    }
+
+    fn pause_next_account_get(&self) {
+        self.pause_next_account_get.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_account_get(&self) {
+        self.account_get_reached.notified().await;
+    }
+
+    fn resume_account_get(&self) {
+        self.resume_account_get.notify_one();
+    }
+
+    fn pause_next_flow_list(&self) {
+        self.pause_next_flow_list.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_flow_list(&self) {
+        self.flow_list_reached.notified().await;
+    }
+
+    fn resume_flow_list(&self) {
+        self.resume_flow_list.notify_one();
+    }
+
+    fn fail_next_flow_get(&self) {
+        self.fail_next_flow_get.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_account_put_for_after(
+        &self,
+        account_id: CredentialAccountId,
+        successful_matches_before_failure: usize,
+    ) {
+        *self.fail_account_put_path_fragment.lock().unwrap() =
+            Some((account_id.to_string(), successful_matches_before_failure));
+    }
+}
+
+#[async_trait::async_trait]
+impl RootFilesystem for PausedAccountPutBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if path.as_str().contains("/accounts/")
+            && self.pause_next_account_put.swap(false, Ordering::SeqCst)
+        {
+            self.account_put_reached.notify_one();
+            self.resume_account_put.notified().await;
+        }
+        let fail_account_put = {
+            let mut fragment = self.fail_account_put_path_fragment.lock().unwrap();
+            let matches = path.as_str().contains("/accounts/")
+                && fragment
+                    .as_ref()
+                    .is_some_and(|(fragment, _)| path.as_str().contains(fragment));
+            if !matches {
+                false
+            } else if fragment
+                .as_ref()
+                .is_some_and(|(_, remaining)| *remaining == 0)
+            {
+                *fragment = None;
+                true
+            } else {
+                fragment.as_mut().unwrap().1 -= 1;
+                false
+            }
+        };
+        if fail_account_put {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: ironclaw_filesystem::FilesystemOperation::WriteFile,
+                reason: "injected account write failure".to_string(),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if path.as_str().contains("/flows/")
+            && self.fail_next_flow_get.swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: ironclaw_filesystem::FilesystemOperation::ReadFile,
+                reason: "injected flow reread failure".to_string(),
+            });
+        }
+        if path.as_str().contains("/accounts/")
+            && self.pause_next_account_get.swap(false, Ordering::SeqCst)
+        {
+            self.account_get_reached.notify_one();
+            self.resume_account_get.notified().await;
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if path.as_str().contains("/flows")
+            && self.pause_next_flow_list.swap(false, Ordering::SeqCst)
+        {
+            self.flow_list_reached.notify_one();
+            self.resume_flow_list.notified().await;
+        }
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.inner.delete_if_version(path, expected_version).await
+    }
+}
+
+fn paused_account_put_filesystem() -> (
+    Arc<ScopedFilesystem<PausedAccountPutBackend>>,
+    Arc<PausedAccountPutBackend>,
+) {
+    let mounts = ironclaw_host_api::MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").unwrap(),
+        VirtualPath::new("/tenants/test/users/alice/secrets").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let backend = Arc::new(PausedAccountPutBackend::new());
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
+    (filesystem, backend)
+}
+
 struct FailFirstDeleteSecretStore {
     inner: InMemorySecretStore,
     fail_next_delete: AtomicBool,
@@ -71,6 +269,10 @@ impl FailFirstDeleteSecretStore {
             inner: InMemorySecretStore::new(),
             fail_next_delete: AtomicBool::new(true),
         }
+    }
+
+    fn set_delete_failure(&self, fail: bool) {
+        self.fail_next_delete.store(fail, Ordering::SeqCst);
     }
 }
 
@@ -1354,6 +1556,633 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .expect("completed callback replay should not reclaim provider exchange");
     assert_eq!(completed_replay.status, AuthFlowStatus::Completed);
     assert_eq!(completed_replay.continuation_emitted_at, Some(emitted_at));
+}
+
+#[tokio::test]
+async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configured_account() {
+    use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService as _};
+
+    let (filesystem, backend) = paused_account_put_filesystem();
+    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let callback_service = Arc::new(FilesystemAuthProductServices::new(
+        Arc::clone(&filesystem),
+        Arc::clone(&secret_store),
+    ));
+    let cleanup_service = FilesystemAuthProductServices::new(filesystem, secret_store);
+    let access_handle = SecretHandle::new("disconnect-race-access").unwrap();
+    let refresh_handle = SecretHandle::new("disconnect-race-refresh").unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            access_handle.clone(),
+            SecretMaterial::from("disconnect-race-access-token"),
+            None,
+        )
+        .await
+        .unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            refresh_handle.clone(),
+            SecretMaterial::from("disconnect-race-refresh-token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let flow = callback_service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("disconnect-race-state")),
+            pkce_verifier_hash: Some(pkce_hash("disconnect-race-pkce")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    callback_service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("disconnect-race-state"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("disconnect-race-pkce"),
+            },
+        )
+        .await
+        .unwrap();
+
+    backend.pause_next_account_put();
+    let callback_scope = scope.clone();
+    let callback_access_handle = access_handle.clone();
+    let callback_refresh_handle = refresh_handle.clone();
+    let callback = tokio::spawn(async move {
+        callback_service
+            .complete_oauth_callback(
+                &callback_scope,
+                OAuthCallbackInput {
+                    flow_id: flow.id,
+                    opaque_state_hash: state_hash("disconnect-race-state"),
+                    outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
+                        exchange: Box::new(OAuthProviderExchange {
+                            provider: google_provider(),
+                            account_label: account_label(),
+                            authorization_code_hash: code_hash("disconnect-race-code"),
+                            pkce_verifier_hash: pkce_hash("disconnect-race-pkce"),
+                            access_secret: callback_access_handle,
+                            refresh_secret: Some(callback_refresh_handle),
+                            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                            account_id: None,
+                            provider_identity: None,
+                        }),
+                    },
+                },
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        backend.wait_for_account_put(),
+    )
+    .await
+    .expect("callback must reach the account write barrier");
+
+    let cleanup_request = SecretCleanupRequest {
+        scope: scope.clone(),
+        extension_id: ExtensionId::new("slack").unwrap(),
+        provider: Some(google_provider()),
+        action: SecretCleanupAction::Uninstall,
+    };
+    cleanup_service
+        .cleanup_for_lifecycle(cleanup_request.clone())
+        .await
+        .expect("disconnect cleanup must finish before the callback account write");
+
+    backend.fail_next_flow_get();
+    backend.resume_account_put();
+    let callback_error = callback
+        .await
+        .expect("callback task must finish")
+        .expect_err("canceled flow must reject callback completion");
+    assert_eq!(callback_error, AuthProductError::BackendUnavailable);
+
+    let account_id = CredentialAccountId::from_uuid(flow.id.as_uuid());
+    let account = cleanup_service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            account_id,
+        ))
+        .await
+        .unwrap()
+        .expect("the failed callback account remains as a durable tombstone");
+    assert_eq!(account.status, CredentialAccountStatus::Revoked);
+    assert_eq!(account.access_secret, Some(access_handle.clone()));
+    assert!(account.refresh_secret.is_none());
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &access_handle)
+            .await
+            .unwrap()
+            .is_some(),
+        "failed deletion must leave the handle retryable on the revoked account"
+    );
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &refresh_handle)
+            .await
+            .unwrap()
+            .is_none(),
+        "successful refresh-token deletion must be persisted"
+    );
+
+    let selection_error = cleanup_service
+        .select_unique_configured_account(CredentialAccountSelectionRequest::new(
+            scope.clone(),
+            google_provider(),
+        ))
+        .await
+        .expect_err("failed callback account must never be selectable");
+    assert_eq!(selection_error, AuthProductError::CredentialMissing);
+
+    cleanup_service
+        .cleanup_for_lifecycle(cleanup_request)
+        .await
+        .expect("retry must finish purging the revoked callback account");
+    let retried = cleanup_service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            account_id,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retried.access_secret.is_none());
+    assert!(retried.refresh_secret.is_none());
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &access_handle)
+            .await
+            .unwrap()
+            .is_none(),
+        "lifecycle retry must remove the retained failed-deletion secret"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_disconnect_cleans_account_when_callback_completes_before_flow_cancel() {
+    use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService as _};
+
+    let (filesystem, backend) = paused_account_put_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let callback_service = Arc::new(FilesystemAuthProductServices::new(
+        Arc::clone(&filesystem),
+        Arc::clone(&secret_store),
+    ));
+    let cleanup_service = Arc::new(FilesystemAuthProductServices::new(filesystem, secret_store));
+
+    let flow = callback_service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("callback-wins-state")),
+            pkce_verifier_hash: Some(pkce_hash("callback-wins-pkce")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    callback_service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("callback-wins-state"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("callback-wins-pkce"),
+            },
+        )
+        .await
+        .unwrap();
+
+    backend.pause_next_flow_list();
+    let cleanup_scope = scope.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_service
+            .cleanup_for_lifecycle(SecretCleanupRequest {
+                scope: cleanup_scope,
+                extension_id: ExtensionId::new("slack").unwrap(),
+                provider: Some(google_provider()),
+                action: SecretCleanupAction::Uninstall,
+            })
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        backend.wait_for_flow_list(),
+    )
+    .await
+    .expect("disconnect must reach the flow scan barrier");
+
+    let completed = callback_service
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("callback-wins-state"),
+                outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("callback-wins-code"),
+                        pkce_verifier_hash: pkce_hash("callback-wins-pkce"),
+                        access_secret: SecretHandle::new("callback-wins-access").unwrap(),
+                        refresh_secret: Some(SecretHandle::new("callback-wins-refresh").unwrap()),
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("callback wins the flow terminal-state race");
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+
+    backend.resume_flow_list();
+    cleanup
+        .await
+        .expect("cleanup task must finish")
+        .expect("disconnect cleanup must succeed");
+
+    let account_id = CredentialAccountId::from_uuid(flow.id.as_uuid());
+    let account = callback_service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            account_id,
+        ))
+        .await
+        .unwrap()
+        .expect("completed callback account remains as a durable tombstone");
+    assert_eq!(account.status, CredentialAccountStatus::Revoked);
+    assert!(account.access_secret.is_none());
+    assert!(account.refresh_secret.is_none());
+}
+
+#[derive(Clone, Copy)]
+enum StaleBoundRollbackFailure {
+    CleanupAccountWrite,
+    RestoreWrite,
+    SecretDelete,
+}
+
+#[tokio::test]
+async fn stale_bound_callback_restores_newer_reconnect_when_cleanup_staging_fails() {
+    assert_stale_bound_callback_restores_newer_reconnect(
+        StaleBoundRollbackFailure::CleanupAccountWrite,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stale_bound_callback_retains_failed_secret_deletion_for_lifecycle_retry() {
+    assert_stale_bound_callback_restores_newer_reconnect(StaleBoundRollbackFailure::SecretDelete)
+        .await;
+}
+
+#[tokio::test]
+async fn stale_bound_callback_retries_transient_restore_failure() {
+    assert_stale_bound_callback_restores_newer_reconnect(StaleBoundRollbackFailure::RestoreWrite)
+        .await;
+}
+
+async fn assert_stale_bound_callback_restores_newer_reconnect(failure: StaleBoundRollbackFailure) {
+    use ironclaw_auth::{
+        CredentialAccountUpdateBinding, SecretCleanupAction, SecretCleanupRequest,
+        SecretCleanupService as _,
+    };
+
+    let (filesystem, backend) = paused_account_put_filesystem();
+    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    concrete_secret_store.set_delete_failure(false);
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let stale_service = Arc::new(FilesystemAuthProductServices::new(
+        Arc::clone(&filesystem),
+        Arc::clone(&secret_store),
+    ));
+    let newer_service = FilesystemAuthProductServices::new(filesystem, secret_store);
+
+    let original_access = SecretHandle::new("bound-race-original").unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            original_access.clone(),
+            SecretMaterial::from("original-token"),
+            None,
+        )
+        .await
+        .unwrap();
+    let account = stale_service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(original_access),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        })
+        .await
+        .unwrap();
+    let binding = CredentialAccountUpdateBinding {
+        account_id: account.id,
+        ownership: CredentialOwnership::UserReusable,
+        owner_extension: None,
+        granted_extensions: vec![],
+    };
+
+    let stale_flow = stale_service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(binding.clone()),
+            opaque_state_hash: Some(state_hash("stale-bound-state")),
+            pkce_verifier_hash: Some(pkce_hash("stale-bound-pkce")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    stale_service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: stale_flow.id,
+                opaque_state_hash: state_hash("stale-bound-state"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("stale-bound-pkce"),
+            },
+        )
+        .await
+        .unwrap();
+
+    let stale_access = SecretHandle::new("bound-race-stale").unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            stale_access.clone(),
+            SecretMaterial::from("stale-token"),
+            None,
+        )
+        .await
+        .unwrap();
+    let stale_flow_id = stale_flow.id;
+    let callback_stale_access = stale_access.clone();
+    backend.pause_next_account_get();
+    let stale_scope = scope.clone();
+    let stale_callback = tokio::spawn(async move {
+        stale_service
+            .complete_oauth_callback(
+                &stale_scope,
+                OAuthCallbackInput {
+                    flow_id: stale_flow_id,
+                    opaque_state_hash: state_hash("stale-bound-state"),
+                    outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
+                        exchange: Box::new(OAuthProviderExchange {
+                            provider: google_provider(),
+                            account_label: account_label(),
+                            authorization_code_hash: code_hash("stale-bound-code"),
+                            pkce_verifier_hash: pkce_hash("stale-bound-pkce"),
+                            access_secret: callback_stale_access,
+                            refresh_secret: None,
+                            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                            account_id: None,
+                            provider_identity: None,
+                        }),
+                    },
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        backend.wait_for_account_get(),
+    )
+    .await
+    .expect("stale callback must pause after reading its flow");
+
+    newer_service
+        .cancel_flow(&scope, stale_flow_id)
+        .await
+        .expect("disconnect cancels the stale flow");
+    let newer_flow = newer_service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(binding),
+            opaque_state_hash: Some(state_hash("newer-bound-state")),
+            pkce_verifier_hash: Some(pkce_hash("newer-bound-pkce")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    newer_service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: newer_flow.id,
+                opaque_state_hash: state_hash("newer-bound-state"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("newer-bound-pkce"),
+            },
+        )
+        .await
+        .unwrap();
+    let newer_access = SecretHandle::new("bound-race-newer").unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            newer_access.clone(),
+            SecretMaterial::from("newer-token"),
+            None,
+        )
+        .await
+        .unwrap();
+    newer_service
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: newer_flow.id,
+                opaque_state_hash: state_hash("newer-bound-state"),
+                outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("newer-bound-code"),
+                        pkce_verifier_hash: pkce_hash("newer-bound-pkce"),
+                        access_secret: newer_access.clone(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("newer reconnect must complete");
+
+    let cleanup_account_id = CredentialAccountId::from_uuid(stale_flow_id.as_uuid());
+    match failure {
+        StaleBoundRollbackFailure::CleanupAccountWrite => {
+            backend.fail_account_put_for_after(cleanup_account_id, 0);
+        }
+        StaleBoundRollbackFailure::RestoreWrite => {
+            // The first matching write stores the stale callback account; the
+            // second is the compensation that restores the newer reconnect.
+            backend.fail_account_put_for_after(account.id, 1);
+        }
+        StaleBoundRollbackFailure::SecretDelete => {
+            concrete_secret_store.set_delete_failure(true);
+        }
+    }
+    backend.resume_account_get();
+    let stale_error = stale_callback
+        .await
+        .expect("stale callback task must finish")
+        .expect_err("canceled stale callback must not complete");
+    assert_eq!(
+        stale_error,
+        match failure {
+            StaleBoundRollbackFailure::RestoreWrite => AuthProductError::Canceled,
+            StaleBoundRollbackFailure::CleanupAccountWrite
+            | StaleBoundRollbackFailure::SecretDelete => AuthProductError::BackendUnavailable,
+        }
+    );
+
+    let stored = newer_service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            account.id,
+        ))
+        .await
+        .unwrap()
+        .expect("newer account must remain durable");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
+    assert_eq!(stored.access_secret, Some(newer_access.clone()));
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &newer_access)
+            .await
+            .unwrap()
+            .is_some(),
+        "stale rollback must not delete the newer reconnect token"
+    );
+    let stale_secret_remains = concrete_secret_store
+        .metadata(&scope.resource, &stale_access)
+        .await
+        .unwrap()
+        .is_some();
+    assert_eq!(
+        stale_secret_remains,
+        !matches!(failure, StaleBoundRollbackFailure::RestoreWrite),
+        "stale token must be deleted unless cleanup itself was injected to fail"
+    );
+
+    let cleanup_account = newer_service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            cleanup_account_id,
+        ))
+        .await
+        .unwrap();
+    match failure {
+        StaleBoundRollbackFailure::CleanupAccountWrite => {
+            assert!(
+                cleanup_account.is_none(),
+                "injected staging failure must not create a cleanup account"
+            );
+        }
+        StaleBoundRollbackFailure::RestoreWrite => {
+            let cleanup_account =
+                cleanup_account.expect("successful retry must retain an empty tombstone");
+            assert_eq!(cleanup_account.status, CredentialAccountStatus::Revoked);
+            assert!(cleanup_account.access_secret.is_none());
+        }
+        StaleBoundRollbackFailure::SecretDelete => {
+            let cleanup_account =
+                cleanup_account.expect("failed deletion must retain a durable cleanup account");
+            assert_eq!(cleanup_account.status, CredentialAccountStatus::Revoked);
+            assert_eq!(cleanup_account.access_secret, Some(stale_access.clone()));
+
+            newer_service
+                .cleanup_for_lifecycle(SecretCleanupRequest {
+                    scope: scope.clone(),
+                    extension_id: ExtensionId::new("slack").unwrap(),
+                    provider: Some(google_provider()),
+                    action: SecretCleanupAction::Uninstall,
+                })
+                .await
+                .expect("lifecycle retry must purge retained stale callback secrets");
+            let retried_cleanup_account = newer_service
+                .get_account(CredentialAccountLookupRequest::new(
+                    scope.clone(),
+                    cleanup_account_id,
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(retried_cleanup_account.access_secret.is_none());
+            assert!(
+                concrete_secret_store
+                    .metadata(&scope.resource, &stale_access)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "lifecycle retry must delete the stale callback token"
+            );
+        }
+    }
 }
 
 #[tokio::test]

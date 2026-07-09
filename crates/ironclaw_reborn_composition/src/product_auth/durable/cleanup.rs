@@ -19,6 +19,46 @@ where
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, AuthProductError> {
         let mut report = SecretCleanupReport::default();
+        // Cancel first, then scan accounts. Together with callback-side CAS
+        // compensation this closes both interleavings: a callback that wins
+        // before cancellation is found by the account scan, while a callback
+        // that loses after cancellation rolls back its own late account write.
+        if matches!(request.action, SecretCleanupAction::Uninstall)
+            && let Some(provider) = request.provider.as_ref()
+        {
+            for flow in self
+                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
+                .await?
+            {
+                let canceled = match flow.status {
+                    AuthFlowStatus::Canceled => flow,
+                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
+                        Ok(canceled) => canceled,
+                        Err(AuthProductError::Canceled) => flow,
+                        Err(AuthProductError::FlowAlreadyTerminal) => continue,
+                        Err(error) => return Err(error),
+                    },
+                };
+                if canceled.continuation_emitted_at.is_none()
+                    && matches!(
+                        canceled.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: canceled.id,
+                            scope: canceled.scope.clone(),
+                            continuation: canceled.continuation.clone(),
+                            provider: canceled.provider.clone(),
+                            credential_account_id: canceled.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
+                }
+            }
+        }
+
         // Credential-owner granularity, not full scope equality: lifecycle and
         // disconnect callers mint a fresh `invocation_id` (and often arrive
         // from a different thread), so an exact-scope lookup could never find
@@ -124,51 +164,6 @@ where
                 }
                 if delete_failed {
                     return Err(AuthProductError::BackendUnavailable);
-                }
-            }
-        }
-
-        // Cancel the owner's pending (non-terminal) auth-flows for the disconnected
-        // provider so a lifecycle uninstall/disconnect does not leave a stale flow
-        // that shadows the next connect (the "waiting for authorization" gate that
-        // never clears). This runs for whatever provider a disconnect/uninstall
-        // targets — it is not channel- or Slack-specific. Flows are owner-scoped on
-        // disk (not thread-scoped), so this reaches thread-less setup flows and
-        // thread-scoped turn-gate flows alike. Idempotent: a flow that terminalizes
-        // between the read and the cancel (a concurrent OAuth callback) is already
-        // in the desired end state.
-        if matches!(request.action, SecretCleanupAction::Uninstall)
-            && let Some(provider) = request.provider.as_ref()
-        {
-            for flow in self
-                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
-                .await?
-            {
-                let canceled = match flow.status {
-                    AuthFlowStatus::Canceled => flow,
-                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
-                        Ok(canceled) => canceled,
-                        Err(AuthProductError::Canceled) => flow,
-                        Err(AuthProductError::FlowAlreadyTerminal) => continue,
-                        Err(error) => return Err(error),
-                    },
-                };
-                if canceled.continuation_emitted_at.is_none()
-                    && matches!(
-                        canceled.continuation,
-                        AuthContinuationRef::TurnGateResume { .. }
-                    )
-                {
-                    report
-                        .canceled_turn_gate_continuations
-                        .push(AuthContinuationEvent {
-                            flow_id: canceled.id,
-                            scope: canceled.scope.clone(),
-                            continuation: canceled.continuation.clone(),
-                            provider: canceled.provider.clone(),
-                            credential_account_id: canceled.credential_account_id,
-                            emitted_at: Utc::now(),
-                        });
                 }
             }
         }
