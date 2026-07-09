@@ -208,6 +208,7 @@ async fn filesystem_first_context_window_uses_one_shot_accepted_message_cache() 
         .await
         .unwrap();
     let query_count_after_submit = backend.query_count();
+    let get_count_after_submit = backend.get_count();
 
     let first_window = service
         .load_context_window(LoadContextWindowRequest {
@@ -228,6 +229,11 @@ async fn filesystem_first_context_window_uses_one_shot_accepted_message_cache() 
         query_count_after_submit,
         "the immediate first-turn context load should consume the submitted message cache"
     );
+    assert_eq!(
+        backend.get_count(),
+        get_count_after_submit,
+        "the immediate first-turn context load should not re-read the thread record"
+    );
 
     let second_window = service
         .load_context_window(LoadContextWindowRequest {
@@ -242,6 +248,10 @@ async fn filesystem_first_context_window_uses_one_shot_accepted_message_cache() 
     assert!(
         backend.query_count() > query_count_after_submit,
         "the submitted-message context cache must be one-shot, not a transcript source of truth"
+    );
+    assert!(
+        backend.get_count() > get_count_after_submit,
+        "the submitted-message context cache must be one-shot, not a thread existence shortcut"
     );
 }
 
@@ -2925,6 +2935,7 @@ impl LookupIndexReadFailureBackend {
 struct QueryCountingBackend {
     inner: InMemoryBackend,
     query_count: AtomicUsize,
+    get_count: AtomicUsize,
 }
 
 impl QueryCountingBackend {
@@ -2932,11 +2943,16 @@ impl QueryCountingBackend {
         Self {
             inner: InMemoryBackend::new(),
             query_count: AtomicUsize::new(0),
+            get_count: AtomicUsize::new(0),
         }
     }
 
     fn query_count(&self) -> usize {
         self.query_count.load(Ordering::SeqCst)
+    }
+
+    fn get_count(&self) -> usize {
+        self.get_count.load(Ordering::SeqCst)
     }
 }
 
@@ -3158,6 +3174,7 @@ impl RootFilesystem for QueryCountingBackend {
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.get_count.fetch_add(1, Ordering::SeqCst);
         self.inner.get(path).await
     }
 

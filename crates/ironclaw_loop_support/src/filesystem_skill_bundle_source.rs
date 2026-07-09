@@ -190,6 +190,24 @@ where
         &self.roots
     }
 
+    /// Preloads stable system-root descriptors so the first prompt does not
+    /// pay the directory/manifest scan cost.
+    pub async fn warm_system_root_descriptor_cache(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<(), SkillBundleSourceError> {
+        let mut descriptors = Vec::new();
+        for root in self
+            .roots
+            .iter()
+            .filter(|root| root.source_kind() == SkillSourceKind::System)
+        {
+            self.list_root_with_cache(scope, root, &mut descriptors)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn list_root_with_cache(
         &self,
         scope: &ResourceScope,
@@ -730,6 +748,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["system:system-alpha"],
             "system skills are process-stable after first discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_warms_system_root_descriptor_cache() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/system/skills/system-alpha/SKILL.md",
+            skill_md("system-alpha", "System alpha"),
+        )
+        .await;
+
+        let context = run_context().await;
+        source
+            .warm_system_root_descriptor_cache(&resource_scope_for_run(&context))
+            .await
+            .unwrap();
+
+        write_root(
+            &root,
+            "/system/skills/system-beta/SKILL.md",
+            skill_md("system-beta", "System beta"),
+        )
+        .await;
+
+        let descriptors = source.list_skill_bundles(&context).await.unwrap();
+        assert_eq!(
+            descriptors
+                .iter()
+                .map(|descriptor| descriptor.id().to_string())
+                .collect::<Vec<_>>(),
+            vec!["system:system-alpha"],
+            "system warmup populates the same process-stable descriptor cache as first discovery"
         );
     }
 

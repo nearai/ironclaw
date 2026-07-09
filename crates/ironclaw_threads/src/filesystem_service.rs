@@ -2284,11 +2284,6 @@ where
             &request.thread_id,
             request.max_messages,
         ) {
-            self.read_thread_versioned(&request.scope, &request.thread_id)
-                .await?
-                .ok_or_else(|| SessionThreadError::UnknownThread {
-                    thread_id: request.thread_id.clone(),
-                })?;
             return Ok(context);
         }
 

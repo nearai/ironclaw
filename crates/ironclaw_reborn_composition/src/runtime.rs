@@ -3204,6 +3204,22 @@ pub async fn build_reborn_runtime(
                     &validated_identity.tenant_id,
                     regex_skill_activation_enabled,
                 )?;
+                let skill_warm_scope = ResourceScope {
+                    tenant_id: validated_identity.tenant_id.clone(),
+                    user_id: actor_user_id.clone(),
+                    agent_id: Some(validated_identity.agent_id.clone()),
+                    project_id: default_project_id.clone(),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                };
+                local_dev_skills
+                    .bundle_source
+                    .warm_system_root_descriptor_cache(&skill_warm_scope)
+                    .await
+                    .map_err(|error| RebornRuntimeError::InvalidArgument {
+                        reason: format!("first-party skills warmup: {error}"),
+                    })?;
                 (
                     Some(local_dev_skills.source),
                     Some(local_dev_skills.activation_source),
@@ -4129,6 +4145,7 @@ async fn append_trusted_laptop_access_audit(
 }
 
 struct LocalDevSkillContextSource {
+    bundle_source: Arc<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
     source: Arc<dyn HostSkillContextSource>,
     activation_source: Arc<LocalDevSelectableSkillContextSource>,
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
@@ -4216,10 +4233,12 @@ fn local_dev_filesystem_skill_context_source(
         Arc::clone(&local_runtime.workspace_filesystem),
         Arc::clone(&local_runtime.skill_auto_activate_learned),
     );
+    let bundle_source = extension.bundle_source();
     Ok(LocalDevSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
         activation_source: selectable_skills.activation_source(),
         execution_adapter: selectable_skills.execution_adapter(),
+        bundle_source,
     })
 }
 
