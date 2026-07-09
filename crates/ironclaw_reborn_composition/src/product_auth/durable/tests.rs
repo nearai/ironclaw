@@ -646,6 +646,100 @@ async fn filesystem_manual_token_cancel_marks_flow_canceled_and_is_idempotent() 
     assert!(unknown.is_none());
 }
 
+async fn create_pending_setup_flow(
+    service: &FilesystemAuthProductServices<InMemoryBackend>,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) -> AuthFlowStatus {
+    let expires_at = Utc::now() + Duration::minutes(10);
+    service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new(
+                    "https://example.com/oauth/authorize?state=x",
+                )
+                .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash(provider.as_str())),
+            pkce_verifier_hash: Some(pkce_hash(provider.as_str())),
+            expires_at,
+        })
+        .await
+        .unwrap()
+        .status
+}
+
+#[tokio::test]
+async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provider_only() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    // Two pending (non-terminal) setup flows for DIFFERENT providers, both
+    // thread-less (`thread_id: None`) exactly as an extension Configure card
+    // creates. The cleanup mechanism is provider-agnostic — not Slack-specific —
+    // so we prove it: disconnecting one provider cancels only its flow and leaves
+    // the other untouched.
+    let disconnected = AuthProviderId::new("google").unwrap();
+    let untouched = AuthProviderId::new("github").unwrap();
+    assert_eq!(
+        create_pending_setup_flow(&service, &scope, &disconnected).await,
+        AuthFlowStatus::AwaitingUser
+    );
+    assert_eq!(
+        create_pending_setup_flow(&service, &scope, &untouched).await,
+        AuthFlowStatus::AwaitingUser
+    );
+
+    // The exact lifecycle cleanup an extension disconnect/remove issues for one
+    // provider. Both the WebUI facade remove and the model-visible
+    // `extension_remove` tool funnel through this same call
+    // (`RebornProductAuthServices` -> `SecretCleanupService::cleanup_for_lifecycle`),
+    // so covering it here covers both paths identically.
+    ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(
+        &service,
+        ironclaw_auth::SecretCleanupRequest {
+            scope: scope.clone(),
+            extension_id: ExtensionId::new("example_ext").unwrap(),
+            provider: Some(disconnected.clone()),
+            action: ironclaw_auth::SecretCleanupAction::Uninstall,
+        },
+    )
+    .await
+    .unwrap();
+
+    // LLM data is never deleted: flow records are retained (filterable by their
+    // terminal status), not removed.
+    let flows = service.flows_for_scope(&scope).await.unwrap();
+    let status_of = |provider: &AuthProviderId| {
+        flows
+            .iter()
+            .find(|(flow, _)| &flow.provider == provider)
+            .map(|(flow, _)| flow.status)
+    };
+    // The disconnected provider's pending flow is canceled...
+    assert_eq!(
+        status_of(&disconnected),
+        Some(AuthFlowStatus::Canceled),
+        "cleanup must cancel the disconnected provider's pending flow"
+    );
+    // ...and a DIFFERENT provider's flow is untouched (correctly provider-scoped,
+    // not a blanket cancel).
+    assert_eq!(
+        status_of(&untouched),
+        Some(AuthFlowStatus::AwaitingUser),
+        "cleanup must not touch other providers' flows"
+    );
+}
+
 #[tokio::test]
 async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     let filesystem = test_filesystem();

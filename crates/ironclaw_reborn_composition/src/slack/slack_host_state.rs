@@ -927,6 +927,20 @@ where
             .map_err(map_binding_fs_error)?
         {
             if existing.user_id != binding.user_id.as_str() {
+                // Surfaces the duplicate for ops — the two shapes both land here and
+                // were previously indistinguishable because we discarded the ids:
+                // (a) the OAuth popup authorized a Slack account that is NOT the
+                //     connecting user's own (it's already owned by someone else), or
+                // (b) a stale/orphaned binding whose owner no longer exists.
+                // The authorized `provider_user_id` is what tells them apart.
+                tracing::warn!(
+                    provider = %binding.provider.as_str(),
+                    provider_user_id = %binding.provider_user_id.as_str(),
+                    existing_user_id = %existing.user_id,
+                    connecting_user_id = %binding.user_id.as_str(),
+                    "rejecting Slack identity bind: provider identity already bound to a different \
+                     reborn user (connecting user is not the current owner)"
+                );
                 return Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound);
             }
             let updated = StoredSlackUserIdentity::from_binding(&binding, existing.created_at);

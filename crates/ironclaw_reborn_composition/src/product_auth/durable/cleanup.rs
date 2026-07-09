@@ -4,8 +4,9 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthProductError, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    AuthFlowManager, AuthProductError, CredentialAccountOwnerScope, CredentialAccountStatus,
+    CredentialOwnership, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
+    SecretCleanupService,
 };
 
 #[async_trait]
@@ -88,6 +89,31 @@ where
                 let _ = self.secret_store.delete(&current.scope.resource, h).await;
             }
         }
+
+        // Cancel the owner's pending (non-terminal) auth-flows for the disconnected
+        // provider so a lifecycle uninstall/disconnect does not leave a stale flow
+        // that shadows the next connect (the "waiting for authorization" gate that
+        // never clears). This runs for whatever provider a disconnect/uninstall
+        // targets — it is not channel- or Slack-specific. Flows are owner-scoped on
+        // disk (not thread-scoped), so this reaches thread-less setup flows and
+        // thread-scoped turn-gate flows alike. Idempotent: a flow that terminalizes
+        // between the read and the cancel (a concurrent OAuth callback) is already
+        // in the desired end state.
+        if matches!(request.action, SecretCleanupAction::Uninstall)
+            && let Some(provider) = request.provider.as_ref()
+        {
+            for flow in self
+                .non_terminal_flows_for_owner_provider(&request.scope.resource, provider)
+                .await?
+            {
+                match self.cancel_flow(&flow.scope, flow.id).await {
+                    Ok(_)
+                    | Err(AuthProductError::Canceled | AuthProductError::FlowAlreadyTerminal) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
         Ok(report)
     }
 }
