@@ -379,6 +379,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
             "checkpoint_created",
@@ -1035,6 +1036,7 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
         ]
@@ -2212,6 +2214,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
         ]
@@ -3024,6 +3027,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
             "checkpoint_created",
@@ -8883,33 +8887,47 @@ fn assert_string_omits(label: &str, wire: &str, forbidden: &[&str]) {
     }
 }
 
+const FORBIDDEN_SENSITIVE_PUBLIC_PAYLOADS: &[&str] = &[
+    "RAW_CHECKPOINT_PAYLOAD",
+    "RAW_PROMPT_TEXT_SENTINEL",
+    "RAW_PROVIDER_ERROR",
+    "invalid api key",
+    "sk-secret",
+    "sk-prompt-secret",
+    "sk-provider-secret",
+    "/host/path",
+    "tool_input",
+];
+
 fn assert_serialized_or_debug_hides_raw_payloads(wire: &str) {
-    for forbidden in [
-        "RAW_CHECKPOINT_PAYLOAD",
-        "RAW_PROMPT_TEXT_SENTINEL",
-        "RAW_PROVIDER_ERROR",
-        "invalid api key",
-        "sk-secret",
-        "sk-prompt-secret",
-        "sk-provider-secret",
-        "/host/path",
-        "tool_input",
-        "model says hi",
-    ] {
-        assert!(
-            !wire.contains(forbidden),
-            "public output leaked {forbidden}"
-        );
-    }
+    assert_string_omits("public output", wire, FORBIDDEN_SENSITIVE_PUBLIC_PAYLOADS);
+    assert_string_omits("public output", wire, &["model says hi"]);
 }
 
 fn assert_public_milestones_hide_raw_payloads(milestones: &[LoopHostMilestone]) {
-    // Milestones are public progress metadata: they may carry durable refs and
-    // safe summaries, never raw model text, checkpoint bytes, tool input,
-    // secrets, or host paths. Drivers must rehydrate content through scoped
-    // stores instead of learning it from milestone JSON.
-    let wire = serde_json::to_string(milestones).unwrap();
+    // Milestones are public progress metadata: text deltas are intentionally
+    // browser-visible, but all other milestone payloads must stay ref/summary
+    // shaped instead of leaking private model text or scoped host data.
+    let non_text_milestones = milestones
+        .iter()
+        .filter(|milestone| {
+            !matches!(
+                &milestone.kind,
+                LoopHostMilestoneKind::ModelTextDelta { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let wire = serde_json::to_string(&non_text_milestones).unwrap();
     assert_serialized_or_debug_hides_raw_payloads(&wire);
+    for milestone in milestones {
+        if let LoopHostMilestoneKind::ModelTextDelta { safe_text } = &milestone.kind {
+            assert_string_omits(
+                "public model text delta",
+                safe_text,
+                FORBIDDEN_SENSITIVE_PUBLIC_PAYLOADS,
+            );
+        }
+    }
 }
 
 struct FailingLoopCheckpointStore;
