@@ -349,7 +349,7 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
         await page.locator(SEL_V2["automation_run_logs"]).first.click()
         await asyncio.wait_for(logs_requested.wait(), timeout=10)
 
-        assert f"/v2/logs" in page.url
+        assert "/v2/logs" in page.url
         first_query = requested_log_queries[0]
         assert first_query.get("thread_id") == [thread_id], first_query
         assert first_query.get("run_id") == [run_id], first_query
