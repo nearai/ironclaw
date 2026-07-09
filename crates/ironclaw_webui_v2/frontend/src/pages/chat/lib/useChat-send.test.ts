@@ -29,6 +29,8 @@ import {
 import {
   CHAT_MESSAGE_ROLES,
   createErrorChatMessage,
+  createRequestFailureChatMessage,
+  isRequestFailureForMessage,
   requestFailureIdForMessage,
 } from "./message-types";
 import {
@@ -101,7 +103,9 @@ function runUseChatSource(context) {
     CHAT_MESSAGE_ROLES,
     connectionEventMatchesOnboarding,
     createErrorChatMessage,
+    createRequestFailureChatMessage,
     forgetChannelConnectionWaiter,
+    isRequestFailureForMessage,
     normalizeConnectionChannel,
     rememberChannelConnectionWaiter,
     requestFailureIdForMessage,
@@ -1075,6 +1079,7 @@ test("useChat.send: request failure appends inline error in the active thread", 
     "inline:AI provider account is out of credits",
   );
   assert.equal(renderedMessages[1].role, "error");
+  assert.equal(renderedMessages[1].requestForMessageId, renderedMessages[0].id);
   assert.equal(
     renderedMessages[1].content,
     "inline:AI provider account is out of credits",
@@ -1262,9 +1267,10 @@ test("useChat.retryMessage: retry removes the prior request error bubble", async
     status: "error",
   };
   const failedRequestError = {
-    id: "err-request-failed-1",
+    id: "err-request-legacy-or-renamed-id",
     role: "error",
     content: "Network unavailable",
+    requestForMessageId: "failed-1",
   };
   let renderedMessages = [failedMessage, failedRequestError];
   let sendCalls = 0;

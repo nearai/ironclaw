@@ -16,11 +16,29 @@ export const REQUEST_FAILURE_ID_PREFIX = "err-request-";
 export const STREAM_FAILURE_ID_PREFIX = "err-stream-";
 export const UNKNOWN_RUN_FAILURE_ID = `${RUN_FAILURE_ID_PREFIX}unknown`;
 
-export type ChatMessage = {
+export type ChatAttachment = {
   id?: string;
-  role?: ChatMessageRole;
-  content?: unknown;
+  filename?: string;
+  mime_type?: string;
+  kind?: string;
+  size_label?: string;
+  fetch_url?: string;
+  preview_url?: string | null;
+  [key: string]: unknown;
+};
+
+export type ChatMessage = {
+  id: string;
+  role: ChatMessageRole;
+  content?: string;
   timestamp?: string;
+  images?: string[];
+  attachments?: ChatAttachment[];
+  generatedImages?: Array<{ data_url?: string | null; path?: string | null }>;
+  isOptimistic?: boolean;
+  status?: string;
+  error?: string;
+  toolCalls?: unknown[];
   [key: string]: unknown;
 };
 
@@ -43,6 +61,10 @@ export type ErrorChatMessageInput = {
   failureCategory?: string | null;
   failureSummary?: string | null;
   [key: string]: unknown;
+};
+
+export type RequestFailureChatMessage = ErrorChatMessage & {
+  requestForMessageId: string;
 };
 
 export function createErrorChatMessage(
@@ -70,6 +92,37 @@ export function safeMessageIdToken(value: unknown): string {
 
 export function requestFailureIdForMessage(messageId: unknown): string {
   return `${REQUEST_FAILURE_ID_PREFIX}${safeMessageIdToken(messageId)}`;
+}
+
+export function createRequestFailureChatMessage({
+  messageId,
+  content,
+  timestamp,
+}: {
+  messageId: unknown;
+  content: string;
+  timestamp: string;
+}): RequestFailureChatMessage {
+  const requestForMessageId = String(messageId || "unknown");
+  return {
+    ...createErrorChatMessage({
+      id: requestFailureIdForMessage(messageId),
+      content,
+      timestamp,
+      requestForMessageId,
+    }),
+    requestForMessageId,
+  };
+}
+
+export function isRequestFailureForMessage(
+  message: unknown,
+  messageId: unknown,
+): boolean {
+  if (!isErrorChatMessage(message)) return false;
+  const requestForMessageId = String(messageId || "unknown");
+  if (message.requestForMessageId === requestForMessageId) return true;
+  return message.id === requestFailureIdForMessage(messageId);
 }
 
 export function isRunFailureMessageId(value: unknown): boolean {

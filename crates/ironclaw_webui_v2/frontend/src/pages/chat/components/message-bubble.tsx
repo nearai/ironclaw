@@ -7,7 +7,11 @@ import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
-import { CHAT_MESSAGE_ROLES } from "../lib/message-types";
+import {
+  CHAT_MESSAGE_ROLES,
+  type ChatAttachment,
+  type ChatMessage,
+} from "../lib/message-types";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system stays as a centered notice, and error renders as an inline
@@ -23,7 +27,13 @@ const ROLE_STYLES = {
     "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
 };
 
-function formatTimestamp(value) {
+type MessageBubbleProps = {
+  message: ChatMessage;
+  onRetry?: (message: ChatMessage) => void;
+  threadId?: string | null;
+};
+
+function formatTimestamp(value?: string) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -33,7 +43,7 @@ function formatTimestamp(value) {
 /* Collapsible provider-reasoning summary. Collapsed by default so the
    thread stays clean; expands to the full reasoning markdown. Data comes
    from the `thinking` projection item (PR #4230). */
-function ThinkingDisclosure({ content }) {
+function ThinkingDisclosure({ content }: { content?: string }) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   if (!content) return null;
@@ -62,13 +72,14 @@ function ThinkingDisclosure({ content }) {
   );
 }
 
-function MessageBubbleImpl({ message, onRetry, threadId }) {
+function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === CHAT_MESSAGE_ROLES.USER;
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
-  const [previewAttachment, setPreviewAttachment] = React.useState(null);
+  const [previewAttachment, setPreviewAttachment] =
+    React.useState<ChatAttachment | null>(null);
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -140,6 +151,9 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
     isUser || isError ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
+  const roleStyle =
+    ROLE_STYLES[role as keyof typeof ROLE_STYLES] ||
+    ROLE_STYLES[CHAT_MESSAGE_ROLES.ASSISTANT];
 
   return (
     <div
@@ -151,7 +165,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
           className={[
             "text-base leading-7",
             contentWidthClass,
-            ROLE_STYLES[role] || ROLE_STYLES.assistant,
+            roleStyle,
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}
         >
@@ -225,7 +239,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             {showRetryAction && (
               <button
                 type="button"
-                onClick={() => onRetry(message)}
+                onClick={() => onRetry?.(message)}
                 title={t("chat.retryMessage")}
                 aria-label={t("chat.retryMessage")}
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 hover:text-red-200"

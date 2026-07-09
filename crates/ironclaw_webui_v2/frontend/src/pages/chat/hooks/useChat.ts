@@ -37,6 +37,8 @@ import {
 import {
   CHAT_MESSAGE_ROLES,
   createErrorChatMessage,
+  createRequestFailureChatMessage,
+  isRequestFailureForMessage,
   requestFailureIdForMessage,
 } from "../lib/message-types";
 import {
@@ -1028,10 +1030,11 @@ export function useChat(threadId) {
         : [];
       if (!content && attachments.length === 0) return;
 
-      const failedRequestErrorId = requestFailureIdForMessage(message.id);
       const removeFailed = (prev) =>
         prev.filter(
-          (item) => item.id !== message.id && item.id !== failedRequestErrorId,
+          (item) =>
+            item.id !== message.id &&
+            !isRequestFailureForMessage(item, message.id),
         );
       const restoreFailedIfNoReplacement = (prev) => {
         const hasReplacement = prev.some(
@@ -1122,8 +1125,8 @@ function requestFailureMessageForError(messageId, error) {
 }
 
 function requestFailureMessageForContent(messageId, content) {
-  return createErrorChatMessage({
-    id: requestFailureIdForMessage(messageId),
+  return createRequestFailureChatMessage({
+    messageId,
     content,
     timestamp: new Date().toISOString(),
   });
