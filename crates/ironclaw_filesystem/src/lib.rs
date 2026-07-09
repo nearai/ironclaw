@@ -25,6 +25,8 @@ mod in_memory;
 mod index;
 #[cfg(feature = "libsql")]
 mod libsql;
+#[cfg(feature = "libsql")]
+mod libsql_pool;
 mod local;
 #[cfg(feature = "postgres")]
 mod postgres;

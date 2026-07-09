@@ -2,8 +2,8 @@
 //!
 //! Ships the browser-side SPA that drives the JSON route surface in this crate.
 //! The SPA targets only the `/api/webchat/v2/*` endpoints — no v1 gateway
-//! routes, no engine APIs. See `crates/ironclaw_webui_v2/static/` for the bundle
-//! and the issue #3886 plan for the hard non-goals.
+//! routes, no engine APIs. See `crates/ironclaw_webui_v2/frontend/` for the
+//! TypeScript/Vite project and the issue #3886 plan for the hard non-goals.
 //!
 //! Folded in from the former `ironclaw_webui_v2_static` crate: the SPA bytes and
 //! the JSON route surface now ship from one crate behind the single

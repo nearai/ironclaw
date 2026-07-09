@@ -411,12 +411,6 @@ pub enum LifecycleExtensionCredentialSetup {
     OAuth {
         scopes: Vec<String>,
     },
-    /// Twin of [`RuntimeCredentialAccountSetup::ChannelPairing`]: a per-user
-    /// inbound-channel connection satisfied by an out-of-band pairing binding,
-    /// not a stored secret. `channel` is the connectable channel id.
-    ChannelPairing {
-        channel: String,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

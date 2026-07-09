@@ -422,6 +422,11 @@ pub struct RebornRuntimeInput {
     /// run, so a downstream caller can reconstruct the full step-by-step
     /// trajectory (the sealed runtime otherwise exposes only the final reply).
     pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    /// Mints the one-time API bearer returned when an admin creates a user. The
+    /// serve layer supplies a session-store-backed minter; when unset, the admin
+    /// user-management surface stays unwired (create reports unavailable).
+    #[cfg(feature = "webui-v2-beta")]
+    pub admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -459,6 +464,8 @@ impl RebornRuntimeInput {
             budget_defaults: None,
             budget_event_observer: None,
             trajectory_observer: None,
+            #[cfg(feature = "webui-v2-beta")]
+            admin_api_token_minter: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -487,6 +494,18 @@ impl RebornRuntimeInput {
         observer: Arc<dyn crate::BudgetEventObserver>,
     ) -> Self {
         self.budget_event_observer = Some(observer);
+        self
+    }
+
+    /// Install the admin API-token minter used when an admin creates a user.
+    /// The serve layer builds a session-store-backed minter; without it the
+    /// admin user-management surface stays unwired.
+    #[cfg(feature = "webui-v2-beta")]
+    pub fn with_admin_api_token_minter(
+        mut self,
+        minter: Arc<dyn crate::AdminApiTokenMinter>,
+    ) -> Self {
+        self.admin_api_token_minter = Some(minter);
         self
     }
 
