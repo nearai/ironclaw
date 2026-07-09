@@ -279,8 +279,12 @@ mod tests {
         let message_bubble = source_text("pages/chat/components/message-bubble.tsx");
         assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
         assert!(message_bubble.contains("const bubbleWidthClass = isUser"));
-        assert!(message_bubble.contains("const isNotice = role === \"system\";"));
-        assert!(message_bubble.contains("const isError = role === \"error\";"));
+        assert!(message_bubble.contains(
+            "const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;"
+        ));
+        assert!(message_bubble.contains(
+            "const isError = role === CHAT_MESSAGE_ROLES.ERROR;"
+        ));
         assert!(message_bubble.contains("\"v2-chat-readable-width\""));
         assert!(message_bubble.contains("\"mx-auto v2-chat-readable-width\""));
         assert!(message_bubble.contains("\"mr-auto v2-chat-readable-width\""));
