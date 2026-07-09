@@ -122,9 +122,12 @@ enum TracesSubcommand {
         min_submission_score: f32,
     },
 
-    /// Disable autonomous trace contribution
+    /// Disable autonomous trace contribution. With --user-scope: opt out ONLY
+    /// that user (instance-level enrollment untouched). Without: disable the
+    /// global/instance policy AND the owner scope (full off switch).
     OptOut {
-        /// Runtime/web user scope to disable; defaults to this instance's owner_id
+        /// Runtime/web user scope to disable (scoped-only opt-out); defaults
+        /// to this instance's owner_id AND disables the global policy
         #[arg(long)]
         user_scope: Option<String>,
     },
@@ -548,15 +551,32 @@ fn opt_in(options: OptInOptions) -> anyhow::Result<()> {
 }
 
 fn opt_out(user_scope: Option<&str>) -> anyhow::Result<()> {
+    let explicit_scope = user_scope.is_some();
     let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    if explicit_scope {
+        // Per-user opt-out: write ONLY the scoped policy. The root policy is
+        // the instance-wide enrollment (inherited by every user without a
+        // personal enrollment); flipping it here would disenroll the entire
+        // instance to opt out one user.
+        ironclaw_reborn_traces::contribution::opt_out_user_scope(&runtime_scope)?;
+        println!("Trace contribution disabled for user scope: {runtime_scope}");
+        println!(
+            "The instance-level enrollment (if any) is unchanged; other users keep contributing."
+        );
+        return Ok(());
+    }
+    // No explicit scope: legacy full disable — the global/instance policy AND
+    // the owner's scope. This is the admin-facing "turn it all off" path.
     let mut policy = read_policy()?;
     policy.enabled = false;
     write_policy(&policy)?;
-    let mut scoped_policy = read_trace_policy_for_scope(Some(&runtime_scope))?;
-    scoped_policy.enabled = false;
-    write_trace_policy_for_scope(Some(&runtime_scope), &scoped_policy)?;
+    ironclaw_reborn_traces::contribution::opt_out_user_scope(&runtime_scope)?;
     println!("Trace contribution opt-in disabled. Queued envelopes remain local.");
     println!("Runtime/web trace scope disabled: {runtime_scope}");
+    println!(
+        "NOTE: this also disabled the global/instance-level policy. To opt out a single \
+         user instead, pass --user-scope <tenant-id>/<user-id>."
+    );
     Ok(())
 }
 
@@ -614,8 +634,9 @@ async fn enroll_instance(
          enrollment, attributed via salted per-user pseudonyms."
     );
     println!(
-        "Users can exclude themselves with `ironclaw-reborn traces opt-out`; an explicit \
-         opt-out always wins over instance enrollment."
+        "Opt a single user out with `ironclaw-reborn traces opt-out --user-scope \
+         <tenant-id>/<user-id>`; an explicit opt-out always wins over instance enrollment \
+         (bare `traces opt-out` disables the whole instance enrollment)."
     );
     println!("Verify with `ironclaw-reborn traces status --json` and `traces ingest-health`.");
     Ok(())

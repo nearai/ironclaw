@@ -4263,6 +4263,24 @@ fn resolve_trace_credentials_at(
     Ok(None)
 }
 
+/// Explicit per-user Trace Commons opt-out: write (or update) the scope's
+/// policy with `enabled = false`, which the resolver treats as an explicit
+/// opt-out that blocks the instance fallback for this user — WITHOUT touching
+/// the instance-level (scope-`None`) policy. This is the primitive a per-user
+/// opt-out surface must use: flipping the root policy would disenroll the
+/// entire instance.
+pub fn opt_out_user_scope_at(base: &std::path::Path, scope: &str) -> anyhow::Result<()> {
+    let mut policy =
+        read_trace_policy_for_scope_if_present_at(base, Some(scope))?.unwrap_or_default();
+    policy.enabled = false;
+    write_trace_policy_for_scope_at(base, Some(scope), &policy)
+}
+
+/// [`opt_out_user_scope_at`] against the process base dir.
+pub fn opt_out_user_scope(scope: &str) -> anyhow::Result<()> {
+    opt_out_user_scope_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
+}
+
 /// Pick the user's own (personal-invite) enrollment when present and enabled,
 /// else fall back to the admin-provisioned instance enrollment (scope `None`)
 /// with a per-user pseudonymous subject. Returns `None` when neither is
@@ -16057,6 +16075,47 @@ mod tests {
             resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn opt_out_user_scope_blocks_only_that_user_never_the_instance() {
+        // Regression (PR #5858 review): the CLI's opt-out used to flip the
+        // ROOT policy too — which, under instance enrollment, disenrolled the
+        // ENTIRE instance when one user opted out. The per-user opt-out
+        // primitive must write only the user's scoped policy.
+        let dir = tempfile::tempdir().unwrap();
+        write_policy_at(
+            dir.path(),
+            None,
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+
+        let alice = trace_scope_key("tenant-a", "alice");
+        opt_out_user_scope_at(dir.path(), &alice).expect("opt-out writes");
+
+        // The instance policy is untouched on disk.
+        let instance = read_trace_policy_for_scope_at(dir.path(), None).expect("instance reads");
+        assert!(
+            instance.enabled,
+            "per-user opt-out must never disable the instance enrollment"
+        );
+        // Alice is out on every resolution surface…
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+                .unwrap()
+                .is_none(),
+            "opted-out user must not resolve instance credentials"
+        );
+        // …while other users still inherit the instance enrollment.
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "bob")
+                .unwrap()
+                .is_some(),
+            "other users must keep inheriting the instance enrollment"
         );
     }
 
