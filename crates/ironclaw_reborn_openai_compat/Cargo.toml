@@ -10,13 +10,15 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "products"
+
 [features]
 default = []
 # Compile the fail-closed axum route fragment. Host composition still owns
 # listener binding, auth middleware, CORS, body/rate limits, and mounting.
 openai-compat-beta = ["dep:async-stream", "dep:axum", "dep:futures-core"]
-# Durable filesystem-backed OpenAiCompatRefStore (folded in from the former
-# `ironclaw_reborn_openai_compat_storage` crate). `storage` pulls the universal
+# Durable filesystem-backed OpenAiCompatRefStore. `storage` pulls the universal
 # filesystem port; `libsql`/`postgres` additionally compile the concrete-backend
 # convenience wrappers. Contract-only consumers stay on `default` and carry no
 # `ironclaw_filesystem` dependency.
@@ -46,9 +48,8 @@ futures-core = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
-# Force `storage` on for this crate's own test builds so the folded-in
-# ref-store contract suite (from ironclaw_reborn_openai_compat_storage) runs
-# under a bare `cargo test -p ironclaw_reborn_openai_compat`.
+# Force `storage` on for this crate's own test builds so the ref-store contract
+# suite runs under a bare `cargo test -p ironclaw_reborn_openai_compat`.
 ironclaw_reborn_openai_compat = { path = ".", features = ["storage"] }
 http = "1"
 http-body-util = "0.1"
