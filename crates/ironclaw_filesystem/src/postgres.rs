@@ -1637,17 +1637,17 @@ async fn postgres_delete_with_client(
 /// statement (a fresh READ COMMITTED snapshot) would then observe the *new*
 /// incarnation and misclassify the outcome.
 ///
-/// The `candidate` CTE is deliberately `MATERIALIZED`: it records the
-/// row/version visible at statement start before `locked` waits on a
-/// contended tuple. Under READ COMMITTED, `SELECT ... FOR UPDATE` can follow
-/// a concurrent delete+recreate to the new path row after waiting. Comparing
-/// the current row's `created_at` with the initial candidate lets the Rust
-/// classifier treat "expected row was deleted and a later incarnation now
-/// exists at another version" as NotFound, while still reporting
-/// VersionMismatch for ordinary updates that preserve `created_at`. This
-/// relies on `created_at` being immutable after row creation; if a future
-/// writer mutates it on update, replacement detection would classify that
-/// update as a new incarnation.
+/// The `candidate` and `candidate_state` CTEs are deliberately
+/// `MATERIALIZED`: they record the row/version visible at statement start
+/// before `locked` waits on a contended tuple. Under READ COMMITTED,
+/// `SELECT ... FOR UPDATE` can follow a concurrent delete+recreate to the
+/// new path row after waiting. Comparing the current row's `created_at` with
+/// the initial candidate lets the Rust classifier treat "expected row was
+/// deleted and a later incarnation now exists at another version" as
+/// NotFound, while still reporting VersionMismatch for ordinary updates
+/// that preserve `created_at`. This relies on `created_at` being immutable
+/// after row creation; if a future writer mutates it on update, replacement
+/// detection would classify that update as a new incarnation.
 #[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
     WITH candidate AS MATERIALIZED (
@@ -1656,21 +1656,36 @@ const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
         WHERE path = $1
           AND is_dir = FALSE
     ),
+    candidate_state AS MATERIALIZED (
+        SELECT
+            MAX(version) AS candidate_version,
+            MAX(created_at) AS candidate_created_at,
+            COUNT(*) AS candidate_rows
+        FROM candidate
+    ),
     locked AS (
         SELECT
-            root_filesystem_entries.path,
-            root_filesystem_entries.version,
-            root_filesystem_entries.created_at,
-            candidate.version AS candidate_version,
-            candidate.created_at AS candidate_created_at
-        FROM root_filesystem_entries
-        -- `candidate` is materialized and path-unique, so this carries the
-        -- statement-start snapshot alongside the post-lock row without
-        -- multiplying rows.
-        LEFT JOIN candidate ON TRUE
-        WHERE root_filesystem_entries.path = $1
-          AND root_filesystem_entries.is_dir = FALSE
-        FOR UPDATE OF root_filesystem_entries
+            locked_row.path,
+            locked_row.version,
+            locked_row.created_at,
+            candidate_state.candidate_version,
+            candidate_state.candidate_created_at
+        FROM candidate_state
+        -- `candidate_state` is materialized and always one row, so this
+        -- carries the statement-start snapshot alongside the post-lock row
+        -- without multiplying rows. The lateral dependency forces that state
+        -- to be available before the lock wait begins.
+        LEFT JOIN LATERAL (
+            SELECT path, version, created_at
+            FROM root_filesystem_entries AS entry
+            WHERE path = $1
+              AND is_dir = FALSE
+              -- Intentional tautology: keep the LATERAL subquery correlated
+              -- to `candidate_state` so it cannot run before that state is
+              -- materialized.
+              AND candidate_state.candidate_rows >= 0
+            FOR UPDATE OF entry
+        ) AS locked_row ON TRUE
     ),
     deleted AS (
         DELETE FROM root_filesystem_entries
