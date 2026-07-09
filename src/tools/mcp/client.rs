@@ -384,6 +384,16 @@ impl McpClient {
         self.server_name.as_str()
     }
 
+    /// Whether this server's tools may be run as background jobs. Reads the
+    /// `allow_background` opt-in from the server config; defaults `false` when
+    /// the client holds no config (e.g. transport-only test clients).
+    pub fn allows_background(&self) -> bool {
+        self.server_config
+            .as_ref()
+            .map(|c| c.allow_background)
+            .unwrap_or(false)
+    }
+
     /// Get the typed server name.
     pub fn server_name_typed(&self) -> &McpServerName {
         &self.server_name

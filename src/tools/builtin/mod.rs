@@ -22,6 +22,7 @@ pub mod skill_tools;
 pub mod system;
 mod time;
 mod tool_info;
+mod tool_job;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -53,6 +54,7 @@ pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSea
 pub use system::{SystemToolsListTool, SystemVersionTool};
 pub use time::TimeTool;
 pub use tool_info::ToolInfoTool;
+pub use tool_job::{BackgroundPolicy, CreateMcpJobTool, McpJobStatusTool, StoreBackgroundPolicy};
 mod html_converter;
 pub mod image_analyze;
 pub mod image_edit;
