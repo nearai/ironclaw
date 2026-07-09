@@ -155,7 +155,7 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | Crate | Load first | Owns / go here for | Avoid moving in |
 | --- | --- | --- | --- |
 | `ironclaw_llm` | `ironclaw_llm/AGENTS.md`, `ironclaw_llm/CLAUDE.md`, `ironclaw_llm/Cargo.toml` | Multi-provider LLM integration: provider trait, auth, registry, retry/failover/circuit breaker/cache, tool schemas, reasoning, tracing, transcription/vision. | Engine loop ownership or product workflow. |
-| `ironclaw_skills` | `ironclaw_skills/AGENTS.md` | Skill catalog, parser, gating, selector/scoring, registry, validation, v2 skill types. | Agent-loop execution or UI command routing. |
+| `ironclaw_skills` | `ironclaw_skills/AGENTS.md` | Skill catalog, parser, gating, selector/scoring, registry, validation, v2 skill types, and pure skill-learning distillation/refinement logic. | Agent-loop execution, concrete LLM adapters, filesystem writes, or UI command routing. |
 | `ironclaw_safety` | `ironclaw_safety/AGENTS.md`, `crates/ironclaw_safety/fuzz/README.md` | Prompt-injection detection, validation, sanitization, safety policy, sensitive paths, credential detection, leak scanning, fuzz/benches. | Sandbox execution, credential storage/injection, network allowlists, dispatch, UI decisions. |
 | `ironclaw_gateway` | `ironclaw_gateway/AGENTS.md` | **v1-only (legacy).** v1 gateway frontend assets, layout config, bundle metadata, widget extension system. WebChat v2 assets live in `ironclaw_webui_v2_static`. | Browser API/web channel runtime (`src/channels/web/`) or product workflow; Reborn WebChat v2 work. |
 | `ironclaw_webui_v2` | `ironclaw_webui_v2/AGENTS.md`, `ironclaw_webui_v2/CLAUDE.md` | Reborn WebChat v2 route descriptors, axum handlers, schemas, and redacted HTTP error shape behind `webui-v2-beta`. | Bearer validation, CSRF/origin/rate-limit middleware, direct runtime/DB access, unredacted responses. |
@@ -163,7 +163,6 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | `ironclaw_silk_decoder` | `ironclaw_silk_decoder/AGENTS.md`, `ironclaw_silk_decoder/README.md`, `ironclaw_silk_decoder/Cargo.toml`, `ironclaw_silk_decoder/src/main.rs` | Excluded helper binary that decodes WeChat SILK v3 voice notes to WAV. | Main workspace build dependencies; keep libclang isolated. |
 | `ironclaw_webui_v2_static` | `frontend/README.md`, `src/lib.rs` | WebChat v2 static SPA bundle: a thin Rust embedding harness (`static_router`) over the `static/` JS app; zero workspace deps by design. | Route semantics (`ironclaw_webui_v2`) or listener/auth (`ironclaw_reborn_webui_ingress`). |
 | `ironclaw_embeddings` | `ironclaw_embeddings/AGENTS.md` | `EmbeddingProvider` trait + OpenAI/NearAI/Ollama/Bedrock impls + caching decorator. **v1-only today** (sole consumer: the root crate; not yet wired Reborn-side). | Reborn runtime wiring assumptions; memory-native's same-named local port (deliberately separate). |
-| `ironclaw_skill_learning` | `Cargo.toml`, `src/lib.rs` | Pure skill distillation/refinement domain logic over a one-method `SkillInferencePort`; outputs validated through `ironclaw_skills::parse_skill_md`. | LLM providers, runtime, filesystem — composition supplies the adapters. |
 
 ## Common Change Routes
 

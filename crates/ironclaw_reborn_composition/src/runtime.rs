@@ -3584,7 +3584,7 @@ pub async fn build_reborn_runtime(
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
-        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> = Arc::new(
+        let inference: Arc<dyn ironclaw_skills::learning::SkillInferencePort> = Arc::new(
             crate::extension_host::skill_learning::SkillLearningInferenceAdapter::new(
                 learning_provider,
                 learning_model,
