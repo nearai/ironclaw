@@ -84,7 +84,8 @@ jobs:
           fi
 
           webhook_file="$(mktemp)"
-          printf '%s\n' "$webhooks" | tr ',' '\n' | sed '/^[[:space:]]*$/d' > "$webhook_file"
+          trap 'rm -f "$webhook_file"' EXIT
+          printf '%s\n' "$webhooks" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d' > "$webhook_file"
 
           posted=0
           while IFS= read -r webhook; do
@@ -95,5 +96,10 @@ jobs:
               echo "::warning::Failed to post alert to webhook (HTTP error or timeout)."
             fi
           done < "$webhook_file"
+
+          if [ "$posted" -eq 0 ]; then
+            echo "::error::Failed to post alert to any Slack webhook."
+            exit 1
+          fi
 
           echo "Posted main CI failure alert to ${posted} Slack webhook(s)."
