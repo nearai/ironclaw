@@ -5561,7 +5561,12 @@ impl std::error::Error for ContributionHttpError {}
 /// no redirects, the request's own timeout, and a body read bounded DURING
 /// streaming by the request's `response_body_limit`. Agent-path callers must
 /// keep using the host-egress sink instead.
-pub struct DirectPinnedContributionSink;
+/// INVARIANT: request URLs handed to this sink must be derived from the
+/// enrolled policy's trust-anchored endpoints (`account_login_links_url`,
+/// `account_traces_url`, …) — never from caller/request input. The sink
+/// attaches the caller's bearer to whatever URL it is given; keeping it
+/// crate-private confines that to the vetted derivations in this module.
+pub(crate) struct DirectPinnedContributionSink;
 
 #[async_trait]
 impl ContributionHttpSink for DirectPinnedContributionSink {
@@ -6788,6 +6793,13 @@ async fn mint_account_login_link_inner(
     }
     let url = account_login_links_url(&resolution.policy)
         .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
+    // Parsed once up front: the join base for a relative `url` in the response
+    // (its origin is the trust-anchored issuer origin).
+    let endpoint_url = reqwest::Url::parse(&url).map_err(|e| {
+        AccountLoginLinkError::EnrollmentIncomplete(
+            anyhow::Error::new(e).context("login-links URL is not a valid URL"),
+        )
+    })?;
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     // Mint the bearer THROUGH the sink: on the agent path the upload-claim
@@ -6842,6 +6854,23 @@ async fn mint_account_login_link_inner(
             AccountLoginLinkError::Backend(anyhow::anyhow!("login-link response missing url"))
         })?
         .to_string();
+    // The server may return a relative path (e.g. `/account/login?code=…`).
+    // Resolve it against the login-links endpoint — whose origin is the
+    // trust-anchored issuer origin — so every delivery channel (browser
+    // navigation, local delivery file) receives an absolute URL instead of
+    // one that would resolve against the WRONG origin (e.g. the IronClaw
+    // WebUI's own host).
+    let link_url = match reqwest::Url::parse(&link_url) {
+        Ok(absolute) => absolute.to_string(),
+        Err(_) => endpoint_url
+            .join(&link_url)
+            .map_err(|e| {
+                AccountLoginLinkError::Backend(
+                    anyhow::Error::new(e).context("login-link response url is not resolvable"),
+                )
+            })?
+            .to_string(),
+    };
     Ok(AccountLoginLink {
         account_id,
         url: link_url,
@@ -16417,7 +16446,10 @@ mod tests {
             .unwrap();
 
         // ── assertions ───────────────────────────────────────────────────────
-        assert_eq!(link.url, "/account/login?code=abc");
+        // The server returned a RELATIVE url; it must come back absolutized
+        // against the trust-anchored issuer origin, never left relative (a
+        // relative URL would resolve against the consuming surface's origin).
+        assert_eq!(link.url, format!("http://{addr}/account/login?code=abc"));
         assert_eq!(link.account_id, "11111111-1111-1111-1111-111111111111");
 
         // Egress invariant: on the agent path BOTH network calls — the
@@ -16463,7 +16495,7 @@ mod tests {
         let direct = mint_account_login_link_direct(base.path(), "tenant-dev", "alice")
             .await
             .expect("direct login-link mint succeeds");
-        assert_eq!(direct.url, "/account/login?code=abc");
+        assert_eq!(direct.url, format!("http://{addr}/account/login?code=abc"));
         assert_eq!(direct.account_id, "11111111-1111-1111-1111-111111111111");
         let mut delivery_files = Vec::new();
         let mut stack = vec![base.path().to_path_buf()];

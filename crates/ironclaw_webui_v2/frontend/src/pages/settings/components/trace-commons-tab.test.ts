@@ -42,20 +42,34 @@ test("credit and timestamp formatting used by trace rows", () => {
   expect(formatTimestamp("2026-06-25T00:00:00Z", t)).not.toBe("traceCommons.never");
 });
 
-// Fake window.open that captures EVERY argument the production caller passes
-// (url, target, features) — a partial mock would hide a caller that drops the
-// noopener hardening — plus the navigations assigned to the opened handle.
+// Fake window.open that captures EVERY argument the production caller passes —
+// a partial mock would hide a caller reintroducing the `noopener` feature
+// (which makes window.open return null and breaks navigation) — plus the
+// opener-severing and navigations applied to the opened handle. Mirrors the
+// browser contract: passing a `noopener` feature yields a null handle.
 function fakeOpener() {
-  const calls: Array<{ url: string; target: string; features: string }> = [];
-  const windows: Array<{ closed: boolean; location: string | null; close: () => void }> = [];
+  const calls: Array<{ args: unknown[] }> = [];
+  const windows: Array<{
+    closed: boolean;
+    location: string | null;
+    opener: unknown;
+    close: () => void;
+  }> = [];
   return {
     calls,
     windows,
-    open: (url: string, target: string, features: string) => {
-      calls.push({ url, target, features });
+    open: (...args: unknown[]) => {
+      calls.push({ args });
+      const features = String(args[2] ?? "");
+      if (features.includes("noopener")) {
+        // Real browsers return null for noopener opens — the production
+        // caller must NOT pass it as a feature or it can never navigate.
+        return null;
+      }
       const win = {
         closed: false,
         location: null as string | null,
+        opener: "parent-window-sentinel" as unknown,
         close() {
           this.closed = true;
         },
@@ -67,7 +81,7 @@ function fakeOpener() {
 }
 
 describe("openAccountLoginLink", () => {
-  test("opens a blank tab synchronously, then navigates it to the minted URL", async () => {
+  test("opens a blank tab synchronously, severs opener, then navigates it", async () => {
     const opener = fakeOpener();
     const result = await openAccountLoginLink({
       mint: async () => ({
@@ -80,10 +94,11 @@ describe("openAccountLoginLink", () => {
 
     expect(result.status).toBe("opened");
     // The tab must be opened BEFORE the async mint resolves (popup-blocker
-    // attribution) with the full hardened argument set.
-    expect(opener.calls).toEqual([
-      { url: "about:blank", target: "_blank", features: "noopener,noreferrer" },
-    ]);
+    // attribution), WITHOUT a `noopener` feature (which would null the handle
+    // and make navigation impossible).
+    expect(opener.calls).toEqual([{ args: ["about:blank", "_blank"] }]);
+    // Reverse-tabnabbing protection comes from severing the opener manually.
+    expect(opener.windows[0].opener).toBeNull();
     expect(opener.windows[0].location).toBe("https://commons.example/a?code=1");
     expect(opener.windows[0].closed).toBe(false);
   });
@@ -111,11 +126,18 @@ describe("openAccountLoginLink", () => {
     expect(opener.windows[0].closed).toBe(true);
   });
 
-  test("popup-blocked open reports blocked without navigating", async () => {
+  test("popup-blocked open reports blocked WITHOUT burning a one-time link", async () => {
+    let minted = 0;
     const result = await openAccountLoginLink({
-      mint: async () => ({ minted: true, enrolled: true, url: "https://commons.example/a" }),
+      mint: async () => {
+        minted += 1;
+        return { minted: true, enrolled: true, url: "https://commons.example/a" };
+      },
       open: () => null,
     });
     expect(result.status).toBe("blocked");
+    // Each mint burns a single-use credential server-side; a blocked popup
+    // must short-circuit BEFORE the mint call.
+    expect(minted).toBe(0);
   });
 });

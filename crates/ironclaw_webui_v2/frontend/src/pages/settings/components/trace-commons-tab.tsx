@@ -25,23 +25,33 @@ export function formatTimestamp(value, t) {
 
 // Open the caller's Trace Commons account in a new tab via a one-time login
 // link. Pure/injectable so tests can drive it without a browser: `mint` is the
-// API call, `open` is the window.open-shaped opener. Opens a blank tab
-// SYNCHRONOUSLY (before the async mint) so popup blockers attribute it to the
-// user's click, then navigates it to the minted URL. The URL exists only in
-// this flow — never logged, never stored.
+// API call, `open` is the window.open-shaped opener.
+//
+// Ordering is load-bearing:
+// 1. Open a blank tab SYNCHRONOUSLY (before the async mint) so popup blockers
+//    attribute it to the user's click — WITHOUT the `noopener` feature, which
+//    would make window.open return null and leave nothing to navigate.
+//    Reverse-tabnabbing protection comes from severing `win.opener` manually.
+// 2. Short-circuit on a blocked popup BEFORE minting: every mint burns a
+//    single-use login URL server-side.
+// 3. Only then mint and navigate. The URL exists only in this flow — never
+//    logged, never stored.
 export async function openAccountLoginLink({ mint, open }) {
-  const win = open("about:blank", "_blank", "noopener,noreferrer");
+  const win = open("about:blank", "_blank");
+  if (!win) {
+    return { status: "blocked" };
+  }
+  win.opener = null;
   try {
     const response = await mint();
     if (!response || response.minted !== true || !response.url) {
-      if (win) win.close();
+      win.close();
       return { status: "unavailable" };
     }
-    if (!win) return { status: "blocked" };
     win.location = response.url;
     return { status: "opened" };
   } catch (error) {
-    if (win) win.close();
+    win.close();
     return { status: "error", error };
   }
 }
@@ -81,7 +91,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
     setOpenState("pending");
     const result = await openAccountLoginLink({
       mint: mintAccountLoginLink,
-      open: (url, target, features) => window.open(url, target, features),
+      open: (url, target) => window.open(url, target),
     });
     setOpenState(result.status === "opened" ? "idle" : "failed");
   };
