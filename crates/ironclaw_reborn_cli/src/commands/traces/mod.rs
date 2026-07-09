@@ -135,8 +135,9 @@ enum TracesSubcommand {
     /// Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite
     /// link (admin operation — requires shell access to the instance host).
     /// Every user without a personal enrollment inherits it, attributed via a
-    /// salted per-user pseudonym; users can exclude themselves with
-    /// `traces opt-out`.
+    /// salted per-user pseudonym. Exclude a single user with
+    /// `traces opt-out --user-scope <tenant-id>/<user-id>` (bare
+    /// `traces opt-out` disables the entire instance enrollment).
     EnrollInstance {
         /// Operator invite link (`https://<host>#<code>`, or `<code>@<host>`)
         #[arg(long)]
