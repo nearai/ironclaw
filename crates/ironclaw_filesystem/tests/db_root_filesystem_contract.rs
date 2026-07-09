@@ -1996,8 +1996,74 @@ mod postgres_tests {
              'already gone', never a VersionMismatch against the racer's new \
              row) — got: {result:?}. A non-atomic (separate DELETE + \
              diagnosis SELECT) implementation would misclassify this as \
-             VersionMismatch{{found: Some(999)}}."
+            VersionMismatch{{found: Some(999)}}."
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_delete_if_version_reports_mismatch_under_concurrent_update_race() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let racer_pool = match postgres_pool().await {
+            Some(pool) => pool,
+            None => {
+                return;
+            }
+        };
+        let path = vpath(&prefix, "cas_delete_update_race");
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let racer_client = racer_pool
+            .get()
+            .await
+            .expect("racer connection must be available on the same reachable Postgres");
+        let path_str = path.as_str().to_string();
+        let (updated_tx, updated_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let racer = tokio::spawn(async move {
+            racer_client.batch_execute("BEGIN").await.unwrap();
+            racer_client
+                .execute(
+                    "UPDATE root_filesystem_entries \
+                     SET version = 999, updated_at = NOW() \
+                     WHERE path = $1 AND is_dir = FALSE",
+                    &[&path_str],
+                )
+                .await
+                .unwrap();
+            // The uncommitted UPDATE holds the tuple lock. A concurrent
+            // `delete_if_version` must wait, then report the updated row as
+            // stale rather than collapsing every waited-on version change to
+            // NotFound.
+            let _ = updated_tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            racer_client.batch_execute("COMMIT").await.unwrap();
+        });
+
+        updated_rx
+            .await
+            .expect("racer must signal after its UPDATE runs");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let result = fs.delete_if_version(&path, v1).await;
+
+        racer.await.expect("racer task must not panic");
+
+        match result {
+            Err(FilesystemError::VersionMismatch {
+                expected, found, ..
+            }) => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(
+                    found,
+                    Some(ironclaw_filesystem::RecordVersion::from_backend(999))
+                );
+            }
+            other => panic!("expected VersionMismatch against updated row, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

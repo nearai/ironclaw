@@ -1631,23 +1631,40 @@ async fn postgres_delete_with_client(
 /// unlike blind delete's `path = $1 OR (path >= $2 ...)`.
 ///
 /// Review fix (PR #5749): the conditional DELETE and the zero-rows
-/// diagnosis now run as ONE statement (one round trip), not two. Two
-/// separate statements left a window between them in which an external
-/// transaction could commit a full delete-then-recreate on the same path;
-/// the second statement (a fresh READ COMMITTED snapshot) would then
-/// observe the *new* incarnation and misclassify the outcome. Folding both
-/// into a single `WITH` query closes that window: `locked` takes a
-/// `FOR UPDATE` row lock up front, and `deleted` is made to depend on it
-/// (`path IN (SELECT path FROM locked)`) so Postgres must evaluate `locked`
-/// first — the lock is held for the rest of the statement, so no
-/// concurrent delete/recreate on this path can commit until ours does.
+/// diagnosis run as ONE statement (one round trip), not two. Two separate
+/// statements left a window between them in which an external transaction
+/// could commit a full delete-then-recreate on the same path; the second
+/// statement (a fresh READ COMMITTED snapshot) would then observe the *new*
+/// incarnation and misclassify the outcome.
+///
+/// The `candidate` CTE is deliberately `MATERIALIZED`: it records the
+/// row/version visible at statement start before `locked` waits on a
+/// contended tuple. Under READ COMMITTED, `SELECT ... FOR UPDATE` can follow
+/// a concurrent delete+recreate to the new path row after waiting. Comparing
+/// the current row's `created_at` with the initial candidate lets the Rust
+/// classifier treat "expected row was deleted and a later incarnation now
+/// exists at another version" as NotFound, while still reporting
+/// VersionMismatch for ordinary updates that preserve `created_at`.
 #[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
-    WITH locked AS (
-        SELECT path, version
+    WITH candidate AS MATERIALIZED (
+        SELECT version, created_at
         FROM root_filesystem_entries
-        WHERE path = $1 AND is_dir = FALSE
-        FOR UPDATE
+        WHERE path = $1
+          AND is_dir = FALSE
+    ),
+    locked AS (
+        SELECT
+            root_filesystem_entries.path,
+            root_filesystem_entries.version,
+            root_filesystem_entries.created_at,
+            candidate.version AS candidate_version,
+            candidate.created_at AS candidate_created_at
+        FROM root_filesystem_entries
+        LEFT JOIN candidate ON TRUE
+        WHERE root_filesystem_entries.path = $1
+          AND root_filesystem_entries.is_dir = FALSE
+        FOR UPDATE OF root_filesystem_entries
     ),
     deleted AS (
         DELETE FROM root_filesystem_entries
@@ -1659,7 +1676,13 @@ const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
     )
     SELECT
         EXISTS (SELECT 1 FROM deleted) AS was_deleted,
-        (SELECT version FROM locked) AS locked_version
+        (SELECT version FROM locked) AS locked_version,
+        EXISTS (
+            SELECT 1
+            FROM locked
+            WHERE candidate_version = $2
+              AND candidate_created_at IS DISTINCT FROM created_at
+        ) AS expected_incarnation_was_replaced
     "#;
 
 /// CAS delete for the Postgres backend: one statement, one round trip,
@@ -1686,6 +1709,10 @@ async fn postgres_delete_if_version_with_client(
     let was_deleted: bool = row.get("was_deleted");
     if was_deleted {
         return Ok(());
+    }
+    let expected_incarnation_was_replaced: bool = row.get("expected_incarnation_was_replaced");
+    if expected_incarnation_was_replaced {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
     }
     let locked_version: Option<i64> = row.get("locked_version");
     if let Some(raw) = locked_version {
@@ -2155,6 +2182,18 @@ mod tests {
             "delete_if_version must lock the row before deciding NotFound vs \
              VersionMismatch, or a concurrent delete+recreate can race the \
              classification: {sql}"
+        );
+        assert!(
+            sql.contains("candidate AS MATERIALIZED"),
+            "delete_if_version must materialize the statement-start \
+             candidate before FOR UPDATE waits, or a concurrent \
+             delete+recreate can be mistaken for the new incarnation: {sql}"
+        );
+        assert!(
+            sql.contains("expected_incarnation_was_replaced"),
+            "delete_if_version must classify a replaced expected \
+             incarnation as NotFound rather than VersionMismatch against \
+             the replacement row: {sql}"
         );
         assert!(
             sql.contains("path IN (SELECT path FROM locked)"),
