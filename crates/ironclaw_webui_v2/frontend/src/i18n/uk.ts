@@ -1203,6 +1203,8 @@ registerPack("uk", {
   "extensions.reconfigure": "Повторно налаштувати",
   "extensions.configureName": "Налаштувати {name}",
   "extensions.allInstalled": "Усі встановлені розширення",
+  "extensions.scope.shared": "спільні",
+  "extensions.scope.private": "мої",
   "mcp.installed": "Встановлені сервери MCP",
   "extensions.oneCapability": "1 можливість",
   "extensions.pluralCapabilities": "Можливості {count}",

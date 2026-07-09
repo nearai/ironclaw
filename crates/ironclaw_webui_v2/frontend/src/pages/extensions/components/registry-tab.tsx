@@ -30,7 +30,7 @@ function ImportButton({ onImport, isImporting, isBusy }) {
       <button
         type="button"
         onClick={() => fileInputRef.current?.click()}
-        disabled={isBusy}
+        disabled={isBusy || isImporting}
         className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] disabled:opacity-50"
       >
         <Icon name="upload" className="h-3 w-3" />

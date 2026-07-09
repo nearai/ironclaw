@@ -1203,6 +1203,8 @@ registerPack("de", {
   "extensions.reconfigure": "Neu konfigurieren",
   "extensions.configureName": "{name} konfigurieren",
   "extensions.allInstalled": "Alle installierten Erweiterungen",
+  "extensions.scope.shared": "geteilt",
+  "extensions.scope.private": "meine",
   "mcp.installed": "Installierte MCP-Server",
   "extensions.oneCapability": "1 Fähigkeit",
   "extensions.pluralCapabilities": "{count} Fähigkeiten",

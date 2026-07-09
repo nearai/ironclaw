@@ -5,8 +5,8 @@ flow (`POST /api/webchat/v2/extensions/import`, admin-only) during live QA.
 Each directory is one uploadable bundle; zipping it produces the file the
 Import button accepts.
 
-These are **manual/live-QA assets, not automated-test inputs**: the Rust
-suites build their zip fixtures in-memory
+These are used by both manual/live QA and automated tests: the E2E suite builds
+and uploads these bundles, while the Rust suites build their zip fixtures in-memory
 (`ironclaw_reborn_composition::extension_lifecycle` tests) and pin only the
 manifests here via `include_str!`
 (`available_extensions::tests::test_tool_fixture_manifests_stay_importable`),

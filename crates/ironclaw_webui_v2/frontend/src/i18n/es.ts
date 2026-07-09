@@ -1204,6 +1204,8 @@ registerPack("es", {
   "extensions.reconfigure": "Reconfigurar",
   "extensions.configureName": "Configurar {name}",
   "extensions.allInstalled": "Todas las extensiones instaladas",
+  "extensions.scope.shared": "compartidas",
+  "extensions.scope.private": "mías",
   "mcp.installed": "Servidores MCP instalados",
   "extensions.oneCapability": "1 capacidad",
   "extensions.pluralCapabilities": "Capacidades {count}",

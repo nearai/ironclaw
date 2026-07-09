@@ -1203,6 +1203,8 @@ registerPack("hi", {
   "extensions.reconfigure": "पुन: कॉन्फ़िगर करें",
   "extensions.configureName": "{name} कॉन्फ़िगर करें",
   "extensions.allInstalled": "सभी स्थापित एक्सटेंशन",
+  "extensions.scope.shared": "साझा",
+  "extensions.scope.private": "मेरे",
   "mcp.installed": "स्थापित MCP सर्वर",
   "extensions.oneCapability": "1 क्षमता",
   "extensions.pluralCapabilities": "{count} क्षमताएं",

@@ -7,7 +7,7 @@ import { McpTab } from "./components/mcp-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 
-export function ExtensionsPage({ isAdmin = false }) {
+export function ExtensionsPage({ isAdmin = false } = {}) {
   const { tab = "registry" } = useParams();
   const [configuring, setConfiguring] = React.useState(null);
 

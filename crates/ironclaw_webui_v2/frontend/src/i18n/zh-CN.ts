@@ -1203,6 +1203,8 @@ registerPack("zh-CN", {
   "extensions.reconfigure": "重新配置",
   "extensions.configureName": "配置 {name}",
   "extensions.allInstalled": "所有已安装扩展",
+  "extensions.scope.shared": "共享",
+  "extensions.scope.private": "我的",
   "mcp.installed": "已安装的 MCP 服务",
   "extensions.oneCapability": "1 个能力",
   "extensions.pluralCapabilities": "{count} 个能力",

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_extensions::{
@@ -380,12 +382,14 @@ fn credential_requirement_name(
 
 #[derive(Debug, Default)]
 pub(crate) struct AvailableExtensionCatalog {
-    packages: Vec<AvailableExtensionPackage>,
+    packages: Vec<Arc<AvailableExtensionPackage>>,
 }
 
 impl AvailableExtensionCatalog {
     pub(crate) fn from_packages(packages: Vec<AvailableExtensionPackage>) -> Self {
-        Self { packages }
+        Self {
+            packages: packages.into_iter().map(Arc::new).collect(),
+        }
     }
 
     #[cfg(test)]
@@ -445,22 +449,24 @@ impl AvailableExtensionCatalog {
     pub(crate) fn search<'a>(
         &'a self,
         query: &str,
-    ) -> impl Iterator<Item = &'a AvailableExtensionPackage> + 'a {
+    ) -> impl Iterator<Item = Arc<AvailableExtensionPackage>> + 'a {
         let normalized_query = query.trim().to_ascii_lowercase();
         self.packages
             .iter()
             .filter(|package| !is_internal_extension_package_ref(&package.package_ref))
             .filter(move |package| package_matches_search(package, &normalized_query))
+            .cloned()
     }
 
     pub(crate) fn resolve(
         &self,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<&AvailableExtensionPackage, ProductWorkflowError> {
+    ) -> Result<Arc<AvailableExtensionPackage>, ProductWorkflowError> {
         package_ref.require_kind(LifecyclePackageKind::Extension)?;
         self.packages
             .iter()
             .find(|package| &package.package_ref == package_ref)
+            .cloned()
             .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
@@ -1766,7 +1772,11 @@ where
                 )));
             }
             let Some(relative) = child.path.as_str().strip_prefix(&root_prefix) else {
-                continue;
+                return Err(map_binding_error(format!(
+                    "available extension asset {} is outside expected root prefix {}",
+                    child.path.as_str(),
+                    root_prefix
+                )));
             };
             assets.push(AvailableExtensionAsset {
                 path: relative.to_string(),
@@ -2088,12 +2098,15 @@ mod tests {
             "google-drive",
             "google-sheets",
             "google-slides",
-        ]);
+        ])
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
 
         for query in ["google", "gsuite", "workspace"] {
             let ids = catalog
                 .search(query)
-                .map(|package| package.package_ref.id.as_str())
+                .map(|package| package.package_ref.id.as_str().to_string())
                 .collect::<BTreeSet<_>>();
 
             assert!(
@@ -2110,7 +2123,7 @@ mod tests {
         for query in ["google sheets", "google sheet", "spreadsheet"] {
             let ids = catalog
                 .search(query)
-                .map(|package| package.package_ref.id.as_str())
+                .map(|package| package.package_ref.id.as_str().to_string())
                 .collect::<BTreeSet<_>>();
 
             assert!(
@@ -2700,7 +2713,7 @@ handle = "web_token"
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
         let github = catalog.resolve(&package_ref).unwrap();
 
-        materialize_available_extension(&fs, github).await.unwrap();
+        materialize_available_extension(&fs, &github).await.unwrap();
 
         let get_repo_schema = fs
             .read_file(
@@ -2978,7 +2991,7 @@ output_schema_ref = "schemas/search.output.json"
         fs.delete(&VirtualPath::new("/system/extensions/fixture").unwrap())
             .await
             .unwrap();
-        materialize_available_extension(&fs, results[0])
+        materialize_available_extension(&fs, &results[0])
             .await
             .expect("reinstall after remove must re-materialize from the self-contained entry");
         assert!(
@@ -2996,6 +3009,26 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .is_ok(),
             "schema restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_asset_catalog_rejects_paths_outside_expected_root() {
+        let root = VirtualPath::new("/system/extensions/fixture").unwrap();
+        let error = inline_extension_dir_assets(&MismatchedAssetPathFilesystem, &root)
+            .await
+            .expect_err("asset paths outside the extension root must fail discovery");
+
+        let ProductWorkflowError::InvalidBindingRequest { reason } = error else {
+            panic!("expected invalid binding request, got {error:?}");
+        };
+        assert!(
+            reason.contains("/system/extensions/other/asset.txt"),
+            "reason: {reason}"
+        );
+        assert!(
+            reason.contains("/system/extensions/fixture/"),
+            "reason: {reason}"
         );
     }
 
@@ -3399,6 +3432,30 @@ credential_handle = "channel_ext_token"
     struct RecordingMaterializeFilesystem {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         writes: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct MismatchedAssetPathFilesystem;
+
+    #[async_trait]
+    impl RootFilesystem for MismatchedAssetPathFilesystem {
+        async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Ok(vec![DirEntry {
+                name: "asset.txt".to_string(),
+                path: VirtualPath::new("/system/extensions/other/asset.txt").unwrap(),
+                file_type: FileType::File,
+            }])
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Stat,
+            })
+        }
+
+        async fn read_file(&self, _path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+            Ok(b"asset".to_vec())
+        }
     }
 
     #[async_trait]

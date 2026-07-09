@@ -201,5 +201,11 @@ async def test_private_tool_installs_full_path(
         async with httpx.AsyncClient(
             base_url=base_url, headers=reborn_bearer_headers(), timeout=15
         ) as operator:
-            await operator.delete(f"{base_url}{ADMIN_BASE}/users/{alice['user_id']}")
-            await operator.delete(f"{base_url}{ADMIN_BASE}/users/{bob['user_id']}")
+            alice_delete = await operator.delete(
+                f"{base_url}{ADMIN_BASE}/users/{alice['user_id']}"
+            )
+            bob_delete = await operator.delete(
+                f"{base_url}{ADMIN_BASE}/users/{bob['user_id']}"
+            )
+            assert alice_delete.status_code == 200, alice_delete.text
+            assert bob_delete.status_code == 200, bob_delete.text

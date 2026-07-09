@@ -1203,6 +1203,8 @@ registerPack("ar", {
   "extensions.reconfigure": "إعادة تكوين",
   "extensions.configureName": "تكوين {name}",
   "extensions.allInstalled": "جميع الامتدادات المثبتة",
+  "extensions.scope.shared": "مشترك",
+  "extensions.scope.private": "خاص بي",
   "mcp.installed": "خوادم MCP المثبتة",
   "extensions.oneCapability": "قدرة واحدة",
   "extensions.pluralCapabilities": "إمكانات {count}",

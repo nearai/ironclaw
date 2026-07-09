@@ -286,16 +286,16 @@ pub(crate) async fn restore_extension_lifecycle_state(
             installation.extension_id().as_str(),
         )?;
         let available = catalog.resolve(&package_ref)?;
-        if let Err(hash_error) = validate_restored_manifest_hash(&installation, available) {
+        if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
             migrate_host_bundled_manifest_hash(
                 installation_store,
-                available,
+                &available,
                 &installation,
                 hash_error,
             )
             .await?;
         }
-        materialize_available_extension(filesystem.as_ref(), available).await?;
+        materialize_available_extension(filesystem.as_ref(), &available).await?;
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
@@ -422,16 +422,17 @@ impl RebornLocalExtensionManagementPort {
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let catalog = self.catalog.read().await;
-        let extensions = catalog.search(query);
+        let extensions = {
+            let catalog = self.catalog.read().await;
+            catalog.search(query).collect::<Vec<_>>()
+        };
         let mut summaries = Vec::new();
         for extension in extensions {
             summaries.push(
-                self.search_summary(extension, credential_gate, caller)
+                self.search_summary(&extension, credential_gate, caller)
                     .await?,
             );
         }
-        drop(catalog);
         let count = summaries.len();
         let mut response = response_with_payload(
             None,
@@ -492,7 +493,10 @@ impl RebornLocalExtensionManagementPort {
         let install_scope = installation
             .as_ref()
             .and_then(|installation| install_scope_for_owner(installation.owner()));
-        let summary = self.catalog.read().await.resolve(&package_ref)?.summary();
+        let summary = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref)?.summary()
+        };
         Ok(response_with_payload(
             Some(package_ref),
             phase,
@@ -612,9 +616,12 @@ impl RebornLocalExtensionManagementPort {
             if is_internal_extension_package_ref(&package_ref) {
                 continue;
             }
-            let catalog = self.catalog.read().await;
-            let Ok(available) = catalog.resolve(&package_ref) else {
-                continue;
+            let available = {
+                let catalog = self.catalog.read().await;
+                let Ok(available) = catalog.resolve(&package_ref) else {
+                    continue;
+                };
+                available
             };
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
@@ -757,13 +764,15 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        // Read guard is held for the whole method because `available` borrows
-        // from the catalog (used by prepare_install/materialize/visible_caps
-        // below). Acquired BEFORE `operation_lock`; `import_bundle` takes the
-        // write guard before `operation_lock` too, so the lock order is
-        // consistent and the two cannot deadlock.
-        let catalog = self.catalog.read().await;
-        let available = catalog.resolve(&package_ref)?;
+        // Snapshot the package before taking `operation_lock`. The catalog
+        // lock must not be held across installation-store, filesystem, or
+        // credential awaits. Acquiring the read lock first preserves the
+        // catalog-before-operation ordering used by `import_bundle` without
+        // retaining a borrow into the catalog.
+        let available = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref)?
+        };
         let _operation_guard = self.operation_lock.lock().await;
         let installation_id =
             ExtensionInstallationId::new(available.package.id.as_str().to_string())
@@ -792,7 +801,7 @@ impl RebornLocalExtensionManagementPort {
                     .map_err(map_extension_installation_error)?;
             }
             None => {
-                self.install_fresh_locked(available, caller).await?;
+                self.install_fresh_locked(&available, caller).await?;
             }
         }
 
@@ -801,7 +810,7 @@ impl RebornLocalExtensionManagementPort {
             LifecyclePhase::Installed,
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
-                visible_capability_ids: visible_capability_ids(available)
+                visible_capability_ids: visible_capability_ids(&available)
                     .map(|id| id.as_str().to_string())
                     .collect(),
                 next_step: format!(
@@ -923,6 +932,12 @@ impl RebornLocalExtensionManagementPort {
                 .load_installation(&extension_id, &installation_id)
                 .await?;
             ensure_caller_may_operate(&installation, caller)?;
+            ensure_caller_may_mutate_tenant_installation(
+                &installation,
+                caller,
+                &self.tenant_operator_user_id,
+                "activate",
+            )?;
             let package = self.lifecycle_package(&extension_id).await?;
             credential_gate.ensure_credentials(&package).await?;
             match mode {
@@ -973,18 +988,55 @@ impl RebornLocalExtensionManagementPort {
         let installation = self
             .load_installation(&extension_id, &installation_id)
             .await
-            .map_err(|_| hosted_mcp_changed_during_discovery_error())?;
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    extension_id = %extension_id.as_str(),
+                    installation_id = %installation_id.as_str(),
+                    "hosted MCP activation could not recheck the installation after discovery"
+                );
+                hosted_mcp_changed_during_discovery_error()
+            })?;
         // #5459 P1: the slot may have changed hands while the lock was dropped
         // for discovery (eviction+reinstall / remove+reinstall reuse the same
         // installation id), so re-check ownership before committing — phase 1's
         // check is stale. A foreign row must not be flipped to Enabled under
         // this caller's action.
-        ensure_caller_may_operate(&installation, caller)
-            .map_err(|_| hosted_mcp_changed_during_discovery_error())?;
+        ensure_caller_may_operate(&installation, caller).map_err(|error| {
+            tracing::warn!(
+                %error,
+                extension_id = %extension_id.as_str(),
+                installation_id = %installation_id.as_str(),
+                "hosted MCP activation caller ownership changed during discovery"
+            );
+            hosted_mcp_changed_during_discovery_error()
+        })?;
+        ensure_caller_may_mutate_tenant_installation(
+            &installation,
+            caller,
+            &self.tenant_operator_user_id,
+            "activate",
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                extension_id = %extension_id.as_str(),
+                installation_id = %installation_id.as_str(),
+                "hosted MCP activation caller is not the tenant operator after discovery"
+            );
+            hosted_mcp_changed_during_discovery_error()
+        })?;
         let current_package = self
             .lifecycle_package(&extension_id)
             .await
-            .map_err(|_| hosted_mcp_changed_during_discovery_error())?;
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    extension_id = %extension_id.as_str(),
+                    "hosted MCP activation could not recheck the lifecycle package after discovery"
+                );
+                hosted_mcp_changed_during_discovery_error()
+            })?;
         if current_package != discovery.base_package {
             return Err(hosted_mcp_changed_during_discovery_error());
         };
@@ -1281,14 +1333,12 @@ impl RebornLocalExtensionManagementPort {
             .load_installation(&extension_id, &installation_id)
             .await?;
         ensure_caller_may_operate(&installation, caller)?;
-        if installation.owner().is_tenant() && caller != &self.tenant_operator_user_id {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} is a shared tool; only the tenant admin can remove it",
-                    extension_id.as_str()
-                ),
-            });
-        }
+        ensure_caller_may_mutate_tenant_installation(
+            &installation,
+            caller,
+            &self.tenant_operator_user_id,
+            "remove",
+        )?;
         // Membership remove (#5459 P1 pivot): while other members still hold
         // the tool, the caller just LEAVES the member set — a single row
         // rewrite, no teardown. Only the last holder's remove (or the
@@ -2093,6 +2143,23 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
     ProductWorkflowError::InvalidBindingRequest {
         reason: error.to_string(),
     }
+}
+
+fn ensure_caller_may_mutate_tenant_installation(
+    installation: &ExtensionInstallation,
+    caller: &UserId,
+    tenant_operator: &UserId,
+    operation: &str,
+) -> Result<(), ProductWorkflowError> {
+    if installation.owner().is_tenant() && caller != tenant_operator {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!(
+                "extension {} is a shared tool; only the tenant admin can {operation} it",
+                installation.extension_id().as_str()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn hosted_mcp_discovery_error(error: HostedMcpDiscoveryError) -> ProductWorkflowError {
@@ -4312,6 +4379,49 @@ output_schema_ref = "schemas/run.output.json"
         assert!(
             error.to_string().contains("is not installed"),
             "ownership must mask before the credential preflight: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_facade_blocks_non_operator_activation_of_shared_installation() {
+        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("operator installs the shared extension");
+        let error = facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect_err("non-operator must not activate a shared extension");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("only the tenant admin can activate it"),
+            "unexpected activation denial: {error}"
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").expect("valid extension id"))
+                .is_none(),
+            "denied activation must not publish shared capabilities"
         );
     }
 

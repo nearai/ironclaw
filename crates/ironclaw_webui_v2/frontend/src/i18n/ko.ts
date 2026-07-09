@@ -1203,6 +1203,8 @@ registerPack("ko", {
   "extensions.reconfigure": "재구성",
   "extensions.configureName": "{name} 구성",
   "extensions.allInstalled": "설치된 모든 확장 프로그램",
+  "extensions.scope.shared": "공유",
+  "extensions.scope.private": "내 것",
   "mcp.installed": "설치된 MCP 서버",
   "extensions.oneCapability": "1개 기능",
   "extensions.pluralCapabilities": "{count} 기능",
