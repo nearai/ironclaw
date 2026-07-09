@@ -9,12 +9,21 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages";
+import {
+  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  failureMessageForRunStatus,
+} from "./failureMessages";
+import { CONNECTION_STATUS } from "./connection-status";
 import { gateFromProjectionGate } from "./gates";
 import {
   createToolActivityState,
   ensureGateToolActivity,
   upsertToolActivityMessage,
 } from "./tool-activity-state";
+import {
+  isFinalAssistantForRun,
+  replaceAssistantReplyForRun,
+} from "./stream-order-memory";
 
 function useChatEventsSourceForTest() {
   const source = readFileSync(
@@ -45,6 +54,8 @@ function createUseChatEventsHarness({
   failureMessageForStreamError = ({ error, kind, retryable }) =>
     `stream:${error}:${kind}:${retryable}`,
   locallyResolvedGatesRef = { current: new Map() },
+  noteConnectionInterruptedRunId = () => {},
+  connectionContextForRunFailure = () => ({}),
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -68,6 +79,8 @@ function createUseChatEventsHarness({
     globalThis: {},
     ensureGateToolActivity,
     isTerminalToolStatus,
+    isFinalAssistantForRun,
+    replaceAssistantReplyForRun,
     toolCardFromActivity,
     toolCardFromPreview,
     upsertToolActivityMessage,
@@ -95,6 +108,8 @@ function createUseChatEventsHarness({
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
+    noteConnectionInterruptedRunId,
+    connectionContextForRunFailure,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
@@ -175,6 +190,430 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
     Array.from(harness.messages, (message) => message.turnRunId),
     ["run-1", "run-1", "run-1"],
   );
+});
+
+test("useChatEvents: projection text streams into one assistant bubble without ending the run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "partial" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-1",
+    threadId: "thread-1",
+    status: "running",
+  });
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "text-text:run-1");
+  assert.equal(harness.messages[0].role, "assistant");
+  assert.equal(harness.messages[0].content, "partial");
+  assert.equal(harness.messages[0].turnRunId, "run-1");
+  assert.equal(
+    harness.messages[0].isFinalReply,
+    false,
+    "streamed projection text is still in-flight until terminal reply/timeline finalizes it",
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ text: { id: "text:run-1", run_id: "run-1", body: "partial answer" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].content, "partial answer");
+  assert.equal(harness.messages[0].turnRunId, "run-1");
+  assert.equal(harness.messages[0].isFinalReply, false);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
+test("useChatEvents: final_reply replaces matching streamed projection bubble", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "part" } },
+        ],
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "partial answer finalized",
+        generated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.deepEqual(plain(harness.messages[0]), {
+    id: "reply-run-1",
+    role: "assistant",
+    content: "partial answer finalized",
+    timestamp: "2026-07-08T13:00:00Z",
+    turnRunId: "run-1",
+    isFinalReply: true,
+  });
+  assert.equal(harness.isProcessing, false);
+});
+
+test("useChatEvents: replayed final_reply replaces existing same-run assistant in place", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-web-search",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "old final",
+      timestamp: "2026-07-08T12:59:00Z",
+      isFinalReply: true,
+      turnRunId: "run-1",
+      keepFollowingActivityAfter: true,
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "new final",
+        generated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-web-search", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].content, "new final");
+  assert.equal(harness.messages[2].timestamp, "2026-07-08T12:59:00Z");
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, true);
+  assert.equal(harness.isProcessing, false);
+});
+
+test("useChatEvents: stale projection text does not duplicate finalized same-run reply", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-web-search",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { text: { id: "text:run-1", run_id: "run-1", body: "stale final answer" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 3);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-web-search", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].content, "final answer");
+  assert.equal(harness.messages[2].isFinalReply, true);
+});
+
+test("useChatEvents: replayed text before activity keeps finalized reply after activity", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-invocation-1",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { text: { id: "text:run-1", run_id: "run-1", body: "stale final answer" } },
+          {
+            capability_activity: {
+              invocation_id: "invocation-1",
+              turn_run_id: "run-1",
+              thread_id: "thread-1",
+              capability_id: "builtin.web_search",
+              status: "completed",
+              updated_at: "2026-07-08T13:00:00Z",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].content, "final answer");
+  assert.equal(harness.messages[2].isFinalReply, true);
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
+});
+
+test("useChatEvents: replayed activity before text keeps finalized reply after activity", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-invocation-1",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-1",
+              turn_run_id: "run-1",
+              thread_id: "thread-1",
+              capability_id: "builtin.web_search",
+              status: "completed",
+              updated_at: "2026-07-08T13:00:00Z",
+            },
+          },
+          { text: { id: "text:run-1", run_id: "run-1", body: "stale final answer" } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].content, "final answer");
+  assert.equal(harness.messages[2].isFinalReply, true);
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
+});
+
+test("useChatEvents: text replay before a later activity frame keeps tools before final reply", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-invocation-1",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ text: { id: "text:run-1", run_id: "run-1", body: "pre-tool text" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
+  );
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-1",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.web_search",
+        status: "completed",
+        updated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
+});
+
+test("useChatEvents: text replay after activity does not move finalized reply on preview", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-invocation-1",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-1",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.web_search",
+        status: "completed",
+        updated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ text: { id: "text:run-1", run_id: "run-1", body: "post-tool text" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "capability_display_preview",
+    frame: {
+      preview: {
+        invocation_id: "invocation-1",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.web_search",
+        status: "completed",
+        title: "builtin.web_search",
+        updated_at: "2026-07-08T13:00:01Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
 });
 
 test("useChatEvents: skill activation projection stays out of chat transcript", () => {
@@ -267,6 +706,64 @@ test("useChatEvents: progress clears non-auth gates for the resumed run", () => 
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: final_reply clears the active run", () => {
+  const runId = "run-final-reply";
+  const harness = createUseChatEventsHarness();
+
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: runId,
+        text: "Done.",
+        generated_at: "2026-06-02T00:00:00Z",
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `reply-${runId}`);
+  assert.equal(harness.messages[0].content, "Done.");
+});
+
+test("useChatEvents: observed run ids are passed to the connection observer", () => {
+  const notedRunIds = [];
+  const harness = createUseChatEventsHarness({
+    noteConnectionInterruptedRunId: (runId) => notedRunIds.push(runId),
+  });
+
+  harness.handleEvent({
+    type: "accepted",
+    frame: {
+      ack: {
+        run_id: "run-accepted-1",
+        thread_id: "thread-1",
+        status: "queued",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "capability_progress",
+    frame: {
+      progress: {
+        turn_run_id: "run-progress-1",
+        kind: "tool_running",
+      },
+    },
+  });
+
+  assert.deepEqual(notedRunIds, ["run-accepted-1", "run-progress-1"]);
 });
 
 test("useChatEvents: approval gate annotates an existing tool activity", () => {
@@ -703,6 +1200,52 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
     harness.messages[0].content,
     "The run failed because the execution driver rejected the request.",
   );
+});
+
+test("useChatEvents: interrupted driver_unavailable projection shows connection error", () => {
+  const runId = "run-disconnected-driver";
+  const contextRunIds = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus,
+    connectionContextForRunFailure: (actualRunId) => {
+      contextRunIds.push(actualRunId);
+      return {
+        connectionStatus: CONNECTION_STATUS.CONNECTED,
+        connectionInterrupted: actualRunId === runId,
+      };
+    },
+  });
+
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: runId,
+              status: "failed",
+              failure_category: "driver_unavailable",
+              failure_summary:
+                "The run failed because the execution driver was temporarily unavailable.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `err-${runId}`);
+  assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.deepEqual(contextRunIds, [runId]);
 });
 
 test("useChatEvents: repeated failed projection updates existing error content", () => {

@@ -30,6 +30,14 @@ import {
   failGateToolActivity,
   resetToolActivityState,
 } from "../lib/tool-activity-state";
+import {
+  rewriteConnectionLostRunFailures,
+  upsertConnectionLostRunFailure,
+} from "../lib/failureMessages";
+import {
+  CONNECTION_STATUS,
+  isConnectionLostStatus,
+} from "../lib/connection-status";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments";
 import { failureMessageForRequestError } from "../lib/failureMessages";
 import { useHistory } from "./useHistory";
@@ -111,6 +119,9 @@ export function useChat(threadId) {
   const [now, setNow] = React.useState(Date.now());
   const [activeRun, setActiveRunState] = React.useState(null);
   const activeRunRef = React.useRef(activeRun);
+  const connectionStatusRef = React.useRef(CONNECTION_STATUS.IDLE);
+  const connectionInterruptedRunIdsRef = React.useRef(new Set());
+  const connectionInterruptedUnknownRef = React.useRef(false);
   const setActiveRun = React.useCallback((next) => {
     const value = typeof next === "function" ? next(activeRunRef.current) : next;
     activeRunRef.current = value;
@@ -275,6 +286,9 @@ export function useChat(threadId) {
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
     locallyResolvedGatesRef.current.clear();
+    connectionInterruptedRunIdsRef.current.clear();
+    connectionInterruptedUnknownRef.current = false;
+    connectionStatusRef.current = CONNECTION_STATUS.IDLE;
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -329,6 +343,38 @@ export function useChat(threadId) {
     };
   }, [pendingGate]);
 
+  const noteConnectionInterruptedRunId = React.useCallback((runId) => {
+    if (!runId || !connectionInterruptedUnknownRef.current) return;
+    connectionInterruptedRunIdsRef.current.add(runId);
+    connectionInterruptedUnknownRef.current = false;
+  }, []);
+
+  const connectionContextForRunFailure = React.useCallback((runId) => {
+    const connectionStatus = connectionStatusRef.current;
+    const connectionLostNow = isConnectionLostStatus(connectionStatus);
+    let connectionInterrupted = Boolean(
+      (runId && connectionInterruptedRunIdsRef.current.has(runId)) ||
+        connectionInterruptedUnknownRef.current,
+    );
+
+    if (connectionLostNow && runId) {
+      connectionInterruptedRunIdsRef.current.add(runId);
+      connectionInterrupted = true;
+    } else if (connectionLostNow) {
+      connectionInterruptedUnknownRef.current = true;
+      connectionInterrupted = true;
+    }
+
+    if (runId && connectionInterruptedUnknownRef.current) {
+      connectionInterruptedRunIdsRef.current.add(runId);
+      connectionInterruptedUnknownRef.current = false;
+      connectionInterrupted = true;
+    }
+
+    if (!connectionInterrupted && !connectionLostNow) return {};
+    return { connectionStatus, connectionInterrupted };
+  }, []);
+
   const handleEvent = useChatEvents({
     threadId,
     setMessages,
@@ -338,6 +384,8 @@ export function useChat(threadId) {
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
+    noteConnectionInterruptedRunId,
+    connectionContextForRunFailure,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -378,6 +426,36 @@ export function useChat(threadId) {
     onEvent: handleEvent,
     enabled: Boolean(threadId),
   });
+
+  React.useEffect(() => {
+    connectionStatusRef.current = sseStatus;
+    if (sseStatus !== CONNECTION_STATUS.DISCONNECTED) return;
+    const wasProcessing = isProcessingRef.current;
+    if (!wasProcessing) return;
+    const runId = activeRunRef.current?.runId || null;
+    if (runId) {
+      connectionInterruptedRunIdsRef.current.add(runId);
+    } else {
+      connectionInterruptedUnknownRef.current = true;
+    }
+    setIsProcessing(false);
+    setActiveRun(null);
+    const localRunAdmission = localRunAdmissionRef.current;
+    if (
+      localRunAdmission &&
+      (!runId ||
+        localRunAdmission.runId === runId ||
+        localRunAdmission.threadId === threadId)
+    ) {
+      localRunAdmissionRef.current = null;
+    }
+    setMessages((prev) =>
+      upsertConnectionLostRunFailure(
+        runId ? rewriteConnectionLostRunFailures(prev, { runId }) : prev,
+        { runId },
+      ),
+    );
+  }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId]);
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.js`
@@ -546,6 +624,12 @@ export function useChat(threadId) {
         }
         let runSettledBeforeResponse = false;
         if (response?.run_id && shouldTrackLocalRun) {
+          if (connectionInterruptedUnknownRef.current) {
+            noteConnectionInterruptedRunId(response.run_id);
+            setMessages((prev) =>
+              rewriteConnectionLostRunFailures(prev, { runId: response.run_id }),
+            );
+          }
           const localRunAdmission = localRunAdmissionRef.current;
           runSettledBeforeResponse = Boolean(
             localRunAdmission &&
@@ -711,6 +795,7 @@ export function useChat(threadId) {
       setIsProcessing,
       setPendingGate,
       setActiveRun,
+      noteConnectionInterruptedRunId,
     ],
   );
   sendRef.current = send;
@@ -861,6 +946,8 @@ export function useChat(threadId) {
       ) {
         localRunAdmissionRef.current = null;
       }
+      connectionInterruptedRunIdsRef.current.delete(runId);
+      connectionInterruptedUnknownRef.current = false;
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId, dismissOnboardingPairing],

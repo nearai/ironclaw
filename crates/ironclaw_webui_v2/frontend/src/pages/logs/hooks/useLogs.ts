@@ -17,8 +17,12 @@ const SCOPE_QUERY_PARAMS = [
   ["source", "source", "logs.scope.source"],
 ];
 
+function effectiveLocationSearch(location = globalThis.location) {
+  return location?.search || globalThis.location?.search || "";
+}
+
 export function readLogScopeFromLocation(location = globalThis.location, defaultThreadId = null) {
-  const params = new URLSearchParams(location?.search || "");
+  const params = new URLSearchParams(effectiveLocationSearch(location));
   const scope = { active: [] };
   for (const [key, param, labelKey] of SCOPE_QUERY_PARAMS) {
     const value = params.get(param)?.trim();
@@ -39,7 +43,7 @@ export function readLogScopeFromLocation(location = globalThis.location, default
 // are an optimization for operator-capable sessions, not the default.
 export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
   const location = useLocation();
-  const locationSearch = location?.search || "";
+  const locationSearch = effectiveLocationSearch(location);
   const scope = React.useMemo(
     () => readLogScopeFromLocation(location, defaultThreadId),
     [defaultThreadId, locationSearch]

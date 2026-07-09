@@ -69,13 +69,13 @@ use crate::slack::slack_personal_binding_serve::{
     SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteState,
     slack_personal_binding_route_mount,
 };
-use crate::webui::RebornWebuiBundle;
-use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
-use crate::webui_operator_auth::{
+use crate::webui::facade::RebornWebuiBundle;
+use crate::webui::webui_body_limit::{build_body_limit_state, enforce_body_limit};
+use crate::webui::webui_operator_auth::{
     OperatorWebuiConfigRouteState, build_operator_webui_config_route_state,
 };
-use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
-use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
+use crate::webui::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
+use crate::webui::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use serde::Serialize;
 
@@ -548,7 +548,7 @@ pub enum WebuiServeError {
     #[error("invalid CSP header value: {0}")]
     InvalidCspHeader(String),
     #[error("rate-limit composition failed: {0}")]
-    RateLimit(#[from] crate::webui_rate_limit::RateLimitConfigError),
+    RateLimit(#[from] crate::webui::webui_rate_limit::RateLimitConfigError),
 }
 
 /// Build the fully-composed Reborn WebChat v2 axum app:

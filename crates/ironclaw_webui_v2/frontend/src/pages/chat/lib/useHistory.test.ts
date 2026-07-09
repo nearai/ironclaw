@@ -3,12 +3,29 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+import {
+  carryFinalAssistantOrderFlags,
+  isFinalAssistantMessage,
+  isRunActivityMessage,
+} from "./stream-order-memory";
 
 function useHistorySourceForTest() {
+  const helpers = readFileSync(
+    new URL("./stream-order-memory.ts", import.meta.url),
+    "utf8",
+  );
   const source = readFileSync(
     new URL("../hooks/useHistory.ts", import.meta.url),
     "utf8",
   );
+  const helperLines = [];
+  for (const line of helpers.split("\n")) {
+    if (line.startsWith("export function ")) {
+      helperLines.push(line.replace("export function ", "function "));
+      continue;
+    }
+    helperLines.push(line);
+  }
   const lines = [];
   let skippingImport = false;
   for (const line of source.split("\n")) {
@@ -22,7 +39,7 @@ function useHistorySourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join(
+  return `${helperLines.join("\n")}\n${lines.join(
     "\n",
   )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh };`;
 }
@@ -610,6 +627,116 @@ test("mergeFullRefresh carries live assistant timestamps onto confirmed replies"
   assert.equal(merged.length, 1);
   assert.equal(merged[0].id, "msg-assistant-1");
   assert.equal(merged[0].timestamp, "2026-06-25T07:18:00.000Z");
+});
+
+test("mergeFullRefresh keeps same-run activity before confirmed assistant replies", () => {
+  const context = {
+    globalThis: {},
+    React: createReactStub(),
+    carryFinalAssistantOrderFlags,
+    isFinalAssistantMessage,
+    isRunActivityMessage,
+  };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-user-1",
+        role: "user",
+        turnRunId: "run-1",
+      },
+      {
+        id: "tool-web-search",
+        role: "tool_activity",
+        toolName: "web_search",
+        turnRunId: "run-1",
+      },
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "PRETOOL text and final answer.",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [
+      {
+        id: "msg-user-1",
+        role: "user",
+        turnRunId: "run-1",
+      },
+      {
+        id: "text-text:run-1",
+        role: "assistant",
+        content: "PRETOOL text",
+        isFinalReply: false,
+        turnRunId: "run-1",
+      },
+      {
+        id: "tool-web-search",
+        role: "tool_activity",
+        toolName: "web_search",
+        turnRunId: "run-1",
+      },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-user-1,tool-web-search,msg-assistant-1",
+  );
+  assert.equal(merged[2].keepFollowingActivityAfter, undefined);
+});
+
+test("mergeFullRefresh preserves final assistant activity-order flag by run", () => {
+  const context = {
+    globalThis: {},
+    React: createReactStub(),
+    carryFinalAssistantOrderFlags,
+    isFinalAssistantMessage,
+    isRunActivityMessage,
+  };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-user-1",
+        role: "user",
+        turnRunId: "run-1",
+      },
+      {
+        id: "tool-web-search",
+        role: "tool_activity",
+        toolName: "web_search",
+        turnRunId: "run-1",
+      },
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "confirmed final",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [
+      {
+        id: "reply-run-1",
+        role: "assistant",
+        content: "live final",
+        isFinalReply: true,
+        turnRunId: "run-1",
+        keepFollowingActivityAfter: true,
+      },
+    ],
+  );
+
+  assert.equal(merged.length, 3);
+  assert.equal(merged[2].id, "msg-assistant-1");
+  assert.equal(merged[2].keepFollowingActivityAfter, true);
 });
 
 test("mergeFullRefresh uses run-settled time for confirmed assistant replies", () => {

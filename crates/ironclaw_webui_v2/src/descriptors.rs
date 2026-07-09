@@ -40,6 +40,7 @@ pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
+pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK: &str = "webui.v2.trace_account_login_link";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
 pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
 pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
@@ -136,6 +137,8 @@ pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit"
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
+pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK: &str =
+    "/api/webchat/v2/traces/account-login-link";
 pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
 pub const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
@@ -229,6 +232,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         delete_automation_descriptor(),
         trace_credits_descriptor(),
         trace_account_traces_descriptor(),
+        trace_account_login_link_descriptor(),
         authorize_trace_hold_descriptor(),
         get_outbound_preferences_descriptor(),
         set_outbound_preferences_descriptor(),
@@ -944,6 +948,23 @@ fn authorize_trace_hold_descriptor() -> IngressRouteDescriptor {
             // The submission id is in the path; no request body.
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn trace_account_login_link_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK,
+        mutation_policy(
+            // Caller-scoped mint; no request body.
+            BodyLimitPolicy::NoBody,
+            // Deliberately tighter than the standard mutation limit: each
+            // call mints a one-time account-access credential server-side.
+            rate_limit_per_caller(10, 60),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,
         ),

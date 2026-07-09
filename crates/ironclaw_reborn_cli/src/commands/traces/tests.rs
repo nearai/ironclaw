@@ -853,3 +853,40 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
         "absent invite code must report configured=false"
     );
 }
+
+#[test]
+fn enroll_instance_parses_invite_and_consent_flags() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "enroll-instance",
+        "--invite",
+        "https://commons.example#INVADMIN1",
+        "--include-message-text",
+        "--json",
+    ]);
+
+    let TracesSubcommand::EnrollInstance {
+        invite,
+        include_message_text,
+        include_tool_payloads,
+        json,
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces enroll-instance command");
+    };
+
+    assert_eq!(invite, "https://commons.example#INVADMIN1");
+    assert!(include_message_text);
+    assert!(
+        !include_tool_payloads,
+        "tool payloads must default to excluded"
+    );
+    assert!(json);
+}
+
+#[test]
+fn enroll_instance_requires_invite() {
+    let result = parse_cli_result(["ironclaw-reborn", "traces", "enroll-instance"]);
+    assert!(result.is_err(), "--invite must be required");
+}
