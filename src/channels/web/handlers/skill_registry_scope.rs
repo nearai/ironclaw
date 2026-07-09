@@ -27,6 +27,8 @@ static SCOPED_SKILL_REGISTRY_BUILD_LOCKS: std::sync::LazyLock<
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ScopedSkillRegistryCacheKey {
     template_ptr: usize,
+    template_user_dir: PathBuf,
+    template_installed_dir: Option<PathBuf>,
     tenant_segment: String,
     user_segment: String,
 }
@@ -65,12 +67,9 @@ async fn cached_scoped_registry(
     tenant_segment: &str,
     user: &UserIdentity,
 ) -> HandlerResult<SharedSkillRegistry> {
-    let user_segment =
-        ironclaw_skills::SkillRegistry::tenant_user_scope_segment(tenant_segment, &user.user_id);
-    let key = ScopedSkillRegistryCacheKey {
-        template_ptr: Arc::as_ptr(template) as usize,
-        tenant_segment: tenant_segment.to_string(),
-        user_segment,
+    let key = {
+        let guard = template.read().map_err(lock_error_response)?;
+        scoped_registry_cache_key(template, &guard, tenant_segment, &user.user_id)
     };
     let now = Instant::now();
     if let Some(registry) = cached_registry(&key, now)? {
@@ -92,6 +91,24 @@ async fn cached_scoped_registry(
     let scoped = Arc::new(RwLock::new(scoped));
     cache_registry(key, Arc::clone(&scoped), now)?;
     Ok(scoped)
+}
+
+fn scoped_registry_cache_key(
+    template: &SharedSkillRegistry,
+    registry: &ironclaw_skills::SkillRegistry,
+    tenant_segment: &str,
+    user_id: &str,
+) -> ScopedSkillRegistryCacheKey {
+    ScopedSkillRegistryCacheKey {
+        template_ptr: Arc::as_ptr(template) as usize,
+        template_user_dir: registry.user_dir().to_path_buf(),
+        template_installed_dir: registry.installed_dir().map(PathBuf::from),
+        tenant_segment: tenant_segment.to_string(),
+        user_segment: ironclaw_skills::SkillRegistry::tenant_user_scope_segment(
+            tenant_segment,
+            user_id,
+        ),
+    }
 }
 
 fn cached_registry(
@@ -288,4 +305,42 @@ fn lock_error_response(e: std::sync::PoisonError<impl Sized>) -> (StatusCode, St
         StatusCode::INTERNAL_SERVER_ERROR,
         "Can't access skills right now".to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_registry_cache_key_includes_template_skill_roots() {
+        let first = tempfile::tempdir().expect("first tempdir");
+        let second = tempfile::tempdir().expect("second tempdir");
+        let first_registry = Arc::new(RwLock::new(
+            ironclaw_skills::SkillRegistry::new(first.path().join("skills"))
+                .with_installed_dir(first.path().join("installed_skills")),
+        ));
+        let second_registry = Arc::new(RwLock::new(
+            ironclaw_skills::SkillRegistry::new(second.path().join("skills"))
+                .with_installed_dir(second.path().join("installed_skills")),
+        ));
+
+        let first_key = {
+            let guard = first_registry.read().expect("first registry read");
+            scoped_registry_cache_key(&first_registry, &guard, "owner-user", "alice")
+        };
+        let second_key = {
+            let guard = second_registry.read().expect("second registry read");
+            scoped_registry_cache_key(&second_registry, &guard, "owner-user", "alice")
+        };
+
+        assert_ne!(first_key.template_user_dir, second_key.template_user_dir);
+        assert_ne!(
+            first_key.template_installed_dir,
+            second_key.template_installed_dir
+        );
+        assert_ne!(
+            first_key, second_key,
+            "scoped cache entries from different template roots must not alias"
+        );
+    }
 }
