@@ -252,6 +252,10 @@ registerPack("ar", {
   "traceCommons.lastSyncDesc": "عرض محلي حتى آخر مزامنة",
   "traceCommons.never": "أبدًا",
   "traceCommons.recentExplanations": "تفسيرات الرصيد الأخيرة",
+  "traceCommons.openAccount": "فتح حساب Trace Commons",
+  "traceCommons.openingAccount": "جارٍ الفتح…",
+  "traceCommons.openAccountFailed":
+    "تعذر فتح حساب Trace Commons الخاص بك. تحقق من التسجيل وحاول مرة أخرى.",
   "traceCommons.submittedTracesTitle": "الآثار المُرسَلة",
   "traceCommons.tracesLoadFailed": "تعذّر تحميل آثارك المُرسَلة.",
   "traceCommons.traceStatus": "الحالة",

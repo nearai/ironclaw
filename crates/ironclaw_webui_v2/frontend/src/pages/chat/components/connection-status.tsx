@@ -1,19 +1,20 @@
 import { useT } from "../../../lib/i18n";
-
-const HIDDEN_STATUSES = [
-  "idle",
-  "connecting",
-  "connected",
-  "reconnecting",
-  "disconnected",
-  "paused",
-];
+import { CONNECTION_STATUS } from "../lib/connection-status";
 
 const FALLBACK_STYLE = "bg-iron-700/50 text-iron-200 border-iron-700/50";
 
+const HIDDEN_STATUSES = new Set([
+  CONNECTION_STATUS.IDLE,
+  CONNECTION_STATUS.CONNECTING,
+  CONNECTION_STATUS.CONNECTED,
+  CONNECTION_STATUS.RECONNECTING,
+  CONNECTION_STATUS.DISCONNECTED,
+  CONNECTION_STATUS.PAUSED,
+]);
+
 export function ConnectionStatus({ status }) {
   const t = useT();
-  if (!status || HIDDEN_STATUSES.includes(status)) return null;
+  if (!status || HIDDEN_STATUSES.has(status)) return null;
 
   const labelKey = "connection." + status;
   const label = t(labelKey);

@@ -252,6 +252,10 @@ registerPack("hi", {
   "traceCommons.lastSyncDesc": "अंतिम सिंक के समय का स्थानीय दृश्य",
   "traceCommons.never": "कभी नहीं",
   "traceCommons.recentExplanations": "हाल की क्रेडिट व्याख्याएँ",
+  "traceCommons.openAccount": "Trace Commons खाता खोलें",
+  "traceCommons.openingAccount": "खोला जा रहा है…",
+  "traceCommons.openAccountFailed":
+    "आपका Trace Commons खाता नहीं खोला जा सका। नामांकन जाँचें और फिर से प्रयास करें।",
   "traceCommons.submittedTracesTitle": "सबमिट किए गए ट्रेस",
   "traceCommons.tracesLoadFailed": "आपके सबमिट किए गए ट्रेस लोड नहीं हो सके।",
   "traceCommons.traceStatus": "स्थिति",

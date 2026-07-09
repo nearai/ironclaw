@@ -252,6 +252,10 @@ registerPack("de", {
   "traceCommons.lastSyncDesc": "Lokale Ansicht zum Zeitpunkt der letzten Synchronisierung",
   "traceCommons.never": "nie",
   "traceCommons.recentExplanations": "Aktuelle Guthaben-Erläuterungen",
+  "traceCommons.openAccount": "Trace-Commons-Konto öffnen",
+  "traceCommons.openingAccount": "Wird geöffnet…",
+  "traceCommons.openAccountFailed":
+    "Ihr Trace-Commons-Konto konnte nicht geöffnet werden. Prüfen Sie die Registrierung und versuchen Sie es erneut.",
   "traceCommons.submittedTracesTitle": "Eingereichte Traces",
   "traceCommons.tracesLoadFailed": "Ihre eingereichten Traces konnten nicht geladen werden.",
   "traceCommons.traceStatus": "Status",

@@ -252,6 +252,10 @@ registerPack("es", {
   "traceCommons.lastSyncDesc": "Vista local a fecha de la última sincronización",
   "traceCommons.never": "nunca",
   "traceCommons.recentExplanations": "Explicaciones de crédito recientes",
+  "traceCommons.openAccount": "Abrir cuenta de Trace Commons",
+  "traceCommons.openingAccount": "Abriendo…",
+  "traceCommons.openAccountFailed":
+    "No se pudo abrir tu cuenta de Trace Commons. Comprueba la inscripción e inténtalo de nuevo.",
   "traceCommons.submittedTracesTitle": "Trazas enviadas",
   "traceCommons.tracesLoadFailed": "No se pudieron cargar tus trazas enviadas.",
   "traceCommons.traceStatus": "Estado",

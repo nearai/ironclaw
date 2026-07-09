@@ -1,5 +1,9 @@
 import React from "react";
 import { openEventStream } from "../../../lib/api";
+import {
+  CONNECTION_STATUS,
+  type ConnectionStatus,
+} from "../lib/connection-status";
 
 // v2 SSE emits `WebChatV2EventFrame` JSON, tagged with a typed
 // event name (`event: accepted`, `event: final_reply`, etc.) so
@@ -44,7 +48,9 @@ function isEventSourceOpen(source) {
 }
 
 export function useSSE({ threadId, onEvent, enabled }) {
-  const [status, setStatus] = React.useState("idle");
+  const [status, setStatus] = React.useState<ConnectionStatus>(
+    CONNECTION_STATUS.IDLE,
+  );
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
   // Last cursor we successfully received. EventSource sends
@@ -57,7 +63,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
   React.useEffect(() => {
     if (!enabled || !threadId) {
-      setStatus("idle");
+      setStatus(CONNECTION_STATUS.IDLE);
       return;
     }
     // New thread → drop the prior thread's cursor before the first
@@ -85,7 +91,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         es = null;
       }
       clearReconnectWatchdog();
-      setStatus("disconnected");
+      setStatus(CONNECTION_STATUS.DISCONNECTED);
       reconnectAttempts++;
       const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
       reconnectTimer = setTimeout(connect, delay);
@@ -100,7 +106,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         }
         if (isEventSourceOpen(source)) {
           reconnectAttempts = 0;
-          setStatus("connected");
+          setStatus(CONNECTION_STATUS.CONNECTED);
           return;
         }
         reconnectWithTimer();
@@ -109,10 +115,14 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
     function connect() {
       if (document.visibilityState === "hidden") {
-        setStatus("paused");
+        setStatus(CONNECTION_STATUS.PAUSED);
         return;
       }
-      setStatus(reconnectAttempts > 0 ? "reconnecting" : "connecting");
+      setStatus(
+        reconnectAttempts > 0
+          ? CONNECTION_STATUS.RECONNECTING
+          : CONNECTION_STATUS.CONNECTING,
+      );
 
       es = openEventStream({
         threadId,
@@ -122,13 +132,13 @@ export function useSSE({ threadId, onEvent, enabled }) {
       es.onopen = () => {
         clearReconnectWatchdog();
         reconnectAttempts = 0;
-        setStatus("connected");
+        setStatus(CONNECTION_STATUS.CONNECTED);
       };
 
       es.onerror = () => {
         if (!es) return;
         if (!isEventSourceClosed(es)) {
-          setStatus("reconnecting");
+          setStatus(CONNECTION_STATUS.RECONNECTING);
           scheduleNativeReconnectWatchdog(es);
           return;
         }
@@ -178,7 +188,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         es.close();
         es = null;
       }
-      setStatus("paused");
+      setStatus(CONNECTION_STATUS.PAUSED);
     }
 
     function handleVisibilityChange() {

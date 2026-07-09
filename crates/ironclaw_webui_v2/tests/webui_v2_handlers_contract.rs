@@ -29,21 +29,21 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -264,6 +264,8 @@ struct StubServices {
     /// `trace_account_traces` call, so the contract test can assert the handler
     /// forwards the caller (the route is caller-scoped).
     trace_account_traces_callers: Mutex<Vec<String>>,
+    /// Forwarded caller user-ids for each `trace_account_login_link` call.
+    trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     next_rename_automation_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
@@ -1470,6 +1472,29 @@ impl RebornServicesApi for StubServices {
             traces: vec![],
         })
     }
+
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        // Capture the forwarded caller (tenant AND user — this is the trusted
+        // identity boundary) so the contract test can verify the caller-scoped
+        // route threads the authenticated identity, then return a hermetic
+        // canned mint (no network / filesystem).
+        self.trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .push(format!(
+                "{}/{}",
+                caller.tenant_id.as_str(),
+                caller.actor().user_id.as_str()
+            ));
+        Ok(RebornAccountLoginLinkResponse {
+            minted: true,
+            enrolled: true,
+            url: Some("https://commons.example/account/login?code=stub".to_string()),
+        })
+    }
 }
 
 fn operator_command_response(area: RebornOperatorArea) -> RebornOperatorCommandPlaneResponse {
@@ -2599,6 +2624,47 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
             .expect("lock")
             .clone(),
         vec![user_id],
+    );
+}
+
+#[tokio::test]
+async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
+    // POST /traces/account-login-link is caller-scoped and returns the minted
+    // one-time URL in the authenticated response body — the only delivery
+    // channel hosted users have (no host-file access).
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/traces/account-login-link")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["minted"], true);
+    assert_eq!(body["enrolled"], true);
+    assert_eq!(
+        body["url"],
+        "https://commons.example/account/login?code=stub"
+    );
+
+    // The route must forward the authenticated caller's tenant AND user id to
+    // the facade — the scope is trusted-caller-derived, never request input
+    // (fails if the handler stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["tenant-alpha/user-alpha".to_string()],
     );
 }
 

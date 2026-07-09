@@ -9,6 +9,11 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages";
+import {
+  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  failureMessageForRunStatus,
+} from "./failureMessages";
+import { CONNECTION_STATUS } from "./connection-status";
 import { gateFromProjectionGate } from "./gates";
 import {
   createToolActivityState,
@@ -47,6 +52,8 @@ function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
   locallyResolvedGatesRef = { current: new Map() },
+  noteConnectionInterruptedRunId = () => {},
+  connectionContextForRunFailure = () => ({}),
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -98,6 +105,8 @@ function createUseChatEventsHarness({
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
+    noteConnectionInterruptedRunId,
+    connectionContextForRunFailure,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
@@ -696,6 +705,64 @@ test("useChatEvents: progress clears non-auth gates for the resumed run", () => 
   assert.equal(harness.pendingGate, null);
 });
 
+test("useChatEvents: final_reply clears the active run", () => {
+  const runId = "run-final-reply";
+  const harness = createUseChatEventsHarness();
+
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: runId,
+        text: "Done.",
+        generated_at: "2026-06-02T00:00:00Z",
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `reply-${runId}`);
+  assert.equal(harness.messages[0].content, "Done.");
+});
+
+test("useChatEvents: observed run ids are passed to the connection observer", () => {
+  const notedRunIds = [];
+  const harness = createUseChatEventsHarness({
+    noteConnectionInterruptedRunId: (runId) => notedRunIds.push(runId),
+  });
+
+  harness.handleEvent({
+    type: "accepted",
+    frame: {
+      ack: {
+        run_id: "run-accepted-1",
+        thread_id: "thread-1",
+        status: "queued",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "capability_progress",
+    frame: {
+      progress: {
+        turn_run_id: "run-progress-1",
+        kind: "tool_running",
+      },
+    },
+  });
+
+  assert.deepEqual(notedRunIds, ["run-accepted-1", "run-progress-1"]);
+});
+
 test("useChatEvents: approval gate annotates an existing tool activity", () => {
   const runId = "run-gated-existing";
   const gateRef = "gate:web-access";
@@ -1130,6 +1197,52 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
     harness.messages[0].content,
     "The run failed because the execution driver rejected the request.",
   );
+});
+
+test("useChatEvents: interrupted driver_unavailable projection shows connection error", () => {
+  const runId = "run-disconnected-driver";
+  const contextRunIds = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus,
+    connectionContextForRunFailure: (actualRunId) => {
+      contextRunIds.push(actualRunId);
+      return {
+        connectionStatus: CONNECTION_STATUS.CONNECTED,
+        connectionInterrupted: actualRunId === runId,
+      };
+    },
+  });
+
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: runId,
+              status: "failed",
+              failure_category: "driver_unavailable",
+              failure_summary:
+                "The run failed because the execution driver was temporarily unavailable.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `err-${runId}`);
+  assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.deepEqual(contextRunIds, [runId]);
 });
 
 test("useChatEvents: repeated failed projection updates existing error content", () => {

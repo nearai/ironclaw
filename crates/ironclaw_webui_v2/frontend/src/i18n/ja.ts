@@ -252,6 +252,10 @@ registerPack("ja", {
   "traceCommons.lastSyncDesc": "最終同期時点のローカル表示",
   "traceCommons.never": "なし",
   "traceCommons.recentExplanations": "最近のクレジット明細",
+  "traceCommons.openAccount": "Trace Commons アカウントを開く",
+  "traceCommons.openingAccount": "開いています…",
+  "traceCommons.openAccountFailed":
+    "Trace Commons アカウントを開けませんでした。登録状況を確認して再試行してください。",
   "traceCommons.submittedTracesTitle": "送信したトレース",
   "traceCommons.tracesLoadFailed": "送信したトレースを読み込めませんでした。",
   "traceCommons.traceStatus": "ステータス",
