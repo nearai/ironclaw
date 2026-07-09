@@ -374,86 +374,100 @@ where
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
         validate_context_cursor(request.after.as_ref(), &self.run_context)?;
         let max_messages = bounded_limit(request.limit, self.max_messages);
-        let started_at = ironclaw_observability::live_latency_started_at();
-        let context = self
-            .thread_service
-            .load_context_window(LoadContextWindowRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                max_messages,
-            })
-            .await
-            .map_err(context_read_error)?;
-        trace_loop_support_latency_ok(
-            "context_load_window",
-            &self.run_context,
-            started_at,
-            max_messages,
-            context.messages.len(),
-        );
-        if let Some(cache) = self.context_window_cache.as_ref() {
+        let mode = request.mode;
+        let context_window = async {
             let started_at = ironclaw_observability::live_latency_started_at();
-            cache
-                .store(self.thread_scope.clone(), max_messages, context.clone())
-                .await;
+            let context = self
+                .thread_service
+                .load_context_window(LoadContextWindowRequest {
+                    scope: self.thread_scope.clone(),
+                    thread_id: self.run_context.thread_id.clone(),
+                    max_messages,
+                })
+                .await
+                .map_err(context_read_error)?;
             trace_loop_support_latency_ok(
-                "context_cache_store",
+                "context_load_window",
                 &self.run_context,
                 started_at,
                 max_messages,
                 context.messages.len(),
             );
-        }
-
-        let started_at = ironclaw_observability::live_latency_started_at();
-        let instruction_snippets = match self.skill_context_source.as_deref() {
-            Some(source) => {
-                skill_context::build_skill_instruction_snippets(source, &self.run_context).await?
-            }
-            None => Vec::new(),
-        };
-        trace_loop_support_latency_ok(
-            "context_skill_snippets",
-            &self.run_context,
-            started_at,
-            max_messages,
-            instruction_snippets.len(),
-        );
-        let started_at = ironclaw_observability::live_latency_started_at();
-        let identity_messages = match self.identity_context_source.as_deref() {
-            Some(source) => {
-                let mode = request.mode;
-                let candidates = self
-                    .identity_candidates
-                    .cell_for_mode(mode)
-                    .get_or_try_init(|| async {
-                        source
-                            .load_identity_candidates(&self.run_context, mode)
-                            .await
-                            .map_err(HostIdentityContextBuildError::into_host_error)
-                    })
-                    .await?;
-                let outcome = identity_context::build_identity_messages_for_run_detailed(
-                    candidates,
+            if let Some(cache) = self.context_window_cache.as_ref() {
+                let started_at = ironclaw_observability::live_latency_started_at();
+                cache
+                    .store(self.thread_scope.clone(), max_messages, context.clone())
+                    .await;
+                trace_loop_support_latency_ok(
+                    "context_cache_store",
                     &self.run_context,
-                    mode,
-                    self.identity_budget,
-                )?;
-                self.publish_personal_context_admitted(
-                    mode,
-                    &outcome.admitted_personal_context_paths,
+                    started_at,
+                    max_messages,
+                    context.messages.len(),
                 );
-                outcome.messages
             }
-            None => Vec::new(),
+            Ok::<_, AgentLoopHostError>(context)
         };
-        trace_loop_support_latency_ok(
-            "context_identity_messages",
-            &self.run_context,
-            started_at,
-            max_messages,
-            identity_messages.len(),
-        );
+
+        let skill_snippets = async {
+            let started_at = ironclaw_observability::live_latency_started_at();
+            let instruction_snippets = match self.skill_context_source.as_deref() {
+                Some(source) => {
+                    skill_context::build_skill_instruction_snippets(source, &self.run_context)
+                        .await?
+                }
+                None => Vec::new(),
+            };
+            trace_loop_support_latency_ok(
+                "context_skill_snippets",
+                &self.run_context,
+                started_at,
+                max_messages,
+                instruction_snippets.len(),
+            );
+            Ok::<_, AgentLoopHostError>(instruction_snippets)
+        };
+
+        let identity_context = async {
+            let started_at = ironclaw_observability::live_latency_started_at();
+            let identity_messages = match self.identity_context_source.as_deref() {
+                Some(source) => {
+                    let candidates = self
+                        .identity_candidates
+                        .cell_for_mode(mode)
+                        .get_or_try_init(|| async {
+                            source
+                                .load_identity_candidates(&self.run_context, mode)
+                                .await
+                                .map_err(HostIdentityContextBuildError::into_host_error)
+                        })
+                        .await?;
+                    let outcome = identity_context::build_identity_messages_for_run_detailed(
+                        candidates,
+                        &self.run_context,
+                        mode,
+                        self.identity_budget,
+                    )?;
+                    self.publish_personal_context_admitted(
+                        mode,
+                        &outcome.admitted_personal_context_paths,
+                    );
+                    outcome.messages
+                }
+                None => Vec::new(),
+            };
+            trace_loop_support_latency_ok(
+                "context_identity_messages",
+                &self.run_context,
+                started_at,
+                max_messages,
+                identity_messages.len(),
+            );
+            Ok::<_, AgentLoopHostError>(identity_messages)
+        };
+
+        let (context, instruction_snippets, identity_messages) =
+            tokio::try_join!(context_window, skill_snippets, identity_context)?;
 
         let started_at = ironclaw_observability::live_latency_started_at();
         let compaction_message_index = context

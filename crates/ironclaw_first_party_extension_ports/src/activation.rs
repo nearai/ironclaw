@@ -482,25 +482,41 @@ where
             ));
         }
 
-        let candidate_set = self.load_activation_candidate_set(run_context).await?;
-        let selection = select_skill_activations(
+        let descriptors = self.load_activation_descriptors(run_context).await?;
+        let candidates = self
+            .load_activation_candidates(run_context, &descriptors)
+            .await?;
+        let checked_setup_markers = setup_markers_for_explicit_mentions(message, &candidates);
+        let mut satisfied_setup_markers = self
+            .satisfied_setup_markers_for_marker_set(run_context, &checked_setup_markers)
+            .await?;
+        let mut selection = select_skill_activations(
             message,
-            &candidate_set.candidates,
+            &candidates,
             &self.config,
             self.auto_activate_learned.load(Ordering::Relaxed),
-            &candidate_set.satisfied_setup_markers,
+            &satisfied_setup_markers,
         )?;
+        let selected_setup_markers = setup_markers_for_selection(&selection, &candidates);
+        let unchecked_selected_setup_markers = selected_setup_markers
+            .difference(&checked_setup_markers)
+            .cloned()
+            .collect::<HashSet<_>>();
+        let newly_satisfied_setup_markers = self
+            .satisfied_setup_markers_for_marker_set(run_context, &unchecked_selected_setup_markers)
+            .await?;
+        if !newly_satisfied_setup_markers.is_empty() {
+            satisfied_setup_markers.extend(newly_satisfied_setup_markers);
+            selection = select_skill_activations(
+                message,
+                &candidates,
+                &self.config,
+                self.auto_activate_learned.load(Ordering::Relaxed),
+                &satisfied_setup_markers,
+            )?;
+        }
         let plan = activation_plan_for_candidates(selection);
-        Ok((plan, candidate_set.candidates))
-    }
-
-    async fn load_activation_candidate_set(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
-        let descriptors = self.load_activation_descriptors(run_context).await?;
-        self.load_activation_candidate_set_for_descriptors(run_context, descriptors)
-            .await
+        Ok((plan, candidates))
     }
 
     async fn load_named_activation_candidate_set(
@@ -587,6 +603,15 @@ where
                     .cloned()
             })
             .collect::<HashSet<_>>();
+        self.satisfied_setup_markers_for_marker_set(run_context, &markers)
+            .await
+    }
+
+    async fn satisfied_setup_markers_for_marker_set(
+        &self,
+        run_context: &LoopRunContext,
+        markers: &HashSet<String>,
+    ) -> Result<HashSet<String>, SkillActivationSelectionError> {
         if markers.is_empty() {
             return Ok(HashSet::new());
         }
@@ -1192,6 +1217,54 @@ fn candidates_with_unsatisfied_setup_markers<'a>(
         .collect()
 }
 
+fn setup_markers_for_explicit_mentions(
+    message: &str,
+    candidates: &[ActivationCandidate],
+) -> HashSet<String> {
+    let explicit_names = extract_explicit_skill_names(message);
+    if explicit_names.is_empty() {
+        return HashSet::new();
+    }
+    candidates
+        .iter()
+        .filter(|candidate| {
+            explicit_names
+                .iter()
+                .any(|name| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
+        })
+        .filter_map(candidate_setup_marker)
+        .collect()
+}
+
+fn setup_markers_for_selection(
+    selection: &SkillActivationSelection,
+    candidates: &[ActivationCandidate],
+) -> HashSet<String> {
+    let activated_bundle_ids = selection
+        .activations
+        .iter()
+        .filter_map(|activation| activation.bundle_id.as_ref())
+        .collect::<HashSet<_>>();
+    if activated_bundle_ids.is_empty() {
+        return HashSet::new();
+    }
+    candidates
+        .iter()
+        .filter(|candidate| activated_bundle_ids.contains(candidate.descriptor.id()))
+        .filter_map(candidate_setup_marker)
+        .collect()
+}
+
+fn candidate_setup_marker(candidate: &ActivationCandidate) -> Option<String> {
+    candidate
+        .loaded
+        .manifest
+        .activation
+        .setup_marker
+        .as_ref()
+        .cloned()
+}
+
 fn candidate_for_loaded_skill<'a>(
     skill: &LoadedSkill,
     candidates: &'a [&ActivationCandidate],
@@ -1441,6 +1514,12 @@ mod tests {
         satisfied_markers: HashSet<String>,
     }
 
+    #[derive(Debug)]
+    struct CountingSetupMarkerSource {
+        inner: StaticSetupMarkerSource,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
     impl StaticSkillBundleSource {
         fn new(skills: Vec<(SkillSourceKind, &str, &str)>) -> Self {
             let mut descriptors = Vec::new();
@@ -1511,6 +1590,19 @@ mod tests {
                     .map(|marker| marker.to_string())
                     .collect(),
             }
+        }
+    }
+
+    impl CountingSetupMarkerSource {
+        fn new(satisfied_markers: &[&str]) -> Self {
+            Self {
+                inner: StaticSetupMarkerSource::new(satisfied_markers),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
         }
     }
 
@@ -1618,6 +1710,20 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl SetupMarkerSource for CountingSetupMarkerSource {
+        async fn satisfied_setup_markers(
+            &self,
+            run_context: &LoopRunContext,
+            markers: &HashSet<String>,
+        ) -> Result<HashSet<String>, SkillActivationSelectionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .satisfied_setup_markers(run_context, markers)
+                .await
+        }
+    }
+
     fn skill_md(name: &str, description: &str, keywords: &[&str], prompt: &str) -> String {
         let keyword_list = keywords
             .iter()
@@ -1697,6 +1803,45 @@ mod tests {
             .expect("selection succeeds");
 
         assert!(selected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selector_skips_setup_marker_probe_without_matching_activation() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "setup-helper",
+            &skill_md_with_activation(
+                "setup-helper",
+                "  keywords: [\"setup-helper\"]\n  setup_marker: \"markers/setup-helper.done\"",
+                "SETUP_HELPER_SENTINEL",
+            ),
+        )]));
+        let setup_markers = Arc::new(CountingSetupMarkerSource::new(&[
+            "markers/setup-helper.done",
+        ]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
+                .with_setup_marker_source(Arc::clone(&setup_markers));
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "hello there",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert!(selected.is_empty());
+        assert_eq!(
+            setup_markers.calls(),
+            0,
+            "non-matching chat should not stat setup markers"
+        );
     }
 
     #[tokio::test]
