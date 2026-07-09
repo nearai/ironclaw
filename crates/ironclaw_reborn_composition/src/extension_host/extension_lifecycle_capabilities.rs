@@ -603,7 +603,9 @@ mod tests {
                 .exists()
         );
 
-        let before_activate = active_extension_capability_ids(&extension_management).await;
+        let before_activate =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(!before_activate.iter().any(|id| id == "web-access.search"));
 
         let activate = invoke_json(
@@ -620,7 +622,9 @@ mod tests {
             "activation success should override stale same-turn search onboarding, got {activate}"
         );
 
-        let after_activate = active_extension_capability_ids(&extension_management).await;
+        let after_activate =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(after_activate.iter().any(|id| id == "web-access.search"));
         assert!(
             after_activate
@@ -644,7 +648,9 @@ mod tests {
         .expect("remove succeeds");
         assert_eq!(remove["payload"]["removed"], true);
 
-        let after_remove = active_extension_capability_ids(&extension_management).await;
+        let after_remove =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(!after_remove.iter().any(|id| id == "web-access.search"));
         assert!(!storage_root.join("system/extensions/web-access").exists());
     }
@@ -834,7 +840,9 @@ mod tests {
         assert_eq!(requirement.provider.as_str(), "github");
         assert_eq!(requirement.requester_extension.as_str(), "github");
 
-        let active = active_extension_capability_ids(&extension_management).await;
+        let active =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(!active.iter().any(|id| id == "github.search_issues"));
     }
 
@@ -1037,7 +1045,9 @@ mod tests {
             ])
         );
 
-        let active = active_extension_capability_ids(&extension_management).await;
+        let active =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(!active.iter().any(|id| id == "google-calendar.create_event"));
     }
 
@@ -1101,7 +1111,9 @@ mod tests {
             ])
         );
 
-        let active = active_extension_capability_ids(&extension_management).await;
+        let active =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(!active.iter().any(|id| id == "gmail.list_messages"));
     }
 
@@ -1151,7 +1163,9 @@ mod tests {
         };
         assert_eq!(failure.kind, RuntimeFailureKind::Backend);
 
-        let active = active_extension_capability_ids(&extension_management).await;
+        let active =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(!active.iter().any(|id| id == "github.search_issues"));
     }
 
@@ -1193,7 +1207,9 @@ mod tests {
         .expect("hosted MCP activation succeeds");
         assert_eq!(activate["payload"]["activated"], true);
 
-        let active = active_extension_capability_ids(&extension_management).await;
+        let active =
+            active_extension_capability_ids(&extension_management, &extension_tool_test_owner())
+                .await;
         assert!(active.iter().any(|id| id == "notion.notion-get-self"));
         assert!(
             storage_root
@@ -1327,9 +1343,10 @@ mod tests {
 
     async fn active_extension_capability_ids(
         extension_management: &RebornLocalExtensionManagementPort,
+        owner: &UserId,
     ) -> Vec<String> {
         extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(owner)
             .await
             .expect("active extension capabilities")
             .into_iter()
@@ -1351,12 +1368,16 @@ mod tests {
         .with_provider_trust(provider_trust)
     }
 
+    fn extension_tool_test_owner() -> UserId {
+        UserId::new("extension-tool-test-user").expect("valid user id")
+    }
+
     fn execution_context<'a>(
         capability_ids: impl IntoIterator<Item = &'a str>,
     ) -> ExecutionContext {
         let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id");
         ExecutionContext::local_default(
-            UserId::new("extension-tool-test-user").expect("valid user id"),
+            extension_tool_test_owner(),
             caller.clone(),
             RuntimeKind::FirstParty,
             TrustClass::FirstParty,

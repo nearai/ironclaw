@@ -17,6 +17,8 @@ use crate::runtime::local_dev::synthetic_capability::{
     LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
 };
 
+use super::effective_user_id;
+
 /// Test-only bridge (E-PROJ seam): wrap `inner` with just the `project_create`
 /// local-dev synthetic capability, so the Reborn integration-test harness can
 /// inject it onto its host-runtime capability port the same way production does
@@ -257,24 +259,6 @@ fn project_service_outcome(
         safe_summary,
         detail: None,
     }))
-}
-
-/// Resolve the user the run acts on behalf of: the explicit thread owner, else
-/// the run actor, else the local-dev fallback. Mirrors the same resolution used
-/// by the outbound-delivery capabilities so all local-dev synthetic
-/// capabilities scope to one identity.
-fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
-    run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| {
-            run_context
-                .actor
-                .as_ref()
-                .map(|actor| actor.user_id.clone())
-        })
-        .unwrap_or_else(|| fallback_user_id.clone())
 }
 
 #[cfg(test)]

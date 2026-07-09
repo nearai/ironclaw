@@ -590,6 +590,42 @@ impl RebornServices {
             .map(|em| em.installation_store_for_test())
     }
 
+    /// Test-support access to the operator tool catalog wired exactly as
+    /// `build_webui_services_with_connectable_channels` wires it
+    /// (`ActiveRegistryOperatorToolCatalog`, registry + installation store).
+    /// `build_webui_services` needs a `&RebornRuntime`, which flat
+    /// integration-test harnesses never construct (they call
+    /// `build_reborn_services` directly) — this accessor lets a test drive
+    /// the REAL owner/enabled operator-tool filter (T3-iso correction 10)
+    /// through `RebornServices::with_operator_approval_config` instead of a
+    /// hand-rolled `RebornOperatorToolCatalog` double. `None` for
+    /// compositions with no local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_operator_tool_catalog_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::RebornOperatorToolCatalog>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let registry = local_runtime
+            .shared_extension_registry
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(SharedExtensionRegistry::new(
+                    local_runtime.extension_registry.as_ref().clone(),
+                ))
+            });
+        let installation_store = local_runtime
+            .extension_management
+            .as_ref()
+            .map(|extension_management| extension_management.installation_store());
+        Some(Arc::new(
+            crate::webui::ActiveRegistryOperatorToolCatalog::new(
+                registry,
+                installation_store,
+                Vec::new(),
+            ),
+        ))
+    }
+
     /// Test-support access to the local-dev memory filesystem that backs the
     /// user-profile source (E-PROFILE seam). This is the raw `RootFilesystem`
     /// that `MemoryBackedUserProfileSource` reads `context/profile.json` from and
@@ -6581,7 +6617,7 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(&UserId::new(owner).unwrap())
             .await
             .expect("active capabilities");
         let search = capabilities
@@ -6696,7 +6732,7 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Discovered);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(&UserId::new(owner).unwrap())
             .await
             .expect("active capabilities");
         assert!(
@@ -6861,7 +6897,7 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(&UserId::new(owner).unwrap())
             .await
             .expect("active capabilities");
         assert!(

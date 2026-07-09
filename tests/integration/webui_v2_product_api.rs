@@ -152,8 +152,12 @@ async fn thread_history_cold_get_after_in_memory_reopen() {
 /// via a production impl (no enabler needed).
 struct TestOperatorToolCatalog;
 
+#[async_trait::async_trait]
 impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(
+        &self,
+        _caller: &ironclaw_host_api::UserId,
+    ) -> Vec<RebornOperatorToolInfo> {
         vec![RebornOperatorToolInfo {
             capability_id: CapabilityId::new("builtin.http").expect("capability id"),
             provider: ExtensionId::new("builtin").expect("extension id"),

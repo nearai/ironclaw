@@ -38,6 +38,8 @@ use crate::runtime::local_dev::synthetic_capability::{
     LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
 };
 
+use super::effective_user_id;
+
 pub(super) fn outbound_delivery_capabilities(
     facade: Arc<dyn OutboundPreferencesProductFacade>,
     fallback_user_id: UserId,
@@ -611,20 +613,6 @@ fn settings_scope_for_run(
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
-}
-
-fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
-    run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| {
-            run_context
-                .actor
-                .as_ref()
-                .map(|actor| actor.user_id.clone())
-        })
-        .unwrap_or_else(|| fallback_user_id.clone())
 }
 
 fn outbound_delivery_target_set_capability_id() -> Result<CapabilityId, AgentLoopHostError> {

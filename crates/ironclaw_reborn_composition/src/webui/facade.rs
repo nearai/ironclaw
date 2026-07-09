@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
+use ironclaw_extensions::{ExtensionInstallationStore, SharedExtensionRegistry};
+use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope, UserId};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, ConnectableChannelsProductFacade, OperatorStatusService,
@@ -43,29 +43,55 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
 
 #[derive(Clone)]
-struct ActiveRegistryOperatorToolCatalog {
+pub(crate) struct ActiveRegistryOperatorToolCatalog {
     registry: Arc<SharedExtensionRegistry>,
+    // T3-iso (correction 10): `None` only for compositions with no local-dev
+    // extension management wired (e.g. the Echo backend) — those never
+    // publish `UserRegistered` extensions, so no owner/enabled filtering is
+    // possible or needed and every registry capability stays visible.
+    installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
     synthetic_tools: Arc<[RebornOperatorToolInfo]>,
 }
 
 impl ActiveRegistryOperatorToolCatalog {
-    fn new(
+    // `pub(crate)`: also constructed by `RebornServices::local_dev_operator_tool_catalog_for_test`
+    // (factory.rs) so integration tests can drive the REAL owner/enabled
+    // filter through `RebornServicesApi` without duplicating it in a double.
+    pub(crate) fn new(
         registry: Arc<SharedExtensionRegistry>,
+        installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
         synthetic_tools: Vec<RebornOperatorToolInfo>,
     ) -> Self {
         Self {
             registry,
+            installation_store,
             synthetic_tools: Arc::from(synthetic_tools),
         }
     }
 }
 
+#[async_trait]
 impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo> {
+        // Correction 10: default-ALLOW exclusion (never-installation-tracked
+        // capabilities like `builtin.*` stay visible), unlike AC2's
+        // default-deny intersection — see `operator_config_excluded_extension_ids`.
+        let excluded_ids = match &self.installation_store {
+            Some(store) => {
+                crate::extension_host::registered_extension_store::operator_config_excluded_extension_ids(
+                    store.as_ref(),
+                    caller,
+                )
+                .await
+                .unwrap_or_default()
+            }
+            None => Default::default(),
+        };
         let mut tools = self
             .registry
             .snapshot()
             .capabilities()
+            .filter(|descriptor| !excluded_ids.contains(&descriptor.provider))
             .map(|descriptor| RebornOperatorToolInfo {
                 capability_id: descriptor.id.clone(),
                 provider: descriptor.provider.clone(),
@@ -242,12 +268,17 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 })?,
             ]
         };
+        let operator_tool_installation_store = local_runtime
+            .extension_management
+            .as_ref()
+            .map(|extension_management| extension_management.installation_store());
         api = api.with_operator_approval_config(
             tool_permission_overrides,
             auto_approve_settings,
             persistent_approval_policies,
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
+                operator_tool_installation_store,
                 synthetic_operator_tools,
             )),
         );
@@ -981,25 +1012,35 @@ mod tests {
     };
     use std::{path::Path, time::Duration};
 
-    #[test]
-    fn operator_tool_catalog_reads_shared_registry_updates() {
+    #[tokio::test]
+    async fn operator_tool_catalog_reads_shared_registry_updates() {
         let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let synthetic_provider =
             outbound_delivery_synthetic_provider().expect("synthetic provider id");
         let catalog = ActiveRegistryOperatorToolCatalog::new(
             Arc::clone(&registry),
+            // No installation store: this fixture never registers a
+            // `UserRegistered` extension, so no owner/enabled filtering is
+            // under test here (see `owner_visible_enabled_extension_ids`
+            // coverage in `registered_extension_store.rs` for that).
+            None,
             vec![
                 outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
                     .expect("synthetic tool info"),
             ],
         );
+        let caller = UserId::new("operator-tool-catalog-test-caller").expect("valid user id");
 
         assert!(
-            catalog.list_operator_tools().iter().any(|tool| {
-                tool.capability_id.as_str()
-                    == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
-                    && tool.provider == synthetic_provider
-            }),
+            catalog
+                .list_operator_tools(&caller)
+                .await
+                .iter()
+                .any(|tool| {
+                    tool.capability_id.as_str()
+                        == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                        && tool.provider == synthetic_provider
+                }),
             "synthetic outbound delivery capability must use the Settings > Tools provider key"
         );
 
@@ -1007,7 +1048,7 @@ mod tests {
             .insert(test_extension_package("dynamic-tools", "echo"))
             .expect("insert dynamic extension");
 
-        let tools = catalog.list_operator_tools();
+        let tools = catalog.list_operator_tools(&caller).await;
 
         assert!(
             tools

@@ -10,9 +10,14 @@
 //!
 //! The write side (`put`/`delete`) lands with the register verb in T3.
 
-use ironclaw_extensions::ManifestSource;
+use std::collections::BTreeSet;
+
+use ironclaw_extensions::{
+    ExtensionActivationState, ExtensionInstallationError, ExtensionInstallationStore,
+    ManifestSource,
+};
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{UserId, VirtualPath};
+use ironclaw_host_api::{ExtensionId, UserId, VirtualPath};
 use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::available_extensions::{
@@ -29,6 +34,76 @@ const REGISTERED_ROOT: &str = "/system/extensions/registered";
 /// and restore) gate on this.
 pub(crate) fn is_owner_registered(source: &ManifestSource) -> bool {
     matches!(source, ManifestSource::UserRegistered { .. })
+}
+
+/// T3-iso owner filter: a `UserRegistered` manifest is visible only to its
+/// own owner; every other source is visible to any caller (including a
+/// caller with no resolved identity).
+pub(crate) fn manifest_visible_to_caller(source: &ManifestSource, caller: Option<&UserId>) -> bool {
+    match source {
+        ManifestSource::UserRegistered { owner } => caller.is_some_and(|caller| caller == owner),
+        _ => true,
+    }
+}
+
+/// AC2: the set of extension ids that are BOTH enabled AND visible to
+/// `owner` — the model-visible-capability filter
+/// (`active_model_visible_capabilities`) intersects the shared registry
+/// against this set, so a disabled or cross-owner `UserRegistered` extension's
+/// capabilities never reach the model's toolbox. Deliberately NOT used by the
+/// operator-tool-config surface below: `builtin.*` capabilities are never
+/// installation-tracked, so an intersection against `list_enabled_installations()`
+/// would silently drop them from Settings > Tools (see
+/// `operator_config_excluded_extension_ids`'s doc for that surface's
+/// default-allow design instead).
+pub(crate) async fn owner_visible_enabled_extension_ids(
+    installation_store: &dyn ExtensionInstallationStore,
+    owner: &UserId,
+) -> Result<BTreeSet<ExtensionId>, ExtensionInstallationError> {
+    let enabled_ids: BTreeSet<ExtensionId> = installation_store
+        .list_enabled_installations()
+        .await?
+        .into_iter()
+        .map(|installation| installation.extension_id().clone())
+        .collect();
+    let owner_visible_ids: BTreeSet<ExtensionId> = installation_store
+        .list_manifests()
+        .await?
+        .into_iter()
+        .filter(|record| manifest_visible_to_caller(&record.manifest().source, Some(owner)))
+        .map(|record| record.extension_id().clone())
+        .collect();
+    Ok(enabled_ids
+        .intersection(&owner_visible_ids)
+        .cloned()
+        .collect())
+}
+
+/// Correction 10: the set of extension ids the operator-tool-config surface
+/// (`ActiveRegistryOperatorToolCatalog`) must HIDE from `caller` — a
+/// default-ALLOW exclusion list, unlike AC2's default-deny intersection.
+/// `builtin.*` and other never-installation-tracked capabilities carry no
+/// manifest or installation record at all, so they are never added here and
+/// stay visible to every caller, matching Settings > Tools' pre-T3-iso
+/// behavior for them. Only two things get excluded: a `UserRegistered`
+/// manifest owned by someone else, and any tracked installation that is not
+/// `Enabled` (disabled/quarantined).
+pub(crate) async fn operator_config_excluded_extension_ids(
+    installation_store: &dyn ExtensionInstallationStore,
+    caller: &UserId,
+) -> Result<BTreeSet<ExtensionId>, ExtensionInstallationError> {
+    let mut excluded = BTreeSet::new();
+    for record in installation_store.list_manifests().await? {
+        if !manifest_visible_to_caller(&record.manifest().source, Some(caller)) {
+            excluded.insert(record.extension_id().clone());
+        }
+    }
+    for installation in installation_store.list_installations().await? {
+        if installation.activation_state() != ExtensionActivationState::Enabled {
+            excluded.insert(installation.extension_id().clone());
+        }
+    }
+    Ok(excluded)
 }
 
 /// Owner-scoped read access to user-registered extension manifests.

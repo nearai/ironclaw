@@ -84,8 +84,8 @@ use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 use crate::extension_host::registered_extension_store::{
-    is_owner_registered, resolve_any_owner_for_restore, resolve_with_owner_overlay,
-    search_with_owner_overlay,
+    is_owner_registered, manifest_visible_to_caller, owner_visible_enabled_extension_ids,
+    resolve_any_owner_for_restore, resolve_with_owner_overlay, search_with_owner_overlay,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -277,6 +277,15 @@ impl RebornLocalExtensionManagementPort {
         }
     }
 
+    /// Production access to the extension installation store, for
+    /// `webui.rs`'s `ActiveRegistryOperatorToolCatalog` (T3-iso, correction
+    /// 10): the operator-tool-config surface needs the SAME owner/enabled
+    /// visibility filter `active_model_visible_capabilities` uses, which
+    /// requires reading manifest sources off this store.
+    pub(crate) fn installation_store(&self) -> Arc<dyn ExtensionInstallationStore> {
+        Arc::clone(&self.installation_store)
+    }
+
     /// Test-support access to the extension installation store.
     ///
     /// Mirrors the `installation_store` field that `build_local_runtime` wires
@@ -310,14 +319,20 @@ impl RebornLocalExtensionManagementPort {
         let extensions = self.catalog.search(query);
         let mut summaries = Vec::new();
         for extension in extensions {
-            summaries.push(self.search_summary(extension, credential_gate).await?);
+            summaries.push(
+                self.search_summary(extension, credential_gate, owner)
+                    .await?,
+            );
         }
         // Owner-registered packages never enter the shared catalog above
         // (boot-leak fix), so they are searched separately and overlaid here.
         let owner_overlay =
             search_with_owner_overlay(self.filesystem.as_ref(), owner, query).await?;
         for extension in &owner_overlay {
-            summaries.push(self.search_summary(extension, credential_gate).await?);
+            summaries.push(
+                self.search_summary(extension, credential_gate, owner)
+                    .await?,
+            );
         }
         let count = summaries.len();
         let mut response = response_with_payload(
@@ -380,21 +395,26 @@ impl RebornLocalExtensionManagementPort {
         ))
     }
 
+    // T3-iso: `owner` is the acting caller, threaded from
+    // `local_dev_visible_capability_request`'s resolved run owner
+    // (`refreshing_capability_port.rs`'s `build_inner`) through
+    // `LocalDevExtensionSurfaceSource::snapshot(owner)` ->
+    // `LocalDevExtensionSurface::from_extension_management(mgmt, owner)`. A
+    // `UserRegistered` extension's capabilities are visible only when its
+    // manifest's owner matches `owner` — see
+    // `registered_extension_store::owner_visible_enabled_extension_ids`.
     pub(crate) async fn active_model_visible_capabilities(
         &self,
+        owner: &UserId,
     ) -> Result<Vec<ActiveExtensionCapability>, ProductWorkflowError> {
-        let enabled_extension_ids = self
-            .installation_store
-            .list_enabled_installations()
-            .await
-            .map_err(map_extension_installation_error)?
-            .into_iter()
-            .map(|installation| installation.extension_id().clone())
-            .collect::<BTreeSet<_>>();
+        let visible_extension_ids =
+            owner_visible_enabled_extension_ids(self.installation_store.as_ref(), owner)
+                .await
+                .map_err(map_extension_installation_error)?;
         let registry = self.active_extensions.snapshot();
         Ok(registry
             .capabilities()
-            .filter(|descriptor| enabled_extension_ids.contains(&descriptor.provider))
+            .filter(|descriptor| visible_extension_ids.contains(&descriptor.provider))
             .filter(|descriptor| {
                 registry
                     .capability_visibility(&descriptor.id)
@@ -452,10 +472,14 @@ impl RebornLocalExtensionManagementPort {
         &self,
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+        owner: Option<&UserId>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
-        let Some(installation) = self.search_installation(&extension.package.id).await? else {
+        let Some(installation) = self
+            .search_installation(&extension.package.id, owner)
+            .await?
+        else {
             return Ok(LifecycleSearchExtensionSummary {
                 summary,
                 installation_phase: None,
@@ -468,9 +492,15 @@ impl RebornLocalExtensionManagementPort {
         })
     }
 
+    // T3-iso (AC1b): `owner` is the acting caller. When the installation's
+    // manifest is `UserRegistered` under a DIFFERENT owner, this returns
+    // `Ok(None)` (no installation status) rather than the real record — the
+    // same "not installed" shape a genuine miss returns, so a caller cannot
+    // distinguish "not installed" from "installed by someone else".
     async fn search_installation(
         &self,
         extension_id: &ExtensionId,
+        owner: Option<&UserId>,
     ) -> Result<Option<ExtensionInstallation>, ProductWorkflowError> {
         let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
             .map_err(map_extension_installation_error)?;
@@ -490,6 +520,16 @@ impl RebornLocalExtensionManagementPort {
                     extension_id.as_str()
                 ),
             });
+        }
+        let manifest = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        if manifest
+            .is_some_and(|record| !manifest_visible_to_caller(&record.manifest().source, owner))
+        {
+            return Ok(None);
         }
         Ok(installation)
     }
@@ -2233,7 +2273,9 @@ mod tests {
         .expect("activate Slack tools extension");
 
         let active_capability_ids = port
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &UserId::new("lifecycle-test-owner").expect("valid user id"),
+            )
             .await
             .expect("active capabilities")
             .into_iter()
@@ -2341,7 +2383,9 @@ mod tests {
             "removing the public Slack extension must not leave hidden Slack user-tool installations behind"
         );
         let active_capability_ids = port
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &UserId::new("lifecycle-test-owner").expect("valid user id"),
+            )
             .await
             .expect("active capabilities")
             .into_iter()
@@ -2378,7 +2422,9 @@ mod tests {
         .expect("activate fixture extension");
 
         let capability_ids = port
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &UserId::new("lifecycle-test-owner").expect("valid user id"),
+            )
             .await
             .expect("active capabilities")
             .into_iter()
@@ -2389,6 +2435,134 @@ mod tests {
         assert!(!capability_ids.contains(&CapabilityId::new("fixture.write").unwrap()));
         assert!(
             !capability_ids.contains(&CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap())
+        );
+    }
+
+    /// T3-iso AC2, crate tier: the integration tier cannot reach this filter
+    /// through a real `submit_turn` — `tests/integration`'s
+    /// `HostRuntimeCapabilityHarness` grants model-visible capabilities from a
+    /// STATIC `capability_ids` list fixed at harness construction
+    /// (`create_recording_capability_port`), never through this production
+    /// local-dev path (`RefreshingLocalDevCapabilityPort::build_inner` ->
+    /// `active_model_visible_capabilities`), so a dynamically owner-registered
+    /// extension can never reach the model toolbox in that harness regardless
+    /// of this filter. This test drives the SAME public method production's
+    /// `LocalDevExtensionSurface::from_extension_management` calls, with a
+    /// real `UserRegistered`-owned, enabled installation seeded through the
+    /// installation store (T3-reg's register verb doesn't exist yet).
+    #[tokio::test]
+    async fn active_model_visible_capabilities_is_owner_scoped_for_user_registered_extensions() {
+        let (_dir, _storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let owner_a = UserId::new("ac2-owner-a").expect("valid user id");
+        let owner_b = UserId::new("ac2-owner-b").expect("valid user id");
+        let extension_id = ExtensionId::new("acme-registered").expect("valid extension id");
+
+        let manifest_record = ExtensionManifestRecord::from_toml(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-registered"
+name = "Acme Registered"
+version = "0.1.0"
+description = "Owner-registered MCP server (AC2 fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#,
+            ManifestSource::UserRegistered {
+                owner: owner_a.clone(),
+            },
+            &HostPortCatalog::empty(),
+            None,
+        )
+        .expect("owner manifest record parses");
+        installation_store
+            .upsert_manifest(manifest_record)
+            .await
+            .expect("seed owner manifest");
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new(extension_id.as_str().to_string())
+                .expect("valid installation id"),
+            extension_id.clone(),
+            ExtensionActivationState::Enabled,
+            ExtensionManifestRef::new(extension_id.clone(), None),
+            Vec::new(),
+            chrono::Utc::now(),
+        )
+        .expect("valid installation");
+        installation_store
+            .upsert_installation(installation)
+            .await
+            .expect("seed installation");
+
+        // Publish a capability into the registry under the SAME id — models
+        // T3-disc's eventual discovery-publish step; discovery itself is out
+        // of scope for T3-iso (registered extensions publish zero capabilities
+        // until T3-disc opens the gate).
+        let capability_manifest = ExtensionManifest::parse(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-registered"
+name = "Acme Registered"
+version = "0.1.0"
+description = "Registered MCP capability probe fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/acme.wasm"
+
+[[capabilities]]
+id = "acme-registered.search"
+description = "Registered MCP search capability (fixture)"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("capability manifest parses");
+        let capability_package = ExtensionPackage::from_manifest(
+            capability_manifest,
+            VirtualPath::new("/system/extensions/acme-registered").expect("valid root"),
+        )
+        .expect("capability package builds");
+        active_registry
+            .upsert(capability_package)
+            .expect("publish capability into registry");
+
+        let owner_capability_ids = port
+            .active_model_visible_capabilities(&owner_a)
+            .await
+            .expect("owner A capabilities")
+            .into_iter()
+            .map(|capability| capability.id)
+            .collect::<Vec<_>>();
+        assert!(
+            owner_capability_ids.contains(&CapabilityId::new("acme-registered.search").unwrap()),
+            "owner A must see its own registered+enabled capability"
+        );
+
+        let other_owner_capability_ids = port
+            .active_model_visible_capabilities(&owner_b)
+            .await
+            .expect("owner B capabilities")
+            .into_iter()
+            .map(|capability| capability.id)
+            .collect::<Vec<_>>();
+        assert!(
+            !other_owner_capability_ids
+                .contains(&CapabilityId::new("acme-registered.search").unwrap()),
+            "isolation failure: a different owner must not see owner A's registered capability"
         );
     }
 

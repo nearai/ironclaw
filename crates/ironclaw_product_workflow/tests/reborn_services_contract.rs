@@ -8247,8 +8247,9 @@ struct StaticOperatorToolCatalogForTest {
     tools: Vec<RebornOperatorToolInfo>,
 }
 
+#[async_trait]
 impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(&self, _caller: &UserId) -> Vec<RebornOperatorToolInfo> {
         self.tools.clone()
     }
 }

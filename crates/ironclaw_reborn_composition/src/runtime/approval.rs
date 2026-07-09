@@ -69,7 +69,7 @@ impl LocalDevApprovalLeaseTermsProvider {
         };
         let surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(&gate.resource_scope().user_id)
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
@@ -99,11 +99,12 @@ impl LocalDevApprovalLeaseTermsProvider {
 
     async fn active_extension_persistent_approval_allowed(
         &self,
+        gate: &ApprovalGateRecord,
         action: LocalDevApprovalPolicyAction<'_>,
     ) -> Result<bool, ProductWorkflowError> {
         let surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(&gate.resource_scope().user_id)
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval surface is unavailable");
@@ -196,7 +197,7 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             }
         }
         if self
-            .active_extension_persistent_approval_allowed(action)
+            .active_extension_persistent_approval_allowed(gate, action)
             .await?
         {
             Ok(())
