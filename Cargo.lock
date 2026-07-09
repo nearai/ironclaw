@@ -3919,6 +3919,7 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "insta",
+ "ironclaw_agent_loop",
  "ironclaw_approvals",
  "ironclaw_attachments",
  "ironclaw_auth",
@@ -3940,7 +3941,6 @@ dependencies = [
  "ironclaw_mcp",
  "ironclaw_memory",
  "ironclaw_network",
- "ironclaw_oauth",
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_adapters",
@@ -4102,6 +4102,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "urlencoding",
  "uuid",
 ]
 
@@ -4459,7 +4460,6 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_process_sandbox",
  "ironclaw_processes",
- "ironclaw_product_adapter_registry",
  "ironclaw_prompt_envelope",
  "ironclaw_reborn_event_store",
  "ironclaw_reborn_traces",
@@ -4553,6 +4553,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
+ "ironclaw_observability",
  "ironclaw_process_sandbox",
  "ironclaw_resources",
  "ironclaw_safety",
@@ -4638,16 +4639,6 @@ dependencies = [
  "tokio",
  "url",
  "zeroize",
-]
-
-[[package]]
-name = "ironclaw_oauth"
-version = "0.1.0"
-dependencies = [
- "ironclaw_common",
- "thiserror 2.0.18",
- "tokio",
- "urlencoding",
 ]
 
 [[package]]
@@ -4834,6 +4825,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "blake3",
  "chrono",
  "futures-util",
  "ironclaw_agent_loop",
@@ -4954,12 +4946,12 @@ dependencies = [
  "ironclaw_reborn_identity",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
+ "ironclaw_reborn_webui_ingress",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
- "ironclaw_skill_learning",
  "ironclaw_skills",
  "ironclaw_slack_v2_adapter",
  "ironclaw_threads",
@@ -5130,6 +5122,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_llm",
  "ironclaw_safety",
  "jsonwebtoken",
@@ -5192,11 +5185,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "chrono-tz",
- "deadpool-postgres",
  "fs2",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "libsql",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -5204,7 +5195,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-postgres",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
@@ -5295,16 +5285,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_skill_learning"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ironclaw_skills",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "ironclaw_skills"
 version = "0.3.0"
 dependencies = [
@@ -5354,10 +5334,13 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_llm",
  "ironclaw_resources",
+ "ironclaw_secrets",
  "ironclaw_threads",
  "ironclaw_turns",
  "libc",
  "libsql",
+ "reqwest 0.12.28",
+ "rig-core",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -5414,6 +5397,7 @@ dependencies = [
  "cron",
  "deadpool-postgres",
  "hex",
+ "ironclaw_common",
  "ironclaw_host_api",
  "ironclaw_turns",
  "libsql",
@@ -5498,7 +5482,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_resources",
  "ironclaw_wasm_limiter",
- "ironclaw_wasm_sandbox_core",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -5529,7 +5512,7 @@ dependencies = [
  "hmac 0.13.0",
  "http 1.4.2",
  "ironclaw_product_adapters",
- "ironclaw_wasm_sandbox_core",
+ "ironclaw_wasm",
  "serde_json",
  "sha2 0.11.0",
  "subtle",
@@ -5540,17 +5523,6 @@ dependencies = [
  "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
-]
-
-[[package]]
-name = "ironclaw_wasm_sandbox_core"
-version = "0.1.0"
-dependencies = [
- "ironclaw_wasm_limiter",
- "thiserror 2.0.18",
- "tracing",
- "wasmtime",
- "wasmtime-wasi",
 ]
 
 [[package]]

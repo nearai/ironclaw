@@ -11,8 +11,10 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
+mod await_edge_port;
 mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;
@@ -40,6 +42,9 @@ mod token_estimator;
 mod turn_event_publisher;
 pub mod user_profile_context;
 
+pub use await_edge_port::{
+    AwaitEdgeSettler, AwaitEdgeWriter, ResolveOutcome, ResolveReport, ScopeRecoveryInProgress,
+};
 pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
 pub use budget_seeding::BudgetSeedingPolicy;
@@ -100,11 +105,11 @@ pub use subagent_prompt_port::{
 pub use subagent_spawn_port::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
     DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
-    InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
+    InMemoryAwaitEdgeWriter, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
     SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
-    SubagentDefinitionResolver, SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId,
-    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
+    SubagentDefinitionResolver, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
+    SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
@@ -126,7 +131,8 @@ use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage,
+    AppendAssistantDraftRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, ContextMessage, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
     SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -154,6 +160,30 @@ use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
+
+fn trace_loop_support_latency_ok(
+    operation: &'static str,
+    context: &LoopRunContext,
+    started_at: Option<Instant>,
+    max_messages: usize,
+    message_count: usize,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "loop_support",
+        operation,
+        started_at,
+        tenant_id = %context.scope.tenant_id,
+        agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = %context.thread_id,
+        owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
+        run_id = %context.run_id,
+        turn_id = %context.turn_id,
+        max_messages = max_messages as u64,
+        message_count = message_count as u64,
+        "loop support operation completed",
+    );
+}
 
 pub fn raw_agent_loop_host_error(
     component: &'static str,
@@ -344,55 +374,100 @@ where
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
         validate_context_cursor(request.after.as_ref(), &self.run_context)?;
         let max_messages = bounded_limit(request.limit, self.max_messages);
-        let context = self
-            .thread_service
-            .load_context_window(LoadContextWindowRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
+        let mode = request.mode;
+        let context_window = async {
+            let started_at = ironclaw_observability::live_latency_started_at();
+            let context = self
+                .thread_service
+                .load_context_window(LoadContextWindowRequest {
+                    scope: self.thread_scope.clone(),
+                    thread_id: self.run_context.thread_id.clone(),
+                    max_messages,
+                })
+                .await
+                .map_err(context_read_error)?;
+            trace_loop_support_latency_ok(
+                "context_load_window",
+                &self.run_context,
+                started_at,
                 max_messages,
-            })
-            .await
-            .map_err(context_read_error)?;
-        if let Some(cache) = self.context_window_cache.as_ref() {
-            cache
-                .store(self.thread_scope.clone(), max_messages, context.clone())
-                .await;
-        }
-
-        let instruction_snippets = match self.skill_context_source.as_deref() {
-            Some(source) => {
-                skill_context::build_skill_instruction_snippets(source, &self.run_context).await?
-            }
-            None => Vec::new(),
-        };
-        let identity_messages = match self.identity_context_source.as_deref() {
-            Some(source) => {
-                let mode = request.mode;
-                let candidates = self
-                    .identity_candidates
-                    .cell_for_mode(mode)
-                    .get_or_try_init(|| async {
-                        source
-                            .load_identity_candidates(&self.run_context, mode)
-                            .await
-                            .map_err(HostIdentityContextBuildError::into_host_error)
-                    })
-                    .await?;
-                let outcome = identity_context::build_identity_messages_for_run_detailed(
-                    candidates,
+                context.messages.len(),
+            );
+            if let Some(cache) = self.context_window_cache.as_ref() {
+                let started_at = ironclaw_observability::live_latency_started_at();
+                cache
+                    .store(self.thread_scope.clone(), max_messages, context.clone())
+                    .await;
+                trace_loop_support_latency_ok(
+                    "context_cache_store",
                     &self.run_context,
-                    mode,
-                    self.identity_budget,
-                )?;
-                self.publish_personal_context_admitted(
-                    mode,
-                    &outcome.admitted_personal_context_paths,
+                    started_at,
+                    max_messages,
+                    context.messages.len(),
                 );
-                outcome.messages
             }
-            None => Vec::new(),
+            Ok::<_, AgentLoopHostError>(context)
         };
 
+        let skill_snippets = async {
+            let started_at = ironclaw_observability::live_latency_started_at();
+            let instruction_snippets = match self.skill_context_source.as_deref() {
+                Some(source) => {
+                    skill_context::build_skill_instruction_snippets(source, &self.run_context)
+                        .await?
+                }
+                None => Vec::new(),
+            };
+            trace_loop_support_latency_ok(
+                "context_skill_snippets",
+                &self.run_context,
+                started_at,
+                max_messages,
+                instruction_snippets.len(),
+            );
+            Ok::<_, AgentLoopHostError>(instruction_snippets)
+        };
+
+        let identity_context = async {
+            let started_at = ironclaw_observability::live_latency_started_at();
+            let (identity_messages, admitted_personal_context_paths) =
+                match self.identity_context_source.as_deref() {
+                    Some(source) => {
+                        let candidates = self
+                            .identity_candidates
+                            .cell_for_mode(mode)
+                            .get_or_try_init(|| async {
+                                source
+                                    .load_identity_candidates(&self.run_context, mode)
+                                    .await
+                                    .map_err(HostIdentityContextBuildError::into_host_error)
+                            })
+                            .await?;
+                        let outcome = identity_context::build_identity_messages_for_run_detailed(
+                            candidates,
+                            &self.run_context,
+                            mode,
+                            self.identity_budget,
+                        )?;
+                        (outcome.messages, outcome.admitted_personal_context_paths)
+                    }
+                    None => (Vec::new(), Vec::new()),
+                };
+            trace_loop_support_latency_ok(
+                "context_identity_messages",
+                &self.run_context,
+                started_at,
+                max_messages,
+                identity_messages.len(),
+            );
+            Ok::<_, AgentLoopHostError>((identity_messages, admitted_personal_context_paths))
+        };
+
+        let (context, instruction_snippets, (identity_messages, admitted_personal_context_paths)) =
+            tokio::try_join!(context_window, skill_snippets, identity_context)?;
+        self.publish_personal_context_admitted(mode, &admitted_personal_context_paths);
+
+        let started_at = ironclaw_observability::live_latency_started_at();
         let compaction_message_index = context
             .messages
             .iter()
@@ -401,6 +476,13 @@ where
         let messages = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
+        );
+        trace_loop_support_latency_ok(
+            "context_select_messages",
+            &self.run_context,
+            started_at,
+            max_messages,
+            messages.len(),
         );
 
         Ok(LoopContextBundle {
@@ -618,57 +700,40 @@ where
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
         let reply_content = request.reply.content;
-        let draft = self
+        let finalized = match self
             .thread_service
-            .append_assistant_draft(AppendAssistantDraftRequest {
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
                 turn_run_id: self.run_context.run_id.to_string(),
                 content: MessageContent::text(reply_content.clone()),
             })
             .await
-            .map_err(transcript_write_error)?;
-        if draft.status == MessageStatus::Finalized {
-            if draft.content.as_deref() == Some(reply_content.as_str()) {
-                let message_ref = message_ref(draft.message_id)?;
-                self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
-                return Ok(message_ref);
+        {
+            Ok(message) => message,
+            Err(error) => {
+                if let Some(message) = self
+                    .already_finalized_matching_reply_for_current_run(&reply_content)
+                    .await?
+                {
+                    message
+                } else {
+                    return Err(transcript_write_error(error));
+                }
             }
+        };
+        if finalized.status != MessageStatus::Finalized
+            || finalized.content.as_deref() != Some(reply_content.as_str())
+        {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,
                 "assistant transcript write failed",
             ));
         }
-        let finalized = self
-            .thread_service
-            .finalize_assistant_message(
-                &self.thread_scope,
-                &self.run_context.thread_id,
-                draft.message_id,
-                MessageContent::text(reply_content.clone()),
-            )
-            .await;
-        match finalized {
-            Ok(message) => {
-                let message_ref = message_ref(message.message_id)?;
-                self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
-                Ok(message_ref)
-            }
-            Err(error) => {
-                if let Some(message_id) = self
-                    .already_finalized_matching_reply(draft.message_id, &reply_content)
-                    .await?
-                {
-                    let message_ref = message_ref(message_id)?;
-                    self.emit_assistant_reply_finalized(message_ref.clone())
-                        .await?;
-                    return Ok(message_ref);
-                }
-                Err(transcript_write_error(error))
-            }
-        }
+        let message_ref = message_ref(finalized.message_id)?;
+        self.emit_assistant_reply_finalized(message_ref.clone())
+            .await?;
+        Ok(message_ref)
     }
 
     async fn append_capability_result_ref(
@@ -790,30 +855,27 @@ where
         Ok(message)
     }
 
-    async fn already_finalized_matching_reply(
+    async fn already_finalized_matching_reply_for_current_run(
         &self,
-        message_id: ThreadMessageId,
         reply_content: &str,
-    ) -> Result<Option<ThreadMessageId>, AgentLoopHostError> {
-        let history = self
+    ) -> Result<Option<ThreadMessageRecord>, AgentLoopHostError> {
+        let Some(message) = self
             .thread_service
-            .list_thread_history(ThreadHistoryRequest {
+            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
+                turn_run_id: self.run_context.run_id.to_string(),
             })
             .await
-            .map_err(transcript_write_error)?;
-        let expected_run_id = self.run_context.run_id.to_string();
-        Ok(history.messages.into_iter().find_map(|message| {
-            let belongs_to_run = message.turn_run_id.as_deref() == Some(expected_run_id.as_str());
-            let matches_reply = message.status == MessageStatus::Finalized
-                && message.content.as_deref() == Some(reply_content);
-            if message.message_id == message_id && belongs_to_run && matches_reply {
-                Some(message.message_id)
-            } else {
-                None
-            }
-        }))
+            .map_err(transcript_write_error)?
+        else {
+            return Ok(None);
+        };
+        if message.content.as_deref() == Some(reply_content) {
+            Ok(Some(message))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -902,6 +964,7 @@ where
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -931,6 +994,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
+            stream_sink: None,
         }
     }
 
@@ -957,6 +1021,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
+            stream_sink: None,
         }
     }
 
@@ -1006,6 +1071,11 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_stream_sink(mut self, sink: Arc<dyn HostManagedModelStreamSink>) -> Self {
+        self.stream_sink = Some(sink);
         self
     }
 
@@ -1127,8 +1197,22 @@ where
                 } else {
                     Arc::clone(capabilities)
                 };
+            if let Some(stream_sink) = self.stream_sink.as_ref() {
+                self.gateway
+                    .stream_model_with_capabilities_and_progress(
+                        host_request,
+                        capabilities,
+                        Arc::clone(stream_sink),
+                    )
+                    .await
+            } else {
+                self.gateway
+                    .stream_model_with_capabilities(host_request, capabilities)
+                    .await
+            }
+        } else if let Some(stream_sink) = self.stream_sink.as_ref() {
             self.gateway
-                .stream_model_with_capabilities(host_request, capabilities)
+                .stream_model_with_progress(host_request, Arc::clone(stream_sink))
                 .await
         } else {
             self.gateway.stream_model(host_request).await
@@ -1224,7 +1308,9 @@ where
         &self,
         requested_messages: Vec<LoopModelMessage>,
     ) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
-        let context = self.load_model_context_window().await?;
+        let context = self
+            .load_model_context_window(!requested_messages.is_empty())
+            .await?;
 
         if requested_messages.is_empty() {
             let context_messages = prompt_context_budget::select_prompt_context_messages(
@@ -1415,27 +1501,54 @@ where
 
     async fn load_model_context_window(
         &self,
+        allow_smaller_cached_context: bool,
     ) -> Result<ironclaw_threads::ContextWindow, AgentLoopHostError> {
+        let started_at = ironclaw_observability::live_latency_started_at();
         if let Some(cache) = self.context_window_cache.as_ref()
             && let Some(context) = cache
                 .take_matching(
                     &self.thread_scope,
                     &self.run_context.thread_id,
                     self.max_messages,
+                    allow_smaller_cached_context,
                 )
                 .await
         {
+            trace_loop_support_latency_ok(
+                "model_context_cache_hit",
+                &self.run_context,
+                started_at,
+                self.max_messages,
+                context.messages.len(),
+            );
             return Ok(context);
         }
+        trace_loop_support_latency_ok(
+            "model_context_cache_miss",
+            &self.run_context,
+            started_at,
+            self.max_messages,
+            0,
+        );
 
-        self.thread_service
+        let started_at = ironclaw_observability::live_latency_started_at();
+        let context = self
+            .thread_service
             .load_context_window(LoadContextWindowRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
                 max_messages: self.max_messages,
             })
             .await
-            .map_err(context_read_error)
+            .map_err(context_read_error)?;
+        trace_loop_support_latency_ok(
+            "model_context_load_window",
+            &self.run_context,
+            started_at,
+            self.max_messages,
+            context.messages.len(),
+        );
+        Ok(context)
     }
 
     async fn instruction_snippet_messages_by_ref(
@@ -1479,12 +1592,30 @@ pub trait HostManagedModelGateway: Send + Sync {
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError>;
 
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        _sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model(request).await
+    }
+
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
         _capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.stream_model(request).await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        _sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model_with_capabilities(request, capabilities)
+            .await
     }
 
     /// Resolve a scope-specific gateway, if this gateway multiplexes by scope.
@@ -1496,6 +1627,11 @@ pub trait HostManagedModelGateway: Send + Sync {
     ) -> Option<std::sync::Arc<dyn HostManagedModelGateway>> {
         None
     }
+}
+
+#[async_trait::async_trait]
+pub trait HostManagedModelStreamSink: Send + Sync {
+    async fn safe_text_update(&self, safe_text: String);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

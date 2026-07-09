@@ -354,6 +354,21 @@ where
     last.expect("at least one read should have succeeded in wait_for_settled")
 }
 
+async fn wait_for_mutator_registration_outcomes(
+    gateway: &TriggerMutatorAttemptGateway,
+    deadline: Duration,
+) -> (Vec<String>, BTreeMap<String, Result<(), String>>) {
+    let stop = Instant::now() + deadline;
+    loop {
+        let captured_contents = gateway.captured_message_contents().await;
+        let outcomes = gateway.registration_outcomes().await;
+        if outcomes.len() == 4 || Instant::now() >= stop {
+            return (captured_contents, outcomes);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn current_minute_slot() -> chrono::DateTime<Utc> {
     let now_seconds = Utc::now().timestamp();
     let minute_seconds = now_seconds - now_seconds.rem_euclid(60);
@@ -1426,10 +1441,9 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // legitimate trigger's id before the fire runs.
     gateway.set_mutator_target_trigger_id(trigger_id).await;
 
-    // Wait for the fire to settle. This is the model's ONLY turn where a
-    // capability call can be attempted (`invoke_trigger_create` above never
-    // touched the model), so once `last_status` is set, the mutator
-    // self-attempts inside `gateway` have already run to completion.
+    // Wait for the submit settlement first. `mark_fire_accepted` sets
+    // `last_status` when the turn is accepted, before the scheduler has
+    // necessarily executed the fired run's model turn.
     let settled = wait_for_settled(
         &repo,
         &tenant_id,
@@ -1439,17 +1453,23 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     )
     .await;
 
-    runtime.shutdown().await.expect("runtime shutdown");
+    // This is the model's only turn where a capability call can be attempted
+    // (`invoke_trigger_create` above never touched the model). Wait for the
+    // gateway-side registration attempts before shutting the runtime down; a
+    // shutdown immediately after submit settlement can stop a queued run before
+    // it reaches the model.
+    let (captured_contents, registration_outcomes) =
+        wait_for_mutator_registration_outcomes(gateway.as_ref(), Duration::from_secs(15)).await;
 
-    let captured_contents = gateway.captured_message_contents().await;
-    let registration_outcomes = gateway.registration_outcomes().await;
+    runtime.shutdown().await.expect("runtime shutdown");
 
     assert_eq!(
         registration_outcomes.len(),
         4,
         "the fired run must have attempted all 4 scheduled-trigger mutator \
          registrations (create/remove/pause/resume) — captured_messages: \
-         {captured_contents:?}, outcomes: {registration_outcomes:?}"
+         {captured_contents:?}, outcomes: {registration_outcomes:?}, \
+         settled_record: {settled:?}"
     );
 
     // Core assertion, mechanism-level: the surface must deny EVERY mutator

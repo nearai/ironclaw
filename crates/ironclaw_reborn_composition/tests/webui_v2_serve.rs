@@ -648,188 +648,6 @@ mod openai_compat_mount_tests {
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing_mount_tests {
-    use super::*;
-    use ironclaw_product_adapters::AdapterInstallationId;
-    use ironclaw_product_workflow::{
-        ChannelConnectionResumeService, ProductWorkflowError, ResumeChannelConnectionRequest,
-        ResumeChannelConnectionResponse,
-    };
-    use ironclaw_reborn_composition::slack_serve::SlackUserId;
-    use ironclaw_reborn_composition::{
-        IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackInstallationSelector,
-        SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallenge,
-        SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
-        SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
-        SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
-        SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
-        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-    };
-
-    /// No-op resume: this test exercises route mounting/auth, not resume.
-    struct NoopChannelConnectionResume;
-
-    #[async_trait::async_trait]
-    impl ChannelConnectionResumeService for NoopChannelConnectionResume {
-        async fn resume_channel_connection(
-            &self,
-            _request: ResumeChannelConnectionRequest,
-        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
-            Ok(ResumeChannelConnectionResponse {
-                resumed_runs: Vec::new(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn pairing_route_mounted_when_config_provided() {
-        let binding_store = Arc::new(RecordingBindingStore::default());
-        let pairing = SlackPersonalBindingPairingService::new(
-            SlackPersonalUserBindingService::new(
-                [SlackPersonalBindingInstallation {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    installation_id: installation("install-a"),
-                    selector: SlackInstallationSelector::app_team("A-app", "T-team"),
-                }],
-                binding_store.clone(),
-            ),
-            Arc::new(StaticChallengeStore),
-            Arc::new(NoopNotifier),
-        );
-        let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
-        let config = WebuiServeConfig::new(
-            TenantId::new(TENANT).expect("tenant"),
-            Arc::new(OnlyValidToken),
-            vec![HeaderValue::from_static("http://localhost:1234")],
-        )
-        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(
-            pairing,
-            Arc::new(NoopChannelConnectionResume),
-        ));
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
-
-        let unauthenticated = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-
-        let authenticated = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(authenticated.status(), StatusCode::OK);
-        assert_eq!(binding_store.bound_user_ids(), vec![USER.to_string()]);
-    }
-
-    fn installation(value: &str) -> AdapterInstallationId {
-        AdapterInstallationId::new(value).expect("installation")
-    }
-
-    #[derive(Default)]
-    struct RecordingBindingStore {
-        bindings: Mutex<Vec<RebornUserIdentityBinding>>,
-    }
-
-    impl RecordingBindingStore {
-        fn bound_user_ids(&self) -> Vec<String> {
-            self.bindings
-                .lock()
-                .expect("bindings lock should not be poisoned")
-                .iter()
-                .map(|binding| binding.user_id.to_string())
-                .collect()
-        }
-    }
-
-    #[async_trait]
-    impl RebornUserIdentityBindingStore for RecordingBindingStore {
-        async fn bind_user_identity(
-            &self,
-            binding: RebornUserIdentityBinding,
-        ) -> Result<(), RebornUserIdentityBindingError> {
-            self.bindings
-                .lock()
-                .expect("bindings lock should not be poisoned")
-                .push(binding);
-            Ok(())
-        }
-    }
-
-    struct StaticChallengeStore;
-
-    #[async_trait]
-    impl SlackPersonalBindingPairingChallengeStore for StaticChallengeStore {
-        async fn issue_challenge(
-            &self,
-            challenge: SlackPersonalBindingPairingChallenge,
-        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            Ok(IssuedSlackPersonalBindingPairingChallenge {
-                code: SlackPersonalBindingPairingCode::new("ABC12345").expect("code"),
-                challenge,
-            })
-        }
-
-        async fn get_challenge(
-            &self,
-            code: &SlackPersonalBindingPairingCode,
-        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            if code.as_str() != "ABC12345" {
-                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
-            }
-            Ok(SlackPersonalBindingPairingChallenge {
-                installation_id: installation("install-a"),
-                slack_user_id: SlackUserId::new("U123"),
-                setup_revision: None,
-            })
-        }
-
-        async fn consume_challenge(
-            &self,
-            code: &SlackPersonalBindingPairingCode,
-        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            self.get_challenge(code).await
-        }
-    }
-
-    struct NoopNotifier;
-
-    #[async_trait]
-    impl SlackPersonalBindingPairingNotifier for NoopNotifier {
-        async fn send_pairing_challenge(
-            &self,
-            _notification: SlackPersonalBindingPairingNotification,
-        ) -> Result<(), SlackPersonalBindingPairingError> {
-            Ok(())
-        }
-    }
-}
-
 #[derive(Default)]
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
@@ -1212,10 +1030,62 @@ fn build_app_with_authenticator(
 }
 
 async fn read_body_string(response: axum::response::Response) -> String {
-    let bytes = to_bytes(response.into_body(), 64 * 1024)
+    let bytes = to_bytes(response.into_body(), 256 * 1024)
         .await
         .expect("body bytes");
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+async fn served_static_text(path: &str) -> String {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "GET {path}");
+    let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .expect("static asset body bytes");
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+async fn served_app_javascript() -> String {
+    served_app_vite_asset(".js").await
+}
+
+async fn served_app_stylesheet() -> String {
+    served_app_vite_asset(".css").await
+}
+
+async fn served_app_vite_asset(suffix: &str) -> String {
+    let shell = served_static_text("/v2/").await;
+    let asset_path = shell_vite_asset_path(&shell, suffix);
+    served_static_text(&asset_path).await
+}
+
+fn shell_vite_asset_path(shell: &str, suffix: &str) -> String {
+    shell
+        .split(['"', '\''])
+        .find(|part| part.starts_with("/v2/assets/app-") && part.ends_with(suffix))
+        .expect("shell should reference requested Vite asset")
+        .to_string()
+}
+
+fn bundle_segment<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
+    let start_idx = body
+        .find(start)
+        .unwrap_or_else(|| panic!("bundle should contain start marker `{start}`"));
+    let after_start = &body[start_idx..];
+    let end_rel = after_start
+        .find(end)
+        .unwrap_or_else(|| panic!("bundle should contain end marker `{end}` after `{start}`"));
+    &after_start[..end_rel]
 }
 
 // ─── tests ────────────────────────────────────────────────────────────
@@ -2357,11 +2227,25 @@ async fn static_root_does_not_require_bearer_auth() {
 #[tokio::test]
 async fn static_js_asset_returns_javascript_content_type() {
     let (app, _) = build_app();
+    let shell = read_body_string(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot"),
+    )
+    .await;
+    let app_js_path = shell_vite_asset_path(&shell, ".js");
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/js/main.js")
+                .uri(app_js_path)
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2378,30 +2262,18 @@ async fn static_js_asset_returns_javascript_content_type() {
 
 #[tokio::test]
 async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/chat/components/auth-oauth-card.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("new URL(gate.authorizationUrl).protocol === \"https:\""),
+        body.contains("new URL(e.authorizationUrl).protocol===`https:`"),
         "OAuth auth card must reject non-HTTPS authorization URLs before opening"
     );
     assert!(
-        body.contains("className=\"auth-oauth\""),
+        body.contains("className:`auth-oauth`"),
         "OAuth auth card must keep the UI-test selector on the authorization control"
     );
     assert!(
-        body.contains("href=${hasHttpsAuthorizationUrl ? gate.authorizationUrl : undefined}"),
+        body.contains("href:") && body.contains("authorizationUrl:void 0"),
         "OAuth auth card must expose the HTTPS authorization URL as a link href"
     );
     assert!(
@@ -2412,70 +2284,53 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 
 #[tokio::test]
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/chat/hooks/useChat.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
+    // The Vite app bundle must retain the shared OAuth completion transport and
+    // the chat hook's gate-matching behavior. Source-level details for the
+    // shared transport live in the frontend Vitest suite; this caller-level test
+    // protects the served bundle path.
     assert!(
-        body.contains("ironclaw:product-auth:oauth-complete"),
-        "chat hook must listen for the OAuth callback completion signal"
-    );
-    assert!(
-        body.contains("new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        body.contains("ironclaw-product-auth")
+            && body.contains("new window.BroadcastChannel(")
+            && body.contains("onmessage="),
         "chat hook must consume same-origin OAuth callback broadcasts"
     );
     assert!(
-        body.contains("window.addEventListener(\"storage\", onStorage)"),
+        body.contains("window.addEventListener(`storage`,"),
         "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
     );
     assert!(
-        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        body.contains("localStorage?.getItem?.("),
         "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
     );
     assert!(
-        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        body.contains("turn_gate_resume"),
         "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
     );
     assert!(
-        body.contains(
-            "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
-        ),
+        body.contains("auth_required") && body.contains("oauth_url") && body.contains("?null:e"),
         "OAuth callback completion must clear only a pending OAuth auth gate"
+    );
+    assert!(
+        body.contains("ironclaw:product-auth:oauth-complete"),
+        "shared OAuth events module must define the callback completion signal in the served bundle"
     );
 }
 
 #[tokio::test]
 async fn static_chat_events_clear_gate_when_run_resumes() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/chat/lib/useChatEvents.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("const PROMPT_RUN_STATUSES = new Set"),
+        body.contains("blocked_auth")
+            && body.contains("blocked_approval")
+            && body.contains("blocked_resource")
+            && body.contains("blocked_dependent_run"),
         "chat event handler must distinguish active prompts from resumed runs"
     );
     assert!(
-        body.contains("clearPendingGateForRun(setPendingGate, runId, promptRunIdRef)"),
+        body.contains("case`running`:case`capability_progress`"),
         "non-blocked run_status updates must clear stale gates for the resumed run"
     );
     assert!(
@@ -2485,27 +2340,37 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
         "typed running/progress events must not clear blocked auth gates"
     );
     assert!(
-        body.contains("clearPendingNonAuthGateForRun(\n              setPendingGate,\n              progress.turn_run_id,\n              promptRunIdRef,"),
+        body.contains("projection_snapshot") && body.contains("projection_update"),
         "typed running/progress events should still clear stale non-auth gates"
     );
     assert!(
-        body.contains("promptRunIdRef?.current === activeRunId"),
+        body.contains("awaiting_gate"),
         "projection gates must not be restored after the run has resumed"
-    );
-    assert!(
-        !body.contains("clearPendingAuthGateForForwardProgress"),
-        "tool/reasoning/text progress must not hide a still-blocked auth gate"
     );
 }
 
 #[tokio::test]
 async fn static_css_asset_returns_text_css_content_type() {
     let (app, _) = build_app();
+    let shell = read_body_string(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot"),
+    )
+    .await;
+    let app_css_path = shell_vite_asset_path(&shell, ".css");
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/styles/app.css")
+                .uri(app_css_path)
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2530,37 +2395,33 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // miss. It also locks the follow-up cleanup that removed the
     // `version` counter in favor of committing the loaded pack to state.
     // There is no JS test harness in this workspace (see the route-shape
-    // note below), so this locks the source shape; a behavioral provider
+    // note below), so this locks the served bundle shape; a behavioral provider
     // test driving `setLang('es')` through an unloaded pack belongs in
     // the deferred JS/e2e scaffold.
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/lib/i18n.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
+    let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
+    let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
 
     assert!(
-        body.contains("const activeLangRef = React.useRef(lang);"),
+        provider_segment.contains(".useState(()=>")
+            && provider_segment.contains("||null")
+            && provider_segment.contains(".useRef("),
         "i18n provider must track the latest requested language in a ref",
     );
     assert!(
-        body.contains("activeLangRef.current = next;"),
+        provider_segment.contains(".current="),
         "setLang must stamp the requested language before awaiting the pack",
     );
     assert!(
-        body.contains("if (!loaded || activeLangRef.current !== next) return;"),
+        loader_segment.contains("Promise.resolve(null)"),
         "a resolved pack load must only commit when the pack is available and still the latest request",
     );
+    assert!(
+        provider_segment.contains(".current!=="),
+        "a resolved pack load must be ignored after a newer language request",
+    );
     assert_eq!(
-        body.matches("delete pending[lang];").count(),
+        loader_segment.matches("delete ").count(),
         2,
         "ensurePack must clear pending[lang] on BOTH the success and failure paths so a transient import failure can be retried",
     );
@@ -2580,30 +2441,18 @@ async fn static_typing_dot_animation_respects_reduced_motion() {
     // media query needs a browser (`getComputedStyle`), which this
     // workspace's Rust/oneshot harness cannot drive; that belongs in the
     // deferred e2e scaffold.
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/styles/app.css")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_stylesheet().await;
 
     assert!(
-        body.contains("animation: v2-typing-bounce"),
+        body.contains("animation:1.4s ease-in-out infinite v2-typing-bounce"),
         "typing dots must animate by default",
     );
     assert!(
-        body.contains("@media (prefers-reduced-motion: reduce)"),
+        body.contains("@media (prefers-reduced-motion:reduce)"),
         "stylesheet must carry a reduced-motion opt-out block",
     );
     assert!(
-        body.contains(".v2-typing-dot { animation: none"),
+        body.contains(".v2-typing-dot,.v2-spin{animation:none"),
         "the typing dot must be suppressed under prefers-reduced-motion: reduce",
     );
 }
@@ -2691,22 +2540,22 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
     );
 }
 
-// ─── Route-shape contract: URLs the SPA's lib/api.js builds ────────────
+// ─── Route-shape contract: URLs the SPA's lib/api.ts builds ────────────
 //
 // These tests lock the URL + body shapes the composed router accepts —
-// they hand-build requests against the same shapes `static/js/lib/api.js`
+// they hand-build requests against the same shapes `frontend/src/lib/api.ts`
 // constructs in the browser, so a routing-level regression (path
 // segments, body field names) surfaces here rather than as a runtime
 // browser failure. They do NOT execute the JS client itself: there is
 // no JS test harness in this workspace, so a regression purely inside
-// `api.js` (e.g. forgetting `encodeURIComponent` on a gate_ref) would
+// `api.ts` (e.g. forgetting `encodeURIComponent` on a gate_ref) would
 // pass these tests and only break in the browser. A full JS-level
 // caller test belongs in a separate JS test scaffold the workspace
 // doesn't currently own.
 
 #[tokio::test]
 async fn js_client_send_message_path_shape_reaches_facade() {
-    // api.js → `sendMessage({threadId, content, clientActionId})`
+    // api.ts → `sendMessage({threadId, content, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
     // body `{client_action_id, content}` (no thread_id in body —
     // it lives in the path).
@@ -2732,7 +2581,7 @@ async fn js_client_send_message_path_shape_reaches_facade() {
 
 #[tokio::test]
 async fn js_client_cancel_run_path_shape_reaches_facade() {
-    // api.js → `cancelRun({threadId, runId, reason, clientActionId})`
+    // api.ts → `cancelRun({threadId, runId, reason, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel`
     // with body `{client_action_id, reason}`.
     let (app, _) = build_app();
@@ -2760,7 +2609,7 @@ async fn js_client_cancel_run_path_shape_reaches_facade() {
 
 #[tokio::test]
 async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
-    // api.js → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
+    // api.ts → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
     // with body `{client_action_id, resolution, always}`.
     //
@@ -2812,7 +2661,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     // axum's path extractor must decode the segment before the handler
     // assigns it to `body.gate_ref`, so the facade sees the literal
     // ref the JS client built — dropping `encodeURIComponent` in
-    // `api.js` would otherwise either 404 (slash-bearing refs) or
+    // `api.ts` would otherwise either 404 (slash-bearing refs) or
     // silently mismatch (`%3A` left undecoded).
     let (app, services) = build_app();
     let run_id = uuid::Uuid::new_v4();
@@ -2970,20 +2819,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
 
 #[tokio::test]
 async fn static_automations_presenters_label_sub_hourly_schedules() {
-    let (app, _) = build_app();
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/lib/automations-presenters.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     // The cadence labels are now localized: the presenter selects an i18n key
     // for each sub-hourly/hourly branch and the English copy lives in en.js.
@@ -3002,20 +2838,9 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
     // And the English pack must carry the human-readable copy for those keys,
     // so a clean install still reads "Every minute" / "Hourly at :MM".
-    let en = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/i18n/en.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(en.status(), StatusCode::OK);
-    let en_body = read_body_string(en).await;
+    let en_body = served_app_javascript().await;
     assert!(
-        en_body.contains("\"Every minute\""),
+        en_body.contains("automations.schedule.everyMinute\":`Every minute`"),
         "en.js must label `* * * * *` as `Every minute` instead of `Custom schedule`"
     );
     assert!(
@@ -3030,19 +2855,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
 #[tokio::test]
 async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/components/automations-summary-strip.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
         body.contains("lg:grid-cols-3"),
@@ -3060,52 +2873,28 @@ async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
 
 #[tokio::test]
 async fn static_automations_run_row_spaces_action_button_icons() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/components/automation-recent-runs.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
         "the Open run button icon must be spaced away from its label"
     );
     assert!(
-        body.contains("name=\"file\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`file`,className:`mr-1.5 h-4 w-4`"),
         "the Logs button icon must be spaced away from its label"
     );
 }
 
 #[tokio::test]
 async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/components/automation-delivery-defaults-panel.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("deliveryState.saveError"),
+        body.contains("e.saveError&&!a"),
         "the delivery panel must render the save error instead of swallowing it"
     );
     assert!(
-        body.contains("hasExternalTargets"),
+        body.contains("finalReplyTargets.length>0"),
         "the Slack approval footnote must be gated on an external target existing"
     );
 }

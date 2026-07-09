@@ -329,6 +329,15 @@ impl WebUiListAutomationsRequest {
     }
 }
 
+/// Browser body for WebUI automation rename mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiRenameAutomationRequest {
+    /// Optional at the DTO boundary so `{}` returns the stable field-level
+    /// `missing_field` validation error instead of a generic JSON rejection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// Browser body for WebUI extension-setup interaction.
 ///
 /// This is the v2 entrypoint inventory's "extensions onboarding" row.

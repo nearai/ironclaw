@@ -679,6 +679,63 @@ body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "bloc
     )
 }
 
+/// A discovery-valid manifest that combines product-adapter and hook surfaces.
+/// Hook discovery must validate the whole manifest through composition's
+/// product-aware contract registry before projecting its hooks.
+fn product_adapter_manifest_toml_with_hook(id: &str) -> String {
+    format!(
+        r#"schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "{id} product adapter"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{id}.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run {id}"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/{id}/run.input.v1.json"
+output_schema_ref = "schemas/{id}/run.output.v1.json"
+prompt_doc_ref = "prompts/{id}/run.md"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.web"
+
+[product_adapter.web]
+surface_kind = "web"
+
+[product_adapter.web.auth]
+kind = "bearer_token"
+
+[product_adapter.web.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.web.required_credentials]]
+handle = "web_token"
+
+[[hooks]]
+id = "deny-run"
+kind = "before_capability"
+scope = "own_capabilities"
+body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "blocked by manifest hook", when = {{ type = "name_equals", name = "{id}.run" }} }} }}
+"#
+    )
+}
+
 /// Write `body` as `/system/extensions/<id>/manifest.toml` on `fs`.
 async fn write_manifest<F: ironclaw_filesystem::RootFilesystem>(fs: &F, id: &str, body: &str) {
     fs.write_file(
@@ -733,6 +790,38 @@ async fn malformed_sibling_manifest_does_not_drop_the_whole_third_party_set() {
         2,
         "exactly the two valid third-party packages must be merged (not builtin-only)"
     );
+}
+
+#[tokio::test]
+async fn product_adapter_manifest_with_hooks_survives_discovery() {
+    use ironclaw_filesystem::InMemoryBackend;
+
+    let fs = InMemoryBackend::new();
+    let extension_id = "product-hooks";
+    write_manifest(
+        &fs,
+        extension_id,
+        &product_adapter_manifest_toml_with_hook(extension_id),
+    )
+    .await;
+
+    let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+    let projection_registry = build_hook_projection_registry(
+        ExtensionRegistry::new(),
+        Some(ThirdPartyDiscoveryInput {
+            filesystem: &fs,
+            tenant_id: &tenant,
+        }),
+        HooksActivationConfig::enabled().with_third_party_enabled(true),
+    )
+    .await
+    .expect("product-adapter contract and hooks must validate together");
+
+    let projected_ids: Vec<&str> = projection_registry
+        .projections()
+        .map(|projection| projection.extension_id.as_str())
+        .collect();
+    assert_eq!(projected_ids, vec![extension_id]);
 }
 
 /// Critical 2 boundary: root unreadable is the ONLY case that falls back to

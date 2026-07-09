@@ -37,7 +37,9 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
             OAuthCallbackInput {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized { exchange },
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(exchange),
+                },
             },
         )
         .await
@@ -243,7 +245,7 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -252,7 +254,8 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
                         refresh_secret: Some(refresh_secret.clone()),
                         scopes: provider_scopes(&["repo", "workflow"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -316,7 +319,7 @@ async fn oauth_callback_with_no_provider_account_id_updates_bound_account_across
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -325,7 +328,8 @@ async fn oauth_callback_with_no_provider_account_id_updates_bound_account_across
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -382,7 +386,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: provider_mismatch_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: gitlab.clone(),
                         account_label: label("gitlab"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -391,7 +395,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["read_user"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -407,7 +412,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: unbound_account_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("missing"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -416,7 +421,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -432,7 +438,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: cross_scope_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("foreign"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -441,7 +447,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(foreign.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -457,7 +464,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: unbound_provider_mismatch_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("wrong provider account"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -466,7 +473,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(provider_mismatch.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -485,7 +493,7 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                 flow_id: valid_update_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("renamed github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -494,7 +502,8 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: Some(existing.id),
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -636,7 +645,7 @@ async fn oauth_callback_rejects_cross_scope_stale_malformed_and_denied() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: provider(),
                         account_label: label("work github"),
                         authorization_code_hash: code_hash("code-hash"),
@@ -645,7 +654,8 @@ async fn oauth_callback_rejects_cross_scope_stale_malformed_and_denied() {
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )

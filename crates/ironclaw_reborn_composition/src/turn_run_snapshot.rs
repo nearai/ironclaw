@@ -51,6 +51,16 @@ where
     }
 }
 
+#[async_trait]
+impl<F> TurnRunSnapshotSource for ironclaw_turns::FilesystemTurnStateStoreKind<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        self.persistence_snapshot().await
+    }
+}
+
 // In-memory authority: sync infallible snapshot. Also unconditional, for the
 // same reason as the impl above.
 #[async_trait]

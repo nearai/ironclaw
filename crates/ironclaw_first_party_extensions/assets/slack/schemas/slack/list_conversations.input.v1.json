@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack list_conversations",
+  "description": "List channels, private channels, DMs, and group DMs you belong to.",
+  "type": "object",
+  "properties": {
+    "types": { "type": "string", "description": "Comma-separated conversation types. Default public_channel,private_channel,im,mpim." },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum conversations to return (default 200)." }
+  },
+  "additionalProperties": false
+}

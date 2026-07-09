@@ -6,7 +6,6 @@ use ironclaw_host_api::{
     CapabilityId, ExtensionId, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPath, HostPortId, VirtualPath,
 };
 use ironclaw_host_runtime::discover_extensions_with_default_host_api_contracts;
-use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -46,29 +45,24 @@ async fn default_host_api_contracts_discover_capability_provider_manifest() {
 }
 
 #[tokio::test]
-async fn default_host_api_contracts_discover_product_adapter_manifest() {
+async fn default_host_api_contracts_do_not_own_product_adapter_manifest() {
     let (_storage, fs) = mounted_extension_fs("telegram-v2", PRODUCT_ADAPTER_MANIFEST);
 
-    let registry = discover_extensions_with_default_host_api_contracts(
+    let err = discover_extensions_with_default_host_api_contracts(
         &fs,
         &VirtualPath::new("/system/extensions").unwrap(),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    let package = registry
-        .get_extension(&ExtensionId::new("telegram-v2").unwrap())
-        .unwrap();
-    assert_eq!(package.manifest.host_apis.len(), 1);
-    assert_eq!(
-        package.manifest.host_apis[0].id.as_str(),
-        PRODUCT_ADAPTER_HOST_API_ID
+    assert!(
+        matches!(
+            err,
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostApi { ref id })
+                if id.as_str() == "ironclaw.product_adapter/v1"
+        ),
+        "unexpected error: {err:?}"
     );
-    assert_eq!(
-        package.manifest.host_apis[0].section.as_str(),
-        "product_adapter.inbound"
-    );
-    assert!(package.capabilities.is_empty());
 }
 
 #[tokio::test]

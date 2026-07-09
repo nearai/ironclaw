@@ -9,6 +9,7 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
+use tokio::sync::mpsc;
 
 use crate::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
@@ -241,6 +242,7 @@ pub enum RebornChannelConnectStrategy {
     AdminManagedChannels,
     WebGeneratedCode,
     QrCode,
+    #[serde(rename = "oauth")]
     OAuth,
 }
 
@@ -248,7 +250,7 @@ pub enum RebornChannelConnectStrategy {
 pub struct RebornChannelConnectAction {
     pub title: String,
     pub instructions: String,
-    #[serde(rename = "input_placeholder", alias = "code_placeholder")]
+    #[serde(rename = "input_placeholder")]
     pub input_placeholder: String,
     pub submit_label: String,
     pub success_message: String,
@@ -390,6 +392,24 @@ pub struct RebornStreamEventsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornStreamEventsResponse {
     pub events: Vec<ProductOutboundEnvelope>,
+}
+
+pub struct RebornStreamEventsSubscription {
+    receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::RebornServicesError>>,
+}
+
+impl RebornStreamEventsSubscription {
+    pub fn new(
+        receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::RebornServicesError>>,
+    ) -> Self {
+        Self { receiver }
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Option<Result<ProductOutboundEnvelope, super::RebornServicesError>> {
+        self.receiver.recv().await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

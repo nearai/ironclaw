@@ -988,6 +988,191 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     );
 }
 
+/// Audit F-010: per-user token isolation for the `slack_user` first-party
+/// tool. A `slack_user` capability dispatch must inject the *authenticated
+/// user's personal* Slack token — the `xoxp-` user token resolved from the
+/// per-user `slack_personal` product-auth account — as the
+/// `Authorization: Bearer` header on the slack.com egress, and never the
+/// workspace bot (`xoxb-`) token. This mirrors the github/google search
+/// injection contracts above, driven through the full `invoke_capability`
+/// path (authorizer obligation -> credential-account resolver -> secret
+/// store -> staged injection -> recorded egress).
+#[tokio::test]
+async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search_capability() {
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    // A per-user *personal* Slack token, shaped like a real `xoxp-` user token
+    // so a regression that swapped in a bot (`xoxb-`) token changes the bytes.
+    let personal_user_token = "xoxp-fake-personal-user-token-9999";
+    let policy = slack_policy();
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"ok":true,"messages":{"total":2,"matches":[]}}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let slot_handle = SecretHandle::new("slack_user_token").unwrap();
+    let account_access_secret = SecretHandle::new("slack_personal_access").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_slack_user_package()),
+        Arc::new(filesystem_with_slack_user_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: slack_user_scopes(),
+                },
+                provider_scopes: slack_user_scopes(),
+                requester_extension: ExtensionId::new("slack").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(
+        FixedSlackRuntimeCredentialAccountResolver {
+            expected_scopes: slack_user_scopes(),
+            result: Ok(account_access_secret.clone()),
+        },
+    ))
+    .with_trust_policy(Arc::new(slack_user_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from(personal_user_token),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "deploy"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["ok"], json!(true));
+            assert_eq!(completed.output["total"], json!(2));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://slack.com/api/search.messages?query=deploy&count=20"
+    );
+    assert_eq!(requests[0].policy, policy);
+    // The injected credential is the per-user personal xoxp token that was
+    // resolved from the `slack_personal` account and stored under this scope.
+    let authorization = requests[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name == "authorization");
+    assert_eq!(
+        authorization,
+        Some(&(
+            "authorization".to_string(),
+            format!("Bearer {personal_user_token}"),
+        ))
+    );
+    // ...and it is never a workspace bot token: F-010 requires the personal
+    // (`xoxp-`) user token, not the `xoxb-` bot token the `slack` channel uses.
+    let (_, header_value) = authorization.unwrap();
+    assert!(
+        !header_value.contains("xoxb-"),
+        "slack_user must not inject a bot token, got: {header_value}"
+    );
+}
+
+/// Audit F-010 companion: a MISSING `slack_personal` account must gate the
+/// `slack_user` tool on auth — it must never silently fall back to another
+/// credential (e.g. the workspace bot token). Mirrors the github
+/// missing-secret contract: the resolver returns `AuthRequired`, and no
+/// slack.com egress happens.
+#[tokio::test]
+async fn host_runtime_services_missing_slack_personal_account_blocks_slack_user_on_auth() {
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = slack_policy();
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"ok":true,"messages":{"total":0,"matches":[]}}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let slot_handle = SecretHandle::new("slack_user_token").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_slack_user_package()),
+        Arc::new(filesystem_with_slack_user_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: slack_user_scopes(),
+                },
+                provider_scopes: slack_user_scopes(),
+                requester_extension: ExtensionId::new("slack").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(
+        FixedSlackRuntimeCredentialAccountResolver {
+            expected_scopes: slack_user_scopes(),
+            result: Err(CredentialStageError::AuthRequired),
+        },
+    ))
+    .with_trust_policy(Arc::new(slack_user_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "deploy"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id);
+        }
+        other => panic!("expected auth-required outcome, got {other:?}"),
+    }
+    assert!(
+        network.requests().is_empty(),
+        "missing slack_personal account must block before slack.com egress"
+    );
+}
+
 #[tokio::test]
 async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     let search_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
@@ -1809,6 +1994,127 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
                 handle,
             })
     }
+}
+
+// ---- slack_user (audit F-010) helpers ----------------------------------
+//
+// Mirror the github/google first-party WASM harness above for the `slack_user`
+// tool: load its bundled manifest + WASM, drive a capability through
+// `invoke_capability`, and assert the per-user personal-token injection.
+
+/// Credential-account resolver for the `slack_user` tool. Asserts the runtime
+/// asks for the per-user *personal* account (`slack_personal`) on behalf of the
+/// `slack_user` extension — never a workspace/bot credential — before handing
+/// back the fixed access-secret handle (or an auth-required error).
+#[derive(Debug)]
+struct FixedSlackRuntimeCredentialAccountResolver {
+    expected_scopes: Vec<String>,
+    result: Result<SecretHandle, CredentialStageError>,
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "slack_personal");
+        assert_eq!(request.requester_extension.as_str(), "slack");
+        assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
+        self.result
+            .clone()
+            .map(|handle| RuntimeCredentialAccessSecret {
+                scope: request.scope.clone(),
+                handle,
+            })
+    }
+}
+
+fn registry_with_slack_user_package() -> ExtensionRegistry {
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
+        ManifestSource::HostBundled,
+        &default_host_port_catalog().unwrap(),
+        &default_host_api_contract_registry().unwrap(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/slack").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    registry
+}
+
+fn filesystem_with_slack_user_package() -> LocalFilesystem {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").unwrap(),
+            HostPath::from_path_buf(slack_user_asset_root().parent().unwrap().to_path_buf()),
+        )
+        .unwrap();
+    filesystem
+}
+
+fn slack_user_asset_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("crates/ironclaw_first_party_extensions/assets/slack")
+}
+
+fn slack_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "slack.com".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
+}
+
+/// The read-only scopes the Slack read capabilities (e.g. slack.search_messages)
+/// request. Kept in lockstep with `assets/slack/manifest.toml`, where the
+/// read-only tools request only read scopes and only send_message adds chat:write.
+fn slack_user_scopes() -> Vec<String> {
+    [
+        "search:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "channels:read",
+        "groups:read",
+        "im:read",
+        "mpim:read",
+        "users:read",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn slack_user_first_party_trust_policy() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("slack").unwrap(),
+            "/system/extensions/slack/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ],
+            None,
+        ),
+    ]))])
+    .unwrap()
 }
 
 fn registry_with_github_package() -> ExtensionRegistry {
