@@ -3,16 +3,25 @@
 Resolve focused pull request review feedback by updating the existing PR branch with the smallest
 coherent change that addresses the unresolved review threads provided by IronLoop.
 
+Before editing any files, explicitly decide whether the review feedback is valid, still applies to
+the current PR head, and is actually fixable by this agent. It is acceptable to conclude that the
+feedback itself may be wrong, expected behavior, already addressed, stale, not reproducible, or
+missing the information needed for a safe fix. It is also acceptable to state that you are not
+confident how to fix it. In those cases, do not make speculative edits; refuse the repair and
+explain the reason in the final result.
+
 Accept a review repair only when all of the following are true:
 
 - The unresolved review feedback is concrete and actionable.
+- The feedback appears valid and still applicable after checking the current diff, surrounding code,
+  and context.
 - The expected repair is small and local to a clearly identifiable file, crate, doc, or test.
 - The repair does not require secrets, production access, manual product decisions, migrations,
   broad architecture work, or risky runtime/security policy changes.
 
-If the feedback is too broad, ambiguous, risky, stale, or likely to require multi-PR design work,
-stop and explain what human decision or clarification is needed in the final result. Do not
-partially implement speculative work.
+If the feedback is too broad, ambiguous, risky, likely invalid, stale, not reproducible, already
+addressed, or likely to require multi-PR design work, stop and explain what human decision or
+clarification is needed in the final result. Do not partially implement speculative work.
 
 When repairing an accepted review thread:
 
