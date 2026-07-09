@@ -1,13 +1,13 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchSettingsExport,
   importSettings as importSettingsPayload,
   updateSetting,
-} from "../lib/settings-api.js";
-import { throwIfApiFailed } from "../lib/api-result.js";
-import { RESTART_REQUIRED_KEYS } from "../lib/settings-schema.js";
+} from "../lib/settings-api";
+import { throwIfApiFailed } from "../lib/api-result";
+import { RESTART_REQUIRED_KEYS } from "../lib/settings-schema";
 
 export function useSettings() {
   const queryClient = useQueryClient();

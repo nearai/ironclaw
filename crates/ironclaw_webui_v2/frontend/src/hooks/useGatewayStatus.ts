@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { gatewayStatus } from "../lib/api.js";
+import { gatewayStatus } from "../lib/api";
 
 export function useGatewayStatus(token) {
   return useQuery({

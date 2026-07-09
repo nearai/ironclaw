@@ -1,4 +1,4 @@
-import { React } from "../lib/html.js";
+import React from "react";
 
 export function useTeeAttestation() {
   const endpoint = React.useMemo(() => getTeeEndpoint(window.location), []);

@@ -1,6 +1,7 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use chrono::{SecondsFormat, TimeZone, Utc};
+use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository, TriggerError,
@@ -33,6 +34,10 @@ fn tenant(value: &str) -> TenantId {
 
 fn user(value: &str) -> UserId {
     UserId::new(value).expect("valid user")
+}
+
+fn automation_name(value: &str) -> AutomationName {
+    AutomationName::new(value).expect("valid automation name")
 }
 
 fn sample_record(
@@ -1062,6 +1067,60 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
     );
 }
 
+async fn assert_scoped_rename_updates_only_matching_scope(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01J00000000000000000000004").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_200));
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert trigger to rename");
+
+    let wrong_scope = repo
+        .rename_scoped_trigger(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-other").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            automation_name("wrong scope name"),
+        )
+        .await
+        .expect("wrong-scope rename");
+    assert_eq!(wrong_scope, None);
+    assert_eq!(
+        repo.get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get after wrong-scope rename")
+            .expect("record")
+            .name,
+        record.name
+    );
+
+    let renamed = repo
+        .rename_scoped_trigger(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            automation_name("morning inbox summary"),
+        )
+        .await
+        .expect("matching-scope rename")
+        .expect("renamed record");
+    assert_eq!(renamed.name, "morning inbox summary");
+    assert_eq!(renamed.state, TriggerState::Scheduled);
+    assert_eq!(renamed.prompt, record.prompt);
+    assert_eq!(renamed.next_run_at, record.next_run_at);
+
+    let fetched = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get renamed trigger")
+        .expect("renamed record");
+    assert_eq!(fetched.name, "morning inbox summary");
+}
+
 #[cfg(feature = "libsql")]
 async fn build_libsql_repo_with_db() -> (
     tempfile::TempDir,
@@ -1119,6 +1178,9 @@ async fn libsql_repository_contract_parity() {
 
     let (_dir, repo) = build_libsql_repo().await;
     assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_scoped_rename_updates_only_matching_scope(&repo).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1260,6 +1322,9 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_scoped_rename_updates_only_matching_scope(&repo).await;
 }
 
 #[cfg(feature = "postgres")]

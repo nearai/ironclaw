@@ -7,7 +7,7 @@
  * previously dropped its draft on unmount.
  */
 
-import { authScope } from "../../../lib/auth-scope.js";
+import { authScope } from "../../../lib/auth-scope";
 
 export const NEW_DRAFT_KEY = "__new__";
 

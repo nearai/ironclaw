@@ -9,14 +9,14 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, test } from "vitest";
-import { setAuthScope } from "../../../lib/auth-scope.ts";
+import { setAuthScope } from "../../../lib/auth-scope";
 import {
   NEW_DRAFT_KEY,
   clearAllDrafts,
   clearDraft,
   getDraft,
   setDraft,
-} from "./draft-store.ts";
+} from "./draft-store";
 
 // Minimal localStorage stub — the store reads `window.localStorage` lazily
 // inside each function, so installing it on the global before the calls is

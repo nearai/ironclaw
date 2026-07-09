@@ -86,7 +86,11 @@ jobs:
           FULL='[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
           SLIM='[{"name":"all-features","flags":"--all-features"}]'
 
-          if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
+          # PRs get the fast single-lane matrix for quick feedback. The merge
+          # queue is the production gate: it must run the same full feature
+          # matrix as pushes to main, otherwise feature-gated lints (e.g.
+          # libsql-only dead code) pass the queue and break main post-merge.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "matrix=${SLIM}" >> "$GITHUB_OUTPUT"
           else
             echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
@@ -418,6 +422,21 @@ jobs:
             result="${job_result##*=}"
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "$name failed: $result"
+              exit 1
+            fi
+          done
+      - name: Assert the full clippy matrix ran (merge queue + push)
+        if: needs.changes.outputs.has_code == 'true' && github.event_name != 'pull_request'
+        env:
+          MATRIX_JSON: ${{ needs.clippy-matrix.outputs.matrix }}
+        run: |
+          # This roll-up is a required check. A green result must mean the full
+          # feature matrix was linted, so fail loudly if the matrix config ever
+          # regresses to the slim PR lane on a merge-queue or push run.
+          for lane in all-features default libsql-only; do
+            if ! printf '%s' "$MATRIX_JSON" | jq -e --arg lane "$lane" 'any(.[]; .name == $lane)' > /dev/null; then
+              echo "Required clippy lane missing from matrix on ${{ github.event_name }}: $lane"
+              echo "Matrix was: $MATRIX_JSON"
               exit 1
             fi
           done

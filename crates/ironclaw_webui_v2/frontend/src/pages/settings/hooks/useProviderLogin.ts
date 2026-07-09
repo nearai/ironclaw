@@ -1,13 +1,13 @@
 // @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
-import { useT } from "../../../lib/i18n.js";
+import React from "react";
+import { useT } from "../../../lib/i18n";
 import {
   completeNearaiWalletLogin,
   fetchLlmProviders,
   startCodexLogin,
   startNearaiLogin,
-} from "../lib/settings-api.js";
+} from "../lib/settings-api";
 
 const WALLET_LOGIN_TIMEOUT_MS = 300_000;
 

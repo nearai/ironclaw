@@ -7,12 +7,12 @@ import {
   setActiveLlm,
   testLlmProviderConnection,
   upsertLlmProvider,
-} from "../lib/settings-api.js";
+} from "../lib/settings-api";
 import {
   isProviderConfigured,
   providerDefaultModel,
   providerMissingReason,
-} from "../lib/llm-providers.js";
+} from "../lib/llm-providers";
 
 // The v2 `/llm/providers` snapshot is the single source of truth: a unified
 // provider list (built-in + operator-defined) already annotated with the active

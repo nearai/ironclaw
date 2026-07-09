@@ -95,7 +95,8 @@ Inbound order (outer → inner → handler):
    bearer-validation step). Today: `create_thread`, product-auth OAuth
    start, manual-token setup/secret-submit, accounts list/select/recovery/
    refresh, and lifecycle cleanup — all 16 KiB; `send_message` 14 MiB
-   (text + base64 inline attachments); `cancel_run` and `resolve_gate` 4 KiB; `get_timeline`,
+   (text + base64 inline attachments); `cancel_run`, `resolve_gate`, and
+   `rename_automation` 4 KiB; `get_timeline`,
    `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
@@ -135,7 +136,7 @@ Inbound order (outer → inner → handler):
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension, list-automations).
+   cancel-run, resolve-gate, setup-extension, list/rename automations).
 
 ### Product-auth routes
 

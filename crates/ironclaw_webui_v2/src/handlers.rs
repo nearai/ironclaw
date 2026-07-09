@@ -59,8 +59,8 @@ use ironclaw_product_workflow::{
     UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1211,6 +1211,20 @@ pub async fn resume_automation(
     let response = state
         .services()
         .resume_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/automations/:automation_id`
+pub async fn rename_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+    Json(request): Json<WebUiRenameAutomationRequest>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .rename_automation(caller, automation_id, request)
         .await?;
     Ok(Json(response))
 }

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { authScope } from "./auth-scope.js";
+import { authScope } from "./auth-scope";
 
 const STORAGE_PREFIX = "ironclaw:v2-notifications:";
 const MAX_SEEN_IDS = 250;
