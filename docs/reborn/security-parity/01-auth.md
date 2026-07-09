@@ -11,7 +11,7 @@ session, OIDC, and the query-token exception). Sibling files
 - **v2** auth is the three `WebuiAuthenticator` impls in
   `crates/ironclaw_reborn_webui_ingress/` (`lib.rs`, `session.rs`,
   `oidc.rs`), selected by the host and enforced by the composition
-  middleware in `crates/ironclaw_reborn_composition/src/webui_serve.rs`.
+  middleware in `crates/ironclaw_reborn_composition/src/webui/webui_serve.rs`.
   v2 shares **zero** code with v1 by contract (#3886).
 
 Decision legend: **Keep** = behavior preserved (possibly different

@@ -18,6 +18,15 @@ import {
   resetToolActivityState,
 } from "./tool-activity-state";
 import {
+  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  rewriteConnectionLostRunFailures,
+  upsertConnectionLostRunFailure,
+} from "./failureMessages";
+import {
+  CONNECTION_STATUS,
+  isConnectionLostStatus,
+} from "./connection-status";
+import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
   forgetChannelConnectionWaiter,
@@ -79,6 +88,10 @@ function runUseChatSource(context) {
     failGateToolActivity,
     resetToolActivityState,
     timelineMessageIdFromAcceptedRef,
+    rewriteConnectionLostRunFailures,
+    upsertConnectionLostRunFailure,
+    CONNECTION_STATUS,
+    isConnectionLostStatus,
     channelConnectionContinuationMessage,
     connectionEventMatchesOnboarding,
     forgetChannelConnectionWaiter,
@@ -168,6 +181,230 @@ function createReactStub({
   return react;
 }
 
+test("useChat: disconnected SSE rewrites an active driver_unavailable error", () => {
+  const threadId = "thread-1";
+  const setCalls = [];
+  let renderedMessages = [
+    {
+      id: "err-run-1",
+      role: "error",
+      content:
+        "The run failed because the execution driver was temporarily unavailable.",
+      failureStatus: "failed",
+      failureCategory: "driver_unavailable",
+      failureSummary:
+        "The run failed because the execution driver was temporarily unavailable.",
+    },
+  ];
+  const initialByIndex = new Map([
+    [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
+    [STATE_SLOT.isProcessing, true],
+  ]);
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ initialByIndex, setCalls, runEffects: true }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearInterval,
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: {
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("send should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
+  };
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+
+  assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
+    false,
+  );
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.activeRun).at(-1)?.value,
+    null,
+  );
+});
+
+test("useChat: disconnected SSE surfaces connection error before run id is known", () => {
+  const threadId = "thread-1";
+  const setCalls = [];
+  const historicalFailure =
+    "The run failed because the execution driver was temporarily unavailable.";
+  let renderedMessages = [
+    {
+      id: "err-old-run",
+      role: "error",
+      content: historicalFailure,
+      failureStatus: "failed",
+      failureCategory: "driver_unavailable",
+      failureSummary: historicalFailure,
+    },
+  ];
+  const initialByIndex = new Map([[STATE_SLOT.isProcessing, true]]);
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ initialByIndex, setCalls, runEffects: true }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearInterval,
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: {
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("send should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
+  };
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+
+  assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(renderedMessages.length, 2);
+  assert.equal(renderedMessages[0].content, historicalFailure);
+  assert.equal(renderedMessages[1].id, "err-connection-lost");
+  assert.equal(renderedMessages[1].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
+    false,
+  );
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.activeRun).at(-1)?.value,
+    null,
+  );
+});
+
+test("useChat: disconnected SSE ignores a stale active run after processing ended", () => {
+  const threadId = "thread-1";
+  const setCalls = [];
+  let renderedMessages = [];
+  const initialByIndex = new Map([
+    [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
+    [STATE_SLOT.isProcessing, false],
+  ]);
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ initialByIndex, setCalls, runEffects: true }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearInterval,
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: {
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("send should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
+  };
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+
+  assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.deepEqual(renderedMessages, []);
+  assert.equal(stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).length, 0);
+  assert.equal(stateUpdatesFor(setCalls, STATE_SLOT.activeRun).length, 0);
+});
+
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
@@ -242,7 +479,7 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
         },
       };
     },
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -321,7 +558,7 @@ function createSendCaptureContext() {
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
   return {
     context,
@@ -488,7 +725,7 @@ test("useChat.send: target-thread send does not append into active thread", asyn
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -567,7 +804,7 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -646,7 +883,7 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -734,7 +971,7 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -829,7 +1066,7 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -926,7 +1163,7 @@ test("useChat.send: accepted send does not clear a gate received while in flight
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1019,7 +1256,7 @@ test("useChat.send: rejected busy attaches notice to a gate received while in fl
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1127,7 +1364,7 @@ test("useChat.send: rejected busy seeds notice when active thread changed in fli
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1220,7 +1457,7 @@ test("useChat.send: rejected busy appends system notice after gate resolves in f
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1311,7 +1548,7 @@ test("useChat.send: gate received after callback creation blocks before send", a
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1404,7 +1641,7 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1486,7 +1723,7 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1569,7 +1806,7 @@ test("useChat clears transient run and gate state during thread switch render", 
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1665,7 +1902,7 @@ test("useChat.approve deny marks the current gated tool declined before resume",
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1752,7 +1989,7 @@ test("useChat.approve deny treats queued response without outcome as resumed", a
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1827,7 +2064,7 @@ test("useChat.approve treats already_terminal false as resumed", async () => {
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1914,7 +2151,7 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -1998,7 +2235,7 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2086,7 +2323,7 @@ test("useChat.send: connect-like prompts submit to the model", async () => {
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2164,7 +2401,7 @@ test("useChat.send: routine setup prompts mentioning Slack submit to the model",
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2261,7 +2498,7 @@ test("useChat.submitChannelConnectionPairing: Slack gate redeems through the gen
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2345,7 +2582,7 @@ test("useChat.submitChannelConnectionPairing: generic channel gate redeems via r
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2409,7 +2646,7 @@ test("useChat.submitChannelConnectionPairing: a failed redeem surfaces the error
       seedThreadMessages: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -2506,7 +2743,7 @@ test("useChat: a channel-connected event refreshes the connection caches without
         seedThreadMessages: () => {},
         setMessages: () => {},
       }),
-      useSSE: () => ({ status: "idle" }),
+      useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
     };
 
     runUseChatSource(context);
@@ -4549,7 +4786,7 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4626,7 +4863,7 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4701,7 +4938,7 @@ test("useChat.send: active run refuses duplicate submit before network call", as
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4775,7 +5012,7 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4872,7 +5109,7 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -4977,7 +5214,7 @@ test("useChat.send: clears local busy when run settles before send response", as
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5065,7 +5302,7 @@ test("useChat.send: clears local admission when navigating away before settlemen
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5168,7 +5405,7 @@ test("useChat.send: a send to another thread is not blocked by an unsettled run 
           typeof updater === "function" ? updater(renderedMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   runUseChatSource(context);
@@ -5254,7 +5491,7 @@ function createResolveGateContext({
       loadHistory: () => {},
       setMessages: () => {},
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
   return context;
 }
@@ -5468,7 +5705,7 @@ function createParallelSendContext({
           typeof updater === "function" ? updater(currentMessages) : updater;
       },
     }),
-    useSSE: () => ({ status: "idle" }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
   };
 
   return {

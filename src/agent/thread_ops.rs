@@ -5280,8 +5280,6 @@ mod tests {
         assert!(t.pending_messages.is_empty());
     }
 
-    // Approval persistence is tested via e2e_builtin_tool_coverage integration tests.
-
     // Helper function to extract the approval message without needing a full Agent instance
     fn extract_approval_message(
         session: &crate::agent::session::Session,

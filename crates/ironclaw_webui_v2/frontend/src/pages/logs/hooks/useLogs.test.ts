@@ -25,6 +25,7 @@ function depsChanged(previous, next) {
 
 function createHookHarness({
   search = "",
+  globalSearch = "",
   useLogsArgs = {},
   queryLogsImpl,
   queryOperatorLogsImpl,
@@ -86,7 +87,7 @@ function createHookHarness({
   const context = {
     React,
     clearInterval: () => {},
-    globalThis: {},
+    globalThis: { location: { search: globalSearch } },
     normalizeOperatorLogsResponse: (response) => ({
       entries: response?.entries || response?.logs?.entries || [],
     }),
@@ -132,6 +133,25 @@ function createHookHarness({
     },
   };
 }
+
+test("useLogs reads deep-link scope from browser location when router search is initially empty", async () => {
+  const harness = createHookHarness({
+    search: "",
+    globalSearch: "?thread_id=thread-deep-link&run_id=run-deep-link",
+    useLogsArgs: { isAdmin: false },
+  });
+
+  const result = harness.render();
+  await harness.runEffects();
+
+  assert.equal(result.needsThreadScope, false);
+  assert.equal(result.scope.threadId, "thread-deep-link");
+  assert.equal(result.scope.runId, "run-deep-link");
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].endpoint, "logs");
+  assert.equal(harness.calls[0].threadId, "thread-deep-link");
+  assert.equal(harness.calls[0].runId, "run-deep-link");
+});
 
 test("useLogs reloads scoped logs once when scope changes while paused", async () => {
   const harness = createHookHarness({

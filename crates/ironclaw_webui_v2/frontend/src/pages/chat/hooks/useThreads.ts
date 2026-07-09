@@ -6,6 +6,7 @@ import {
   listThreads,
 } from "../../../lib/api";
 import { queryClient } from "../../../lib/query-client";
+import { normalizeSidebarTitle } from "../../../lib/thread-title";
 import { upsertThreadInCache } from "../lib/thread-cache";
 
 export function useThreads() {
@@ -79,6 +80,7 @@ export function useThreads() {
     return records.map((record) => ({
       ...record,
       id: record.thread_id,
+      title: normalizeSidebarTitle(record.title, record.thread_id),
       state: record.state || null,
       turn_count: record.turn_count || 0,
       updated_at: record.updated_at || null,

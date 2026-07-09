@@ -222,6 +222,126 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
 
 
+async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_error(
+    reborn_v2_server, reborn_v2_browser
+) -> None:
+    """A disconnected active run shows connection-loss copy instead of spinning forever."""
+    thread_id = "thread-disconnected-run"
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__failLatestV2Sse = () => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            stream.readyState = 2;
+            if (typeof stream.onerror !== "function") {
+              throw new Error("EventSource has no error handler");
+            }
+            stream.onerror(new Event("error"));
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body, status=200) -> None:
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "Disconnected run regression",
+                        "created_at": "2026-06-02T00:00:00Z",
+                        "updated_at": "2026-06-02T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route) -> None:
+        await fulfill_json(route, {"messages": [], "next_cursor": None})
+
+    async def handle_send(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "thread_id": thread_id,
+                "run_id": "run-disconnected",
+                "status": "running",
+            },
+            status=202,
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+
+        await composer.fill("summarize 3 X/Twitter posts")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
+
+        await page.evaluate("() => window.__failLatestV2Sse()")
+
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0, timeout=5000)
+        await expect(page.locator(SEL_V2["msg_error"]).last).to_contain_text(
+            "Connection to the server was lost. Please reconnect and try again.",
+            timeout=5000,
+        )
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_approval_gate_blocks_composer_send(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -264,14 +384,14 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
         """
     )
 
-    async def fulfill_json(route, body, status=200):
+    async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
             status=status,
             content_type="application/json",
             body=json.dumps(body),
         )
 
-    async def handle_session(route):
+    async def handle_session(route) -> None:
         await fulfill_json(
             route,
             {
@@ -288,7 +408,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
             },
         )
 
-    async def handle_threads(route):
+    async def handle_threads(route) -> None:
         await fulfill_json(
             route,
             {
@@ -304,7 +424,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
             },
         )
 
-    async def handle_timeline(route):
+    async def handle_timeline(route) -> None:
         await fulfill_json(
             route,
             {
@@ -322,7 +442,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
             },
         )
 
-    async def handle_send(route):
+    async def handle_send(route) -> None:
         send_requests.append(json.loads(route.request.post_data or "{}"))
         await fulfill_json(route, {"thread_id": thread_id}, status=202)
 
@@ -442,7 +562,7 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     requested_queries: list[dict[str, list[str]]] = []
     logs_requested = asyncio.Event()
 
-    async def handle_operator_logs(route):
+    async def handle_operator_logs(route) -> None:
         parsed = urlparse(route.request.url)
         requested_queries.append(parse_qs(parsed.query))
         logs_requested.set()
@@ -516,6 +636,111 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     await expect(
         context.locator(SEL_V2["logs_context_chip"].format(key="source"))
     ).to_contain_text("slack")
+
+
+async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
+    reborn_v2_server, reborn_v2_browser
+):
+    """A non-admin logs deep link reads URL scope before active chat state exists."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    requested_queries: list[dict[str, list[str]]] = []
+    operator_logs_requested = False
+    logs_requested = asyncio.Event()
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(route, {"threads": [], "next_cursor": None})
+
+    async def handle_logs(route):
+        parsed = urlparse(route.request.url)
+        requested_queries.append(parse_qs(parsed.query))
+        logs_requested.set()
+        await fulfill_json(
+            route,
+            {
+                "logs": {
+                    "source": "in_memory_tracing",
+                    "entries": [
+                        {
+                            "id": "direct-log-1",
+                            "timestamp": "2026-07-08T10:11:12.123Z",
+                            "level": "info",
+                            "target": "ironclaw::ui::logs",
+                            "message": "direct scoped deep link log",
+                            "thread_id": "thread-direct",
+                            "run_id": "run-direct",
+                        }
+                    ],
+                    "next_cursor": None,
+                    "tail_supported": True,
+                    "follow_supported": False,
+                },
+            },
+        )
+
+    async def handle_operator_logs(route):
+        nonlocal operator_logs_requested
+        operator_logs_requested = True
+        await fulfill_json(route, {"logs": {"entries": []}}, status=403)
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads**", handle_threads)
+    await page.route("**/api/webchat/v2/logs**", handle_logs)
+    await page.route("**/api/webchat/v2/operator/logs**", handle_operator_logs)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/logs"
+            "?thread_id=thread-direct&run_id=run-direct"
+            f"&token={REBORN_V2_AUTH_TOKEN}"
+        )
+
+        await asyncio.wait_for(logs_requested.wait(), timeout=10)
+        first_query = requested_queries[0]
+        assert first_query.get("thread_id") == ["thread-direct"], first_query
+        assert first_query.get("run_id") == ["run-direct"], first_query
+        assert first_query.get("limit") == ["500"], first_query
+        assert not operator_logs_requested
+
+        await expect(page.locator(SEL_V2["logs_scope_toolbar"])).to_be_visible(
+            timeout=10000
+        )
+        await expect(
+            page.locator(SEL_V2["logs_scope_chip"].format(key="thread_id"))
+        ).to_contain_text("thread-direct")
+        await expect(
+            page.locator(SEL_V2["logs_scope_chip"].format(key="run_id"))
+        ).to_contain_text("run-direct")
+        entry = page.locator(SEL_V2["logs_entry"]).first
+        await expect(entry.locator(SEL_V2["logs_entry_message"])).to_contain_text(
+            "direct scoped deep link log"
+        )
+    finally:
+        await context.close()
 
 
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
