@@ -1914,6 +1914,7 @@ where
             model,
             checkpoint,
             capabilities,
+            surface_state,
             transcript,
             progress,
             compaction,
@@ -1981,6 +1982,7 @@ pub struct RebornLoopDriverHost {
     model: Arc<dyn LoopModelPort>,
     checkpoint: Arc<dyn LoopCheckpointPort>,
     capabilities: Arc<dyn LoopCapabilityPort>,
+    surface_state: Arc<CapabilitySurfaceState>,
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
     compaction: Arc<dyn LoopCompactionPort>,
@@ -2087,6 +2089,12 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         self.capabilities.visible_capabilities(request).await
+    }
+
+    fn current_visible_capabilities(
+        &self,
+    ) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
+        self.surface_state.current()
     }
 
     async fn invoke_capability(

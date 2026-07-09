@@ -395,14 +395,21 @@ impl<'a> PromptPlanningPipeline<'a> {
         &self,
         surface_filter: crate::strategies::CapabilityFilter,
     ) -> Result<VisibleCapabilitySurface, AgentLoopExecutorError> {
-        let mut surface = self
-            .ctx
-            .host
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+        let mut surface = match self.ctx.host.current_visible_capabilities().map_err(|_| {
+            AgentLoopExecutorError::HostUnavailable {
                 stage: HostStage::Capability,
-            })?;
+            }
+        })? {
+            Some(surface) => surface,
+            None => self
+                .ctx
+                .host
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+                    stage: HostStage::Capability,
+                })?,
+        };
         apply_capability_filter(&mut surface, &surface_filter);
         if tracing::enabled!(tracing::Level::DEBUG) {
             let visible_capability_sample = surface

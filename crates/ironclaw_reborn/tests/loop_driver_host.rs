@@ -6784,6 +6784,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
         )
         .await
         .unwrap();
+    assert_eq!(runtime.visible_request_count(), 1);
 
     runtime.set_surface(host_runtime_surface_with_version(
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -6808,6 +6809,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
         .unwrap();
 
     assert_eq!(prompt.surface_version, Some(refreshed_surface.version));
+    assert_eq!(runtime.visible_request_count(), 2);
 }
 
 #[tokio::test]
@@ -7833,6 +7835,7 @@ struct RecordingHostRuntime {
     outcomes: Mutex<Vec<RuntimeCapabilityOutcome>>,
     errors: Mutex<Vec<HostRuntimeError>>,
     invocations: Mutex<Vec<RuntimeCapabilityRequest>>,
+    visible_requests: Mutex<usize>,
 }
 
 impl RecordingHostRuntime {
@@ -7842,6 +7845,7 @@ impl RecordingHostRuntime {
             outcomes: Mutex::new(Vec::new()),
             errors: Mutex::new(Vec::new()),
             invocations: Mutex::new(Vec::new()),
+            visible_requests: Mutex::new(0),
         }
     }
 
@@ -7859,6 +7863,10 @@ impl RecordingHostRuntime {
 
     fn invocations(&self) -> Vec<RuntimeCapabilityRequest> {
         self.invocations.lock().unwrap().clone()
+    }
+
+    fn visible_request_count(&self) -> usize {
+        *self.visible_requests.lock().unwrap()
     }
 }
 
@@ -7889,6 +7897,7 @@ impl HostRuntime for RecordingHostRuntime {
         &self,
         _request: ironclaw_host_runtime::VisibleCapabilityRequest,
     ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
+        *self.visible_requests.lock().unwrap() += 1;
         Ok(self.surface.lock().unwrap().clone())
     }
 

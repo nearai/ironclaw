@@ -445,10 +445,6 @@ where
         Ok(head.unwrap_or(SeqNo::ZERO))
     }
 
-    async fn next_delta_log_seq(&self) -> Result<SeqNo, TurnError> {
-        Ok(self.delta_log_head_seq().await?.next())
-    }
-
     async fn read_row_collection<T>(&self, collection: &'static str) -> Result<Vec<T>, TurnError>
     where
         T: DeserializeOwned,
@@ -763,10 +759,10 @@ where
             let mut refreshed_after_stale_error = false;
             loop {
                 self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
-                let baseline = guard
+                let (baseline, current_journal_seq) = guard
                     .as_ref()
-                    .map(|state| state.snapshot.clone())
-                    .unwrap_or_default();
+                    .map(|state| (state.snapshot.clone(), state.journal_seq))
+                    .unwrap_or_else(|| (TurnPersistenceSnapshot::default(), SeqNo::ZERO));
                 let (overlaid_snapshot, _) = self
                     .runner_lease_store()
                     .overlay((baseline.clone(), None), overlay)
@@ -804,7 +800,7 @@ where
                     }
                 };
                 let persist_delta = row_store_durable_delta(delta.clone());
-                let reservation_seq = self.next_delta_log_seq().await?;
+                let reservation_seq = current_journal_seq.next();
                 let next_state = RowSnapshotState::new(new_snapshot, store, reservation_seq)?;
                 let (run_row_reservations, active_lock_reservations) = match self
                     .reserve_preappend_rows(&baseline, &persist_delta, reservation_seq)
@@ -1660,7 +1656,7 @@ where
                 let build_delta = build_delta.take().ok_or_else(|| TurnError::Unavailable {
                     reason: "turn state row-store targeted delta builder was reused".to_string(),
                 })?;
-                let (delta, persist_delta, reservation_baseline) = {
+                let (delta, persist_delta, reservation_baseline, reservation_seq) = {
                     let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
                         reason: "row snapshot cache was not initialized".to_string(),
                     })?;
@@ -1670,9 +1666,13 @@ where
                     let reservation_baseline = self
                         .preappend_row_reservations
                         .then(|| state.snapshot.clone());
-                    (delta, persist_delta, reservation_baseline)
+                    (
+                        delta,
+                        persist_delta,
+                        reservation_baseline,
+                        state.journal_seq.next(),
+                    )
                 };
-                let reservation_seq = self.next_delta_log_seq().await?;
                 let (run_row_reservations, active_lock_reservations) =
                     if let Some(baseline) = reservation_baseline.as_ref() {
                         match self
