@@ -699,15 +699,18 @@ where
         lease_token: crate::TurnLeaseToken,
         retired_status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
-        let (snapshot, _version) = self.read_snapshot().await?;
+        let run = self
+            .with_cached_snapshot(|snapshot| {
+                snapshot
+                    .runs
+                    .iter()
+                    .find(|record| record.run_id == run_id)
+                    .cloned()
+            })
+            .await?
+            .ok_or(TurnError::ScopeNotFound)?;
         self.runner_lease_store()
-            .retire_runner_lease_from_snapshot(
-                &snapshot,
-                run_id,
-                runner_id,
-                lease_token,
-                retired_status,
-            )
+            .retire_runner_lease_from_run_record(run, runner_id, lease_token, retired_status)
             .await
     }
 

@@ -131,7 +131,8 @@ use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage,
+    AppendAssistantDraftRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, ContextMessage, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
     SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -687,57 +688,40 @@ where
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
         let reply_content = request.reply.content;
-        let draft = self
+        let finalized = match self
             .thread_service
-            .append_assistant_draft(AppendAssistantDraftRequest {
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
                 turn_run_id: self.run_context.run_id.to_string(),
                 content: MessageContent::text(reply_content.clone()),
             })
             .await
-            .map_err(transcript_write_error)?;
-        if draft.status == MessageStatus::Finalized {
-            if draft.content.as_deref() == Some(reply_content.as_str()) {
-                let message_ref = message_ref(draft.message_id)?;
-                self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
-                return Ok(message_ref);
+        {
+            Ok(message) => message,
+            Err(error) => {
+                if let Some(message) = self
+                    .already_finalized_matching_reply_for_current_run(&reply_content)
+                    .await?
+                {
+                    message
+                } else {
+                    return Err(transcript_write_error(error));
+                }
             }
+        };
+        if finalized.status != MessageStatus::Finalized
+            || finalized.content.as_deref() != Some(reply_content.as_str())
+        {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,
                 "assistant transcript write failed",
             ));
         }
-        let finalized = self
-            .thread_service
-            .finalize_assistant_message(
-                &self.thread_scope,
-                &self.run_context.thread_id,
-                draft.message_id,
-                MessageContent::text(reply_content.clone()),
-            )
-            .await;
-        match finalized {
-            Ok(message) => {
-                let message_ref = message_ref(message.message_id)?;
-                self.emit_assistant_reply_finalized(message_ref.clone())
-                    .await?;
-                Ok(message_ref)
-            }
-            Err(error) => {
-                if let Some(message_id) = self
-                    .already_finalized_matching_reply(draft.message_id, &reply_content)
-                    .await?
-                {
-                    let message_ref = message_ref(message_id)?;
-                    self.emit_assistant_reply_finalized(message_ref.clone())
-                        .await?;
-                    return Ok(message_ref);
-                }
-                Err(transcript_write_error(error))
-            }
-        }
+        let message_ref = message_ref(finalized.message_id)?;
+        self.emit_assistant_reply_finalized(message_ref.clone())
+            .await?;
+        Ok(message_ref)
     }
 
     async fn append_capability_result_ref(
@@ -859,30 +843,27 @@ where
         Ok(message)
     }
 
-    async fn already_finalized_matching_reply(
+    async fn already_finalized_matching_reply_for_current_run(
         &self,
-        message_id: ThreadMessageId,
         reply_content: &str,
-    ) -> Result<Option<ThreadMessageId>, AgentLoopHostError> {
-        let history = self
+    ) -> Result<Option<ThreadMessageRecord>, AgentLoopHostError> {
+        let Some(message) = self
             .thread_service
-            .list_thread_history(ThreadHistoryRequest {
+            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
+                turn_run_id: self.run_context.run_id.to_string(),
             })
             .await
-            .map_err(transcript_write_error)?;
-        let expected_run_id = self.run_context.run_id.to_string();
-        Ok(history.messages.into_iter().find_map(|message| {
-            let belongs_to_run = message.turn_run_id.as_deref() == Some(expected_run_id.as_str());
-            let matches_reply = message.status == MessageStatus::Finalized
-                && message.content.as_deref() == Some(reply_content);
-            if message.message_id == message_id && belongs_to_run && matches_reply {
-                Some(message.message_id)
-            } else {
-                None
-            }
-        }))
+            .map_err(transcript_write_error)?
+        else {
+            return Ok(None);
+        };
+        if message.content.as_deref() == Some(reply_content) {
+            Ok(Some(message))
+        } else {
+            Ok(None)
+        }
     }
 }
 
