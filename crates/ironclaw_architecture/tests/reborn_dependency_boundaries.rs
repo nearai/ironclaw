@@ -1131,39 +1131,48 @@ fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
 }
 
 #[test]
-fn wasm_sandbox_core_is_standalone_v1_parity_kernel() {
-    let root = workspace_root().join("crates/ironclaw_wasm_sandbox_core");
+fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
+    let workspace = workspace_root();
+    let module = workspace.join("crates/ironclaw_wasm/src/wasm_sandbox_core.rs");
     assert!(
-        root.join("Cargo.toml").exists(),
-        "shared WASM sandbox core should exist before ProductAdapters duplicate v1 sandbox setup"
+        module.exists(),
+        "shared WASM sandbox core should stay as a module inside ironclaw_wasm after W2.3"
     );
+    let guardrails = std::fs::read_to_string(workspace.join("crates/ironclaw_wasm/CLAUDE.md"))
+        .expect("ironclaw_wasm guardrails must be readable");
     assert!(
-        root.join("CLAUDE.md").exists(),
-        "shared WASM sandbox core needs local guardrails"
+        guardrails.contains("wasm_sandbox_core")
+            && guardrails.contains("Do not put ProductAdapter"),
+        "ironclaw_wasm guardrails must preserve the folded sandbox-core domain-free rule"
     );
+
+    let source = std::fs::read_to_string(&module).expect("WASM sandbox core module is readable");
+    for forbidden in [
+        "ironclaw_product",
+        "ironclaw_dispatcher",
+        "ironclaw_extensions",
+        "ironclaw_filesystem",
+        "ironclaw_network",
+        "ironclaw_secrets",
+        "ironclaw_host_runtime",
+        "ironclaw_reborn_composition",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "folded WASM sandbox core module must stay independent of product/runtime/app crates; \
+             unexpected reference to `{forbidden}`"
+        );
+    }
 
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
         .as_array()
         .expect("cargo metadata must include packages");
-    let package = packages
-        .iter()
-        .find(|package| package["name"] == "ironclaw_wasm_sandbox_core")
-        .expect("ironclaw_wasm_sandbox_core must be a workspace package");
-    let workspace_deps = workspace_dependency_names(package)
-        .filter_map(|dependency| dependency["name"].as_str())
-        .collect::<Vec<_>>();
-    let allowed_workspace_deps = ["ironclaw_wasm_limiter"];
-    let forbidden_workspace_deps = workspace_deps
-        .iter()
-        .copied()
-        .filter(|dependency| !allowed_workspace_deps.contains(dependency))
-        .collect::<Vec<_>>();
     assert!(
-        forbidden_workspace_deps.is_empty(),
-        "WASM sandbox core should stay independent of IronClaw product/runtime crates; \
-         only the low-level shared limiter workspace crate is allowed. Got forbidden deps: \
-         {forbidden_workspace_deps:?}; all workspace deps: {workspace_deps:?}"
+        packages
+            .iter()
+            .all(|package| package["name"] != "ironclaw_wasm_sandbox_core"),
+        "ironclaw_wasm_sandbox_core should remain folded into ironclaw_wasm after W2.3"
     );
 
     let limiter_package = packages
@@ -1216,7 +1225,7 @@ fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
     //   * tracing             — structured logging for hardened error paths
     //                           added in the zmanian review.
     //   * serde_json          — validates temporary JSON-shim WIT payloads.
-    //   * ironclaw_wasm_sandbox_core — shared v1-style minimal WASI sandbox kernel.
+    //   * ironclaw_wasm  — shared v1-style minimal WASI sandbox kernel module.
     //   * wasmtime            — component type and generated binding instantiation.
     // Every addition is justified by a concrete call site in src/. Adding a
     // dep here without a matching call site is a contract violation — and
@@ -1229,7 +1238,7 @@ fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
         "hmac",
         "http",
         "ironclaw_product_adapters",
-        "ironclaw_wasm_sandbox_core",
+        "ironclaw_wasm",
         "serde_json",
         "sha2",
         "subtle",
@@ -1247,8 +1256,8 @@ fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
 #[test]
 fn wasm_product_adapter_runtime_uses_v1_style_minimal_wasi() {
     let root = workspace_root();
-    let core = std::fs::read_to_string(root.join("crates/ironclaw_wasm_sandbox_core/src/lib.rs"))
-        .expect("WASM sandbox core must be readable");
+    let core = std::fs::read_to_string(root.join("crates/ironclaw_wasm/src/wasm_sandbox_core.rs"))
+        .expect("WASM sandbox core module must be readable");
     let adapter_store =
         std::fs::read_to_string(root.join("crates/ironclaw_wasm_product_adapters/src/store.rs"))
             .expect("ProductAdapter WASM store must be readable");
@@ -2783,7 +2792,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_turns",
-                "ironclaw_wasm",
             ],
         },
         BoundaryRule {

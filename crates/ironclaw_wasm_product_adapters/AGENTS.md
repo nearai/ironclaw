@@ -6,7 +6,7 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_product_adapters/AGENTS.md`
-  - `crates/ironclaw_wasm_sandbox_core/CLAUDE.md`
+  - `crates/ironclaw_wasm/CLAUDE.md`
   - `crates/ironclaw_product_adapter_registry/AGENTS.md`
   - `docs/reborn/contracts/network.md`
 

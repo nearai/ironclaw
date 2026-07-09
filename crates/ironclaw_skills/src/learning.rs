@@ -5,16 +5,16 @@
 //! Distills a reusable `SKILL.md` from a completed run's transcript. (Refinement
 //! and library upkeep land here too in later increments.)
 //!
-//! This crate is **pure domain logic**: it does not depend on the LLM provider,
+//! This module is **pure domain logic**: it does not depend on the LLM provider,
 //! the runtime, or the filesystem. Inference is abstracted behind
 //! [`SkillInferencePort`], and the produced document is validated with the same
-//! parser the skill-install path uses ([`ironclaw_skills::parse_skill_md`]), so a
-//! distilled skill is guaranteed installable. The composition layer supplies the
-//! concrete inference adapter (over the runtime's non-run inference port) and the
-//! scoped write; neither concern leaks into this crate.
+//! parser the skill-install path uses ([`crate::parse_skill_md`]), so a distilled
+//! skill is guaranteed installable. The composition layer supplies the concrete
+//! inference adapter (over the runtime's non-run inference port) and the scoped
+//! write; neither concern leaks into this module.
 
+use crate::{SkillParseError, parse_skill_md};
 use async_trait::async_trait;
-use ironclaw_skills::{SkillParseError, parse_skill_md};
 
 /// The extraction prompt (transcript -> `SKILL.md` or a `SKIP:` line). Kept next
 /// to the parser whose output contract it must satisfy.
@@ -82,7 +82,7 @@ pub enum DistillError {
 /// Distill a skill from a completed run's transcript.
 ///
 /// Calls the inference port with the extraction prompt + transcript, then
-/// validates the result with [`ironclaw_skills::parse_skill_md`]. Returns
+/// validates the result with [`crate::parse_skill_md`]. Returns
 /// [`DistillOutcome::Skipped`] when the model declines, or a validated
 /// [`DistilledSkill`].
 pub async fn distill_skill(
@@ -133,7 +133,7 @@ pub enum RefineOutcome {
 /// evidence (clearer steps, the union of real gotchas, a bumped version) into the
 /// existing skill, or returns [`RefineOutcome::KeepExisting`] when the existing
 /// already covers everything useful. The produced document is validated with
-/// [`ironclaw_skills::parse_skill_md`], so only an installable skill comes back
+/// [`crate::parse_skill_md`], so only an installable skill comes back
 /// as [`RefineOutcome::Refined`].
 pub async fn refine_skill(
     existing_skill_md: &str,
