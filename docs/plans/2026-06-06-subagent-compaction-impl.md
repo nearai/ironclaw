@@ -172,7 +172,7 @@ Goal/tombstone/idempotency-ledger likely fit (a) (file-shaped or key-value). Gat
 **Files modified (regardless of choice):**
 
 - `crates/ironclaw_loop_support/src/capability_port.rs` — **do NOT introduce `CapabilityResultStore` trait here** (Reviewer 1 R2: loop_support is adapter glue, not persistence). Introduce in `ironclaw_reborn_event_store` (or its own `ironclaw_loop_capability_store` if needs to be reusable above adapter layer).
-- `crates/ironclaw_reborn_composition/src/product_live_adapters.rs` — switch backend choice via config; keep in-memory as `local_dev` fallback only.
+- `crates/ironclaw_reborn_composition/src/root/product_live_adapters.rs` — switch backend choice via config; keep in-memory as `local_dev` fallback only.
 - `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs` — keep in-memory for dev; wire production-readiness check to require non-in-memory in prod.
 - `crates/ironclaw_reborn/src/composition/production_readiness.rs` — flip `SubagentRestartReconciler` from stub to required impl present.
 

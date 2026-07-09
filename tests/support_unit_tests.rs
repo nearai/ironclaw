@@ -2421,6 +2421,7 @@ mod reborn_support_tests {
                     thread_id,
                     vec![ProductProjectionItem::Text {
                         id: format!("item:{thread_id}"),
+                        run_id: None,
                         body: body.to_string(),
                     }],
                 )
