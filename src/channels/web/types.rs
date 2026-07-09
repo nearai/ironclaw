@@ -322,6 +322,10 @@ pub struct JobInfo {
     pub user_id: String,
     pub created_at: String,
     pub started_at: Option<String>,
+    /// Job kind label. `Some("mcp_tool")` for background MCP-tool jobs; omitted
+    /// for ordinary agent/sandbox jobs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

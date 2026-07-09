@@ -17,6 +17,15 @@ use crate::channels::web::types::*;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
 use crate::ownership::Owned;
 
+/// The `mode` label for a job-list entry. Background MCP-tool jobs are
+/// identified by the durable `mcp:` title prefix (`MCP_JOB_TITLE_PREFIX`) rather
+/// than `metadata.mode`, which is not persisted across all DB backends.
+fn job_mode_for_title(title: &str) -> Option<String> {
+    title
+        .starts_with(crate::worker::mcp_job::MCP_JOB_TITLE_PREFIX)
+        .then(|| "mcp_tool".to_string())
+}
+
 fn db_error(context: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
     tracing::error!(%e, context, "Database error in jobs handler");
     (
@@ -97,6 +106,7 @@ pub async fn jobs_list_handler(
                     user_id: j.user_id.clone(),
                     created_at: j.created_at.to_rfc3339(),
                     started_at: j.started_at.map(|dt| dt.to_rfc3339()),
+                    mode: None,
                 });
             }
         }
@@ -119,6 +129,7 @@ pub async fn jobs_list_handler(
                     user_id: j.user_id.clone(),
                     created_at: j.created_at.to_rfc3339(),
                     started_at: j.started_at.map(|dt| dt.to_rfc3339()),
+                    mode: job_mode_for_title(&j.title),
                 });
             }
         }
@@ -944,6 +955,17 @@ mod tests {
 
     use crate::orchestrator::TokenStore;
     use crate::orchestrator::job_manager::ContainerJobConfig;
+
+    #[test]
+    fn job_mode_flags_mcp_jobs_by_title_prefix() {
+        assert_eq!(
+            job_mode_for_title("mcp:msbsandbox/run_python"),
+            Some("mcp_tool".to_string())
+        );
+        assert_eq!(job_mode_for_title("chat turn"), None);
+        // Requires the full `mcp:` prefix, not just "mcp".
+        assert_eq!(job_mode_for_title("mcp"), None);
+    }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
