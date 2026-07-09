@@ -29,8 +29,6 @@ mod admin_user_directory;
 mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
-mod communication_context;
-mod default_system_prompt;
 mod error;
 mod extension_host;
 mod factory;
@@ -45,10 +43,8 @@ mod local_runtime_profile;
 mod observability;
 mod outbound;
 mod product_auth;
-mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
-mod profile;
 mod profile_approval_authorization;
 mod projection;
 mod slack;
@@ -61,6 +57,7 @@ mod delivered_gate_routing;
 mod host_ingress;
 mod readiness;
 mod retry_disposition;
+mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
@@ -171,21 +168,21 @@ pub use product_auth::api::auth::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
-pub use product_live_adapters::{
-    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
-    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
-    capability_allowlist, visible_capability_request_for_run,
-};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
 pub use retry_disposition::{RetryDisposition, retry_disposition};
+pub use root::product_live_adapters::{
+    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
+    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
+    capability_allowlist, visible_capability_request_for_run,
+};
+pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{

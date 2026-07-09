@@ -16,7 +16,7 @@ use ironclaw_turns::{
 };
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
-const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../assets/prompts/default-system.md");
+const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
 /// Progressive tool-disclosure protocol, appended to the system prompt only when
 /// disclosure is active (bridged mode). A weak model will not adopt the
 /// search/describe/call protocol from the `tool_search` tool description alone —
@@ -25,7 +25,7 @@ const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../assets/prompts/def
 /// missing. This text references the bridge tools, so it must NOT appear when
 /// disclosure is off (no bridges exist on that surface).
 const TOOL_DISCLOSURE_PROTOCOL_EMBEDDED: &str =
-    include_str!("../assets/prompts/tool-disclosure-protocol.md");
+    include_str!("../../assets/prompts/tool-disclosure-protocol.md");
 const MAX_DEFAULT_SYSTEM_PROMPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
