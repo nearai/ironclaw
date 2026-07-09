@@ -1071,6 +1071,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_list_for_scope_returns_only_active_matching_scope_records() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
+        let store = FilesystemCapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
+        let project_a_thread_1 = scope(Some("project-a"), Some("thread-1"));
+        let project_a_thread_2 = scope(Some("project-a"), Some("thread-2"));
+        let project_b = scope(Some("project-b"), Some("thread-1"));
+        let tenant_b_scoped = scoped_fs(backend, "tenant-b", "alice");
+        let tenant_b_store = FilesystemCapabilityPermissionOverrideStore::new(tenant_b_scoped);
+        let tenant_b_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-b").unwrap(),
+            ..scope(Some("project-a"), Some("thread-1"))
+        };
+
+        let project_a_record = store
+            .set(input(
+                project_a_thread_1.clone(),
+                CapabilityPermissionOverride::Disabled,
+            ))
+            .await
+            .unwrap();
+        store
+            .set(input(project_b, CapabilityPermissionOverride::AskEachTime))
+            .await
+            .unwrap();
+        tenant_b_store
+            .set(input(
+                tenant_b_scope,
+                CapabilityPermissionOverride::Disabled,
+            ))
+            .await
+            .unwrap();
+
+        let listed = store.list_for_scope(&project_a_thread_2).await.unwrap();
+
+        assert_eq!(listed, vec![project_a_record]);
+
+        store.clear(&key_for(&project_a_thread_1)).await.unwrap();
+        assert!(
+            store
+                .list_for_scope(&project_a_thread_2)
+                .await
+                .unwrap()
+                .is_empty(),
+            "scope listing must skip tombstoned records"
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_get_returns_serialization_error_for_corrupt_override_record() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");

@@ -3,6 +3,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -1056,6 +1057,46 @@ async fn context_port_emits_safe_milestone_when_personal_identity_is_admitted() 
     assert!(!wire.contains("private user profile"));
     assert!(!wire.contains("private assistant directive"));
     assert!(!wire.contains("context/assistant-directives.md"));
+}
+
+#[tokio::test]
+async fn context_port_does_not_emit_personal_context_milestone_when_context_load_fails() {
+    let fixture = ThreadFixture::new().await;
+    let mut run_context = fixture.run_context.clone();
+    run_context.resolved_run_profile.personal_context_policy = PersonalContextPolicy::Allowed;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![personal_identity(
+        "USER.md",
+        "private user profile",
+    )]));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = milestones.clone();
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_identity_context_source(source)
+    .with_skill_context_source(Arc::new(DelayedFailingSkillContextSource {
+        delay: Duration::from_millis(25),
+    }))
+    .with_milestone_sink(milestone_sink);
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .expect_err("skill context failure should fail context loading");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        milestones.milestones().is_empty(),
+        "personal context admission should only publish after the full context bundle loads"
+    );
 }
 
 #[traced_test]
@@ -3770,6 +3811,21 @@ impl HostSkillContextSource for StaticSkillContextSource {
         _run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         Ok(self.candidates.clone())
+    }
+}
+
+struct DelayedFailingSkillContextSource {
+    delay: Duration,
+}
+
+#[async_trait]
+impl HostSkillContextSource for DelayedFailingSkillContextSource {
+    async fn load_skill_context_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+        tokio::time::sleep(self.delay).await;
+        Err(HostSkillContextBuildError::SourceUnavailable)
     }
 }
 

@@ -114,28 +114,16 @@ fn scoped_path_class(path: &ScopedPath) -> PathClass {
 }
 
 fn scoped_path_detail(path: &ScopedPath) -> &'static str {
-    let path = path.as_str();
-    match path {
-        "/turns/state.json" => "turn_state_snapshot",
-        "/resources/snapshot.json" => "resource_governor_snapshot",
-        "/resources/budget-gates.json" => "budget_gate_snapshot",
-        _ if path.starts_with("/approvals/capability-permissions") => {
-            "approval_capability_permissions"
-        }
-        _ if path.starts_with("/approvals/auto-approve") => "approval_auto_approve",
-        _ if path.starts_with("/approvals/persistent") => "approval_persistent_policy",
-        _ if path.starts_with("/approvals/") => "approvals",
-        _ if path.starts_with("/authorization/leases") => "authorization_leases",
-        _ if path == "/events" || path.starts_with("/events/") => "events",
-        _ if path == "/processes" || path.starts_with("/processes/") => "processes",
-        _ if path == "/run-state" || path.starts_with("/run-state/") => "run_state",
-        _ if path == "/secrets" || path.starts_with("/secrets/") => "secrets",
-        _ if path == "/skills" || path.starts_with("/skills/") => "skill_bundles",
-        _ if path == "/system/skills" || path.starts_with("/system/skills/") => {
-            "system_skill_bundles"
-        }
-        _ if path == "/threads" || path.starts_with("/threads/") => "threads",
-        _ => "unknown",
+    let depth = path
+        .as_str()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .count();
+    match depth {
+        0 => "root",
+        1 => "top_level",
+        2 => "one_level",
+        _ => "nested",
     }
 }
 

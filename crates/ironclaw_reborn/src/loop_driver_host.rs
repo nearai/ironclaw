@@ -53,16 +53,7 @@ const LEGACY_TEXT_ONLY_DRIVER_ID: &str = "lightweight_loop";
 const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
-
-fn should_fetch_communication_context(context: &LoopRunContext) -> bool {
-    !matches!(
-        context
-            .product_context
-            .as_ref()
-            .map(|product_context| product_context.origin),
-        Some(TurnOriginKind::WebUi)
-    )
-}
+const USER_PROFILE_WARMUP_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn trace_host_factory_latency_ok(
     operation: &'static str,
@@ -108,8 +99,8 @@ fn trace_host_factory_latency_error<E: ?Sized>(
 
 use ironclaw_turns::{
     CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
-    TurnCheckpointId, TurnError, TurnOriginKind, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
+    TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -1477,23 +1468,25 @@ where
         // capability-surface computation below, rather than blocking prompt
         // construction. Joined (and stamped with `delivery_tools_visible`) at the
         // prompt-build site once the surface is known.
-        let communication_fetch =
-            self.communication_context_provider
-                .as_ref()
-                .and_then(|provider| {
-                    should_fetch_communication_context(&run_context).then(|| {
-                        provider.begin_communication_context(
-                            run_context.scope.clone(),
-                            run_context.actor().cloned(),
-                        )
-                    })
-                });
+        let communication_fetch = self
+            .communication_context_provider
+            .as_ref()
+            .map(|provider| {
+                provider.begin_communication_context(
+                    run_context.scope.clone(),
+                    run_context.actor().cloned(),
+                )
+            });
         let user_profile_source = Arc::clone(&self.user_profile_source);
         let user_profile_run_context = run_context.clone();
         let user_profile_fetch = tokio::spawn(async move {
-            user_profile_source
-                .resolve_user_profile(&user_profile_run_context)
-                .await
+            tokio::time::timeout(
+                USER_PROFILE_WARMUP_TIMEOUT,
+                user_profile_source.resolve_user_profile(&user_profile_run_context),
+            )
+            .await
+            .ok()
+            .flatten()
         });
         // Build the live cancellation handle in parallel with the rest of host
         // setup. The claimed run state is already validated by the scheduler, so

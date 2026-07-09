@@ -430,32 +430,29 @@ where
 
         let identity_context = async {
             let started_at = ironclaw_observability::live_latency_started_at();
-            let identity_messages = match self.identity_context_source.as_deref() {
-                Some(source) => {
-                    let candidates = self
-                        .identity_candidates
-                        .cell_for_mode(mode)
-                        .get_or_try_init(|| async {
-                            source
-                                .load_identity_candidates(&self.run_context, mode)
-                                .await
-                                .map_err(HostIdentityContextBuildError::into_host_error)
-                        })
-                        .await?;
-                    let outcome = identity_context::build_identity_messages_for_run_detailed(
-                        candidates,
-                        &self.run_context,
-                        mode,
-                        self.identity_budget,
-                    )?;
-                    self.publish_personal_context_admitted(
-                        mode,
-                        &outcome.admitted_personal_context_paths,
-                    );
-                    outcome.messages
-                }
-                None => Vec::new(),
-            };
+            let (identity_messages, admitted_personal_context_paths) =
+                match self.identity_context_source.as_deref() {
+                    Some(source) => {
+                        let candidates = self
+                            .identity_candidates
+                            .cell_for_mode(mode)
+                            .get_or_try_init(|| async {
+                                source
+                                    .load_identity_candidates(&self.run_context, mode)
+                                    .await
+                                    .map_err(HostIdentityContextBuildError::into_host_error)
+                            })
+                            .await?;
+                        let outcome = identity_context::build_identity_messages_for_run_detailed(
+                            candidates,
+                            &self.run_context,
+                            mode,
+                            self.identity_budget,
+                        )?;
+                        (outcome.messages, outcome.admitted_personal_context_paths)
+                    }
+                    None => (Vec::new(), Vec::new()),
+                };
             trace_loop_support_latency_ok(
                 "context_identity_messages",
                 &self.run_context,
@@ -463,11 +460,12 @@ where
                 max_messages,
                 identity_messages.len(),
             );
-            Ok::<_, AgentLoopHostError>(identity_messages)
+            Ok::<_, AgentLoopHostError>((identity_messages, admitted_personal_context_paths))
         };
 
-        let (context, instruction_snippets, identity_messages) =
+        let (context, instruction_snippets, (identity_messages, admitted_personal_context_paths)) =
             tokio::try_join!(context_window, skill_snippets, identity_context)?;
+        self.publish_personal_context_admitted(mode, &admitted_personal_context_paths);
 
         let started_at = ironclaw_observability::live_latency_started_at();
         let compaction_message_index = context

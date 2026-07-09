@@ -18,13 +18,14 @@ use std::{
 
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::{HostApiError, TenantId, UserId};
 use ironclaw_memory::{MemoryContext, MemoryDocumentPath, MemoryDocumentScope};
 use ironclaw_memory_native::{
     FilesystemMemoryDocumentRepository, MemoryBackend, RepositoryMemoryBackend,
 };
 use ironclaw_turns::run_profile::{Locale, LoopRunContext, UserProfileContext};
 use serde::Deserialize;
+use tokio::sync::Notify;
 
 /// Relative path of the per-user agent-context profile document.
 pub const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
@@ -57,6 +58,7 @@ pub(crate) fn profile_scope_and_path(
 pub struct MemoryBackedUserProfileSource {
     filesystem: Arc<dyn RootFilesystem>,
     cache: Mutex<UserProfileCache>,
+    inflight: Arc<Mutex<HashMap<UserProfileCacheKey, Arc<Notify>>>>,
     cache_ttl: Duration,
 }
 
@@ -65,6 +67,7 @@ impl MemoryBackedUserProfileSource {
         Self {
             filesystem,
             cache: Mutex::new(UserProfileCache::default()),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl: PROFILE_CACHE_TTL,
         }
     }
@@ -74,6 +77,7 @@ impl MemoryBackedUserProfileSource {
         Self {
             filesystem,
             cache: Mutex::new(UserProfileCache::default()),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
             cache_ttl,
         }
     }
@@ -87,19 +91,32 @@ impl MemoryBackedUserProfileSource {
         // Profile is keyed to the human user at agent=None, project=None
         // (spec §10) regardless of the run's agent/project scope.
         let scope = &run_context.scope;
-        let user_id = run_context.actor.as_ref().map(|a| a.user_id.as_str())?;
+        let user_id = run_context.actor.as_ref().map(|a| a.user_id.clone())?;
         let cache_key = UserProfileCacheKey {
-            tenant_id: scope.tenant_id.as_str().to_string(),
-            user_id: user_id.to_string(),
+            tenant_id: scope.tenant_id.clone(),
+            user_id,
         };
-        if let Some(profile) = self.cached_profile(&cache_key) {
-            return profile;
+        loop {
+            if let Some(profile) = self.cached_profile(&cache_key) {
+                return profile;
+            }
+            match self.begin_profile_load(&cache_key) {
+                ProfileLoad::Follower(notify) => {
+                    notify.notified().await;
+                }
+                ProfileLoad::Leader(leader) => {
+                    let profile = self
+                        .resolve_user_profile_uncached(
+                            cache_key.tenant_id.as_str(),
+                            cache_key.user_id.as_str(),
+                        )
+                        .await;
+                    self.store_cached_profile(cache_key.clone(), profile.clone());
+                    leader.finish();
+                    return profile;
+                }
+            }
         }
-        let profile = self
-            .resolve_user_profile_uncached(scope.tenant_id.as_str(), user_id)
-            .await;
-        self.store_cached_profile(cache_key, profile.clone());
-        profile
     }
 
     async fn resolve_user_profile_uncached(
@@ -190,12 +207,65 @@ impl MemoryBackedUserProfileSource {
             cache.insert(key, profile, self.cache_ttl);
         }
     }
+
+    fn begin_profile_load(&self, key: &UserProfileCacheKey) -> ProfileLoad {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(notify) = inflight.get(key) {
+            return ProfileLoad::Follower(Arc::clone(notify));
+        }
+        let notify = Arc::new(Notify::new());
+        inflight.insert(key.clone(), Arc::clone(&notify));
+        ProfileLoad::Leader(ProfileLoadLeader {
+            inflight: Arc::clone(&self.inflight),
+            key: key.clone(),
+            notify,
+            finished: false,
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct UserProfileCacheKey {
-    tenant_id: String,
-    user_id: String,
+    tenant_id: TenantId,
+    user_id: UserId,
+}
+
+enum ProfileLoad {
+    Leader(ProfileLoadLeader),
+    Follower(Arc<Notify>),
+}
+
+struct ProfileLoadLeader {
+    inflight: Arc<Mutex<HashMap<UserProfileCacheKey, Arc<Notify>>>>,
+    key: UserProfileCacheKey,
+    notify: Arc<Notify>,
+    finished: bool,
+}
+
+impl ProfileLoadLeader {
+    fn finish(mut self) {
+        self.cleanup();
+        self.finished = true;
+    }
+
+    fn cleanup(&self) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+        self.notify.notify_waiters();
+    }
+}
+
+impl Drop for ProfileLoadLeader {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cleanup();
+        }
+    }
 }
 
 struct UserProfileCacheEntry {

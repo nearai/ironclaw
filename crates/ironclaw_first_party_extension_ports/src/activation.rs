@@ -1,3 +1,7 @@
+// arch-exempt: large_file, skill activation still owns descriptor loading,
+// setup-marker suppression, selection cache, and regression fixtures together;
+// decomposition into activation/{candidate_cache,setup_markers,selection}.rs is
+// tracked with the Reborn perf stack follow-up after PR #5857 lands.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -486,35 +490,38 @@ where
         let candidates = self
             .load_activation_candidates(run_context, &descriptors)
             .await?;
-        let checked_setup_markers = setup_markers_for_explicit_mentions(message, &candidates);
+        let mut checked_setup_markers = setup_markers_for_explicit_mentions(message, &candidates);
         let mut satisfied_setup_markers = self
             .satisfied_setup_markers_for_marker_set(run_context, &checked_setup_markers)
             .await?;
-        let mut selection = select_skill_activations(
-            message,
-            &candidates,
-            &self.config,
-            self.auto_activate_learned.load(Ordering::Relaxed),
-            &satisfied_setup_markers,
-        )?;
-        let selected_setup_markers = setup_markers_for_selection(&selection, &candidates);
-        let unchecked_selected_setup_markers = selected_setup_markers
-            .difference(&checked_setup_markers)
-            .cloned()
-            .collect::<HashSet<_>>();
-        let newly_satisfied_setup_markers = self
-            .satisfied_setup_markers_for_marker_set(run_context, &unchecked_selected_setup_markers)
-            .await?;
-        if !newly_satisfied_setup_markers.is_empty() {
-            satisfied_setup_markers.extend(newly_satisfied_setup_markers);
-            selection = select_skill_activations(
+        let selection = loop {
+            let selection = select_skill_activations(
                 message,
                 &candidates,
                 &self.config,
                 self.auto_activate_learned.load(Ordering::Relaxed),
                 &satisfied_setup_markers,
             )?;
-        }
+            let selected_setup_markers = setup_markers_for_selection(&selection, &candidates);
+            let unchecked_selected_setup_markers = selected_setup_markers
+                .difference(&checked_setup_markers)
+                .cloned()
+                .collect::<HashSet<_>>();
+            if unchecked_selected_setup_markers.is_empty() {
+                break selection;
+            }
+            let newly_satisfied_setup_markers = self
+                .satisfied_setup_markers_for_marker_set(
+                    run_context,
+                    &unchecked_selected_setup_markers,
+                )
+                .await?;
+            checked_setup_markers.extend(unchecked_selected_setup_markers);
+            if newly_satisfied_setup_markers.is_empty() {
+                break selection;
+            }
+            satisfied_setup_markers.extend(newly_satisfied_setup_markers);
+        };
         let plan = activation_plan_for_candidates(selection);
         Ok((plan, candidates))
     }
@@ -2531,6 +2538,60 @@ mod tests {
         assert!(
             selected.is_empty(),
             "setup markers must suppress explicit and natural-language activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_suppresses_cascading_satisfied_setup_markers() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "setup-alpha",
+                &skill_md_with_activation(
+                    "setup-alpha",
+                    "  keywords: [\"setup\"]\n  setup_marker: \"markers/setup-alpha.done\"",
+                    "SETUP_ALPHA_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "setup-beta",
+                &skill_md_with_activation(
+                    "setup-beta",
+                    "  keywords: [\"setup\"]\n  setup_marker: \"markers/setup-beta.done\"",
+                    "SETUP_BETA_SENTINEL",
+                ),
+            ),
+        ]));
+        let setup_markers = Arc::new(StaticSetupMarkerSource::new(&[
+            "markers/setup-alpha.done",
+            "markers/setup-beta.done",
+        ]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                max_active_skills: 1,
+                ..SkillActivationSelectorConfig::default()
+            },
+        )
+        .with_setup_marker_source(setup_markers);
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please run setup",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert!(
+            selected.is_empty(),
+            "all already-satisfied setup markers exposed by reselection must be suppressed"
         );
     }
 
