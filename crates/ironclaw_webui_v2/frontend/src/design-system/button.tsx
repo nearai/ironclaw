@@ -17,6 +17,7 @@
  *   children
  *   ...rest   forwarded to the element (type, onClick, href, …)
  */
+import type { ElementType, ReactNode } from "react";
 import { cn } from "../utils/cn";
 import { Spinner } from "./spinner";
 
@@ -69,6 +70,18 @@ const VARIANTS = {
     "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
 };
 
+type ButtonProps = {
+  children?: ReactNode;
+  className?: string;
+  variant?: "primary" | keyof typeof VARIANTS;
+  size?: keyof typeof SIZES;
+  fullWidth?: boolean;
+  loading?: boolean;
+  disabled?: boolean;
+  as?: ElementType;
+  [key: string]: any;
+};
+
 /* ── Component ─────────────────────────────────────────────────────── */
 
 export function Button({
@@ -81,7 +94,7 @@ export function Button({
   disabled = false,
   as: Tag = "button",
   ...rest
-}) {
+}: ButtonProps) {
   const Element: any = Tag;
   const sizeClass  = SIZES[size] ?? SIZES.md;
   const fullClass  = fullWidth ? "w-full" : "";

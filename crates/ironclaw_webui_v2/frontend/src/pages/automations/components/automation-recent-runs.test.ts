@@ -7,6 +7,10 @@ import vm from "node:vm";
 import { runSummaryView } from "../lib/automations-presenters";
 
 const COPY = {
+  "automations.detail.noThread": "No thread",
+  "automations.detail.openRun": "Open run",
+  "automations.detail.run": "Run",
+  "automations.detail.thread": "Thread",
   "automations.table.noRuns": "No runs",
   "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.runs.total": "{count} runs",
@@ -14,6 +18,7 @@ const COPY = {
   "automations.runs.error": "{count} failed",
   "automations.runs.running": "{count} running",
   "automations.runs.unknown": "{count} unknown",
+  "nav.logs": "Logs",
 };
 
 function sourceForTest() {
@@ -31,7 +36,7 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { RunDots, RunHistorySummary };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { RecentRunRow, RunDots, RunHistorySummary };`;
 }
 
 function html(strings, ...values) {
@@ -63,6 +68,23 @@ function collectScalars(root) {
   return scalars;
 }
 
+function componentProps(root, component) {
+  const props = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (let index = 0; index < node.values.length; index += 1) {
+      if (node.values[index] !== component) continue;
+      const current = {};
+      for (let propIndex = index + 1; propIndex < node.values.length; propIndex += 1) {
+        const name = node.strings[propIndex]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
+        if (name) current[name] = node.values[propIndex];
+      }
+      props.push(current);
+    }
+  });
+  return props;
+}
+
 function deepValuesAfter(root, fragment) {
   const values = [];
   visit(root, (node) => {
@@ -81,11 +103,13 @@ function t(key, vars = {}) {
 function loadComponents() {
   function Button() {}
   function Icon() {}
+  function Link() {}
   function StatusPill() {}
   const context = {
     globalThis: {},
     Button,
     Icon,
+    Link,
     StatusPill,
     buildScopedLogsPath: ({ threadId, runId }) => `/logs?thread=${threadId}&run=${runId}`,
     cn: (...parts) => parts.filter(Boolean).join(" "),
@@ -94,7 +118,7 @@ function loadComponents() {
     useT: () => t,
   };
   vm.runInNewContext(sourceForTest(), context);
-  return context.globalThis.__testExports;
+  return { ...context.globalThis.__testExports, Button, Link };
 }
 
 function runs(count, status = "ok") {
@@ -158,4 +182,30 @@ test("RunHistorySummary renders every status chip from the presenter", () => {
   for (const label of ["1 OK", "1 failed", "1 running", "1 unknown"]) {
     assert.ok(scalars.includes(label), `expected rendered summary to include ${label}`);
   }
+});
+
+test("RecentRunRow renders failed run actions as real links when thread and run ids exist", () => {
+  const { Button, Link, RecentRunRow } = loadComponents();
+
+  const rendered = RecentRunRow({
+    run: {
+      status: "error",
+      status_label: "Error",
+      status_tone: "danger",
+      fired_label: "Jun 5, 9:00 AM",
+      thread_id: "thread:failed",
+      run_id: "run-failed",
+    },
+  });
+
+  const buttons = componentProps(rendered, Button);
+  const openRun = buttons.find((button) => button["data-testid"] === "automation-run-open");
+  const logs = buttons.find((button) => button["data-testid"] === "automation-run-logs");
+
+  assert.equal(openRun.as, Link);
+  assert.equal(openRun.to, "/chat/thread%3Afailed");
+  assert.equal(openRun.disabled, undefined);
+  assert.equal(logs.as, Link);
+  assert.equal(logs.to, "/logs?thread=thread:failed&run=run-failed");
+  assert.equal(logs.disabled, undefined);
 });

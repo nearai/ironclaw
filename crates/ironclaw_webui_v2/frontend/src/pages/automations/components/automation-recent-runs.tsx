@@ -1,3 +1,4 @@
+import { Link } from "react-router";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { StatusPill } from "../../../design-system/primitives";
@@ -79,14 +80,16 @@ export function RunHistorySummary({ runs = [], className = "" }) {
   );
 }
 
-export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
+export function RecentRunRow({ run }) {
   const t = useT();
-  const canOpen = Boolean(run.chat_path);
+  const chatPath =
+    run.chat_path ||
+    (run.thread_id ? `/chat/${encodeURIComponent(run.thread_id)}` : null);
   const logsPath = buildScopedLogsPath({
     threadId: run.thread_id,
     runId: run.run_id,
   });
-  const canOpenLogs = Boolean((run.thread_id || run.run_id) && onOpenLogs);
+  const canOpenLogs = Boolean(run.thread_id || run.run_id);
 
   return (
     <div className="grid gap-3 border-b border-[var(--v2-panel-border)] py-3 last:border-0 sm:grid-cols-[6.5rem_minmax(0,1fr)_auto] sm:items-center">
@@ -108,24 +111,54 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
         )}
       </div>
       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={!canOpen}
-          onClick={canOpen ? () => onOpenRun(run.chat_path) : undefined}
-        >
-          <Icon name="chat" className="mr-1.5 h-4 w-4" />
-          {t("automations.detail.openRun")}
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={!canOpenLogs}
-          onClick={canOpenLogs ? () => onOpenLogs(logsPath) : undefined}
-        >
-          <Icon name="file" className="mr-1.5 h-4 w-4" />
-          {t("nav.logs")}
-        </Button>
+        {chatPath
+          ? (
+              <Button
+                as={Link}
+                to={chatPath}
+                variant="secondary"
+                size="sm"
+                data-testid="automation-run-open"
+              >
+                <Icon name="chat" className="mr-1.5 h-4 w-4" />
+                {t("automations.detail.openRun")}
+              </Button>
+            )
+          : (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled
+                data-testid="automation-run-open"
+              >
+                <Icon name="chat" className="mr-1.5 h-4 w-4" />
+                {t("automations.detail.openRun")}
+              </Button>
+            )}
+        {canOpenLogs
+          ? (
+              <Button
+                as={Link}
+                to={logsPath}
+                variant="ghost"
+                size="sm"
+                data-testid="automation-run-logs"
+              >
+                <Icon name="file" className="mr-1.5 h-4 w-4" />
+                {t("nav.logs")}
+              </Button>
+            )
+          : (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled
+                data-testid="automation-run-logs"
+              >
+                <Icon name="file" className="mr-1.5 h-4 w-4" />
+                {t("nav.logs")}
+              </Button>
+            )}
       </div>
     </div>
   );
