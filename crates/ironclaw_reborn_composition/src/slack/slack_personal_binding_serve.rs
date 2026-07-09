@@ -1047,6 +1047,14 @@ mod tests {
             self.bindings.lock().expect("lock").push(binding);
             Ok(())
         }
+
+        async fn bind_user_identity_for_epoch(
+            &self,
+            binding: RebornUserIdentityBinding,
+            _epoch: crate::slack::slack_personal_binding::SlackConnectionEpoch,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            self.bind_user_identity(binding).await
+        }
     }
 
     struct FailingBindingStore;
@@ -1056,6 +1064,14 @@ mod tests {
         async fn bind_user_identity(
             &self,
             _binding: RebornUserIdentityBinding,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            Err(RebornUserIdentityBindingError::Backend("down".into()))
+        }
+
+        async fn bind_user_identity_for_epoch(
+            &self,
+            _binding: RebornUserIdentityBinding,
+            _epoch: crate::slack::slack_personal_binding::SlackConnectionEpoch,
         ) -> Result<(), RebornUserIdentityBindingError> {
             Err(RebornUserIdentityBindingError::Backend("down".into()))
         }

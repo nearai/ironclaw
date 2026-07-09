@@ -70,7 +70,7 @@ use crate::product_auth::api::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuth
 use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBindingDeleteStore, SlackPersonalUserBinder,
+    RebornUserIdentityBindingDeleteStore, SlackPersonalUserBinder, SlackUserBindingLifecycleStore,
 };
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
@@ -330,6 +330,7 @@ pub struct SlackPersonalOAuthBindingConfig {
     /// user-visible "connected" signal, so it must not survive a completion
     /// failure that already deleted the token material.
     pub(crate) binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    pub(crate) lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -338,11 +339,13 @@ impl SlackPersonalOAuthBindingConfig {
         binding_service: Arc<dyn SlackPersonalUserBinder>,
         connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
         binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+        lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
     ) -> Self {
         Self {
             binding_service,
             connection_scope_resolver,
             binding_rollback_store,
+            lifecycle_store,
         }
     }
 }
@@ -360,6 +363,10 @@ impl std::fmt::Debug for SlackPersonalOAuthBindingConfig {
             .field(
                 "binding_rollback_store",
                 &"Arc<dyn RebornUserIdentityBindingDeleteStore>",
+            )
+            .field(
+                "lifecycle_store",
+                &"Arc<dyn SlackUserBindingLifecycleStore>",
             )
             .finish()
     }
@@ -984,7 +991,8 @@ pub(super) fn route_failure_from_callback_error(
         }
         AuthErrorCode::CredentialMissing
         | AuthErrorCode::AccountSelectionRequired
-        | AuthErrorCode::ProviderIdentityAlreadyConnected => StatusCode::CONFLICT,
+        | AuthErrorCode::ProviderIdentityAlreadyConnected
+        | AuthErrorCode::ConnectionConflict => StatusCode::CONFLICT,
     };
     ProductAuthRouteFailure {
         status,

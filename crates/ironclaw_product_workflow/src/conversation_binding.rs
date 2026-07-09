@@ -126,6 +126,18 @@ pub trait ProductActorUserResolver: Send + Sync {
         &self,
         request: ProductActorUserResolutionRequest,
     ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError>;
+
+    async fn resolved_product_actor_user_is_current(
+        &self,
+        request: &ProductActorUserResolutionRequest,
+        expected: &ResolvedProductActorUser,
+    ) -> Result<bool, ProductWorkflowError> {
+        Ok(self
+            .resolve_product_actor_user(request.clone())
+            .await?
+            .as_ref()
+            == Some(expected))
+    }
 }
 
 /// Request passed to host-owned shared-route subject resolvers.
@@ -512,10 +524,13 @@ impl ProductConversationBindingService {
         else {
             return Ok(());
         };
-        let current_actor = resolver
-            .resolve_product_actor_user(actor_user_resolution_request(request))
-            .await?;
-        if current_actor.as_ref() == Some(expected_actor) {
+        if resolver
+            .resolved_product_actor_user_is_current(
+                &actor_user_resolution_request(request),
+                expected_actor,
+            )
+            .await?
+        {
             return Ok(());
         }
         actor_pairings

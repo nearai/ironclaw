@@ -12,8 +12,9 @@ use crate::product_auth::api::auth::OAuthProviderIdentityCheckFuture;
 use crate::product_auth::oauth::oauth_dcr::DcrOAuthCallbackState;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBindingError, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest,
+    RebornUserIdentityBindingError, SlackConnectionEpoch, SlackConnectionOwner,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
+    SlackUserBindingLifecycleError,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
@@ -317,7 +318,28 @@ async fn start_slack_personal_oauth_flow(
     )
     .map_err(ProductAuthRouteFailure::from)?;
 
-    let flow = run_with_backend_timeout(state.product_auth.start_setup_oauth_flow(
+    let binding_config = state
+        .slack_personal_oauth_binding_config()
+        .ok_or_else(ProductAuthRouteFailure::backend_unavailable)?;
+    let connection_scope = binding_config
+        .connection_scope_resolver
+        .resolve_personal_connection_scope()
+        .await
+        .map_err(|_| ProductAuthRouteFailure::backend_unavailable())?
+        .ok_or_else(ProductAuthRouteFailure::backend_unavailable)?;
+    let connection_owner = SlackConnectionOwner::new(
+        scope.resource.tenant_id.clone(),
+        scope.resource.user_id.clone(),
+        connection_scope.installation_id,
+    );
+    let connection_epoch = SlackConnectionEpoch::new(flow_id);
+    binding_config
+        .lifecycle_store
+        .begin_connection(&connection_owner, connection_epoch, request.expires_at)
+        .await
+        .map_err(slack_lifecycle_start_failure)?;
+
+    let flow = match run_with_backend_timeout(state.product_auth.start_setup_oauth_flow(
         RebornOAuthStartFlowRequest {
             flow_id: Some(flow_id),
             scope: scope.clone(),
@@ -329,8 +351,24 @@ async fn start_slack_personal_oauth_flow(
             expires_at: request.expires_at,
         },
     ))
-    .await?;
-    state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at)?;
+    .await
+    {
+        Ok(flow) => flow,
+        Err(error) => {
+            let _ = binding_config
+                .lifecycle_store
+                .abandon_connection(&connection_owner, connection_epoch)
+                .await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at) {
+        let _ = binding_config
+            .lifecycle_store
+            .abandon_connection(&connection_owner, connection_epoch)
+            .await;
+        return Err(error);
+    }
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
@@ -341,6 +379,20 @@ async fn start_slack_personal_oauth_flow(
         continuation: flow.continuation,
         callback_scope: scope_hint(&scope),
     }))
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_lifecycle_start_failure(error: SlackUserBindingLifecycleError) -> ProductAuthRouteFailure {
+    match error {
+        SlackUserBindingLifecycleError::AlreadyActive
+        | SlackUserBindingLifecycleError::ConnectionInProgress
+        | SlackUserBindingLifecycleError::DisconnectInProgress => {
+            ProductAuthRouteFailure::new(StatusCode::CONFLICT, AuthErrorCode::ConnectionConflict)
+        }
+        SlackUserBindingLifecycleError::StaleEpoch | SlackUserBindingLifecycleError::Backend(_) => {
+            ProductAuthRouteFailure::backend_unavailable()
+        }
+    }
 }
 
 async fn start_google_oauth_flow(
@@ -541,14 +593,18 @@ struct OAuthCallbackDescriptor {
     /// Optional post-exchange provider-identity check (Slack binds the
     /// `authed_user` identity; Google has none). Built after the callback scope
     /// is decoded so it can capture the scope.
-    identity_hook:
-        fn(&ProductAuthRouteState, &AuthProductScope) -> Option<OAuthProviderIdentityCheck>,
+    identity_hook: fn(
+        &ProductAuthRouteState,
+        &AuthProductScope,
+        AuthFlowId,
+    ) -> Option<OAuthProviderIdentityCheck>,
 }
 
 /// No post-exchange identity check (Google).
 fn no_identity_hook(
     _state: &ProductAuthRouteState,
     _callback_scope: &AuthProductScope,
+    _flow_id: AuthFlowId,
 ) -> Option<OAuthProviderIdentityCheck> {
     None
 }
@@ -726,6 +782,7 @@ async fn oauth_provider_callback_attempt(
             },
         ))
         .await;
+        abandon_provider_connection_if_needed(&state, descriptor, callback_scope, flow_id).await;
         state.remove_pkce_verifier(flow_id);
         return oauth_callback_route_result_response(headers, response);
     }
@@ -774,6 +831,8 @@ async fn oauth_provider_callback_attempt(
                 },
             ))
             .await;
+            abandon_provider_connection_if_needed(&state, descriptor, callback_scope, flow_id)
+                .await;
             return oauth_callback_route_result_response(headers, response);
         }
         Err(error) => {
@@ -803,7 +862,7 @@ async fn oauth_provider_callback_attempt(
             },
         },
     };
-    let identity_check = (descriptor.identity_hook)(&state, callback_scope);
+    let identity_check = (descriptor.identity_hook)(&state, callback_scope, flow_id);
     let response = match run_with_backend_timeout(
         state
             .product_auth
@@ -829,6 +888,46 @@ async fn oauth_provider_callback_attempt(
     Ok(oauth_callback_response(headers, response))
 }
 
+async fn abandon_provider_connection_if_needed(
+    state: &ProductAuthRouteState,
+    descriptor: &OAuthCallbackDescriptor,
+    callback_scope: &AuthProductScope,
+    flow_id: AuthFlowId,
+) {
+    #[cfg(feature = "slack-v2-host-beta")]
+    {
+        if descriptor.provider_id != SLACK_PERSONAL_PROVIDER_ID {
+            return;
+        }
+        let Some(config) = state.slack_personal_oauth_binding_config() else {
+            return;
+        };
+        let connection_epoch = SlackConnectionEpoch::new(flow_id);
+        let Ok(Some(connection_owner)) = config
+            .lifecycle_store
+            .connection_owner_for_epoch(
+                &callback_scope.resource.tenant_id,
+                &callback_scope.resource.user_id,
+                connection_epoch,
+            )
+            .await
+        else {
+            return;
+        };
+        if let Err(error) = config
+            .lifecycle_store
+            .abandon_connection(&connection_owner, connection_epoch)
+            .await
+        {
+            tracing::warn!(%error, "failed to abandon denied Slack OAuth connection epoch");
+        }
+    }
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    {
+        let _ = (state, descriptor, callback_scope, flow_id);
+    }
+}
+
 /// Slack post-exchange identity hook: binds the exchanged `authed_user` identity
 /// to the authenticated Reborn user. Captures a clone of the route state and the
 /// decoded callback scope.
@@ -836,6 +935,7 @@ async fn oauth_provider_callback_attempt(
 fn slack_personal_identity_hook(
     state: &ProductAuthRouteState,
     callback_scope: &AuthProductScope,
+    flow_id: AuthFlowId,
 ) -> Option<OAuthProviderIdentityCheck> {
     let state = state.clone();
     let callback_scope = callback_scope.clone();
@@ -845,6 +945,7 @@ fn slack_personal_identity_hook(
                 bind_slack_personal_oauth_identity_for_callback(
                     &state,
                     &callback_scope,
+                    flow_id,
                     provider_identity.as_ref(),
                 )
                 .await
@@ -858,6 +959,7 @@ fn slack_personal_identity_hook(
 async fn bind_slack_personal_oauth_identity_for_callback(
     state: &ProductAuthRouteState,
     callback_scope: &AuthProductScope,
+    flow_id: AuthFlowId,
     provider_identity: Option<&OAuthProviderIdentity>,
 ) -> Result<crate::product_auth::api::auth::OAuthProviderIdentityBindingRollback, AuthProductError>
 {
@@ -873,14 +975,19 @@ async fn bind_slack_personal_oauth_identity_for_callback(
         return Err(AuthProductError::BackendUnavailable);
     };
     let identity = provider_identity.ok_or(AuthProductError::MalformedCallback)?;
-    let connection_scope = config
-        .connection_scope_resolver
-        .resolve_personal_connection_scope()
+    let connection_epoch = SlackConnectionEpoch::new(flow_id);
+    let connection_owner = config
+        .lifecycle_store
+        .connection_owner_for_epoch(
+            &callback_scope.resource.tenant_id,
+            &callback_scope.resource.user_id,
+            connection_epoch,
+        )
         .await
         .map_err(|error| {
             tracing::warn!(
                 %error,
-                "Slack personal OAuth binding connection scope resolver failed"
+                "Slack personal OAuth binding owner lookup failed"
             );
             AuthProductError::BackendUnavailable
         })?
@@ -889,9 +996,6 @@ async fn bind_slack_personal_oauth_identity_for_callback(
         .team_id
         .as_ref()
         .ok_or(AuthProductError::MalformedCallback)?;
-    if team_id.as_str() != connection_scope.team_id.as_str() {
-        return Err(AuthProductError::MalformedCallback);
-    }
     let api_app_id = identity
         .app_id
         .as_ref()
@@ -905,45 +1009,65 @@ async fn bind_slack_personal_oauth_identity_for_callback(
     // the rollback can target exactly the binding this callback writes.
     let bound_provider_user_id =
         crate::slack::slack_actor_identity::slack_user_identity_provider_user_id(
-            &connection_scope.installation_id,
+            connection_owner.installation_id(),
             identity.subject.as_str(),
         );
-    config
+    if let Err(error) = config
         .binding_service
-        .bind_personal_user(
+        .bind_personal_user_for_epoch(
             SlackPersonalBindingPrincipal {
                 tenant_id: callback_scope.resource.tenant_id.clone(),
                 user_id: callback_scope.resource.user_id.clone(),
             },
             SlackPersonalUserBindingRequest {
-                installation_id: connection_scope.installation_id,
+                installation_id: connection_owner.installation_id().clone(),
                 slack_user_id: SlackUserId::new(identity.subject.as_str()),
                 team_id: SlackTeamId::new(team_id.clone()),
                 enterprise_id,
                 api_app_id: SlackApiAppId::new(api_app_id.clone()),
             },
+            connection_epoch,
         )
         .await
-        .map_err(slack_personal_user_binding_auth_error)?;
+    {
+        let _ = config
+            .lifecycle_store
+            .abandon_connection(&connection_owner, connection_epoch)
+            .await;
+        return Err(slack_personal_user_binding_auth_error(error));
+    }
 
     let rollback_store = Arc::clone(&config.binding_rollback_store);
+    let lifecycle_store = Arc::clone(&config.lifecycle_store);
     let rollback_user_id = callback_scope.resource.user_id.clone();
+    let rollback_owner = connection_owner;
+    let rollback_epoch = connection_epoch;
     Ok(Box::pin(async move {
         // Passing the full provider_user_id as the prefix confines the delete
         // to the binding this exact callback wrote. Best-effort by contract:
         // a rollback failure only errs toward "shows connected without a
         // credential", which Disconnect already repairs.
         if let Err(error) = rollback_store
-            .delete_user_identity_bindings_for_user(
+            .delete_user_identity_bindings_for_user_at_epoch(
                 crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
                 &rollback_user_id,
                 Some(bound_provider_user_id.as_str()),
+                Some(rollback_epoch),
             )
             .await
         {
             tracing::warn!(
                 %error,
                 "failed to roll back Slack identity binding after OAuth completion failure"
+            );
+        }
+        if let Err(error) = lifecycle_store
+            .abandon_connection(&rollback_owner, rollback_epoch)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                "failed to roll back Slack connection lifecycle after OAuth completion failure"
             );
         }
     }))
@@ -1102,6 +1226,9 @@ fn oauth_callback_failure_html(
         AuthErrorCode::ProviderIdentityAlreadyConnected => {
             "This Slack account is already connected to another Reborn user. Remove the Slack extension from that other account, then try again."
         }
+        AuthErrorCode::ConnectionConflict => {
+            "This connection is already active or changing. Wait for the current operation to finish, or disconnect it before trying again."
+        }
         _ => "Authorization failed. Please return to Reborn and retry authorization.",
     };
     let script = oauth_callback_signal_script(&json!({
@@ -1255,6 +1382,7 @@ pub(super) fn should_forget_pkce_verifier(code: AuthErrorCode) -> bool {
             | AuthErrorCode::CredentialMissing
             | AuthErrorCode::AccountSelectionRequired
             | AuthErrorCode::ProviderIdentityAlreadyConnected
+            | AuthErrorCode::ConnectionConflict
     )
 }
 
@@ -1305,10 +1433,12 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_personal_binding::{
         RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+        SlackConnectionEpoch, SlackConnectionOwner, SlackConnectionState,
         SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
+        SlackUserBindingLifecycleError, SlackUserBindingLifecycleStore,
     };
     #[cfg(feature = "slack-v2-host-beta")]
-    use crate::slack::slack_serve::{SlackInstallationSelector, SlackTeamId};
+    use crate::slack::slack_serve::SlackInstallationSelector;
     #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_setup::{
         SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
@@ -1766,13 +1896,31 @@ mod tests {
             shared,
             Arc::new(RecordingDispatcher::default()),
         ));
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
         let state = ProductAuthRouteState::new(
             product_auth,
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
         )
-        .with_slack_personal_oauth(slack_personal_oauth_test_slot().await);
+        .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+        .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+            binding_service,
+            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                SlackPersonalConnectionScope { installation_id },
+            ))),
+            binding_store,
+            Arc::new(TestSlackLifecycleStore::default()),
+        ));
 
         let Json(start_response) = extension_oauth_start_handler(
             State(state),
@@ -1854,6 +2002,94 @@ mod tests {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_lifecycle_start_conflicts_do_not_claim_another_user_owns_the_identity() {
+        for error in [
+            SlackUserBindingLifecycleError::AlreadyActive,
+            SlackUserBindingLifecycleError::ConnectionInProgress,
+            SlackUserBindingLifecycleError::DisconnectInProgress,
+        ] {
+            let failure = slack_lifecycle_start_failure(error);
+            assert_eq!(failure.status, StatusCode::CONFLICT);
+            assert_eq!(failure.body.code, AuthErrorCode::ConnectionConflict);
+            assert_ne!(
+                failure.body.code,
+                AuthErrorCode::ProviderIdentityAlreadyConnected
+            );
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_oauth_denial_abandons_the_epoch_owner_after_setup_drift() {
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            Arc::new(InMemoryAuthProductServices::new()),
+            Arc::new(RecordingDispatcher::default()),
+        ));
+        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
+        let user_id = UserId::new("user-alpha").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        let state = ProductAuthRouteState::new(product_auth, tenant_id.clone(), None, None)
+            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+                binding_service,
+                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                    SlackPersonalConnectionScope {
+                        installation_id: AdapterInstallationId::new("install-drifted")
+                            .expect("drifted installation"),
+                    },
+                ))),
+                binding_store,
+                lifecycle_store.clone(),
+            ));
+        let flow_id = AuthFlowId::new();
+        let epoch = SlackConnectionEpoch::new(flow_id);
+        let owner = SlackConnectionOwner::new(tenant_id.clone(), user_id.clone(), installation_id);
+        lifecycle_store
+            .begin_connection(&owner, epoch, Utc::now() + ChronoDuration::minutes(5))
+            .await
+            .expect("connection begins");
+        let callback_scope = AuthProductScope::new(
+            ResourceScope {
+                tenant_id: tenant_id.clone(),
+                user_id: user_id.clone(),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Callback,
+        );
+
+        abandon_provider_connection_if_needed(
+            &state,
+            &SLACK_PERSONAL_CALLBACK_DESCRIPTOR,
+            &callback_scope,
+            flow_id,
+        )
+        .await;
+
+        assert_eq!(
+            lifecycle_store
+                .connection_owner_for_epoch(&tenant_id, &user_id, epoch)
+                .await
+                .expect("owner lookup after denial"),
+            None,
+            "denial must abandon the owner captured before setup drift"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_callback_binds_authenticated_user_to_slack_identity() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1881,6 +2117,7 @@ mod tests {
             }],
             binding_store.clone(),
         ));
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
         let state = ProductAuthRouteState::new(
             product_auth,
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -1889,14 +2126,14 @@ mod tests {
         )
         .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
         .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
-            binding_service,
+            binding_service.clone(),
             Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
                 SlackPersonalConnectionScope {
                     installation_id: installation_id.clone(),
-                    team_id: SlackTeamId::new("T123"),
                 },
             ))),
             binding_store.clone(),
+            lifecycle_store.clone(),
         ));
 
         let invocation_id = InvocationId::new();
@@ -1919,6 +2156,20 @@ mod tests {
         )
         .await
         .expect("start slack oauth flow");
+        // Setup may change while the provider popup is open. The callback must
+        // target the owner captured by this flow's epoch, not re-resolve the
+        // currently configured installation.
+        let state = state.with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+            binding_service,
+            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                SlackPersonalConnectionScope {
+                    installation_id: AdapterInstallationId::new("install-drifted")
+                        .expect("drifted installation"),
+                },
+            ))),
+            binding_store.clone(),
+            lifecycle_store,
+        ));
         let state_value = Url::parse(start_response.authorization_url.as_str())
             .expect("authorization url")
             .query_pairs()
@@ -2016,12 +2267,10 @@ mod tests {
         .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
             binding_service,
             Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
-                SlackPersonalConnectionScope {
-                    installation_id,
-                    team_id: SlackTeamId::new("T123"),
-                },
+                SlackPersonalConnectionScope { installation_id },
             ))),
             binding_store.clone(),
+            Arc::new(TestSlackLifecycleStore::default()),
         ));
 
         let invocation_id = InvocationId::new();
@@ -2133,12 +2382,10 @@ mod tests {
         .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
             binding_service,
             Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
-                SlackPersonalConnectionScope {
-                    installation_id,
-                    team_id: SlackTeamId::new("T123"),
-                },
+                SlackPersonalConnectionScope { installation_id },
             ))),
             rollback_store,
+            Arc::new(TestSlackLifecycleStore::default()),
         ));
 
         let invocation_id = InvocationId::new();
@@ -2240,12 +2487,10 @@ mod tests {
         .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
             binding_service,
             Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
-                SlackPersonalConnectionScope {
-                    installation_id,
-                    team_id: SlackTeamId::new("T123"),
-                },
+                SlackPersonalConnectionScope { installation_id },
             ))),
             binding_store.clone(),
+            Arc::new(TestSlackLifecycleStore::default()),
         ));
 
         let invocation_id = InvocationId::new();
@@ -2405,6 +2650,87 @@ mod tests {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
+    #[derive(Debug, Default)]
+    struct TestSlackLifecycleStore {
+        owners: Mutex<Vec<(SlackConnectionEpoch, SlackConnectionOwner)>>,
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[async_trait]
+    impl SlackUserBindingLifecycleStore for TestSlackLifecycleStore {
+        async fn begin_connection(
+            &self,
+            owner: &SlackConnectionOwner,
+            epoch: SlackConnectionEpoch,
+            _expires_at: ironclaw_auth::Timestamp,
+        ) -> Result<(), SlackUserBindingLifecycleError> {
+            self.owners
+                .lock()
+                .expect("lifecycle owners lock")
+                .push((epoch, owner.clone()));
+            Ok(())
+        }
+
+        async fn connection_state(
+            &self,
+            _owner: &SlackConnectionOwner,
+        ) -> Result<
+            Option<(SlackConnectionEpoch, SlackConnectionState)>,
+            SlackUserBindingLifecycleError,
+        > {
+            Ok(None)
+        }
+
+        async fn connection_owner_for_epoch(
+            &self,
+            tenant_id: &TenantId,
+            user_id: &UserId,
+            epoch: SlackConnectionEpoch,
+        ) -> Result<Option<SlackConnectionOwner>, SlackUserBindingLifecycleError> {
+            Ok(self
+                .owners
+                .lock()
+                .expect("lifecycle owners lock")
+                .iter()
+                .rev()
+                .find(|(candidate_epoch, owner)| {
+                    *candidate_epoch == epoch
+                        && owner.tenant_id() == tenant_id
+                        && owner.user_id() == user_id
+                })
+                .map(|(_, owner)| owner.clone()))
+        }
+
+        async fn begin_disconnect(
+            &self,
+            _owner: &SlackConnectionOwner,
+        ) -> Result<Option<SlackConnectionEpoch>, SlackUserBindingLifecycleError> {
+            Ok(None)
+        }
+
+        async fn complete_disconnect(
+            &self,
+            _owner: &SlackConnectionOwner,
+            _epoch: SlackConnectionEpoch,
+        ) -> Result<(), SlackUserBindingLifecycleError> {
+            Ok(())
+        }
+
+        async fn abandon_connection(
+            &self,
+            owner: &SlackConnectionOwner,
+            epoch: SlackConnectionEpoch,
+        ) -> Result<(), SlackUserBindingLifecycleError> {
+            self.owners.lock().expect("lifecycle owners lock").retain(
+                |(candidate_epoch, candidate_owner)| {
+                    *candidate_epoch != epoch || candidate_owner != owner
+                },
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
     impl RecordingBindingStore {
         fn bindings(&self) -> Vec<RebornUserIdentityBinding> {
             self.bindings.lock().expect("binding store lock").clone()
@@ -2424,6 +2750,14 @@ mod tests {
                 .push(binding);
             Ok(())
         }
+
+        async fn bind_user_identity_for_epoch(
+            &self,
+            binding: RebornUserIdentityBinding,
+            _epoch: SlackConnectionEpoch,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            self.bind_user_identity(binding).await
+        }
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -2435,6 +2769,14 @@ mod tests {
         async fn bind_user_identity(
             &self,
             _binding: RebornUserIdentityBinding,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound)
+        }
+
+        async fn bind_user_identity_for_epoch(
+            &self,
+            _binding: RebornUserIdentityBinding,
+            _epoch: SlackConnectionEpoch,
         ) -> Result<(), RebornUserIdentityBindingError> {
             Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound)
         }
@@ -2465,11 +2807,23 @@ mod tests {
                 .collect())
         }
 
-        async fn delete_user_identity_bindings_for_user(
+        async fn user_identity_bindings_for_user_at_epoch(
             &self,
             provider: &str,
             user_id: &ironclaw_host_api::UserId,
             provider_user_id_prefix: Option<&str>,
+            _expected_epoch: Option<SlackConnectionEpoch>,
+        ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
+            self.user_identity_bindings_for_user(provider, user_id, provider_user_id_prefix)
+                .await
+        }
+
+        async fn delete_user_identity_bindings_for_user_at_epoch(
+            &self,
+            provider: &str,
+            user_id: &ironclaw_host_api::UserId,
+            provider_user_id_prefix: Option<&str>,
+            _expected_epoch: Option<SlackConnectionEpoch>,
         ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
             let mut bindings = self.bindings.lock().expect("binding store lock");
             let mut deleted = Vec::new();
@@ -2630,12 +2984,10 @@ mod tests {
         .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
             binding_service,
             Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
-                SlackPersonalConnectionScope {
-                    installation_id,
-                    team_id: SlackTeamId::new("T123"),
-                },
+                SlackPersonalConnectionScope { installation_id },
             ))),
             binding_store.clone(),
+            Arc::new(TestSlackLifecycleStore::default()),
         ));
 
         let invocation_id = InvocationId::new();

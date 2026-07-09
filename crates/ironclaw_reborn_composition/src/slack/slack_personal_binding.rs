@@ -7,8 +7,10 @@
 
 use std::sync::Arc;
 
+use ironclaw_auth::{AuthFlowId, Timestamp};
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::slack::slack_actor_identity::{
@@ -67,6 +69,124 @@ pub struct RebornUserIdentityBinding {
     pub user_id: UserId,
 }
 
+/// Durable generation for one Slack connection attempt.
+///
+/// Reusing the OAuth flow id keeps the lifecycle tied to the already-durable
+/// authorization attempt without introducing a second token namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SlackConnectionEpoch(AuthFlowId);
+
+impl SlackConnectionEpoch {
+    pub(crate) fn new(flow_id: AuthFlowId) -> Self {
+        Self(flow_id)
+    }
+}
+
+impl std::fmt::Display for SlackConnectionEpoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SlackConnectionState {
+    Connecting,
+    Active,
+    Disconnecting,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlackConnectionOwner {
+    tenant_id: TenantId,
+    user_id: UserId,
+    installation_id: AdapterInstallationId,
+}
+
+impl SlackConnectionOwner {
+    pub(crate) fn new(
+        tenant_id: TenantId,
+        user_id: UserId,
+        installation_id: AdapterInstallationId,
+    ) -> Self {
+        Self {
+            tenant_id,
+            user_id,
+            installation_id,
+        }
+    }
+
+    pub(crate) fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    pub(crate) fn user_id(&self) -> &UserId {
+        &self.user_id
+    }
+
+    pub(crate) fn installation_id(&self) -> &AdapterInstallationId {
+        &self.installation_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum SlackUserBindingLifecycleError {
+    #[error("slack user binding lifecycle backend unavailable: {0}")]
+    Backend(String),
+    #[error("slack is already connected for this user and installation")]
+    AlreadyActive,
+    #[error("another slack connection attempt is already in progress")]
+    ConnectionInProgress,
+    #[error("slack disconnect cleanup is still in progress")]
+    DisconnectInProgress,
+    #[error("slack connection attempt is no longer current")]
+    StaleEpoch,
+}
+
+/// Slack-specific lifecycle authority. OAuth and disconnect paths share this
+/// narrow port while the generic product-auth machinery remains provider
+/// agnostic.
+#[async_trait::async_trait]
+pub(crate) trait SlackUserBindingLifecycleStore: Send + Sync {
+    async fn begin_connection(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+        expires_at: Timestamp,
+    ) -> Result<(), SlackUserBindingLifecycleError>;
+
+    async fn connection_state(
+        &self,
+        owner: &SlackConnectionOwner,
+    ) -> Result<Option<(SlackConnectionEpoch, SlackConnectionState)>, SlackUserBindingLifecycleError>;
+
+    async fn connection_owner_for_epoch(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<Option<SlackConnectionOwner>, SlackUserBindingLifecycleError>;
+
+    async fn begin_disconnect(
+        &self,
+        owner: &SlackConnectionOwner,
+    ) -> Result<Option<SlackConnectionEpoch>, SlackUserBindingLifecycleError>;
+
+    async fn complete_disconnect(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), SlackUserBindingLifecycleError>;
+
+    async fn abandon_connection(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), SlackUserBindingLifecycleError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RebornUserIdentityBindingError {
     #[error("reborn user identity binding backend unavailable: {0}")]
@@ -86,6 +206,12 @@ pub trait RebornUserIdentityBindingStore: Send + Sync {
         &self,
         binding: RebornUserIdentityBinding,
     ) -> Result<(), RebornUserIdentityBindingError>;
+
+    async fn bind_user_identity_for_epoch(
+        &self,
+        binding: RebornUserIdentityBinding,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), RebornUserIdentityBindingError>;
 }
 
 #[async_trait::async_trait]
@@ -97,11 +223,20 @@ pub(crate) trait RebornUserIdentityBindingDeleteStore: Send + Sync {
         provider_user_id_prefix: Option<&str>,
     ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError>;
 
-    async fn delete_user_identity_bindings_for_user(
+    async fn user_identity_bindings_for_user_at_epoch(
         &self,
         provider: &str,
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
+        expected_epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError>;
+
+    async fn delete_user_identity_bindings_for_user_at_epoch(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+        expected_epoch: Option<SlackConnectionEpoch>,
     ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError>;
 }
 
@@ -149,6 +284,26 @@ impl SlackPersonalUserBindingService {
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        self.bind_personal_user_inner(principal, request, None)
+            .await
+    }
+
+    pub(crate) async fn bind_personal_user_for_epoch(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        request: SlackPersonalUserBindingRequest,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        self.bind_personal_user_inner(principal, request, Some(epoch))
+            .await
+    }
+
+    async fn bind_personal_user_inner(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        request: SlackPersonalUserBindingRequest,
+        epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
         validate_slack_id("slack user", request.slack_user_id.as_str())?;
         validate_slack_id("slack team", request.team_id.as_str())?;
         validate_optional_slack_id(
@@ -185,6 +340,7 @@ impl SlackPersonalUserBindingService {
             request.installation_id,
             request.slack_user_id,
             principal.user_id,
+            epoch,
         )
         .await
     }
@@ -196,7 +352,7 @@ impl SlackPersonalUserBindingService {
         slack_user_id: SlackUserId,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
         self.validate_installation_actor(&principal, &installation_id, &slack_user_id)?;
-        self.bind_validated_actor(installation_id, slack_user_id, principal.user_id)
+        self.bind_validated_actor(installation_id, slack_user_id, principal.user_id, None)
             .await
     }
 
@@ -233,6 +389,7 @@ impl SlackPersonalUserBindingService {
         installation_id: AdapterInstallationId,
         slack_user_id: SlackUserId,
         user_id: UserId,
+        epoch: Option<SlackConnectionEpoch>,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
         let binding = RebornUserIdentityBinding {
             provider: RebornIdentityProviderId::new(SLACK_IDENTITY_PROVIDER)?,
@@ -241,31 +398,41 @@ impl SlackPersonalUserBindingService {
             )?,
             user_id,
         };
-        self.store
-            .bind_user_identity(binding.clone())
-            .await
-            .map_err(SlackPersonalUserBindingError::BindingStore)?;
+        match epoch {
+            Some(epoch) => {
+                self.store
+                    .bind_user_identity_for_epoch(binding.clone(), epoch)
+                    .await
+            }
+            None => self.store.bind_user_identity(binding.clone()).await,
+        }
+        .map_err(SlackPersonalUserBindingError::BindingStore)?;
         Ok(binding)
     }
 }
 
 #[async_trait::async_trait]
 pub(crate) trait SlackPersonalUserBinder: Send + Sync + std::fmt::Debug {
-    async fn bind_personal_user(
+    async fn bind_personal_user_for_epoch(
         &self,
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
+        epoch: SlackConnectionEpoch,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError>;
 }
 
 #[async_trait::async_trait]
 impl SlackPersonalUserBinder for SlackPersonalUserBindingService {
-    async fn bind_personal_user(
+    async fn bind_personal_user_for_epoch(
         &self,
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
+        epoch: SlackConnectionEpoch,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
-        SlackPersonalUserBindingService::bind_personal_user(self, principal, request).await
+        SlackPersonalUserBindingService::bind_personal_user_for_epoch(
+            self, principal, request, epoch,
+        )
+        .await
     }
 }
 
@@ -831,6 +998,14 @@ mod tests {
                 Some(error) => Err(error.clone()),
                 None => Ok(()),
             }
+        }
+
+        async fn bind_user_identity_for_epoch(
+            &self,
+            binding: RebornUserIdentityBinding,
+            _epoch: SlackConnectionEpoch,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            self.bind_user_identity(binding).await
         }
     }
 }

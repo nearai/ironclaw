@@ -25,7 +25,10 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use rand::RngExt as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::slack::slack_actor_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use crate::slack::slack_actor_identity::{
+    RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    parse_slack_user_identity_provider_user_id,
+};
 use crate::slack::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
     SlackChannelRouteListPage, SlackChannelRouteStore,
@@ -36,7 +39,9 @@ use crate::slack::slack_outbound_targets::{
 };
 use crate::slack::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackConnectionEpoch,
+    SlackConnectionOwner, SlackConnectionState, SlackUserBindingLifecycleError,
+    SlackUserBindingLifecycleStore,
 };
 use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
 use crate::slack::slack_setup::{
@@ -46,6 +51,8 @@ use crate::slack::slack_setup::{
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
 const SLACK_INSTALLATION_SETUP_PATH: &str = "/tenant-shared/slack-setup/installation.json";
 const IDENTITY_ROOT: &str = "/tenant-shared/slack-personal-binding/identities";
+const CONNECTION_ROOT: &str = "/tenant-shared/slack-personal-binding/connections";
+const LIFECYCLE_CAS_RETRIES: usize = 16;
 // Per-(provider, user) inverse index of identity bindings. Primary identity
 // records are keyed by `provider_user_id`, so answering "is THIS user bound?"
 // otherwise scans every identity. This index lets the connection check
@@ -601,6 +608,15 @@ where
         ))
     }
 
+    fn connection_path(owner: &SlackConnectionOwner) -> Result<ScopedPath, FilesystemError> {
+        scoped_path(&format!(
+            "{}/{}/{}.json",
+            CONNECTION_ROOT,
+            path_segment(owner.installation_id().as_str()),
+            path_segment(owner.user_id().as_str())
+        ))
+    }
+
     fn identity_user_index_dir(
         provider: &str,
         user_id: &str,
@@ -819,6 +835,305 @@ where
 }
 
 #[async_trait::async_trait]
+impl<F> SlackUserBindingLifecycleStore for FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn begin_connection(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+        expires_at: ironclaw_auth::Timestamp,
+    ) -> Result<(), SlackUserBindingLifecycleError> {
+        self.validate_connection_owner(owner)?;
+        let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let current = self
+                .read_record::<StoredSlackConnection>(&path)
+                .await
+                .map_err(map_lifecycle_fs_error)?;
+            let (created_at, cas) = match current {
+                None => (Utc::now(), CasExpectation::Absent),
+                Some((record, version)) => {
+                    record.validate(owner)?;
+                    match record.state {
+                        SlackConnectionState::Connecting if record.epoch == epoch => return Ok(()),
+                        SlackConnectionState::Connecting if record.expires_at <= Utc::now() => {
+                            (Utc::now(), CasExpectation::Version(version))
+                        }
+                        SlackConnectionState::Connecting => {
+                            return Err(SlackUserBindingLifecycleError::ConnectionInProgress);
+                        }
+                        SlackConnectionState::Active => {
+                            return Err(SlackUserBindingLifecycleError::AlreadyActive);
+                        }
+                        SlackConnectionState::Disconnecting => {
+                            return Err(SlackUserBindingLifecycleError::DisconnectInProgress);
+                        }
+                        SlackConnectionState::Disconnected => {
+                            (Utc::now(), CasExpectation::Version(version))
+                        }
+                    }
+                }
+            };
+            let record = StoredSlackConnection::new(
+                owner,
+                epoch,
+                SlackConnectionState::Connecting,
+                created_at,
+                expires_at,
+            );
+            match self.write_record(&path, &record, cas).await {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(map_lifecycle_fs_error(error)),
+            }
+        }
+        Err(SlackUserBindingLifecycleError::Backend(
+            "Slack connection state changed concurrently".to_string(),
+        ))
+    }
+
+    async fn connection_state(
+        &self,
+        owner: &SlackConnectionOwner,
+    ) -> Result<Option<(SlackConnectionEpoch, SlackConnectionState)>, SlackUserBindingLifecycleError>
+    {
+        self.validate_connection_owner(owner)?;
+        let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
+        let Some((record, _)) = self
+            .read_record::<StoredSlackConnection>(&path)
+            .await
+            .map_err(map_lifecycle_fs_error)?
+        else {
+            return Ok(None);
+        };
+        record.validate(owner)?;
+        Ok(Some((record.epoch, record.state)))
+    }
+
+    async fn connection_owner_for_epoch(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<Option<SlackConnectionOwner>, SlackUserBindingLifecycleError> {
+        if tenant_id != &self.scope.tenant_id {
+            return Err(SlackUserBindingLifecycleError::Backend(
+                "Slack connection owner is outside the tenant scope".to_string(),
+            ));
+        }
+        let root = scoped_path(CONNECTION_ROOT).map_err(map_lifecycle_fs_error)?;
+        let installation_entries = match self.filesystem.list_dir(&self.scope, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(map_lifecycle_fs_error(error)),
+        };
+        let mut matched_owner = None;
+        for installation_entry in installation_entries {
+            if installation_entry.file_type != FileType::Directory {
+                continue;
+            }
+            let path = scoped_path(&format!(
+                "{}/{}/{}.json",
+                CONNECTION_ROOT,
+                installation_entry.name,
+                path_segment(user_id.as_str())
+            ))
+            .map_err(map_lifecycle_fs_error)?;
+            let Some((record, _)) = self
+                .read_record::<StoredSlackConnection>(&path)
+                .await
+                .map_err(map_lifecycle_fs_error)?
+            else {
+                continue;
+            };
+            if record.tenant_id != tenant_id.as_str()
+                || record.user_id != user_id.as_str()
+                || record.epoch != epoch
+                || record.state == SlackConnectionState::Disconnected
+            {
+                continue;
+            }
+            if path_segment(&record.installation_id) != installation_entry.name {
+                return Err(SlackUserBindingLifecycleError::Backend(
+                    "stored Slack connection path does not match its owner".to_string(),
+                ));
+            }
+            let installation_id = AdapterInstallationId::new(record.installation_id.clone())
+                .map_err(|error| SlackUserBindingLifecycleError::Backend(error.to_string()))?;
+            let owner =
+                SlackConnectionOwner::new(tenant_id.clone(), user_id.clone(), installation_id);
+            record.validate(&owner)?;
+            if matched_owner.replace(owner).is_some() {
+                return Err(SlackUserBindingLifecycleError::Backend(
+                    "Slack connection epoch is assigned to multiple owners".to_string(),
+                ));
+            }
+        }
+        Ok(matched_owner)
+    }
+
+    async fn begin_disconnect(
+        &self,
+        owner: &SlackConnectionOwner,
+    ) -> Result<Option<SlackConnectionEpoch>, SlackUserBindingLifecycleError> {
+        self.validate_connection_owner(owner)?;
+        let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let Some((record, version)) = self
+                .read_record::<StoredSlackConnection>(&path)
+                .await
+                .map_err(map_lifecycle_fs_error)?
+            else {
+                return Ok(None);
+            };
+            record.validate(owner)?;
+            match record.state {
+                SlackConnectionState::Disconnected => return Ok(None),
+                SlackConnectionState::Disconnecting => return Ok(Some(record.epoch)),
+                SlackConnectionState::Connecting | SlackConnectionState::Active => {}
+            }
+            let updated = record.with_state(SlackConnectionState::Disconnecting);
+            match self
+                .write_record(&path, &updated, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(Some(record.epoch)),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(map_lifecycle_fs_error(error)),
+            }
+        }
+        Err(SlackUserBindingLifecycleError::Backend(
+            "Slack connection state changed concurrently".to_string(),
+        ))
+    }
+
+    async fn complete_disconnect(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), SlackUserBindingLifecycleError> {
+        self.transition_connection_to_disconnected(owner, epoch, false)
+            .await
+    }
+
+    async fn abandon_connection(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), SlackUserBindingLifecycleError> {
+        self.transition_connection_to_disconnected(owner, epoch, true)
+            .await
+    }
+}
+
+impl<F> FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn validate_connection_owner(
+        &self,
+        owner: &SlackConnectionOwner,
+    ) -> Result<(), SlackUserBindingLifecycleError> {
+        if owner.tenant_id() != &self.scope.tenant_id {
+            return Err(SlackUserBindingLifecycleError::Backend(
+                "Slack connection owner is outside the tenant scope".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn activate_connection(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), SlackUserBindingLifecycleError> {
+        self.validate_connection_owner(owner)?;
+        let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let Some((record, version)) = self
+                .read_record::<StoredSlackConnection>(&path)
+                .await
+                .map_err(map_lifecycle_fs_error)?
+            else {
+                return Err(SlackUserBindingLifecycleError::StaleEpoch);
+            };
+            record.validate(owner)?;
+            if record.epoch != epoch {
+                return Err(SlackUserBindingLifecycleError::StaleEpoch);
+            }
+            match record.state {
+                SlackConnectionState::Active => return Ok(()),
+                SlackConnectionState::Connecting => {}
+                SlackConnectionState::Disconnecting | SlackConnectionState::Disconnected => {
+                    return Err(SlackUserBindingLifecycleError::StaleEpoch);
+                }
+            }
+            let updated = record.with_state(SlackConnectionState::Active);
+            match self
+                .write_record(&path, &updated, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(map_lifecycle_fs_error(error)),
+            }
+        }
+        Err(SlackUserBindingLifecycleError::Backend(
+            "Slack connection state changed concurrently".to_string(),
+        ))
+    }
+
+    async fn transition_connection_to_disconnected(
+        &self,
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+        allow_pre_disconnect_states: bool,
+    ) -> Result<(), SlackUserBindingLifecycleError> {
+        self.validate_connection_owner(owner)?;
+        let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let Some((record, version)) = self
+                .read_record::<StoredSlackConnection>(&path)
+                .await
+                .map_err(map_lifecycle_fs_error)?
+            else {
+                return Err(SlackUserBindingLifecycleError::StaleEpoch);
+            };
+            record.validate(owner)?;
+            if record.epoch != epoch {
+                return Err(SlackUserBindingLifecycleError::StaleEpoch);
+            }
+            if record.state == SlackConnectionState::Disconnected {
+                return Ok(());
+            }
+            if allow_pre_disconnect_states && record.state == SlackConnectionState::Disconnecting {
+                // Disconnect owns this transition and must keep ingress fenced
+                // until all credential, DM, pairing, and identity cleanup has
+                // completed.
+                return Ok(());
+            }
+            if !allow_pre_disconnect_states && record.state != SlackConnectionState::Disconnecting {
+                return Err(SlackUserBindingLifecycleError::StaleEpoch);
+            }
+            let updated = record.with_state(SlackConnectionState::Disconnected);
+            match self
+                .write_record(&path, &updated, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(map_lifecycle_fs_error(error)),
+            }
+        }
+        Err(SlackUserBindingLifecycleError::Backend(
+            "Slack connection state changed concurrently".to_string(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
 impl<F> RebornUserIdentityLookup for FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
@@ -828,6 +1143,22 @@ where
         provider: &str,
         provider_user_id: &str,
     ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+        self.resolve_user_identity_with_binding_epoch(provider, provider_user_id)
+            .await
+            .map(|resolved| resolved.map(|(user_id, _)| user_id))
+    }
+
+    async fn resolve_user_identity_with_binding_epoch(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<
+        Option<(
+            UserId,
+            Option<ironclaw_conversations::ExternalActorBindingEpoch>,
+        )>,
+        RebornUserIdentityLookupError,
+    > {
         let path = Self::identity_path(provider, provider_user_id).map_err(map_lookup_fs_error)?;
         let Some((record, _)) = self
             .read_record::<StoredSlackUserIdentity>(&path)
@@ -836,9 +1167,79 @@ where
         else {
             return Ok(None);
         };
-        let user_id = UserId::new(record.user_id)
+        record
+            .validate_for_key(provider, provider_user_id)
+            .map_err(|error| RebornUserIdentityLookupError::Backend(error.to_string()))?;
+        if record.state != StoredSlackIdentityState::Active {
+            return Ok(None);
+        }
+        let user_id = UserId::new(record.user_id.clone())
             .map_err(|error| RebornUserIdentityLookupError::InvalidUserId(error.to_string()))?;
-        Ok(Some(user_id))
+        let Some(epoch) = record.epoch else {
+            return Ok(Some((user_id, None)));
+        };
+        if provider != crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER {
+            return Err(RebornUserIdentityLookupError::Backend(
+                "only Slack identities may carry Slack connection epochs".to_string(),
+            ));
+        }
+        let Some((installation_id, _)) =
+            parse_slack_user_identity_provider_user_id(provider_user_id)
+        else {
+            return Err(RebornUserIdentityLookupError::Backend(
+                "stored Slack provider user identity is malformed".to_string(),
+            ));
+        };
+        let owner = SlackConnectionOwner::new(
+            self.scope.tenant_id.clone(),
+            user_id.clone(),
+            installation_id,
+        );
+        match self
+            .connection_state(&owner)
+            .await
+            .map_err(|error| RebornUserIdentityLookupError::Backend(error.to_string()))?
+        {
+            Some((current_epoch, SlackConnectionState::Active)) if current_epoch == epoch => {}
+            _ => return Ok(None),
+        }
+        let binding_epoch =
+            ironclaw_conversations::ExternalActorBindingEpoch::new(epoch.to_string())
+                .map_err(|error| RebornUserIdentityLookupError::Backend(error.to_string()))?;
+        Ok(Some((user_id, Some(binding_epoch))))
+    }
+
+    async fn user_identity_binding_epoch_is_current(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        expected_user_id: &UserId,
+        expected_epoch: &ironclaw_conversations::ExternalActorBindingEpoch,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        if provider != crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER {
+            return Ok(false);
+        }
+        let Some((installation_id, _)) =
+            parse_slack_user_identity_provider_user_id(provider_user_id)
+        else {
+            return Err(RebornUserIdentityLookupError::Backend(
+                "stored Slack provider user identity is malformed".to_string(),
+            ));
+        };
+        let owner = SlackConnectionOwner::new(
+            self.scope.tenant_id.clone(),
+            expected_user_id.clone(),
+            installation_id,
+        );
+        self.connection_state(&owner)
+            .await
+            .map(|state| {
+                state.is_some_and(|(epoch, connection_state)| {
+                    connection_state == SlackConnectionState::Active
+                        && epoch.to_string() == expected_epoch.as_str()
+                })
+            })
+            .map_err(|error| RebornUserIdentityLookupError::Backend(error.to_string()))
     }
 
     async fn user_has_provider_binding(
@@ -912,67 +1313,146 @@ where
         &self,
         binding: RebornUserIdentityBinding,
     ) -> Result<(), RebornUserIdentityBindingError> {
+        self.bind_user_identity_inner(binding, None).await
+    }
+
+    async fn bind_user_identity_for_epoch(
+        &self,
+        binding: RebornUserIdentityBinding,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<(), RebornUserIdentityBindingError> {
+        self.bind_user_identity_inner(binding, Some(epoch)).await
+    }
+}
+
+impl<F> FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn bind_user_identity_inner(
+        &self,
+        binding: RebornUserIdentityBinding,
+        epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<(), RebornUserIdentityBindingError> {
+        let owner =
+            match epoch {
+                Some(epoch) => {
+                    let installation_id = self.binding_installation(&binding)?;
+                    let owner = SlackConnectionOwner::new(
+                        self.scope.tenant_id.clone(),
+                        binding.user_id.clone(),
+                        installation_id,
+                    );
+                    match self.connection_state(&owner).await.map_err(|error| {
+                        RebornUserIdentityBindingError::Backend(error.to_string())
+                    })? {
+                        Some((current_epoch, SlackConnectionState::Connecting))
+                            if current_epoch == epoch => {}
+                        _ => {
+                            return Err(RebornUserIdentityBindingError::Backend(
+                                SlackUserBindingLifecycleError::StaleEpoch.to_string(),
+                            ));
+                        }
+                    }
+                    Some(owner)
+                }
+                None => None,
+            };
         let path =
             Self::identity_path(binding.provider.as_str(), binding.provider_user_id.as_str())
                 .map_err(map_binding_fs_error)?;
-        let lock = self.lock_for(format!(
-            "identity:{}:{}",
-            binding.provider.as_str(),
-            binding.provider_user_id.as_str()
-        ));
-        let _guard = lock.lock().await;
-        if let Some((existing, version)) = self
-            .read_record::<StoredSlackUserIdentity>(&path)
-            .await
-            .map_err(map_binding_fs_error)?
-        {
-            if existing.user_id != binding.user_id.as_str() {
-                // Surfaces the duplicate for ops — the two shapes both land here and
-                // were previously indistinguishable because we discarded the ids:
-                // (a) the OAuth popup authorized a Slack account that is NOT the
-                //     connecting user's own (it's already owned by someone else), or
-                // (b) a stale/orphaned binding whose owner no longer exists.
-                // The authorized `provider_user_id` is what tells them apart.
-                tracing::warn!(
-                    provider = %binding.provider.as_str(),
-                    provider_user_id = %binding.provider_user_id.as_str(),
-                    existing_user_id = %existing.user_id,
-                    connecting_user_id = %binding.user_id.as_str(),
-                    "rejecting Slack identity bind: provider identity already bound to a different \
-                     reborn user (connecting user is not the current owner)"
-                );
-                return Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound);
-            }
-            let updated = StoredSlackUserIdentity::from_binding(&binding, existing.created_at);
-            match self
-                .write_record(&path, &updated, CasExpectation::Version(version))
+
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let current = self
+                .read_record::<StoredSlackUserIdentity>(&path)
                 .await
-            {
-                Ok(_) => {}
-                Err(FilesystemError::VersionMismatch { .. }) => {
-                    self.reconcile_identity_version_mismatch(&path, &binding)
-                        .await?;
+                .map_err(map_binding_fs_error)?;
+            let (record, cas) = match current {
+                Some((existing, version)) => {
+                    existing.validate_for_key(
+                        binding.provider.as_str(),
+                        binding.provider_user_id.as_str(),
+                    )?;
+                    if existing.state == StoredSlackIdentityState::Active {
+                        if existing.user_id != binding.user_id.as_str() {
+                            log_duplicate_identity_binding(&existing, &binding);
+                            return Err(
+                                RebornUserIdentityBindingError::ProviderIdentityAlreadyBound,
+                            );
+                        }
+                        if let Some(epoch) = epoch {
+                            if existing.epoch == Some(epoch) {
+                                if let Some(owner) = owner.as_ref() {
+                                    self.activate_connection(owner, epoch).await.map_err(
+                                        |error| {
+                                            RebornUserIdentityBindingError::Backend(
+                                                error.to_string(),
+                                            )
+                                        },
+                                    )?;
+                                }
+                                self.write_user_binding_index_marker(&binding).await;
+                                return Ok(());
+                            }
+                            return Err(RebornUserIdentityBindingError::Backend(
+                                "Slack identity has a different active connection epoch".into(),
+                            ));
+                        }
+                    }
+                    (
+                        StoredSlackUserIdentity::from_binding(&binding, epoch, existing.created_at),
+                        CasExpectation::Version(version),
+                    )
                 }
+                None => (
+                    StoredSlackUserIdentity::from_binding(&binding, epoch, Utc::now()),
+                    CasExpectation::Absent,
+                ),
+            };
+            match self.write_record(&path, &record, cas).await {
+                Ok(_) => {
+                    if let (Some(owner), Some(epoch)) = (owner.as_ref(), epoch)
+                        && let Err(error) = self.activate_connection(owner, epoch).await
+                    {
+                        self.tombstone_identity_path_if_owned(
+                            &path,
+                            binding.provider.as_str(),
+                            &binding.user_id,
+                            Some(epoch),
+                        )
+                        .await?;
+                        return Err(RebornUserIdentityBindingError::Backend(error.to_string()));
+                    }
+                    self.write_user_binding_index_marker(&binding).await;
+                    return Ok(());
+                }
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
                 Err(error) => return Err(map_binding_fs_error(error)),
             }
-            self.write_user_binding_index_marker(&binding).await;
-            return Ok(());
         }
+        Err(RebornUserIdentityBindingError::Backend(
+            "Slack actor binding changed concurrently".into(),
+        ))
+    }
 
-        let record = StoredSlackUserIdentity::from_binding(&binding, Utc::now());
-        match self
-            .write_record(&path, &record, CasExpectation::Absent)
-            .await
+    fn binding_installation(
+        &self,
+        binding: &RebornUserIdentityBinding,
+    ) -> Result<AdapterInstallationId, RebornUserIdentityBindingError> {
+        if binding.provider.as_str() != crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER
         {
-            Ok(_) => {}
-            Err(FilesystemError::VersionMismatch { .. }) => {
-                self.reconcile_identity_version_mismatch(&path, &binding)
-                    .await?;
-            }
-            Err(error) => return Err(map_binding_fs_error(error)),
+            return Err(RebornUserIdentityBindingError::Backend(
+                "connection epochs are only supported for Slack identities".to_string(),
+            ));
         }
-        self.write_user_binding_index_marker(&binding).await;
-        Ok(())
+        let Some((installation_id, _)) =
+            parse_slack_user_identity_provider_user_id(binding.provider_user_id.as_str())
+        else {
+            return Err(RebornUserIdentityBindingError::Backend(
+                "Slack provider user identity is malformed".to_string(),
+            ));
+        };
+        Ok(installation_id)
     }
 }
 
@@ -987,15 +1467,58 @@ where
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
     ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
-        self.user_identity_bindings_for_user_inner(provider, user_id, provider_user_id_prefix)
-            .await
+        self.user_identity_bindings_for_user_inner(
+            provider,
+            user_id,
+            provider_user_id_prefix,
+            IdentityBindingScan::AllOwned,
+        )
+        .await
     }
 
-    async fn delete_user_identity_bindings_for_user(
+    async fn user_identity_bindings_for_user_at_epoch(
         &self,
         provider: &str,
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
+        expected_epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
+        self.user_identity_bindings_for_user_inner(
+            provider,
+            user_id,
+            provider_user_id_prefix,
+            IdentityBindingScan::CleanupEpoch(expected_epoch),
+        )
+        .await
+    }
+
+    async fn delete_user_identity_bindings_for_user_at_epoch(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+        expected_epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
+        self.delete_user_identity_bindings_for_user_inner(
+            provider,
+            user_id,
+            provider_user_id_prefix,
+            expected_epoch,
+        )
+        .await
+    }
+}
+
+impl<F> FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn delete_user_identity_bindings_for_user_inner(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+        expected_epoch: Option<SlackConnectionEpoch>,
     ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
         let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
             .map_err(map_binding_fs_error)?;
@@ -1022,51 +1545,27 @@ where
             else {
                 continue;
             };
+            candidate.validate_for_provider(provider)?;
             if !identity_record_matches_user_binding(
                 &candidate,
                 provider,
                 user_id,
                 provider_user_id_prefix,
-            ) {
+            ) || expected_epoch.is_some_and(|epoch| candidate.epoch != Some(epoch))
+            {
                 continue;
             }
-            let lock = self.lock_for(format!(
-                "identity:{}:{}",
-                candidate.provider, candidate.provider_user_id
-            ));
-            let _guard = lock.lock().await;
-            let Some((current, _)) = self
-                .read_record::<StoredSlackUserIdentity>(&path)
-                .await
-                .map_err(map_binding_fs_error)?
-            else {
-                continue;
-            };
-            if !identity_record_matches_user_binding(
-                &current,
-                provider,
-                user_id,
-                provider_user_id_prefix,
-            ) {
-                continue;
-            }
-            match self.delete_record(&path).await {
-                Ok(()) => {
-                    let deleted_binding = current.binding().ok_or_else(|| {
-                        RebornUserIdentityBindingError::Backend(
-                            "stored Slack user identity is invalid".to_string(),
-                        )
-                    })?;
-                    self.delete_user_binding_index_marker(
-                        provider,
-                        user_id.as_str(),
-                        &current.provider_user_id,
-                    )
-                    .await;
-                    deleted.push(deleted_binding);
-                }
-                Err(FilesystemError::NotFound { .. }) => {}
-                Err(error) => return Err(map_binding_fs_error(error)),
+            if let Some(deleted_binding) = self
+                .tombstone_identity_path_if_owned(&path, provider, user_id, expected_epoch)
+                .await?
+            {
+                self.delete_user_binding_index_marker(
+                    provider,
+                    user_id.as_str(),
+                    deleted_binding.provider_user_id.as_str(),
+                )
+                .await;
+                deleted.push(deleted_binding);
             }
         }
         Ok(deleted)
@@ -1082,6 +1581,7 @@ where
         provider: &str,
         user_id: &UserId,
         provider_user_id_prefix: Option<&str>,
+        scan: IdentityBindingScan,
     ) -> Result<Vec<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
         let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
             .map_err(map_binding_fs_error)?;
@@ -1108,15 +1608,25 @@ where
             else {
                 continue;
             };
-            if !identity_record_matches_user_binding(
-                &candidate,
-                provider,
-                user_id,
-                provider_user_id_prefix,
-            ) {
+            candidate.validate_for_provider(provider)?;
+            let matches = match scan {
+                IdentityBindingScan::AllOwned => {
+                    identity_record_is_owned(&candidate, provider, user_id, provider_user_id_prefix)
+                }
+                IdentityBindingScan::CleanupEpoch(expected_epoch) => {
+                    identity_record_is_owned_for_cleanup(
+                        &candidate,
+                        provider,
+                        user_id,
+                        provider_user_id_prefix,
+                        expected_epoch,
+                    )
+                }
+            };
+            if !matches {
                 continue;
             }
-            bindings.push(candidate.binding().ok_or_else(|| {
+            bindings.push(candidate.binding_including_tombstone().ok_or_else(|| {
                 RebornUserIdentityBindingError::Backend(
                     "stored Slack user identity is invalid".to_string(),
                 )
@@ -1125,24 +1635,46 @@ where
         Ok(bindings)
     }
 
-    async fn reconcile_identity_version_mismatch(
+    async fn tombstone_identity_path_if_owned(
         &self,
         path: &ScopedPath,
-        binding: &RebornUserIdentityBinding,
-    ) -> Result<(), RebornUserIdentityBindingError> {
-        let Some((existing, _)) = self
-            .read_record::<StoredSlackUserIdentity>(path)
-            .await
-            .map_err(map_binding_fs_error)?
-        else {
-            return Err(RebornUserIdentityBindingError::Backend(
-                "Slack actor binding changed concurrently".into(),
-            ));
-        };
-        if existing.user_id == binding.user_id.as_str() {
-            return Ok(());
+        provider: &str,
+        user_id: &UserId,
+        expected_epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<Option<RebornUserIdentityBinding>, RebornUserIdentityBindingError> {
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let Some((current, version)) = self
+                .read_record::<StoredSlackUserIdentity>(path)
+                .await
+                .map_err(map_binding_fs_error)?
+            else {
+                return Ok(None);
+            };
+            current.validate_for_provider(provider)?;
+            if current.state != StoredSlackIdentityState::Active
+                || current.user_id != user_id.as_str()
+                || expected_epoch.is_some_and(|epoch| current.epoch != Some(epoch))
+            {
+                return Ok(None);
+            }
+            let binding = current.binding().ok_or_else(|| {
+                RebornUserIdentityBindingError::Backend(
+                    "stored Slack user identity is invalid".to_string(),
+                )
+            })?;
+            let tombstone = current.tombstone();
+            match self
+                .write_record(path, &tombstone, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(Some(binding)),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(map_binding_fs_error(error)),
+            }
         }
-        Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound)
+        Err(RebornUserIdentityBindingError::Backend(
+            "Slack actor binding changed concurrently".to_string(),
+        ))
     }
 }
 
@@ -1184,98 +1716,191 @@ where
         let Some((record, _)) = self.read_personal_dm_target_record(&path).await? else {
             return Ok(None);
         };
-        stored_personal_dm_target(record).map(Some)
+        if record.deleted_at.is_some() {
+            return Ok(None);
+        }
+        let epoch = record.epoch;
+        let target = stored_personal_dm_target(record)?;
+        if let Some(epoch) = epoch
+            && !self
+                .connection_is_active_at_epoch(&target.key, epoch)
+                .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(target))
     }
 
+    #[cfg(test)]
     async fn upsert_personal_dm_target(
         &self,
         target: SlackPersonalDmTarget,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        self.upsert_personal_dm_target_inner(target, None).await
+    }
+
+    async fn upsert_personal_dm_target_for_epoch(
+        &self,
+        target: SlackPersonalDmTarget,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        if !self
+            .connection_is_active_at_epoch(&target.key, epoch)
+            .await?
+        {
+            return Err(SlackPersonalDmTargetError::StoreUnavailable);
+        }
+        let key = target.key.clone();
+        let stored = self
+            .upsert_personal_dm_target_inner(target, Some(epoch))
+            .await?;
+        if self.connection_is_active_at_epoch(&key, epoch).await? {
+            return Ok(stored);
+        }
+        let path = Self::personal_dm_target_path(&key).map_err(map_personal_dm_target_fs_error)?;
+        self.tombstone_personal_dm_target_at_epoch(&path, Some(epoch))
+            .await?;
+        Err(SlackPersonalDmTargetError::StoreUnavailable)
+    }
+
+    async fn delete_personal_dm_targets_for_owner(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        installation_id: &AdapterInstallationId,
+        expected_epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<usize, SlackPersonalDmTargetError> {
+        if tenant_id != &self.scope.tenant_id {
+            return Ok(0);
+        }
+        let installation_dir = scoped_path(&format!(
+            "{}/{}",
+            PERSONAL_DM_TARGET_ROOT,
+            path_segment(installation_id.as_str())
+        ))
+        .map_err(map_personal_dm_target_fs_error)?;
+        let team_entries = match self
+            .filesystem
+            .list_dir(&self.scope, &installation_dir)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(0),
+            Err(error) => return Err(map_personal_dm_target_fs_error(error)),
+        };
+        let mut deleted = 0;
+        for team_entry in team_entries {
+            if team_entry.file_type != FileType::Directory {
+                continue;
+            }
+            let path = scoped_path(&format!(
+                "{}/{}/{}/{}.json",
+                PERSONAL_DM_TARGET_ROOT,
+                path_segment(installation_id.as_str()),
+                team_entry.name,
+                path_segment(user_id.as_str())
+            ))
+            .map_err(map_personal_dm_target_fs_error)?;
+            let Some((record, _)) = self.read_personal_dm_target_record(&path).await? else {
+                continue;
+            };
+            if record.tenant_id != tenant_id.as_str()
+                || record.user_id != user_id.as_str()
+                || record.installation_id != installation_id.as_str()
+            {
+                return Err(SlackPersonalDmTargetError::StoreUnavailable);
+            }
+            deleted += usize::from(
+                self.tombstone_personal_dm_target_at_epoch(&path, expected_epoch)
+                    .await?,
+            );
+        }
+        Ok(deleted)
+    }
+}
+
+impl<F> FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn upsert_personal_dm_target_inner(
+        &self,
+        target: SlackPersonalDmTarget,
+        epoch: Option<SlackConnectionEpoch>,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
         if target.key.tenant_id != self.scope.tenant_id {
             return Err(SlackPersonalDmTargetError::InvalidTarget);
         }
         let path =
             Self::personal_dm_target_path(&target.key).map_err(map_personal_dm_target_fs_error)?;
-        // Lock key omits tenant_id: this store instance is pinned to one
-        // tenant (cross-tenant writes are rejected above before locking),
-        // so installation/team/user uniquely identify the record within
-        // the instance. Revisit if a multi-tenant store instance ever
-        // shares this lock map.
-        let lock = self.lock_for(format!(
-            "personal-dm:{}:{}:{}",
-            target.key.installation_id.as_str(),
-            target.key.team_id.as_str(),
-            target.key.user_id.as_str()
-        ));
-        let _guard = lock.lock().await;
-        let existing = self.read_personal_dm_target_record(&path).await?;
-        let created_at = existing
-            .as_ref()
-            .map(|(record, _)| record.created_at)
-            .unwrap_or_else(Utc::now);
-        let record = StoredSlackPersonalDmTarget::from_target(&target, created_at);
-        let cas = existing
-            .map(|(_, version)| CasExpectation::Version(version))
-            .unwrap_or(CasExpectation::Absent);
-        match self.write_record(&path, &record, cas).await {
-            Ok(_) => Ok(target),
-            Err(FilesystemError::VersionMismatch { .. }) => {
-                // CAS lost to a concurrent writer. Read back and return the winning record.
-                // This is last-write-wins semantics: whichever writer committed first wins.
-                // This is safe today because provisioning the same (tenant, user) DM target is
-                // idempotent — both concurrent writers store the same DM channel ID for the same
-                // Slack user. If a future change makes the payload non-idempotent (e.g. storing a
-                // caller-chosen dm_channel_id that could differ between writers), this branch must
-                // be replaced with explicit conflict semantics (e.g. reject the loser with a
-                // retriable error rather than silently discarding the losing value).
-                let Some((record, _)) = self.read_personal_dm_target_record(&path).await? else {
-                    return Err(SlackPersonalDmTargetError::StoreUnavailable);
-                };
-                stored_personal_dm_target(record)
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let existing = self.read_personal_dm_target_record(&path).await?;
+            let created_at = existing
+                .as_ref()
+                .map(|(record, _)| record.created_at)
+                .unwrap_or_else(Utc::now);
+            let record = StoredSlackPersonalDmTarget::from_target(&target, epoch, created_at);
+            let cas = existing
+                .map(|(_, version)| CasExpectation::Version(version))
+                .unwrap_or(CasExpectation::Absent);
+            match self.write_record(&path, &record, cas).await {
+                Ok(_) => return Ok(target),
+                Err(FilesystemError::VersionMismatch { .. }) => {
+                    if let Some((winner, _)) = self.read_personal_dm_target_record(&path).await?
+                        && winner.epoch == epoch
+                        && winner.deleted_at.is_none()
+                    {
+                        return stored_personal_dm_target(winner);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(map_personal_dm_target_fs_error(error)),
             }
-            Err(error) => Err(map_personal_dm_target_fs_error(error)),
         }
+        Err(SlackPersonalDmTargetError::StoreUnavailable)
     }
 
-    async fn delete_personal_dm_target(
+    async fn connection_is_active_at_epoch(
         &self,
         key: &SlackPersonalDmTargetKey,
+        epoch: SlackConnectionEpoch,
     ) -> Result<bool, SlackPersonalDmTargetError> {
-        if key.tenant_id != self.scope.tenant_id {
-            return Ok(false);
-        }
-        let path = Self::personal_dm_target_path(key).map_err(map_personal_dm_target_fs_error)?;
-        let lock = self.lock_for(format!(
-            "personal-dm:{}:{}:{}",
-            key.installation_id.as_str(),
-            key.team_id.as_str(),
-            key.user_id.as_str()
-        ));
-        let _guard = lock.lock().await;
-        match self.delete_record(&path).await {
-            Ok(()) => Ok(true),
-            Err(FilesystemError::NotFound { .. }) => Ok(false),
-            Err(error) => Err(map_personal_dm_target_fs_error(error)),
-        }
+        let owner = SlackConnectionOwner::new(
+            key.tenant_id.clone(),
+            key.user_id.clone(),
+            key.installation_id.clone(),
+        );
+        self.connection_state(&owner)
+            .await
+            .map(|state| state == Some((epoch, SlackConnectionState::Active)))
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)
     }
 
-    async fn delete_personal_dm_targets_for_user(
+    async fn tombstone_personal_dm_target_at_epoch(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
-        installation_id: &AdapterInstallationId,
-        team_id: &SlackTeamId,
-    ) -> Result<usize, SlackPersonalDmTargetError> {
-        if tenant_id != &self.scope.tenant_id {
-            return Ok(0);
+        path: &ScopedPath,
+        expected_epoch: Option<SlackConnectionEpoch>,
+    ) -> Result<bool, SlackPersonalDmTargetError> {
+        for _ in 0..LIFECYCLE_CAS_RETRIES {
+            let Some((record, version)) = self.read_personal_dm_target_record(path).await? else {
+                return Ok(false);
+            };
+            if record.deleted_at.is_some()
+                || expected_epoch.is_some_and(|epoch| record.epoch != Some(epoch))
+            {
+                return Ok(false);
+            }
+            let tombstone = record.tombstone();
+            match self
+                .write_record(path, &tombstone, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(true),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(map_personal_dm_target_fs_error(error)),
+            }
         }
-        let key = SlackPersonalDmTargetKey::new(
-            tenant_id.clone(),
-            installation_id.clone(),
-            team_id.clone(),
-            user_id.clone(),
-        )?;
-        self.delete_personal_dm_target(&key).await.map(usize::from)
+        Err(SlackPersonalDmTargetError::StoreUnavailable)
     }
 }
 
@@ -1454,27 +2079,117 @@ where
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredSlackConnection {
+    tenant_id: String,
+    user_id: String,
+    installation_id: String,
+    epoch: SlackConnectionEpoch,
+    state: SlackConnectionState,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl StoredSlackConnection {
+    fn new(
+        owner: &SlackConnectionOwner,
+        epoch: SlackConnectionEpoch,
+        state: SlackConnectionState,
+        created_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            tenant_id: owner.tenant_id().as_str().to_string(),
+            user_id: owner.user_id().as_str().to_string(),
+            installation_id: owner.installation_id().as_str().to_string(),
+            epoch,
+            state,
+            expires_at,
+            created_at,
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn validate(&self, owner: &SlackConnectionOwner) -> Result<(), SlackUserBindingLifecycleError> {
+        if self.tenant_id != owner.tenant_id().as_str()
+            || self.user_id != owner.user_id().as_str()
+            || self.installation_id != owner.installation_id().as_str()
+        {
+            return Err(SlackUserBindingLifecycleError::Backend(
+                "stored Slack connection owner is malformed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn with_state(&self, state: SlackConnectionState) -> Self {
+        Self {
+            state,
+            updated_at: Utc::now(),
+            ..self.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredSlackIdentityState {
+    Active,
+    Disconnected,
+}
+
+#[derive(Clone, Copy)]
+enum IdentityBindingScan {
+    AllOwned,
+    CleanupEpoch(Option<SlackConnectionEpoch>),
+}
+
+fn active_identity_state() -> StoredSlackIdentityState {
+    StoredSlackIdentityState::Active
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSlackUserIdentity {
     provider: String,
     provider_user_id: String,
     user_id: String,
+    #[serde(default)]
+    epoch: Option<SlackConnectionEpoch>,
+    #[serde(default = "active_identity_state")]
+    state: StoredSlackIdentityState,
+    #[serde(default)]
+    disconnected_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
 impl StoredSlackUserIdentity {
-    fn from_binding(binding: &RebornUserIdentityBinding, created_at: DateTime<Utc>) -> Self {
+    fn from_binding(
+        binding: &RebornUserIdentityBinding,
+        epoch: Option<SlackConnectionEpoch>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
         Self {
             provider: binding.provider.as_str().to_string(),
             provider_user_id: binding.provider_user_id.as_str().to_string(),
             user_id: binding.user_id.as_str().to_string(),
+            epoch,
+            state: StoredSlackIdentityState::Active,
+            disconnected_at: None,
             created_at,
             updated_at: Utc::now(),
         }
     }
 
     fn binding(&self) -> Option<RebornUserIdentityBinding> {
+        if self.state != StoredSlackIdentityState::Active {
+            return None;
+        }
+        self.binding_including_tombstone()
+    }
+
+    fn binding_including_tombstone(&self) -> Option<RebornUserIdentityBinding> {
         Some(RebornUserIdentityBinding {
             provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
                 self.provider.clone(),
@@ -1487,6 +2202,51 @@ impl StoredSlackUserIdentity {
                 .ok()?,
             user_id: UserId::new(self.user_id.clone()).ok()?,
         })
+    }
+
+    fn tombstone(&self) -> Self {
+        Self {
+            state: StoredSlackIdentityState::Disconnected,
+            disconnected_at: Some(Utc::now()),
+            updated_at: Utc::now(),
+            ..self.clone()
+        }
+    }
+
+    fn validate_for_provider(&self, provider: &str) -> Result<(), RebornUserIdentityBindingError> {
+        if self.provider != provider
+            || crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
+                self.provider.clone(),
+            )
+            .is_err()
+            || crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                self.provider_user_id.clone(),
+            )
+            .is_err()
+            || UserId::new(self.user_id.clone()).is_err()
+            || (self.state == StoredSlackIdentityState::Active && self.disconnected_at.is_some())
+            || (self.state == StoredSlackIdentityState::Disconnected
+                && self.disconnected_at.is_none())
+        {
+            return Err(RebornUserIdentityBindingError::Backend(
+                "stored Slack user identity is invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_for_key(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<(), RebornUserIdentityBindingError> {
+        self.validate_for_provider(provider)?;
+        if self.provider_user_id != provider_user_id {
+            return Err(RebornUserIdentityBindingError::Backend(
+                "stored Slack user identity key does not match its record".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1504,6 +2264,35 @@ fn identity_record_matches_user_binding(
     user_id: &UserId,
     provider_user_id_prefix: Option<&str>,
 ) -> bool {
+    record.state == StoredSlackIdentityState::Active
+        && record.provider == provider
+        && record.user_id == user_id.as_str()
+        && provider_user_id_prefix
+            .map(|prefix| record.provider_user_id.starts_with(prefix))
+            .unwrap_or(true)
+}
+
+fn identity_record_is_owned_for_cleanup(
+    record: &StoredSlackUserIdentity,
+    provider: &str,
+    user_id: &UserId,
+    provider_user_id_prefix: Option<&str>,
+    expected_epoch: Option<SlackConnectionEpoch>,
+) -> bool {
+    record.provider == provider
+        && record.user_id == user_id.as_str()
+        && record.epoch == expected_epoch
+        && provider_user_id_prefix
+            .map(|prefix| record.provider_user_id.starts_with(prefix))
+            .unwrap_or(true)
+}
+
+fn identity_record_is_owned(
+    record: &StoredSlackUserIdentity,
+    provider: &str,
+    user_id: &UserId,
+    provider_user_id_prefix: Option<&str>,
+) -> bool {
     record.provider == provider
         && record.user_id == user_id.as_str()
         && provider_user_id_prefix
@@ -1511,7 +2300,21 @@ fn identity_record_matches_user_binding(
             .unwrap_or(true)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+fn log_duplicate_identity_binding(
+    existing: &StoredSlackUserIdentity,
+    binding: &RebornUserIdentityBinding,
+) {
+    tracing::warn!(
+        provider = %binding.provider.as_str(),
+        provider_user_id = %binding.provider_user_id.as_str(),
+        existing_user_id = %existing.user_id,
+        connecting_user_id = %binding.user_id.as_str(),
+        "rejecting Slack identity bind: provider identity already bound to a different \
+         reborn user (connecting user is not the current owner)"
+    );
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSlackPersonalDmTarget {
     tenant_id: String,
     installation_id: String,
@@ -1519,6 +2322,10 @@ struct StoredSlackPersonalDmTarget {
     user_id: String,
     slack_user_id: String,
     dm_channel_id: String,
+    #[serde(default)]
+    epoch: Option<SlackConnectionEpoch>,
+    #[serde(default)]
+    deleted_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -1528,7 +2335,11 @@ impl StoredSlackPersonalDmTarget {
         dead_code,
         reason = "used with the optional explicit Slack DM target upsert path"
     )]
-    fn from_target(target: &SlackPersonalDmTarget, created_at: DateTime<Utc>) -> Self {
+    fn from_target(
+        target: &SlackPersonalDmTarget,
+        epoch: Option<SlackConnectionEpoch>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
         Self {
             tenant_id: target.key.tenant_id.as_str().to_string(),
             installation_id: target.key.installation_id.as_str().to_string(),
@@ -1536,8 +2347,18 @@ impl StoredSlackPersonalDmTarget {
             user_id: target.key.user_id.as_str().to_string(),
             slack_user_id: target.slack_user_id.as_str().to_string(),
             dm_channel_id: target.dm_channel_id.clone(),
+            epoch,
+            deleted_at: None,
             created_at,
             updated_at: Utc::now(),
+        }
+    }
+
+    fn tombstone(&self) -> Self {
+        Self {
+            deleted_at: Some(Utc::now()),
+            updated_at: Utc::now(),
+            ..self.clone()
         }
     }
 }
@@ -1730,6 +2551,10 @@ fn map_binding_fs_error(error: FilesystemError) -> RebornUserIdentityBindingErro
     RebornUserIdentityBindingError::Backend(error.to_string())
 }
 
+fn map_lifecycle_fs_error(error: FilesystemError) -> SlackUserBindingLifecycleError {
+    SlackUserBindingLifecycleError::Backend(error.to_string())
+}
+
 fn map_route_fs_error(error: FilesystemError) -> SlackChannelRouteError {
     tracing::error!(%error, "Slack channel route filesystem operation failed");
     SlackChannelRouteError::StoreUnavailable
@@ -1776,8 +2601,295 @@ mod tests {
 
     use crate::slack::slack_personal_binding::{
         RebornIdentityProviderId, RebornIdentityProviderUserId,
-        RebornUserIdentityBindingDeleteStore,
+        RebornUserIdentityBindingDeleteStore, SlackConnectionEpoch, SlackConnectionOwner,
+        SlackConnectionState, SlackUserBindingLifecycleStore,
     };
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reclaims_expired_connection_epoch_and_finds_its_owner() {
+        let root = Arc::new(InMemoryBackend::default());
+        let first = state_with_root(Arc::clone(&root));
+        let second = state_with_root(root);
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let expired_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let current_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+
+        first
+            .begin_connection(
+                &owner,
+                expired_epoch,
+                Utc::now() - chrono::Duration::seconds(1),
+            )
+            .await
+            .expect("expired attempt is recorded");
+        second
+            .begin_connection(&owner, current_epoch, connection_expiry())
+            .await
+            .expect("a new attempt reclaims the expired gate");
+
+        assert_eq!(
+            first
+                .connection_owner_for_epoch(owner.tenant_id(), owner.user_id(), expired_epoch,)
+                .await
+                .expect("expired owner lookup"),
+            None,
+            "the replaced epoch can no longer target the owner"
+        );
+        assert_eq!(
+            first
+                .connection_owner_for_epoch(owner.tenant_id(), owner.user_id(), current_epoch)
+                .await
+                .expect("current owner lookup"),
+            Some(owner.clone())
+        );
+        let competing_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        assert_eq!(
+            first
+                .begin_connection(&owner, competing_epoch, connection_expiry())
+                .await
+                .expect_err("a live connection attempt remains exclusive"),
+            SlackUserBindingLifecycleError::ConnectionInProgress
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_connection_epoch_preserves_a_newer_owner() {
+        let root = Arc::new(InMemoryBackend::default());
+        let first = state_with_root(Arc::clone(&root));
+        let second = state_with_root(root);
+        let installation_id = installation();
+        let alice_owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation_id.clone(),
+        );
+        let bob_owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:bob"),
+            installation_id,
+        );
+        let alice_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let bob_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let provider_user_id = RebornIdentityProviderUserId::new("install-alpha:U123").unwrap();
+        let alice_binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: provider_user_id.clone(),
+            user_id: user("user:alice"),
+        };
+
+        first
+            .begin_connection(&alice_owner, alice_epoch, connection_expiry())
+            .await
+            .expect("Alice connection begins");
+        first
+            .bind_user_identity_for_epoch(alice_binding, alice_epoch)
+            .await
+            .expect("Alice identity activates");
+        assert_eq!(
+            first
+                .connection_state(&alice_owner)
+                .await
+                .expect("Alice state"),
+            Some((alice_epoch, SlackConnectionState::Active))
+        );
+        let resolved = first
+            .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
+            .await
+            .expect("active identity resolves")
+            .expect("active identity exists");
+        assert_eq!(resolved.0, user("user:alice"));
+        assert_eq!(
+            resolved.1.as_ref().map(ToString::to_string),
+            Some(alice_epoch.to_string())
+        );
+        let dm_keys = ["T123", "T999"].map(|team_id| {
+            SlackPersonalDmTargetKey::new(
+                TenantId::new("tenant-alpha").unwrap(),
+                installation(),
+                SlackTeamId::new(team_id),
+                user("user:alice"),
+            )
+            .unwrap()
+        });
+        for (key, channel_id) in dm_keys.iter().cloned().zip(["D123", "D999"]) {
+            first
+                .upsert_personal_dm_target_for_epoch(
+                    SlackPersonalDmTarget::new(
+                        key,
+                        SlackUserId::new("U123"),
+                        channel_id.to_string(),
+                    )
+                    .unwrap(),
+                    alice_epoch,
+                )
+                .await
+                .expect("epoch-bound DM target activates");
+        }
+        second
+            .begin_connection(&bob_owner, bob_epoch, connection_expiry())
+            .await
+            .expect("Bob may start a competing connection attempt");
+        let duplicate = second
+            .bind_user_identity_for_epoch(
+                RebornUserIdentityBinding {
+                    provider: RebornIdentityProviderId::new("slack").unwrap(),
+                    provider_user_id: provider_user_id.clone(),
+                    user_id: user("user:bob"),
+                },
+                bob_epoch,
+            )
+            .await
+            .expect_err("Alice's active Slack identity rejects Bob");
+        assert_eq!(
+            duplicate,
+            RebornUserIdentityBindingError::ProviderIdentityAlreadyBound,
+            "the canonical cross-user error must remain unchanged"
+        );
+
+        assert_eq!(
+            second
+                .begin_disconnect(&alice_owner)
+                .await
+                .expect("Alice disconnect fences"),
+            Some(alice_epoch)
+        );
+        second
+            .abandon_connection(&alice_owner, alice_epoch)
+            .await
+            .expect("a racing callback rollback defers to disconnect");
+        assert_eq!(
+            second
+                .connection_state(&alice_owner)
+                .await
+                .expect("disconnect still owns the fence"),
+            Some((alice_epoch, SlackConnectionState::Disconnecting))
+        );
+        assert_eq!(
+            second
+                .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
+                .await
+                .expect("disconnecting identity fails closed"),
+            None
+        );
+        let stale_dm = SlackPersonalDmTarget::new(
+            dm_keys[0].clone(),
+            SlackUserId::new("U123"),
+            "DSTALE".to_string(),
+        )
+        .unwrap();
+        assert!(
+            second
+                .upsert_personal_dm_target_for_epoch(stale_dm, alice_epoch)
+                .await
+                .is_err(),
+            "detached provisioning from the disconnected epoch must fail closed"
+        );
+        assert_eq!(
+            second
+                .delete_personal_dm_targets_for_owner(
+                    &TenantId::new("tenant-alpha").unwrap(),
+                    &user("user:alice"),
+                    &installation(),
+                    Some(alice_epoch),
+                )
+                .await
+                .expect("owner-wide DM cleanup works without setup"),
+            2
+        );
+        for key in &dm_keys {
+            assert_eq!(
+                second
+                    .load_personal_dm_target(key)
+                    .await
+                    .expect("DM tombstone reads as absent"),
+                None
+            );
+        }
+        second
+            .delete_user_identity_bindings_for_user_at_epoch(
+                "slack",
+                &user("user:alice"),
+                Some("install-alpha:"),
+                Some(alice_epoch),
+            )
+            .await
+            .expect("Alice identity tombstones");
+        second
+            .complete_disconnect(&alice_owner, alice_epoch)
+            .await
+            .expect("Alice disconnect completes");
+
+        second
+            .begin_connection(&bob_owner, bob_epoch, connection_expiry())
+            .await
+            .expect("Bob connection begins");
+        second
+            .bind_user_identity_for_epoch(
+                RebornUserIdentityBinding {
+                    provider: RebornIdentityProviderId::new("slack").unwrap(),
+                    provider_user_id,
+                    user_id: user("user:bob"),
+                },
+                bob_epoch,
+            )
+            .await
+            .expect("Bob identity activates");
+
+        first
+            .delete_user_identity_bindings_for_user_at_epoch(
+                "slack",
+                &user("user:alice"),
+                Some("install-alpha:"),
+                Some(alice_epoch),
+            )
+            .await
+            .expect("stale Alice cleanup is harmless");
+        assert_eq!(
+            first
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .expect("resolve Bob"),
+            Some(user("user:bob"))
+        );
+
+        let alice_next_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        first
+            .begin_connection(&alice_owner, alice_next_epoch, connection_expiry())
+            .await
+            .expect("Alice N+1 connection begins");
+        first
+            .bind_user_identity_for_epoch(
+                RebornUserIdentityBinding {
+                    provider: RebornIdentityProviderId::new("slack").unwrap(),
+                    provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U456")
+                        .unwrap(),
+                    user_id: user("user:alice"),
+                },
+                alice_next_epoch,
+            )
+            .await
+            .expect("Alice N+1 identity activates");
+        second
+            .delete_user_identity_bindings_for_user_at_epoch(
+                "slack",
+                &user("user:alice"),
+                Some("install-alpha:"),
+                Some(alice_epoch),
+            )
+            .await
+            .expect("Alice N stale cleanup is harmless to N+1");
+        assert_eq!(
+            second
+                .resolve_user_identity("slack", "install-alpha:U456")
+                .await
+                .expect("resolve Alice N+1"),
+            Some(user("user:alice"))
+        );
+    }
 
     #[tokio::test]
     async fn filesystem_slack_host_state_binds_and_resolves_identity() {
@@ -1800,6 +2912,35 @@ mod tests {
         assert_eq!(resolved, Some(user("user:alice")));
         let stored = read_identity(&state, "slack", "install-alpha:U123").await;
         assert_eq!(stored.binding(), Some(binding));
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_fails_closed_for_malformed_identity_record() {
+        let state = state();
+        let binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+            user_id: user("user:alice"),
+        };
+        let mut malformed = StoredSlackUserIdentity::from_binding(&binding, None, Utc::now());
+        malformed.provider = "github".to_string();
+        let path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(
+            "slack",
+            "install-alpha:U123",
+        )
+        .unwrap();
+        state
+            .write_record(&path, &malformed, CasExpectation::Any)
+            .await
+            .expect("seed malformed identity");
+
+        assert!(
+            state
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .is_err(),
+            "malformed canonical identity must never authorize ingress"
+        );
     }
 
     #[tokio::test]
@@ -1943,10 +3084,11 @@ mod tests {
             .expect("bind bob succeeds");
 
         let deleted = state
-            .delete_user_identity_bindings_for_user(
+            .delete_user_identity_bindings_for_user_at_epoch(
                 "slack",
                 &user("user:alice"),
                 Some("install-alpha:"),
+                None,
             )
             .await
             .expect("delete succeeds");
@@ -2012,11 +3154,17 @@ mod tests {
             Some(target)
         );
 
-        assert!(
+        assert_eq!(
             reader
-                .delete_personal_dm_target(&key)
+                .delete_personal_dm_targets_for_owner(
+                    &TenantId::new("tenant-alpha").unwrap(),
+                    &user("user:alice"),
+                    &installation(),
+                    None,
+                )
                 .await
-                .expect("delete personal DM target succeeds")
+                .expect("delete personal DM target succeeds"),
+            1
         );
         assert_eq!(
             reader
@@ -2025,11 +3173,17 @@ mod tests {
                 .expect("load after delete succeeds"),
             None
         );
-        assert!(
-            !reader
-                .delete_personal_dm_target(&key)
+        assert_eq!(
+            reader
+                .delete_personal_dm_targets_for_owner(
+                    &TenantId::new("tenant-alpha").unwrap(),
+                    &user("user:alice"),
+                    &installation(),
+                    None,
+                )
                 .await
-                .expect("second delete is idempotent")
+                .expect("second delete is idempotent"),
+            0
         );
     }
 
@@ -2061,11 +3215,17 @@ mod tests {
                 .expect("foreign tenant load fails closed"),
             None
         );
-        assert!(
-            !state
-                .delete_personal_dm_target(&foreign_key)
+        assert_eq!(
+            state
+                .delete_personal_dm_targets_for_owner(
+                    &foreign_key.tenant_id,
+                    &foreign_key.user_id,
+                    &foreign_key.installation_id,
+                    None,
+                )
                 .await
-                .expect("foreign tenant delete fails closed")
+                .expect("foreign tenant delete fails closed"),
+            0
         );
     }
 
@@ -2088,6 +3248,8 @@ mod tests {
             user_id: "user:alice".to_string(),
             slack_user_id: "U123".to_string(),
             dm_channel_id: "D123".to_string(),
+            epoch: None,
+            deleted_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2129,6 +3291,8 @@ mod tests {
             user_id: "user:alice".to_string(),
             slack_user_id: "U123".to_string(),
             dm_channel_id: "D123".to_string(),
+            epoch: None,
+            deleted_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2152,6 +3316,8 @@ mod tests {
             user_id: "user:alice".to_string(),
             slack_user_id: "U123".to_string(),
             dm_channel_id: "NOTADM".to_string(), // must start with "D"
+            epoch: None,
+            deleted_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2893,6 +4059,7 @@ mod tests {
         reject_lock_renewal: bool,
         route_write_delay: Option<Duration>,
         personal_dm_write_barrier: Option<Arc<tokio::sync::Barrier>>,
+        personal_dm_puts: AtomicUsize,
         route_write_failures: AtomicUsize,
         lock_puts: AtomicUsize,
     }
@@ -2904,6 +4071,7 @@ mod tests {
                 reject_lock_renewal: false,
                 route_write_delay: None,
                 personal_dm_write_barrier: None,
+                personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -2915,6 +4083,7 @@ mod tests {
                 reject_lock_renewal: false,
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
+                personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -2926,6 +4095,7 @@ mod tests {
                 reject_lock_renewal: true,
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
+                personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -2937,6 +4107,7 @@ mod tests {
                 reject_lock_renewal: false,
                 route_write_delay: None,
                 personal_dm_write_barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
+                personal_dm_puts: AtomicUsize::new(0),
                 route_write_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -2978,6 +4149,7 @@ mod tests {
                 tokio::time::sleep(delay).await;
             } else if is_personal_dm_target_record_path(path)
                 && let Some(barrier) = &self.personal_dm_write_barrier
+                && self.personal_dm_puts.fetch_add(1, Ordering::SeqCst) < 2
             {
                 barrier.wait().await;
             }
@@ -3062,6 +4234,10 @@ mod tests {
 
     fn installation() -> AdapterInstallationId {
         AdapterInstallationId::new("install-alpha").unwrap()
+    }
+
+    fn connection_expiry() -> ironclaw_auth::Timestamp {
+        Utc::now() + chrono::Duration::minutes(5)
     }
 
     fn user(value: &str) -> UserId {

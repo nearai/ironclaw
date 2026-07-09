@@ -64,9 +64,10 @@ use crate::slack::slack_outbound_targets::{
 };
 use crate::slack::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
+    RebornUserIdentityBindingStore, SlackConnectionEpoch, SlackPersonalBindingInstallation,
     SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
+    SlackUserBindingLifecycleStore,
 };
 use crate::slack::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationResolver,
@@ -414,6 +415,7 @@ pub struct SlackHostBetaMounts {
     /// Personal identity delete handle used when a caller uninstalls the
     /// Slack channel extension from the WebUI.
     pub(crate) user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    pub(crate) user_binding_lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
     /// Actor-pairing handle for revoking personal Slack DM conversation state
     /// when a caller removes the Slack channel extension.
     pub(crate) conversation_actor_pairings:
@@ -446,6 +448,7 @@ impl SlackHostBetaMounts {
             Arc::clone(&self.personal_oauth_binder),
             Arc::clone(&self.personal_connection_scope_resolver),
             Arc::clone(&self.user_identity_delete_store),
+            Arc::clone(&self.user_binding_lifecycle_store),
         )
     }
 }
@@ -453,7 +456,6 @@ impl SlackHostBetaMounts {
 #[derive(Clone)]
 pub(crate) struct SlackPersonalConnectionScope {
     pub(crate) installation_id: AdapterInstallationId,
-    pub(crate) team_id: SlackTeamId,
 }
 
 #[async_trait::async_trait]
@@ -484,21 +486,29 @@ impl SlackPersonalConnectionScopeResolver for StaticSlackPersonalConnectionScope
 
 #[async_trait::async_trait]
 pub(super) trait SlackPersonalDmTargetProvisioning: Send + Sync + std::fmt::Debug {
-    async fn provision_for_user(
+    async fn provision_for_user_for_epoch(
         &self,
         user_id: UserId,
         slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
 }
 
 #[async_trait::async_trait]
 impl SlackPersonalDmTargetProvisioning for SlackPersonalDmTargetProvisioner {
-    async fn provision_for_user(
+    async fn provision_for_user_for_epoch(
         &self,
         user_id: UserId,
         slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
-        SlackPersonalDmTargetProvisioner::provision_for_user(self, user_id, slack_user_id).await
+        SlackPersonalDmTargetProvisioner::provision_for_user_for_epoch(
+            self,
+            user_id,
+            slack_user_id,
+            epoch,
+        )
+        .await
     }
 }
 
@@ -519,10 +529,18 @@ impl ProvisioningSlackPersonalUserBinder {
         }
     }
 
-    fn spawn_dm_provisioning(&self, user_id: UserId, slack_user_id: SlackUserId) {
+    fn spawn_dm_provisioning(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
+    ) {
         let provisioner = Arc::clone(&self.dm_provisioner);
         tokio::spawn(async move {
-            match provisioner.provision_for_user(user_id, slack_user_id).await {
+            let result = provisioner
+                .provision_for_user_for_epoch(user_id, slack_user_id, epoch)
+                .await;
+            match result {
                 Ok(_) => {
                     tracing::debug!("Slack personal DM target provisioned after OAuth binding");
                 }
@@ -550,17 +568,18 @@ impl std::fmt::Debug for ProvisioningSlackPersonalUserBinder {
 
 #[async_trait::async_trait]
 impl SlackPersonalUserBinder for ProvisioningSlackPersonalUserBinder {
-    async fn bind_personal_user(
+    async fn bind_personal_user_for_epoch(
         &self,
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
+        epoch: SlackConnectionEpoch,
     ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
         let slack_user_id = request.slack_user_id.clone();
         let binding = self
             .binding_service
-            .bind_personal_user(principal, request)
+            .bind_personal_user_for_epoch(principal, request, epoch)
             .await?;
-        self.spawn_dm_provisioning(binding.user_id.clone(), slack_user_id);
+        self.spawn_dm_provisioning(binding.user_id.clone(), slack_user_id, epoch);
         Ok(binding)
     }
 }
@@ -706,6 +725,7 @@ pub fn build_slack_host_beta_mounts(
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
     let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
+    let user_binding_lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore> = state.clone();
     let binding_service: Arc<dyn SlackPersonalUserBinder> =
         Arc::new(SlackPersonalUserBindingService::new(
             [SlackPersonalBindingInstallation {
@@ -837,7 +857,6 @@ pub fn build_slack_host_beta_mounts(
     if outbound_delivery_provider_already_registered {
         let personal_connection_scope = SlackPersonalConnectionScope {
             installation_id: config.installation_id.clone(),
-            team_id: config.team_id.clone(),
         };
         return Ok(SlackHostBetaMounts {
             events,
@@ -850,6 +869,7 @@ pub fn build_slack_host_beta_mounts(
             personal_oauth_binder,
             user_identity_lookup: user_identity_lookup.clone(),
             user_identity_delete_store: user_identity_delete_store.clone(),
+            user_binding_lifecycle_store: user_binding_lifecycle_store.clone(),
             conversation_actor_pairings: conversation_actor_pairings.clone(),
             personal_dm_target_store: personal_dm_target_store.clone(),
             outbound_delivery_target_provider,
@@ -876,7 +896,6 @@ pub fn build_slack_host_beta_mounts(
     }
     let personal_connection_scope = SlackPersonalConnectionScope {
         installation_id: config.installation_id.clone(),
-        team_id: config.team_id.clone(),
     };
     Ok(SlackHostBetaMounts {
         events,
@@ -889,6 +908,7 @@ pub fn build_slack_host_beta_mounts(
         personal_oauth_binder,
         user_identity_lookup: user_identity_lookup.clone(),
         user_identity_delete_store,
+        user_binding_lifecycle_store,
         conversation_actor_pairings,
         personal_dm_target_store,
         outbound_delivery_target_provider,
@@ -1201,6 +1221,16 @@ impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
             return Ok(Some(resolved_actor));
         }
         Ok(None)
+    }
+
+    async fn resolved_product_actor_user_is_current(
+        &self,
+        request: &ProductActorUserResolutionRequest,
+        expected: &ResolvedProductActorUser,
+    ) -> Result<bool, ProductWorkflowError> {
+        self.cached_identity
+            .resolved_product_actor_user_is_current(request, expected)
+            .await
     }
 }
 
@@ -4277,10 +4307,24 @@ mod tests {
     }
 
     async fn bind_slack_oauth_user(mounts: &SlackHostBetaMounts) {
-        mounts
-            .personal_oauth_binding_config()
+        let config = mounts.personal_oauth_binding_config();
+        let epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        config
+            .lifecycle_store
+            .begin_connection(
+                &crate::slack::slack_personal_binding::SlackConnectionOwner::new(
+                    TenantId::new(TENANT).expect("tenant"),
+                    UserId::new(USER).expect("user"),
+                    AdapterInstallationId::new(INSTALLATION).expect("installation"),
+                ),
+                epoch,
+                chrono::Utc::now() + chrono::Duration::minutes(5),
+            )
+            .await
+            .expect("Slack OAuth lifecycle begins");
+        config
             .binding_service
-            .bind_personal_user(
+            .bind_personal_user_for_epoch(
                 SlackPersonalBindingPrincipal {
                     tenant_id: TenantId::new(TENANT).expect("tenant"),
                     user_id: UserId::new(USER).expect("user"),
@@ -4293,6 +4337,7 @@ mod tests {
                     enterprise_id: None,
                     api_app_id: SlackApiAppId::new(API_APP),
                 },
+                epoch,
             )
             .await
             .expect("Slack OAuth binding succeeds");
@@ -4519,29 +4564,23 @@ mod tests {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
 
-        async fn upsert_personal_dm_target(
+        async fn upsert_personal_dm_target_for_epoch(
             &self,
-            target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            _target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            _epoch: SlackConnectionEpoch,
         ) -> Result<
             crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
             SlackPersonalDmTargetError,
         > {
-            Ok(target)
-        }
-
-        async fn delete_personal_dm_target(
-            &self,
-            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
-        ) -> Result<bool, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
 
-        async fn delete_personal_dm_targets_for_user(
+        async fn delete_personal_dm_targets_for_owner(
             &self,
             _tenant_id: &TenantId,
             _user_id: &UserId,
             _installation_id: &AdapterInstallationId,
-            _team_id: &crate::slack::slack_serve::SlackTeamId,
+            _expected_epoch: Option<SlackConnectionEpoch>,
         ) -> Result<usize, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }

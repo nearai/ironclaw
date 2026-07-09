@@ -1563,6 +1563,7 @@ fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthPr
         AuthErrorCode::ProviderIdentityAlreadyConnected => {
             AuthProductError::ProviderIdentityAlreadyConnected
         }
+        AuthErrorCode::ConnectionConflict => AuthProductError::BackendConflict,
         AuthErrorCode::MalformedConfig => AuthProductError::MalformedConfig,
         AuthErrorCode::MalformedCallback => AuthProductError::MalformedCallback,
         AuthErrorCode::Canceled => AuthProductError::Canceled,
