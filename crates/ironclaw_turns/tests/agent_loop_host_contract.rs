@@ -3783,7 +3783,10 @@ async fn model_started_failure_still_accounts_provider_outcome() {
     assert!(accountant.was_post_called());
     assert!(!accountant.post_saw_failure());
     assert_eq!(gateway.requests().len(), 1);
-    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+    assert_eq!(
+        milestone_sink.kind_names(),
+        vec!["model_text_delta", "model_completed"]
+    );
 }
 
 /// Budget accounting on failure: post hook still fires.

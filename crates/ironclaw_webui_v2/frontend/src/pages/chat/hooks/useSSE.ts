@@ -33,16 +33,20 @@ const V2_EVENT_NAMES = [
 const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
 
+function eventSourceReadyStateConstant(staticValue: unknown, fallback: number) {
+  return typeof staticValue === "number" ? staticValue : fallback;
+}
+
 function isEventSourceClosed(source) {
   const closedState = typeof EventSource === "function"
-    ? EventSource.CLOSED
+    ? eventSourceReadyStateConstant(EventSource.CLOSED, EVENT_SOURCE_CLOSED)
     : EVENT_SOURCE_CLOSED;
   return source?.readyState === closedState;
 }
 
 function isEventSourceOpen(source) {
   const openState = typeof EventSource === "function"
-    ? EventSource.OPEN
+    ? eventSourceReadyStateConstant(EventSource.OPEN, EVENT_SOURCE_OPEN)
     : EVENT_SOURCE_OPEN;
   return source?.readyState === openState;
 }

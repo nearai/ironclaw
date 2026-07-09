@@ -432,18 +432,18 @@ impl WebuiRuntimeProjectionStream {
                 return;
             }
         };
-        if keep_consuming && !is_resuming_runtime_payloads {
-            if let Err(error) = consume_buffered_runtime_items(
+        if keep_consuming
+            && !is_resuming_runtime_payloads
+            && let Err(error) = consume_buffered_runtime_items(
                 &mut subscription,
                 &mut batch,
                 &request.scope,
                 self.display_previews.as_ref(),
             )
             .await
-            {
-                send_projection_subscription_error(&sender, error).await;
-                return;
-            }
+        {
+            send_projection_subscription_error(&sender, error).await;
+            return;
         }
         if let Err(error) = self.append_turn_events(&mut batch, &request).await {
             send_projection_subscription_error(&sender, error).await;

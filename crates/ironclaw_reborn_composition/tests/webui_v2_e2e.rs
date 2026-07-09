@@ -766,6 +766,23 @@ fn event_ids(events: &[ParsedSseEvent]) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
+fn event_payload_without_cursor(event: &ParsedSseEvent) -> Value {
+    let mut payload = event_payload_json(event);
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("cursor");
+    }
+    payload
+}
+
+fn replay_payload_signatures<'a>(
+    events: impl Iterator<Item = &'a ParsedSseEvent>,
+) -> Vec<(Option<String>, Value)> {
+    events
+        .filter(|event| event.id.is_some())
+        .map(|event| (event.event.clone(), event_payload_without_cursor(event)))
+        .collect()
+}
+
 fn has_browser_visible_progress(events: &[ParsedSseEvent]) -> bool {
     events.iter().any(|event| {
         matches!(
@@ -1050,12 +1067,17 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
         replay_ids.iter().all(|id| id != &replay_from),
         "Last-Event-ID replay must resume after the provided cursor, got: {replay_ids:?}"
     );
+    let original_replayable_payloads = replay_payload_signatures(events.iter().skip(1));
+    let replayed_payloads = replay_payload_signatures(replay_events.iter());
     assert!(
-        replay_ids
+        replayed_payloads
             .iter()
-            .any(|id| ids.iter().skip(1).any(|seen| seen == id)),
-        "Last-Event-ID replay should include an event already observed after the first cursor; \
-         original ids: {ids:?}, replay ids: {replay_ids:?}"
+            .any(|replayed| original_replayable_payloads
+                .iter()
+                .any(|seen| seen == replayed)),
+        "Last-Event-ID replay should include a payload already observed after the first cursor; \
+         original ids: {ids:?}, replay ids: {replay_ids:?}, \
+         original payloads: {original_replayable_payloads:?}, replay payloads: {replayed_payloads:?}"
     );
 
     let timeline = wait_for_final_timeline(&harness.router, &thread_id).await;

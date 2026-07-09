@@ -1920,10 +1920,12 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
             LoopHostMilestoneKind::ModelStarted {
                 requested_model_profile_id: None
             },
+            LoopHostMilestoneKind::ModelTextDelta { safe_text },
             LoopHostMilestoneKind::ModelCompleted {
                 effective_model_profile_id
             }
-        ] if effective_model_profile_id.as_str() == "interactive_model"
+        ] if safe_text == "production response"
+            && effective_model_profile_id.as_str() == "interactive_model"
     ));
 }
 
