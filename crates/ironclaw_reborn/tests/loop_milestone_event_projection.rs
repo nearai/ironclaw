@@ -245,6 +245,12 @@ async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones(
 
     for kind in [
         LoopHostMilestoneKind::IterationStarted { iteration: 1 },
+        LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: "thinking".into(),
+        },
+        LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "visible assistant text".into(),
+        },
         LoopHostMilestoneKind::CapabilityBatchStarted {
             iteration: 1,
             call_count: 2,
@@ -289,7 +295,7 @@ async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones(
         .unwrap();
     assert!(
         snapshot.timeline.entries.is_empty(),
-        "progress milestones carry counters/checkpoint kinds that would be lost in RuntimeEvent"
+        "live-only milestones carry lossy progress/text deltas that should not become durable RuntimeEvents"
     );
     assert!(
         snapshot.runs.is_empty(),

@@ -3,6 +3,11 @@ import React from "react";
 import { fetchTimeline } from "../../../lib/api";
 import { authScope } from "../../../lib/auth-scope";
 import { messagesFromTimeline } from "../lib/history-messages";
+import {
+  carryFinalAssistantOrderFlags,
+  isFinalAssistantMessage,
+  isRunActivityMessage,
+} from "../lib/stream-order-memory";
 
 const PAGE_SIZE = 50;
 
@@ -265,15 +270,18 @@ function mergePage(older, current) {
 
 function mergeFullRefresh(fresh, current, options = {}) {
   const { preserveClientOnly = false, finalReplyTimestampByRun = null } = options;
-  const hydratedFresh = hydrateFreshMessages(fresh, current, {
-    finalReplyTimestampByRun,
-  });
+  const hydratedFresh = carryFinalAssistantOrderFlags(
+    hydrateFreshMessages(fresh, current, {
+      finalReplyTimestampByRun,
+    }),
+    current,
+  );
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
     }
-    if (isRuntimeActivityMessage(message)) return true;
+    if (isRunActivityMessage(message)) return true;
     if (
       typeof message.timelineMessageId === "string" &&
       ids.has(`msg-${message.timelineMessageId}`)
@@ -342,14 +350,6 @@ function hydrateFreshMessages(fresh, current, options = {}) {
   });
 }
 
-function isFinalAssistantMessage(message) {
-  return message?.role === "assistant" && message?.isFinalReply === true;
-}
-
-function isRuntimeActivityMessage(message) {
-  return message?.role === "tool_activity" || message?.role === "thinking";
-}
-
 function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const freshIndexById = new Map();
   for (const [index, message] of fresh.entries()) {
@@ -362,7 +362,7 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const append = [];
 
   for (const message of preserved) {
-    if (!isRuntimeActivityMessage(message)) {
+    if (!isRunActivityMessage(message)) {
       append.push(message);
       continue;
     }

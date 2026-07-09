@@ -71,7 +71,7 @@ use crate::slack::slack_serve::{
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
     slack_events_route_mount,
 };
-use crate::webui_serve::PublicRouteMount;
+use crate::webui::webui_serve::PublicRouteMount;
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
@@ -720,7 +720,7 @@ pub fn build_slack_host_beta_mounts(
         ProvisioningSlackPersonalUserBinder::new(Arc::clone(&binding_service), dm_provisioner),
     );
     let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
-        crate::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
+        crate::slack::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
             state.clone(),
         ),
     )));
