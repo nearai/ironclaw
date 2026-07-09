@@ -3131,13 +3131,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     },
     LayerMatrixException {
         crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_product_adapter_registry",
-        introduced: "2026-07-09",
-        removes_in: "W3",
-        reason: "the active product-adapter registry path is still wired through host_runtime until product eviction settles the adapter boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
         dependency_name: "ironclaw_skills",
         introduced: "2026-07-09",
         removes_in: "W5",
@@ -3275,13 +3268,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W4/W5",
         reason: "the runner still directly hosts loop support until scheduler co-location and the loop boundary decision settle the edge",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_wasm_product_adapters",
-        dependency_name: "ironclaw_product_adapters",
-        introduced: "2026-07-09",
-        removes_in: "W3",
-        reason: "WASM product adapter hosting still depends on product adapter vocabulary until product/runtime adapter ownership is settled",
     },
     LayerMatrixException {
         crate_name: "ironclaw_reborn_webui_ingress",

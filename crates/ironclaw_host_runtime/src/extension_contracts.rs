@@ -9,20 +9,15 @@ use ironclaw_host_api::{
     HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, HostPortCatalogEntry,
     HostPortId, VirtualPath,
 };
-use ironclaw_product_adapter_registry::ProductAdapterHostApiContract;
 
 /// Build the host-runtime default set of Extension Manifest v2 host API contracts.
 ///
-/// This is composition-only: contracts validate and project manifest declarations,
-/// but do not execute runtime code, resolve schema files, or publish hot surfaces.
+/// These contracts validate host-owned manifest declarations but do not execute
+/// runtime code, resolve schema files, or publish hot surfaces. Product-specific
+/// contracts are added by the composition layer that owns those products.
 pub fn default_host_api_contract_registry() -> Result<HostApiContractRegistry, ManifestV2Error> {
     let mut registry = HostApiContractRegistry::new();
     registry.register(Arc::new(CapabilityProviderHostApiContract::new()?))?;
-    let product_adapter_contract =
-        ProductAdapterHostApiContract::new().map_err(|error| ManifestV2Error::Invalid {
-            reason: format!("product adapter host API contract registration failed: {error}"),
-        })?;
-    registry.register(Arc::new(product_adapter_contract))?;
     Ok(registry)
 }
 
