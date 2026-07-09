@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   formatCredit,
   formatTimestamp,
+  isSafeLoginLinkUrl,
   openAccountLoginLink,
   tracesSectionMode,
 } from "./trace-commons-tab";
@@ -124,6 +125,26 @@ describe("openAccountLoginLink", () => {
     });
     expect(result.status).toBe("error");
     expect(opener.windows[0].closed).toBe(true);
+  });
+
+  test("non-web minted URLs are refused before navigation (defense in depth)", async () => {
+    // The about:blank tab inherits the WebUI origin — a javascript: URL would
+    // execute with WebUI-origin access. The backend origin-pins the URL, but
+    // the client refuses independently.
+    expect(isSafeLoginLinkUrl("https://commons.example/a")).toBe(true);
+    expect(isSafeLoginLinkUrl("http://127.0.0.1:8080/a")).toBe(true);
+    expect(isSafeLoginLinkUrl("javascript:alert(1)")).toBe(false);
+    expect(isSafeLoginLinkUrl("data:text/html,x")).toBe(false);
+    expect(isSafeLoginLinkUrl("/relative/path")).toBe(false);
+
+    const opener = fakeOpener();
+    const result = await openAccountLoginLink({
+      mint: async () => ({ minted: true, enrolled: true, url: "javascript:alert(1)" }),
+      open: opener.open,
+    });
+    expect(result.status).toBe("unavailable");
+    expect(opener.windows[0].closed).toBe(true);
+    expect(opener.windows[0].location).toBeNull();
   });
 
   test("popup-blocked open reports blocked WITHOUT burning a one-time link", async () => {

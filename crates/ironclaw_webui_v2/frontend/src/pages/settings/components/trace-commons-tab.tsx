@@ -36,6 +36,19 @@ export function formatTimestamp(value, t) {
 //    single-use login URL server-side.
 // 3. Only then mint and navigate. The URL exists only in this flow — never
 //    logged, never stored.
+// 4. Defense in depth: even though the backend pins the minted URL to the
+//    trust-anchored issuer origin, refuse to navigate to anything that is
+//    not absolute http(s) — the about:blank tab inherits the WebUI origin,
+//    so a javascript: URL would execute with WebUI-origin access.
+export function isSafeLoginLinkUrl(raw) {
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 export async function openAccountLoginLink({ mint, open }) {
   const win = open("about:blank", "_blank");
   if (!win) {
@@ -45,6 +58,10 @@ export async function openAccountLoginLink({ mint, open }) {
   try {
     const response = await mint();
     if (!response || response.minted !== true || !response.url) {
+      win.close();
+      return { status: "unavailable" };
+    }
+    if (!isSafeLoginLinkUrl(response.url)) {
       win.close();
       return { status: "unavailable" };
     }
