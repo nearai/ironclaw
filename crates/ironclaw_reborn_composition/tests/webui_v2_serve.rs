@@ -1152,6 +1152,45 @@ async fn session_endpoint_reports_operator_capability_for_operator_authenticator
 }
 
 #[tokio::test]
+async fn session_endpoint_reports_workspace_scoped_projection_from_serve_config() {
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services,
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_workspace_requires_scoped_projection(true);
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("session json");
+    assert_eq!(
+        body["features"]["workspace_requires_scoped_projection"], true,
+        "WebuiServeConfig must feed scoped-workspace fallback behavior into /session"
+    );
+}
+
+#[tokio::test]
 async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenticator() {
     let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
     let response = app

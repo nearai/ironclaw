@@ -7,6 +7,8 @@ import { WorkspaceTree } from "./workspace-tree";
 // drills into its directories. The filter narrows the loaded tree by name.
 export function WorkspaceSidebar({
   rootEntries,
+  currentUser,
+  workspaceScopeKey,
   selectedPath,
   expandedPaths,
   filter,
@@ -30,6 +32,8 @@ export function WorkspaceSidebar({
       <div className="min-h-0 flex-1 overflow-y-auto">
         <WorkspaceTree
           entries={rootEntries}
+          currentUser={currentUser}
+          workspaceScopeKey={workspaceScopeKey}
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
           filter={filter}

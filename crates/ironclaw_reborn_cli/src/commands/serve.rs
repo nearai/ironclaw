@@ -23,7 +23,7 @@ use ironclaw_reborn_composition::{
     build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::{
-    IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
+    IdentitySection, RebornConfigFile, RebornProfile, seed_default_config_file_if_missing,
 };
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
@@ -539,7 +539,10 @@ impl ServeCommand {
             );
 
             let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
-                .with_default_agent_id(default_agent_id.clone());
+                .with_default_agent_id(default_agent_id.clone())
+                .with_workspace_requires_scoped_projection(
+                    profile_requires_scoped_workspace_projection(profile),
+                );
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
@@ -636,6 +639,13 @@ impl ServeCommand {
 
         Ok(())
     }
+}
+
+fn profile_requires_scoped_workspace_projection(profile: RebornProfile) -> bool {
+    !matches!(
+        profile,
+        RebornProfile::LocalDev | RebornProfile::LocalDevYolo
+    )
 }
 
 #[cfg(feature = "slack-v2-host-beta")]

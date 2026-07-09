@@ -224,6 +224,11 @@ pub struct WebuiServeConfig {
     /// the same-origin check pass for a forged Origin. Defaults to
     /// `None` (fall back to Host-header comparison + allowlist).
     pub(crate) canonical_host: Option<String>,
+    /// Whether the browser must avoid raw workspace fallback and only display
+    /// caller-scoped workspace content. This is presentation-layer behavior:
+    /// filesystem mounts stay unchanged, but hosted profiles fail closed when
+    /// the raw workspace root would otherwise expose shared artifacts.
+    pub(crate) workspace_requires_scoped_projection: bool,
     /// Trusted default agent id stamped onto every
     /// [`WebUiAuthenticatedCaller`]. The browser body cannot influence
     /// this — it comes from host installation config / runtime
@@ -372,6 +377,7 @@ impl WebuiServeConfig {
             allowed_origins,
             csp_header: None,
             canonical_host: None,
+            workspace_requires_scoped_projection: false,
             default_agent_id: None,
             default_project_id: None,
             public_mounts: Vec::new(),
@@ -471,6 +477,14 @@ impl WebuiServeConfig {
     /// trusting the request's `Host` header.
     pub fn with_canonical_host(mut self, host: impl Into<String>) -> Self {
         self.canonical_host = Some(host.into());
+        self
+    }
+
+    /// Require the WebUI workspace browser to show only caller-scoped
+    /// workspace projections. Local development should leave this disabled so
+    /// raw single-user `/workspace` roots remain visible.
+    pub fn with_workspace_requires_scoped_projection(mut self, enabled: bool) -> Self {
+        self.workspace_requires_scoped_projection = enabled;
         self
     }
 
@@ -708,7 +722,8 @@ pub fn webui_v2_app_with_lifecycle(
         WebUiV2RouteOptions::without_operator_routes()
     };
     let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-        .with_reborn_projects_enabled(reborn_projects_enabled());
+        .with_reborn_projects_enabled(reborn_projects_enabled())
+        .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);

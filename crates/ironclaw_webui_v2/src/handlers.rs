@@ -108,6 +108,11 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// Whether the browser must hide raw workspace fallback and only show the
+    /// caller-scoped workspace projection. Hosted deployments enable this to
+    /// avoid showing artifacts from a shared `/workspace` root; local
+    /// deployments keep it disabled so single-user workspaces remain visible.
+    pub workspace_requires_scoped_projection: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -130,6 +135,7 @@ pub async fn get_session(
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            workspace_requires_scoped_projection: state.workspace_requires_scoped_projection(),
             global_auto_approve,
         },
         attachments: webui_attachment_capabilities(),

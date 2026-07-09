@@ -3236,6 +3236,37 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
     }
 }
 
+#[tokio::test]
+async fn get_session_reports_workspace_scoped_projection_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_workspace_requires_scoped_projection(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["workspace_requires_scoped_projection"], enabled,
+            "features.workspace_requires_scoped_projection must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
 // The approval card hint needs the effective global auto-approve setting. Keep
 // that as a narrow facade read surfaced through the session bootstrap feature,
 // not an operator config key lookup from the browser or route handler.

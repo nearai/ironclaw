@@ -27,12 +27,22 @@ function visibleEntries(entries, filter, expandedPaths) {
   return sortEntries(filtered);
 }
 
-function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleDirectory, onSelectFile }) {
+function TreeNode({
+  entry,
+  depth,
+  currentUser,
+  workspaceScopeKey,
+  selectedPath,
+  expandedPaths,
+  filter,
+  onToggleDirectory,
+  onSelectFile,
+}) {
   const t = useT();
   const isExpanded = expandedPaths.has(entry.path);
   const childQuery = useQuery({
-    queryKey: ["workspace-list", entry.path],
-    queryFn: () => listWorkspace(entry.path),
+    queryKey: ["workspace-list", workspaceScopeKey, entry.path],
+    queryFn: () => listWorkspace(entry.path, { currentUser }),
     enabled: entry.is_dir && isExpanded,
   });
 
@@ -70,6 +80,8 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
                     key={child.path}
                     entry={child}
                     depth={depth + 1}
+                    currentUser={currentUser}
+                    workspaceScopeKey={workspaceScopeKey}
                     selectedPath={selectedPath}
                     expandedPaths={expandedPaths}
                     filter={filter}
@@ -100,6 +112,8 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
 
 export function WorkspaceTree({
   entries,
+  currentUser,
+  workspaceScopeKey,
   selectedPath,
   expandedPaths,
   filter,
@@ -128,6 +142,8 @@ export function WorkspaceTree({
           key={entry.path}
           entry={entry}
           depth={0}
+          currentUser={currentUser}
+          workspaceScopeKey={workspaceScopeKey}
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
           filter={filter}

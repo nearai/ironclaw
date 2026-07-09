@@ -1,4 +1,4 @@
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useOutletContext, useParams } from "react-router";
 import { Button } from "../../design-system/button";
 import { StatusPill } from "../../design-system/primitives";
 import React from "react";
@@ -14,8 +14,19 @@ export function WorkspacePage() {
   const t = useT();
   const navigate = useNavigate();
   const params = useParams();
+  const {
+    currentUser = null,
+    workspaceRequiresScopedProjection = false,
+  } = useOutletContext() as {
+    currentUser?: { tenant_id?: string | null; user_id?: string | null } | null;
+    workspaceRequiresScopedProjection?: boolean;
+  };
   const selectedPath = params["*"] || DEFAULT_WORKSPACE_PATH;
-  const workspace = useWorkspaceBrowser(selectedPath);
+  const workspace = useWorkspaceBrowser(
+    selectedPath,
+    currentUser,
+    workspaceRequiresScopedProjection,
+  );
 
   const handleSelectFile = React.useCallback(
     (path) => {
@@ -64,6 +75,8 @@ export function WorkspacePage() {
           >
             <WorkspaceSidebar
               rootEntries={workspace.rootEntries}
+              currentUser={workspace.currentUser}
+              workspaceScopeKey={workspace.workspaceScopeKey}
               selectedPath={selectedPath}
               expandedPaths={workspace.expandedPaths}
               filter={workspace.filter}
