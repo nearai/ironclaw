@@ -135,16 +135,22 @@ One generic builtin (not per-server generated variants) keeps the mechanism univ
 | `src/agent/job_monitor.rs` | reuse; add a route variant if the existing one is Claude-Code-specific |
 | `src/app.rs` | wire builtins (mcp client store + scheduler slot), startup reconcile |
 | `src/channels/web/features/jobs/`, `src/channels/web/types.rs` | surface a `mode`/`kind` so MCP jobs are distinguishable in `/api/jobs` |
-| `src/cli/mcp.rs` | `--timeout-secs` / `--allow-background` flags on `mcp add` / `mcp update` |
+| `src/cli/mcp.rs` | `--timeout-secs` / `--allow-background` flags on the existing `mcp add` (already an upsert at `:257`, so it doubles as edit — no new `update` subcommand) |
 | `.env.example`, `src/channels/web/CLAUDE.md` | document the new config + tools |
 
 ## Config surface (enabling msbsandbox after build)
 
+`timeout_secs` and `allow_background` are **per-server properties**, so they live on the `McpServerConfig` row — which is already DB-persisted via `servers.upsert(config)` (`src/cli/mcp.rs:257`). That row is the single source of truth. Deliberately **not** exposed as a generic `settings` key (e.g. `mcp.msbsandbox.timeout_secs`), which would duplicate the source of truth and violate the single-source rule (`.claude/rules/types.md`, `.claude/rules/architecture.md`).
+
+Because `mcp add` already upserts, it doubles as the edit path — no new `update` subcommand:
+
 ```
-ironclaw mcp update msbsandbox --timeout-secs 3600 --allow-background
+ironclaw mcp add msbsandbox --transport stdio --command node \
+  --arg /usr/local/lib/msb-mcp-shim.js --env MSB_BIN=/home/ironclaw/.microsandbox/bin/msb \
+  --timeout-secs 3600 --allow-background
 ```
 
-(or the DB-settings equivalent). The agent can then background long sandbox jobs; every other server and every quick call stays fast-and-synchronous.
+(A direct DB edit of the server-config row remains a power-user escape hatch, not the documented path.) The agent can then background long sandbox jobs; every other server and every quick call stays fast-and-synchronous.
 
 ## Open implementation questions (resolve during planning, not blocking)
 
