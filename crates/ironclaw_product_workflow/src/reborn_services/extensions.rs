@@ -8,13 +8,13 @@ use ironclaw_host_api::ExtensionId;
 
 use crate::{
     ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleInstalledExtensionSummary, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
     RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornServicesError, RemovableChannelCleanup, WebUiAuthenticatedCaller,
-    disconnect_channel_for_cleanup, removable_channel_cleanup_for_summary,
+    disconnect_channel_for_cleanup, removable_channel_cleanup_for_lifecycle_response,
 };
 
 use super::{
@@ -157,18 +157,12 @@ async fn removable_channel_cleanup(
     context: LifecycleProductContext,
     package_ref: &LifecyclePackageRef,
 ) -> Result<Option<RemovableChannelCleanup>, RebornServicesError> {
-    if package_ref.kind != LifecyclePackageKind::Extension {
-        return Ok(None);
-    }
     let lifecycle =
         execute_lifecycle(facade, context, LifecycleProductAction::ExtensionList).await?;
-    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = lifecycle.payload else {
-        return Ok(None);
-    };
-    Ok(extensions
-        .into_iter()
-        .filter(|installed| installed.summary.package_ref == *package_ref)
-        .find_map(|installed| removable_channel_cleanup_for_summary(&installed.summary)))
+    Ok(removable_channel_cleanup_for_lifecycle_response(
+        package_ref,
+        &lifecycle,
+    ))
 }
 
 async fn execute_lifecycle(

@@ -272,6 +272,16 @@ mod tests {
         assert_eq!(slack_user_id, "U123");
     }
 
+    #[test]
+    fn slack_user_identity_provider_user_id_parser_rejects_malformed_values() {
+        assert_eq!(parse_slack_user_identity_provider_user_id("U123"), None);
+        assert_eq!(
+            parse_slack_user_identity_provider_user_id("install-alpha:"),
+            None
+        );
+        assert_eq!(parse_slack_user_identity_provider_user_id(":U123"), None);
+    }
+
     fn request(
         adapter_id: &str,
         installation_id: AdapterInstallationId,

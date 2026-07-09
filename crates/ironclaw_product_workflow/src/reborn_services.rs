@@ -17,7 +17,7 @@ use futures::future::try_join_all;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountUpdateBinding, ProviderScope,
+    CredentialAccountUpdateBinding, ProviderScope, SLACK_PERSONAL_PROVIDER_ID,
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
@@ -48,14 +48,14 @@ use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecycleExtensionSummary,
     LifecycleExtensionSurfaceKind, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    ListPendingApprovalsRequest, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -172,7 +172,6 @@ type SkillActivationClearer =
 const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
 const SLACK_EXTENSION_ID: &str = "slack";
-const SLACK_PERSONAL_PROVIDER_ID: &str = "slack_personal";
 pub(crate) const SLACK_CHANNEL_ID: &str = "slack";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +309,22 @@ pub fn removable_channel_cleanup_for_summary(
         ));
     }
     None
+}
+
+pub fn removable_channel_cleanup_for_lifecycle_response(
+    package_ref: &LifecyclePackageRef,
+    lifecycle: &LifecycleProductResponse,
+) -> Option<RemovableChannelCleanup> {
+    if package_ref.kind != LifecyclePackageKind::Extension {
+        return None;
+    }
+    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = &lifecycle.payload else {
+        return None;
+    };
+    extensions
+        .iter()
+        .find(|installed| installed.summary.package_ref == *package_ref)
+        .and_then(|installed| removable_channel_cleanup_for_summary(&installed.summary))
 }
 
 pub async fn disconnect_channel_for_cleanup(

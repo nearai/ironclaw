@@ -87,6 +87,10 @@ pub(super) async fn build_runtime_mounts(
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
+    // Durable, filesystem-backed conversation binding store so Slack
+    // conversation continuity survives a process restart. Backend
+    // (libSQL / Postgres / local disk) is a property of the host-state
+    // root filesystem, shared with the idempotency ledger.
     let conversation_services = Arc::new(
         RebornFilesystemConversationServices::new(Arc::clone(
             &parts.local_runtime.host_state_filesystem,

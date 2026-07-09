@@ -20,7 +20,7 @@ use ironclaw_product_workflow::{
     ChannelConnectionFacade, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
     LifecycleProductResponse, ProductWorkflowError, RebornServicesError, RemovableChannelCleanup,
     WebUiAuthenticatedCaller, disconnect_channel_for_cleanup,
-    removable_channel_cleanup_for_summary,
+    removable_channel_cleanup_for_lifecycle_response,
 };
 use serde::Deserialize;
 
@@ -157,7 +157,7 @@ impl ExtensionLifecycleToolHandler {
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, FirstPartyCapabilityError> {
         if let Some(cleanup) = self.removable_channel_cleanup(&package_ref).await? {
-            self.disconnect_channel_for_remove(scope, cleanup).await?;
+            disconnect_channel_for_remove(self.channel_connection.as_ref(), scope, cleanup).await?;
         }
         self.extension_management
             .remove(package_ref, scope)
@@ -169,49 +169,42 @@ impl ExtensionLifecycleToolHandler {
         &self,
         package_ref: &LifecyclePackageRef,
     ) -> Result<Option<RemovableChannelCleanup>, FirstPartyCapabilityError> {
-        if package_ref.kind != LifecyclePackageKind::Extension {
-            return Ok(None);
-        }
         let installed = self
             .extension_management
             .list_installed()
             .await
             .map_err(lifecycle_error)?;
-        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = installed.payload
-        else {
-            return Ok(None);
-        };
-        Ok(extensions
-            .into_iter()
-            .filter(|installed| installed.summary.package_ref == *package_ref)
-            .find_map(|installed| removable_channel_cleanup_for_summary(&installed.summary)))
+        Ok(removable_channel_cleanup_for_lifecycle_response(
+            package_ref,
+            &installed,
+        ))
     }
+}
 
-    async fn disconnect_channel_for_remove(
-        &self,
-        scope: &ResourceScope,
-        cleanup: RemovableChannelCleanup,
-    ) -> Result<(), FirstPartyCapabilityError> {
-        let Some(channel_connection) = self.channel_connection.get().cloned() else {
-            let (channel, requires_connection_facade_support) = cleanup.into_parts();
-            if requires_connection_facade_support {
-                return Ok(());
-            }
-            tracing::debug!(
-                target: "ironclaw::reborn::extension_lifecycle",
-                channel,
-                "extension removal requires channel cleanup but no channel connection facade is installed"
-            );
-            return Err(FirstPartyCapabilityError::new(
-                RuntimeDispatchErrorKind::OperationFailed,
-            ));
-        };
-        let caller = caller_from_scope(scope);
-        disconnect_channel_for_cleanup(channel_connection.as_ref(), caller, cleanup)
-            .await
-            .map_err(channel_connection_error)?;
-        Ok(())
-    }
+async fn disconnect_channel_for_remove(
+    channel_connection_slot: &OnceLock<Arc<dyn ChannelConnectionFacade>>,
+    scope: &ResourceScope,
+    cleanup: RemovableChannelCleanup,
+) -> Result<(), FirstPartyCapabilityError> {
+    let Some(channel_connection) = channel_connection_slot.get().cloned() else {
+        let (channel, requires_connection_facade_support) = cleanup.into_parts();
+        if requires_connection_facade_support {
+            return Ok(());
+        }
+        tracing::debug!(
+            target: "ironclaw::reborn::extension_lifecycle",
+            channel,
+            "extension removal requires channel cleanup but no channel connection facade is installed"
+        );
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::OperationFailed,
+        ));
+    };
+    let caller = caller_from_scope(scope);
+    disconnect_channel_for_cleanup(channel_connection.as_ref(), caller, cleanup)
+        .await
+        .map_err(channel_connection_error)?;
+    Ok(())
 }
 
 fn caller_from_scope(scope: &ResourceScope) -> WebUiAuthenticatedCaller {
@@ -829,6 +822,42 @@ mod tests {
             )],
             "model-visible extension removal should clean up the same Slack channel binding as WebUI removal"
         );
+    }
+
+    #[tokio::test]
+    async fn extension_remove_skips_optional_channel_cleanup_when_facade_unset() {
+        let channel_connection: OnceLock<Arc<dyn ChannelConnectionFacade>> = OnceLock::new();
+        let context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
+
+        disconnect_channel_for_remove(
+            &channel_connection,
+            &context.resource_scope,
+            RemovableChannelCleanup::IfConnectionFacadeSupportsChannel("slack".to_string()),
+        )
+        .await
+        .expect("optional channel cleanup should no-op when no facade is wired");
+    }
+
+    #[tokio::test]
+    async fn extension_remove_fails_required_channel_cleanup_when_facade_unset() {
+        let channel_connection: OnceLock<Arc<dyn ChannelConnectionFacade>> = OnceLock::new();
+        let context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
+
+        let error = disconnect_channel_for_remove(
+            &channel_connection,
+            &context.resource_scope,
+            RemovableChannelCleanup::Required("fixture-channel".to_string()),
+        )
+        .await
+        .expect_err("required channel cleanup must fail closed when no facade is wired");
+
+        assert!(matches!(
+            error,
+            FirstPartyCapabilityError::Dispatch {
+                kind: RuntimeDispatchErrorKind::OperationFailed,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

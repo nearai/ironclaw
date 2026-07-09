@@ -240,6 +240,57 @@ async fn unpair_external_actor_revokes_direct_conversation_bindings() {
 }
 
 #[tokio::test]
+async fn unpair_external_actor_clears_direct_external_event_routes() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-1");
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("chat-unpair-event-route-old", None),
+            "telegram-event-before-unpair-route",
+        ))
+        .await
+        .expect("first direct binding");
+
+    services
+        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor)
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-unpair-event-route-new", None),
+            "telegram-event-before-unpair-route",
+        ))
+        .await
+        .expect("unpair should remove the stale direct event route");
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "reusing an event id after direct unpair must create a fresh route, not revive stale state"
+    );
+}
+
+#[tokio::test]
 async fn unpair_external_actor_preserves_shared_conversation_routes() {
     let services = InMemoryConversationServices::default();
     let alice_actor = external_actor("alice-telegram");
