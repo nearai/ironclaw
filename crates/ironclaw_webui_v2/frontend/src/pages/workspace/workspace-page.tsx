@@ -16,7 +16,7 @@ export function WorkspacePage() {
   const params = useParams();
   const {
     currentUser = null,
-    workspaceRequiresScopedProjection = false,
+    workspaceRequiresScopedProjection = true,
   } = useOutletContext() as {
     currentUser?: { tenant_id?: string | null; user_id?: string | null } | null;
     workspaceRequiresScopedProjection?: boolean;

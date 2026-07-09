@@ -27,7 +27,7 @@ export function GatewayLayout({
   isChecking = false,
   isAdmin,
   rebornProjectsEnabled = false,
-  workspaceRequiresScopedProjection = false,
+  workspaceRequiresScopedProjection = true,
   globalAutoApproveEnabled = false,
   onSignOut,
 }) {

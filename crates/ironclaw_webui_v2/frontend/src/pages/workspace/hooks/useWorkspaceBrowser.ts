@@ -16,7 +16,7 @@ function workspaceScopeKey(currentUser) {
 export function useWorkspaceBrowser(
   selectedPath,
   currentUser = null,
-  requireScopedWorkspace = false
+  requireScopedWorkspace = true
 ) {
   const t = useT();
   const queryClient = useQueryClient();
