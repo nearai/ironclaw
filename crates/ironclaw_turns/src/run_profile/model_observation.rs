@@ -100,6 +100,12 @@ pub enum ToolObservationDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    ResultReference {
+        result_ref: String,
+        byte_len: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+    },
 }
 
 impl ToolObservationDetail {
@@ -119,6 +125,22 @@ impl ToolObservationDetail {
             Self::GenericFailure { detail, .. } => {
                 if let Some(detail) = detail {
                     validate_model_observation_detail(detail)?;
+                }
+                Ok(())
+            }
+            Self::ResultReference {
+                result_ref,
+                preview,
+                ..
+            } => {
+                validate_non_empty_text(result_ref, "model observation result ref")?;
+                validate_text_len(
+                    result_ref,
+                    "model observation result ref",
+                    MODEL_OBSERVATION_TEXT_MAX_BYTES,
+                )?;
+                if let Some(preview) = preview {
+                    validate_model_observation_detail(preview)?;
                 }
                 Ok(())
             }

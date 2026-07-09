@@ -550,6 +550,7 @@ async fn write_completed_result(
         terminate_hint: false,
         byte_len: write_result.byte_len,
         output_digest: write_result.output_digest,
+        model_observation: write_result.model_observation,
     }))
 }
 

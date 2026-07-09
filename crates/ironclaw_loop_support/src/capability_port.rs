@@ -27,9 +27,10 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
         ConcurrencyHint, ContentDigest, LoopCapabilityPort, LoopHostMilestone,
         LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef, LoopRunContext,
-        LoopSafeSummary, ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        LoopSafeSummary, ModelVisibleToolObservation, ProcessHandleSummary, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text,
     },
 };
 use serde_json::Value;
@@ -472,6 +473,7 @@ pub struct CapabilityWriteResult {
     pub result_ref: LoopResultRef,
     pub byte_len: u64,
     pub output_digest: Option<ContentDigest>,
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 impl CapabilityWriteResult {
@@ -480,6 +482,7 @@ impl CapabilityWriteResult {
             result_ref,
             byte_len,
             output_digest: None,
+            model_observation: None,
         }
     }
 
@@ -502,6 +505,7 @@ impl CapabilityWriteResult {
             }
         };
         Self {
+            model_observation: None,
             result_ref,
             byte_len,
             output_digest,
@@ -1426,6 +1430,7 @@ impl HostRuntimeLoopCapabilityPort {
             terminate_hint: false,
             byte_len: write_result.byte_len,
             output_digest: write_result.output_digest,
+            model_observation: write_result.model_observation,
         }))
     }
 
@@ -2611,6 +2616,7 @@ async fn runtime_outcome_to_loop(
                 terminate_hint: false,
                 byte_len: write_result.byte_len,
                 output_digest: write_result.output_digest,
+                model_observation: write_result.model_observation,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
@@ -8679,6 +8685,7 @@ mod tests {
                 result_ref,
                 byte_len: 0,
                 output_digest: Some(output_digest),
+                model_observation: None,
             })
         }
     }

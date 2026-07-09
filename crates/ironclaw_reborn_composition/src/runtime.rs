@@ -5016,8 +5016,9 @@ output_schema_ref = "schemas/write.output.json"
     use ironclaw_loop_support::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-        HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource, ModelCost,
-        SpawnSubagentMode, SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
+        HostManagedToolResultContent, HostSkillContextBuildError, HostSkillContextCandidate,
+        HostSkillContextSource, ModelCost, SpawnSubagentMode, SubagentKindId, SubagentThreadKind,
+        SubagentThreadMetadata,
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
@@ -5235,7 +5236,7 @@ output_schema_ref = "schemas/write.output.json"
                 .lock()
                 .expect("tool gateway requests lock poisoned")
                 .push(request.clone());
-            if call_index > 0 {
+            if call_index == 1 {
                 let tool_result = request
                     .messages
                     .iter()
@@ -5303,6 +5304,11 @@ output_schema_ref = "schemas/write.output.json"
     /// the default-observer test can prove the payload is truncated before the
     /// observer sees it.
     const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
+    const LARGE_ECHO_TAIL: &str = "UNREPLAYED_RAW_TOOL_RESULT_TAIL";
+
+    fn large_echo_message() -> String {
+        format!("{}{}", LARGE_ECHO_MESSAGE.repeat(100), LARGE_ECHO_TAIL)
+    }
 
     #[derive(Debug, Default)]
     struct LargeEchoToolCallingGateway {
@@ -5323,7 +5329,7 @@ output_schema_ref = "schemas/write.output.json"
 
         async fn stream_model_with_capabilities(
             &self,
-            _request: HostManagedModelRequest,
+            request: HostManagedModelRequest,
             capabilities: Arc<dyn LoopCapabilityPort>,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
             let call_index = {
@@ -5332,7 +5338,87 @@ output_schema_ref = "schemas/write.output.json"
                 *calls += 1;
                 call_index
             };
-            if call_index > 0 {
+            if call_index == 1 {
+                let tool_result = request
+                    .messages
+                    .iter()
+                    .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                    .expect("second model call should include tool result");
+                assert!(
+                    !tool_result.content.contains(LARGE_ECHO_TAIL),
+                    "raw tail must remain out of the model replay; got {} bytes",
+                    tool_result.content.len()
+                );
+                assert!(
+                    tool_result.content.contains("result_reference"),
+                    "model replay must carry a bounded result-reference observation"
+                );
+                assert!(
+                    tool_result.content.len() <= 4096,
+                    "tool result replay must stay within the envelope bound, got {} bytes",
+                    tool_result.content.len()
+                );
+                let result_ref = match tool_result.tool_result_content.as_ref() {
+                    Some(HostManagedToolResultContent::Reference { envelope }) => {
+                        envelope.result_ref.clone()
+                    }
+                    other => panic!("expected a result reference, got {other:?}"),
+                };
+                let result_read_id = CapabilityId::new("builtin.result_read").expect("reader id");
+                let result_read_tool = capabilities
+                    .tool_definitions()
+                    .map_err(model_capability_error)?
+                    .into_iter()
+                    .find(|definition| definition.capability_id == result_read_id)
+                    .expect("result_read provider tool definition");
+                let candidate = capabilities
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                        ProviderToolCall {
+                            provider_id: "test-provider".to_string(),
+                            provider_model_id: "test-model".to_string(),
+                            turn_id: Some("provider-turn-2".to_string()),
+                            id: "call-2".to_string(),
+                            name: result_read_tool.name,
+                            arguments: serde_json::json!({
+                                "result_ref": result_ref,
+                                "offset": 0,
+                                "max_bytes": 2048,
+                            }),
+                            response_reasoning: None,
+                            reasoning: None,
+                            signature: None,
+                        },
+                    ))
+                    .await
+                    .map_err(model_capability_error)?;
+                return Ok(HostManagedModelResponse::capability_calls(
+                    vec![candidate],
+                    "",
+                ));
+            }
+            if call_index == 2 {
+                let tool_result = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.role == HostManagedModelMessageRole::ToolResult
+                            && message
+                                .tool_result_provider_call
+                                .as_ref()
+                                .is_some_and(|call| {
+                                    call.capability_id.as_str() == "builtin.result_read"
+                                })
+                    })
+                    .expect("third model call should include result_read output");
+                assert!(
+                    tool_result.content.contains(LARGE_ECHO_MESSAGE),
+                    "result_read must expose its bounded chunk to the model"
+                );
+                assert!(
+                    !tool_result.content.contains(LARGE_ECHO_TAIL),
+                    "the result_read response must remain bounded"
+                );
                 return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
             }
             let echo_id = CapabilityId::new("builtin.echo").expect("echo id");
@@ -5342,8 +5428,8 @@ output_schema_ref = "schemas/write.output.json"
                 .into_iter()
                 .find(|definition| definition.capability_id == echo_id)
                 .expect("echo provider tool definition");
-            // ~2.4 KB message: far over the 512-byte string preview cap.
-            let big_message = LARGE_ECHO_MESSAGE.repeat(100);
+            // Larger than both the observer preview and model replay preview.
+            let big_message = large_echo_message();
             let candidate = capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                     ProviderToolCall {
@@ -8115,28 +8201,30 @@ output_schema_ref = "schemas/write.output.json"
         .await
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         // Shut down before inspecting the recorded callbacks so the std-Mutex
         // guards are never held across an `.await` (clippy::await_holding_lock).
         runtime.shutdown().await.expect("runtime shutdown");
 
-        let original_len = LARGE_ECHO_MESSAGE.repeat(100).len();
+        let original_len = large_echo_message().len();
 
         let inputs = observer.inputs.lock().expect("inputs lock");
-        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        assert_eq!(inputs.len(), 2, "echo and result_read inputs observed");
         let observed_message = inputs[0].2["message"].as_str().expect("message string");
         assert!(
             observed_message.len() < original_len && observed_message.contains("[truncated"),
             "observer should receive a truncated preview of the large argument, got {} bytes",
             observed_message.len()
         );
+        assert_eq!(inputs[1].1, "builtin.result_read");
 
         let results = observer.results.lock().expect("results lock");
-        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        assert_eq!(results.len(), 2, "echo and result_read outputs observed");
         assert!(
             results[0].2.to_string().contains("[truncated"),
             "observer should receive a truncated preview of the large result"
         );
+        assert_eq!(results[1].1, "builtin.result_read");
     }
 
     #[tokio::test]

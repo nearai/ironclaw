@@ -255,7 +255,7 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
-        model_observation: None,
+        model_observation: result.model_observation.clone(),
     })
     .await
     .map_err(capability_host_error)?;

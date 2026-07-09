@@ -1045,6 +1045,7 @@ impl ToolDisclosureCapabilityPort {
             terminate_hint: false,
             byte_len: write.byte_len,
             output_digest: write.output_digest,
+            model_observation: write.model_observation,
         }))
     }
 

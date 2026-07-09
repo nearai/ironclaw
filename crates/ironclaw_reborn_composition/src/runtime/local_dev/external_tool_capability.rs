@@ -225,6 +225,7 @@ impl ExternalToolCapabilityPort {
                 terminate_hint: false,
                 byte_len: write.byte_len,
                 output_digest: write.output_digest,
+                model_observation: write.model_observation,
             }));
         }
         // No output yet → park and return control to the API client.

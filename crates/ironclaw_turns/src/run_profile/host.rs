@@ -1866,6 +1866,10 @@ pub struct CapabilityResultMessage {
     /// compatibility and for synthetic results that do not stage real output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_digest: Option<ContentDigest>,
+    /// Bounded, model-visible result metadata or preview. Full output remains
+    /// host-owned and is retrieved only through the result reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
