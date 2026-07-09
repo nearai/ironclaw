@@ -2,7 +2,7 @@
 
 **Status:** Blocking implementation exists but is temporarily disabled in shipped profiles; background mode deferred
 
-> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` (`ironclaw_host_runtime`) plus `RebornTurnRunExecutor` (`ironclaw_reborn`). `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
+> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_reborn`. `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,

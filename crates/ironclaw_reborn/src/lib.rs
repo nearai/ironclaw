@@ -42,6 +42,7 @@ mod tool_disclosure;
 mod tool_disclosure_port;
 pub mod turn_run_executor;
 pub mod turn_runner;
+pub mod turn_scheduler;
 
 #[cfg(feature = "root-llm-provider")]
 pub mod model_gateway;

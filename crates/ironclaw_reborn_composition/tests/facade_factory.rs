@@ -27,7 +27,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
+use ironclaw_reborn::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };

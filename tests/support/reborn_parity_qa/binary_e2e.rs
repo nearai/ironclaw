@@ -22,7 +22,6 @@ use ironclaw_host_api::{
     CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
     ThreadId,
 };
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
     JsonSpawnSubagentInputCodec,
@@ -45,6 +44,7 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
+use ironclaw_reborn::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_reborn::{
     loop_exit_applier::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,

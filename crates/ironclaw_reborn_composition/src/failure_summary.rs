@@ -203,7 +203,7 @@ mod tests {
     }
 
     // The scheduler emits `scheduler_heartbeat_failed` / `scheduler_executor_panic`
-    // (see `ironclaw_host_runtime::turn_scheduler`), not the previously-matched
+    // (see `ironclaw_reborn::turn_scheduler`), not the previously-matched
     // `heartbeat_failed` / `driver_panic`. These two assertions pin the live
     // mapping to the real producer strings.
     #[test]

@@ -35,8 +35,8 @@ use ironclaw_host_runtime::{
     RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason, RuntimeCapabilityCompleted,
     RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId,
-    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind, TurnRunScheduler,
-    TurnRunSchedulerConfig, VisibleCapability, VisibleCapabilityAccess,
+    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind,
+    VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
@@ -89,6 +89,7 @@ use ironclaw_reborn::subagent::{
 use ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriver;
 use ironclaw_reborn::turn_run_executor::RebornTurnRunExecutor;
 use ironclaw_reborn::turn_runner::{HostFactory, HostFactoryError};
+use ironclaw_reborn::turn_scheduler::{TurnRunScheduler, TurnRunSchedulerConfig};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
@@ -1891,7 +1892,7 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     // We verify that at least one line contains the "turn run started" message
     // together with the expected thread_id and run_id correlation fields, which
     // are emitted as explicit event fields on the `debug!` call in
-    // `ironclaw_host_runtime::turn_scheduler::spawn_executor_task`.
+    // `ironclaw_reborn::turn_scheduler::spawn_executor_task`.
     logs_assert(|lines: &[&str]| {
         let found = lines.iter().any(|line| {
             line.contains("turn run started")

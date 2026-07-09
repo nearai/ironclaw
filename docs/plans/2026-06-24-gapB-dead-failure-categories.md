@@ -43,7 +43,7 @@ Exhaustive set of values `sanitized_reason` can take when status is
   `route_snapshot_persistence_failed`, `driver_invalid_request`,
   `driver_unavailable`, `driver_failed`, `model_credits_exhausted`,
   `model_credentials_unavailable`, `unknown_failure`, `exit_application_failed`
-- `TurnRunScheduler` (`crates/ironclaw_host_runtime/src/turn_scheduler.rs:655,668`):
+- `TurnRunScheduler` (`crates/ironclaw_reborn/src/turn_scheduler.rs:655,668`):
   **`scheduler_executor_panic`**, **`scheduler_heartbeat_failed`**
 - store paths (`crates/ironclaw_turns/src/memory/mod.rs:2284,2990`):
   `interrupted_unexpectedly`, `lease_expired`

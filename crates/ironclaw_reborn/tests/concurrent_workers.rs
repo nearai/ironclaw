@@ -14,7 +14,6 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_host_runtime::{TurnRunScheduler, TurnRunSchedulerConfig};
 use ironclaw_loop_support::{
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostManagedModelError, HostManagedModelErrorKind,
@@ -27,6 +26,7 @@ use ironclaw_reborn::{
     loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
     loop_exit_applier::{InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort},
     turn_runner::HostFactory,
+    turn_scheduler::{TurnRunScheduler, TurnRunSchedulerConfig},
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,

@@ -57,7 +57,6 @@ use std::time::Duration;
 
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
-use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
@@ -87,6 +86,7 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
+use ironclaw_reborn::turn_scheduler::TurnRunSchedulerHandle;
 use ironclaw_reborn_composition::build_default_budget_accountant;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{
