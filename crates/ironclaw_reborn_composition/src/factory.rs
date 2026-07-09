@@ -5051,6 +5051,20 @@ mod tests {
             })
         }
 
+        async fn pair_external_actor_with_epoch(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+            _binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
         async fn unpair_external_actor(
             &self,
             _tenant_id: TenantId,
@@ -5058,6 +5072,22 @@ mod tests {
             _adapter_installation_id: AdapterInstallationId,
             _external_actor_ref: ExternalActorRef,
         ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
+        async fn unpair_external_actor_if_owned_by(
+            &self,
+            _tenant_id: &TenantId,
+            _adapter_kind: &AdapterKind,
+            _adapter_installation_id: &AdapterInstallationId,
+            _external_actor_ref: &ExternalActorRef,
+            _expected: &ironclaw_conversations::ExpectedExternalActorOwner,
+        ) -> Result<
+            ironclaw_conversations::ConditionalUnpairOutcome,
+            ironclaw_conversations::InboundTurnError,
+        > {
             Err(ironclaw_conversations::InboundTurnError::DurableState {
                 reason: "raw durable store error".to_string(),
             })

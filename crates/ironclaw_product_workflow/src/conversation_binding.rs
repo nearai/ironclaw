@@ -81,6 +81,31 @@ pub struct ProductActorUserResolutionRequest {
     pub external_actor_ref: ExternalActorRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProductActorUser {
+    pub user_id: UserId,
+    pub binding_epoch: Option<ironclaw_conversations::ExternalActorBindingEpoch>,
+}
+
+impl ResolvedProductActorUser {
+    pub fn new(user_id: UserId) -> Self {
+        Self {
+            user_id,
+            binding_epoch: None,
+        }
+    }
+
+    pub fn with_binding_epoch(
+        user_id: UserId,
+        binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+    ) -> Self {
+        Self {
+            user_id,
+            binding_epoch: Some(binding_epoch),
+        }
+    }
+}
+
 impl ProductActorUserResolutionRequest {
     pub fn new(
         adapter_id: ProductAdapterId,
@@ -100,7 +125,7 @@ pub trait ProductActorUserResolver: Send + Sync {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError>;
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError>;
 }
 
 /// Request passed to host-owned shared-route subject resolvers.
@@ -149,8 +174,12 @@ impl ProductActorUserResolver for StaticProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
-        Ok(self.bindings.get(&request.external_actor_ref).cloned())
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        Ok(self
+            .bindings
+            .get(&request.external_actor_ref)
+            .cloned()
+            .map(ResolvedProductActorUser::new))
     }
 }
 
@@ -426,23 +455,44 @@ impl ProductConversationBindingService {
         &self,
         installation_scope: &ProductInstallationScope,
         request: &ResolveBindingRequest,
-        user_id: &UserId,
+        resolved_actor: &ResolvedProductActorUser,
     ) -> Result<(), ProductWorkflowError> {
         let ProductActorBindingPolicy::ResolveActor { actor_pairings, .. } =
             &installation_scope.actor_binding_policy
         else {
             return Ok(());
         };
-        actor_pairings
-            .pair_external_actor(
-                installation_scope.tenant_id.clone(),
-                conversation_adapter_kind(&request.adapter_id)?,
-                conversation_installation_id(&request.installation_id)?,
-                conversation_actor_ref(&request.external_actor_ref)?,
-                user_id.clone(),
-            )
-            .await
-            .map_err(map_conversation_error)?;
+        let tenant_id = installation_scope.tenant_id.clone();
+        let adapter_kind = conversation_adapter_kind(&request.adapter_id)?;
+        let installation_id = conversation_installation_id(&request.installation_id)?;
+        let external_actor_ref = conversation_actor_ref(&request.external_actor_ref)?;
+        match resolved_actor.binding_epoch.clone() {
+            Some(binding_epoch) => {
+                actor_pairings
+                    .pair_external_actor_with_epoch(
+                        tenant_id,
+                        adapter_kind,
+                        installation_id,
+                        external_actor_ref,
+                        resolved_actor.user_id.clone(),
+                        binding_epoch,
+                    )
+                    .await
+                    .map_err(map_conversation_error)?;
+            }
+            None => {
+                actor_pairings
+                    .pair_external_actor(
+                        tenant_id,
+                        adapter_kind,
+                        installation_id,
+                        external_actor_ref,
+                        resolved_actor.user_id.clone(),
+                    )
+                    .await
+                    .map_err(map_conversation_error)?;
+            }
+        }
         Ok(())
     }
 
@@ -450,9 +500,9 @@ impl ProductConversationBindingService {
         &self,
         installation_scope: &ProductInstallationScope,
         request: &ResolveBindingRequest,
-        expected_user_id: Option<&UserId>,
+        expected_actor: Option<&ResolvedProductActorUser>,
     ) -> Result<(), ProductWorkflowError> {
-        let Some(expected_user_id) = expected_user_id else {
+        let Some(expected_actor) = expected_actor else {
             return Ok(());
         };
         let ProductActorBindingPolicy::ResolveActor {
@@ -462,10 +512,10 @@ impl ProductConversationBindingService {
         else {
             return Ok(());
         };
-        let current_user_id = resolver
+        let current_actor = resolver
             .resolve_product_actor_user(actor_user_resolution_request(request))
             .await?;
-        if current_user_id.as_ref() == Some(expected_user_id) {
+        if current_actor.as_ref() == Some(expected_actor) {
             return Ok(());
         }
         actor_pairings
@@ -496,7 +546,7 @@ fn actor_user_resolution_request(
 async fn resolve_actor_user(
     installation_scope: &ProductInstallationScope,
     request: &ResolveBindingRequest,
-) -> Result<Option<UserId>, ProductWorkflowError> {
+) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
     match &installation_scope.actor_binding_policy {
         ProductActorBindingPolicy::ExistingConversationPairings => Ok(None),
         ProductActorBindingPolicy::ResolveActor { resolver, .. } => resolver
@@ -510,11 +560,12 @@ async fn resolve_actor_user(
 }
 
 fn ensure_resolved_actor_matches_expected_user(
-    expected_user_id: Option<&UserId>,
+    expected_actor: Option<&ResolvedProductActorUser>,
     resolution: &ironclaw_conversations::ConversationBindingResolution,
 ) -> Result<(), ProductWorkflowError> {
-    if let Some(expected_user_id) = expected_user_id
-        && &resolution.actor.user_id != expected_user_id
+    if let Some(expected_actor) = expected_actor
+        && (resolution.actor.user_id != expected_actor.user_id
+            || resolution.binding_epoch != expected_actor.binding_epoch)
     {
         return Err(ProductWorkflowError::BindingAccessDenied);
     }
@@ -551,11 +602,14 @@ impl ConversationBindingService for ProductConversationBindingService {
                         &resolution,
                     )?;
                     let owner_user_id = resolution.turn_scope.explicit_owner_user_id().cloned();
-                    let expected_user_id =
-                        resolve_actor_user(&installation_scope, &request).await?;
-                    if let Some(user_id) = expected_user_id.as_ref() {
-                        self.apply_resolved_actor_binding(&installation_scope, &request, user_id)
-                            .await?;
+                    let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
+                    if let Some(resolved_actor) = expected_actor.as_ref() {
+                        self.apply_resolved_actor_binding(
+                            &installation_scope,
+                            &request,
+                            resolved_actor,
+                        )
+                        .await?;
                     }
                     let resolution = self
                         .conversations
@@ -568,13 +622,13 @@ impl ConversationBindingService for ProductConversationBindingService {
                         .await
                         .map_err(map_conversation_error)?;
                     ensure_resolved_actor_matches_expected_user(
-                        expected_user_id.as_ref(),
+                        expected_actor.as_ref(),
                         &resolution,
                     )?;
                     self.ensure_resolved_actor_binding_still_current(
                         &installation_scope,
                         &request,
-                        expected_user_id.as_ref(),
+                        expected_actor.as_ref(),
                     )
                     .await?;
 
@@ -591,9 +645,9 @@ impl ConversationBindingService for ProductConversationBindingService {
             request.route_kind,
             configured_subject_user_id.as_ref(),
         )?;
-        let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
-        if let Some(user_id) = expected_user_id.as_ref() {
-            self.apply_resolved_actor_binding(&installation_scope, &request, user_id)
+        let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
+        if let Some(resolved_actor) = expected_actor.as_ref() {
+            self.apply_resolved_actor_binding(&installation_scope, &request, resolved_actor)
                 .await?;
         }
         let resolution = self
@@ -606,11 +660,11 @@ impl ConversationBindingService for ProductConversationBindingService {
             )
             .await
             .map_err(map_conversation_error)?;
-        ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
+        ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &resolution)?;
         self.ensure_resolved_actor_binding_still_current(
             &installation_scope,
             &request,
-            expected_user_id.as_ref(),
+            expected_actor.as_ref(),
         )
         .await?;
 
@@ -639,9 +693,10 @@ impl ConversationBindingService for ProductConversationBindingService {
                 current_subject_user_id.as_ref(),
                 &resolution,
             )?;
-            let expected_user_id = resolve_actor_user(&installation_scope, &request).await?;
-            ensure_resolved_actor_matches_expected_user(expected_user_id.as_ref(), &resolution)?;
         }
+
+        let expected_actor = resolve_actor_user(&installation_scope, &request).await?;
+        ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &resolution)?;
 
         resolved_binding_from_resolution(resolution, request.route_kind)
     }

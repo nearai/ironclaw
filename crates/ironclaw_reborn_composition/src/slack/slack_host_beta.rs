@@ -23,7 +23,7 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
     ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding, ResolvedProductActorUser,
     StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
@@ -1192,13 +1192,13 @@ impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
-        if let Some(user_id) = self
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        if let Some(resolved_actor) = self
             .cached_identity
             .resolve_product_actor_user(request.clone())
             .await?
         {
-            return Ok(Some(user_id));
+            return Ok(Some(resolved_actor));
         }
         Ok(None)
     }
@@ -4381,12 +4381,12 @@ mod tests {
         async fn resolve_product_actor_user(
             &self,
             request: ProductActorUserResolutionRequest,
-        ) -> Result<Option<UserId>, ProductWorkflowError> {
+        ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
             self.calls
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request);
-            Ok(Some(self.user_id.clone()))
+            Ok(Some(ResolvedProductActorUser::new(self.user_id.clone())))
         }
     }
 

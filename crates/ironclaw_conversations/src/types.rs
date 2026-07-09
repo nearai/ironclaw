@@ -11,6 +11,51 @@ use crate::{
     InboundMessageContentRef,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ExternalActorBindingEpoch(String);
+
+impl ExternalActorBindingEpoch {
+    pub fn new(value: impl Into<String>) -> Result<Self, crate::InboundTurnError> {
+        let value = value.into();
+        crate::ids::validate_external_id("external_actor_binding_epoch", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ExternalActorBindingEpoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalActorBindingEpoch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalUnpairOutcome {
+    Unpaired,
+    AlreadyAbsent,
+    OwnerChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedExternalActorOwner {
+    pub user_id: UserId,
+    pub binding_epoch: Option<ExternalActorBindingEpoch>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRouteKind {
@@ -35,6 +80,8 @@ pub struct ResolveConversationRequest {
 pub struct ConversationBindingResolution {
     pub tenant_id: TenantId,
     pub actor: TurnActor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_epoch: Option<ExternalActorBindingEpoch>,
     pub turn_scope: TurnScope,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,

@@ -9,6 +9,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
+    ResolvedProductActorUser,
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
@@ -81,7 +82,7 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
         if request.adapter_id.as_str() != SLACK_V2_ADAPTER_ID {
             return Ok(None);
         }
@@ -95,6 +96,7 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
         self.lookup
             .resolve_user_identity(SLACK_IDENTITY_PROVIDER, &provider_user_id)
             .await
+            .map(|resolved| resolved.map(ResolvedProductActorUser::new))
             .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
                 reason: error.to_string(),
             })
@@ -143,7 +145,10 @@ mod tests {
             .await
             .expect("resolution succeeds");
 
-        assert_eq!(resolved, Some(user("user:alice")));
+        assert_eq!(
+            resolved,
+            Some(ResolvedProductActorUser::new(user("user:alice")))
+        );
         assert_eq!(
             lookup.calls(),
             vec![("slack".to_string(), "install-alpha:U123".to_string())]
@@ -247,7 +252,10 @@ mod tests {
             .await
             .expect("second resolution succeeds");
 
-        assert_eq!(first, Some(user("user:alice")));
+        assert_eq!(
+            first,
+            Some(ResolvedProductActorUser::new(user("user:alice")))
+        );
         assert_eq!(second, None);
         assert_eq!(
             lookup.calls(),

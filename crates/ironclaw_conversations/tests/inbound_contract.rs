@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
     ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
-    ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
+    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
+    ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
     InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
     InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
     MessageIdempotencyStatus, ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
@@ -240,6 +241,203 @@ async fn unpair_external_actor_revokes_direct_conversation_bindings() {
 }
 
 #[tokio::test]
+async fn unpair_external_actor_if_owned_by_revokes_the_expected_epoch_and_direct_route() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-conditional");
+    let epoch = ExternalActorBindingEpoch::new("generation-7").expect("epoch");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+            epoch.clone(),
+        )
+        .await
+        .expect("pair with epoch");
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("chat-conditional-unpair", None),
+            "telegram-event-conditional-unpair",
+        ))
+        .await
+        .expect("first direct binding");
+    assert_eq!(first.binding_epoch.as_ref(), Some(&epoch));
+
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &actor,
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(epoch),
+            },
+        )
+        .await
+        .expect("conditional unpair");
+
+    assert_eq!(outcome, ConditionalUnpairOutcome::Unpaired);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-conditional-unpair", None),
+            "telegram-event-after-conditional-unpair",
+        ))
+        .await
+        .expect_err("matching conditional unpair must revoke the direct route");
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+}
+
+#[tokio::test]
+async fn unpair_external_actor_if_owned_by_preserves_a_newer_owner() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-owner-race");
+    let old_epoch = ExternalActorBindingEpoch::new("generation-1").expect("epoch");
+    let new_epoch = ExternalActorBindingEpoch::new("generation-2").expect("epoch");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+            old_epoch.clone(),
+        )
+        .await
+        .expect("old pairing");
+    let original_route = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            external_conversation("chat-owner-race", None),
+            "telegram-event-owner-race-old",
+        ))
+        .await
+        .expect("old owner's route");
+    services
+        .add_thread_participant(&tenant(), &original_route.turn_scope.thread_id, user("bob"))
+        .await
+        .expect("new owner can prove the old route was preserved");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("bob"),
+            new_epoch.clone(),
+        )
+        .await
+        .expect("new pairing");
+
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &actor,
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(old_epoch),
+            },
+        )
+        .await
+        .expect("stale conditional unpair");
+
+    assert_eq!(outcome, ConditionalUnpairOutcome::OwnerChanged);
+    let current = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-owner-race", None),
+            "telegram-event-owner-race-current",
+        ))
+        .await
+        .expect("new owner and the existing route must both remain intact");
+    assert_eq!(current.actor.user_id, user("bob"));
+    assert_eq!(current.binding_epoch, Some(new_epoch));
+    assert_eq!(
+        current.turn_scope.thread_id,
+        original_route.turn_scope.thread_id
+    );
+}
+
+#[tokio::test]
+async fn unpair_external_actor_if_owned_by_is_idempotent_when_absent() {
+    let services = InMemoryConversationServices::default();
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &external_actor("telegram-user-absent"),
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(
+                    ExternalActorBindingEpoch::new("generation-absent").expect("epoch"),
+                ),
+            },
+        )
+        .await
+        .expect("absent unpair is idempotent");
+
+    assert_eq!(outcome, ConditionalUnpairOutcome::AlreadyAbsent);
+}
+
+#[tokio::test]
+async fn pair_external_actor_without_epoch_clears_an_older_epoch_for_the_same_actor_key() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("telegram-user-clear-epoch");
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+            ExternalActorBindingEpoch::new("generation-old").expect("epoch"),
+        )
+        .await
+        .expect("epoch pairing");
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor,
+            external_conversation("chat-clear-epoch", None),
+            "telegram-event-clear-epoch",
+        ))
+        .await
+        .expect("epoch-less pairing remains usable");
+    assert_eq!(resolution.binding_epoch, None);
+}
+
+#[tokio::test]
 async fn unpair_external_actor_clears_direct_external_event_routes() {
     let services = InMemoryConversationServices::default();
     let actor = external_actor("telegram-user-1");
@@ -372,6 +570,85 @@ async fn unpair_external_actor_preserves_shared_conversation_routes() {
     );
     assert_eq!(
         bob_after_unpair.turn_scope.thread_id,
+        alice_resolution.turn_scope.thread_id
+    );
+}
+
+#[tokio::test]
+async fn unpair_external_actor_if_owned_by_preserves_shared_conversation_routes() {
+    let services = InMemoryConversationServices::default();
+    let alice_actor = external_actor("alice-conditional-shared");
+    let bob_actor = external_actor("bob-conditional-shared");
+    let alice_epoch = ExternalActorBindingEpoch::new("generation-shared").expect("epoch");
+    let conversation = external_conversation("shared-chat-conditional-preserve", Some("topic-a"));
+    services
+        .pair_external_actor_with_epoch(
+            tenant(),
+            telegram(),
+            default_installation(),
+            alice_actor.clone(),
+            user("alice"),
+            alice_epoch.clone(),
+        )
+        .await
+        .expect("alice pairing");
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            bob_actor.clone(),
+            user("bob"),
+        )
+        .await;
+    let mut alice_request = resolve_request(
+        telegram(),
+        alice_actor.clone(),
+        conversation.clone(),
+        "shared-conditional-alice",
+    );
+    alice_request.route_kind = ConversationRouteKind::Shared;
+    let alice_resolution = services
+        .resolve_or_create_binding(alice_request)
+        .await
+        .expect("alice creates shared route");
+    services
+        .add_thread_participant(
+            &tenant(),
+            &alice_resolution.turn_scope.thread_id,
+            user("bob"),
+        )
+        .await
+        .expect("bob participant");
+
+    let outcome = services
+        .unpair_external_actor_if_owned_by(
+            &tenant(),
+            &telegram(),
+            &default_installation(),
+            &alice_actor,
+            &ExpectedExternalActorOwner {
+                user_id: user("alice"),
+                binding_epoch: Some(alice_epoch),
+            },
+        )
+        .await
+        .expect("conditional unpair");
+    assert_eq!(outcome, ConditionalUnpairOutcome::Unpaired);
+
+    let mut bob_request = resolve_request(
+        telegram(),
+        bob_actor,
+        conversation,
+        "shared-conditional-bob",
+    );
+    bob_request.route_kind = ConversationRouteKind::Shared;
+    let bob_resolution = services
+        .resolve_or_create_binding(bob_request)
+        .await
+        .expect("shared route remains available to bob");
+    assert_eq!(
+        bob_resolution.turn_scope.thread_id,
         alice_resolution.turn_scope.thread_id
     );
 }
@@ -2769,6 +3046,8 @@ fn serde_deserialization_revalidates_external_ref_invariants() {
     );
     assert!(serde_json::from_str::<ExternalEventId>("\"event\\u0000id\"").is_err());
     assert!(serde_json::from_str::<InboundMessageContentRef>("\"\"").is_err());
+    assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"\"").is_err());
+    assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"bad\\u0000epoch\"").is_err());
     assert!(serde_json::from_str::<ExternalActorRef>(r#"{"kind":"user","id":""}"#).is_err());
     assert!(serde_json::from_str::<ExternalConversationRef>(
         r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"ok","message_id":"bad\u0001"}"#
@@ -3080,6 +3359,7 @@ impl ConversationBindingService for DriftBindingService {
         Ok(ConversationBindingResolution {
             tenant_id: request.tenant_id.clone(),
             actor: TurnActor::new(user_id),
+            binding_epoch: None,
             turn_scope: TurnScope::new(
                 request.tenant_id,
                 None,

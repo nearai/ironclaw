@@ -12,7 +12,9 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
     SecretCleanupReport, SecretCleanupRequest,
 };
-use ironclaw_conversations::{AdapterKind, ConversationActorPairingService, ExternalActorRef};
+use ironclaw_conversations::{
+    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
+};
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
@@ -108,11 +110,15 @@ impl SlackChannelConnectionFacade {
                 continue;
             };
             self.conversation_actor_pairings
-                .unpair_external_actor(
-                    self.tenant_id.clone(),
-                    adapter_kind.clone(),
-                    installation_id,
-                    external_actor_ref,
+                .unpair_external_actor_if_owned_by(
+                    &self.tenant_id,
+                    &adapter_kind,
+                    &installation_id,
+                    &external_actor_ref,
+                    &ExpectedExternalActorOwner {
+                        user_id: binding.user_id.clone(),
+                        binding_epoch: None,
+                    },
                 )
                 .await
                 .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
@@ -443,14 +449,16 @@ mod tests {
                     AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
                     ConversationAdapterInstallationId::new("install-alpha")
                         .expect("installation id"),
-                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor"),
+                    expected_owner("user:alice")
                 ),
                 (
                     expected_tenant_id.clone(),
                     AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
                     ConversationAdapterInstallationId::new("install-alpha")
                         .expect("installation id"),
-                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor"),
+                    expected_owner("user:alice")
                 )
             ],
             "disconnect must revoke before and after identity deletion to close re-pair races"
@@ -685,7 +693,7 @@ mod tests {
         let mut unpaired_actor_ids = actor_pairings
             .unpairs()
             .into_iter()
-            .map(|(_, _, _, actor)| actor.id().to_string())
+            .map(|(_, _, _, actor, _)| actor.id().to_string())
             .collect::<Vec<_>>();
         unpaired_actor_ids.sort();
         assert_eq!(
@@ -839,14 +847,16 @@ mod tests {
                     AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
                     ConversationAdapterInstallationId::new("install-alpha")
                         .expect("installation id"),
-                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor"),
+                    expected_owner("user:alice")
                 ),
                 (
                     expected_tenant_id,
                     AdapterKind::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
                     ConversationAdapterInstallationId::new("install-alpha")
                         .expect("installation id"),
-                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor")
+                    ExternalActorRef::new(SLACK_USER_ACTOR_KIND, "U123").expect("actor"),
+                    expected_owner("user:alice")
                 )
             ],
             "no-scope disconnect still revokes conversation actor state before and after delete"
@@ -983,7 +993,15 @@ mod tests {
         AdapterKind,
         ConversationAdapterInstallationId,
         ExternalActorRef,
+        ExpectedExternalActorOwner,
     );
+
+    fn expected_owner(user_id: &str) -> ExpectedExternalActorOwner {
+        ExpectedExternalActorOwner {
+            user_id: UserId::new(user_id).expect("user id"),
+            binding_epoch: None,
+        }
+    }
 
     #[derive(Default)]
     struct RecordingConversationActorPairingService {
@@ -1009,20 +1027,47 @@ mod tests {
             Ok(())
         }
 
+        async fn pair_external_actor_with_epoch(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: ConversationAdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+            _binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Ok(())
+        }
+
         async fn unpair_external_actor(
             &self,
-            tenant_id: TenantId,
-            adapter_kind: AdapterKind,
-            adapter_installation_id: ConversationAdapterInstallationId,
-            external_actor_ref: ExternalActorRef,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: ConversationAdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
         ) -> Result<(), ironclaw_conversations::InboundTurnError> {
-            self.unpairs.lock().expect("lock").push((
-                tenant_id,
-                adapter_kind,
-                adapter_installation_id,
-                external_actor_ref,
-            ));
             Ok(())
+        }
+
+        async fn unpair_external_actor_if_owned_by(
+            &self,
+            tenant_id: &TenantId,
+            adapter_kind: &AdapterKind,
+            adapter_installation_id: &ConversationAdapterInstallationId,
+            external_actor_ref: &ExternalActorRef,
+            expected: &ExpectedExternalActorOwner,
+        ) -> Result<
+            ironclaw_conversations::ConditionalUnpairOutcome,
+            ironclaw_conversations::InboundTurnError,
+        > {
+            self.unpairs.lock().expect("lock").push((
+                tenant_id.clone(),
+                adapter_kind.clone(),
+                adapter_installation_id.clone(),
+                external_actor_ref.clone(),
+                expected.clone(),
+            ));
+            Ok(ironclaw_conversations::ConditionalUnpairOutcome::Unpaired)
         }
     }
 
@@ -1041,6 +1086,18 @@ mod tests {
             Ok(())
         }
 
+        async fn pair_external_actor_with_epoch(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: ConversationAdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+            _binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Ok(())
+        }
+
         async fn unpair_external_actor(
             &self,
             _tenant_id: TenantId,
@@ -1048,6 +1105,22 @@ mod tests {
             _adapter_installation_id: ConversationAdapterInstallationId,
             _external_actor_ref: ExternalActorRef,
         ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "conversation unpair unavailable".to_string(),
+            })
+        }
+
+        async fn unpair_external_actor_if_owned_by(
+            &self,
+            _tenant_id: &TenantId,
+            _adapter_kind: &AdapterKind,
+            _adapter_installation_id: &ConversationAdapterInstallationId,
+            _external_actor_ref: &ExternalActorRef,
+            _expected: &ExpectedExternalActorOwner,
+        ) -> Result<
+            ironclaw_conversations::ConditionalUnpairOutcome,
+            ironclaw_conversations::InboundTurnError,
+        > {
             Err(ironclaw_conversations::InboundTurnError::DurableState {
                 reason: "conversation unpair unavailable".to_string(),
             })
