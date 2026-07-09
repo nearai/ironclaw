@@ -213,6 +213,7 @@ fn checkpoint_host_error(
             | AgentLoopHostErrorKind::Internal
             | AgentLoopHostErrorKind::BudgetAccountingFailed
     ) {
+        let detail = error.detail.clone();
         return AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Checkpoint,
             kind: error.kind,
@@ -220,6 +221,7 @@ fn checkpoint_host_error(
                 .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
             reason_kind: error.reason_kind,
             diagnostic_ref: error.diagnostic_ref,
+            detail,
         };
     }
     AgentLoopExecutorError::CheckpointFailed { stage: kind }

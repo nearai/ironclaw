@@ -5,15 +5,15 @@ use std::{error::Error, fmt, sync::Arc};
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
-    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
-    DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
-    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    PerSurfaceCapabilityDenyDecorator, ProductLiveCancellationReadiness, RunCancellationFactory,
-    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    verify_product_live_cancellation_probe,
+    AwaitEdgeSettler, AwaitEdgeWriter, CapabilitySurfaceProfileResolver,
+    CompositeTurnRunWakeNotifier, DecoratingLoopCapabilityPortFactory, HostIdentityContextSource,
+    HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
+    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
+    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
+    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
+    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
+    SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -52,10 +52,8 @@ use crate::{
         register_subagent_planned_driver,
     },
     subagent::{
-        capability_surface::SubagentCapabilitySurfaceResolver,
-        completion_observer::SubagentCompletionObserver, flavors,
-        gate_resolution::BoundedSubagentGateResolutionStore, goal_store::SubagentGoalStore,
-        prompt_material::GateBackedSubagentPromptMaterialSource,
+        capability_surface::SubagentCapabilitySurfaceResolver, flavors,
+        goal_store::SubagentGoalStore, prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     tool_disclosure_port::ToolDisclosureCapabilityDecorator,
@@ -155,6 +153,11 @@ impl ToolDisclosureMode {
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
     pub poll_interval: std::time::Duration,
+    /// How often the scheduler sweeps for runs whose lease has expired
+    /// (`TurnRunSchedulerConfig::lease_recovery_interval`). Defaults to the
+    /// scheduler's own 10s default so leaving this untouched is byte-identical
+    /// to today's behavior.
+    pub lease_recovery_interval: std::time::Duration,
     /// Number of concurrent turn-runner slots (the scheduler semaphore permit
     /// count). `None` = unlimited — the semaphore is sized to
     /// [`tokio::sync::Semaphore::MAX_PERMITS`]. See [`scheduler_permit_count`].
@@ -173,6 +176,7 @@ impl Default for DefaultPlannedRuntimeConfig {
         Self {
             heartbeat_interval: std::time::Duration::from_secs(10),
             poll_interval: std::time::Duration::from_secs(5),
+            lease_recovery_interval: std::time::Duration::from_secs(10),
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
             disabled_capability_ids: default_disabled_capability_ids(),
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
@@ -285,7 +289,14 @@ where
     pub capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     pub subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
-    pub subagent_gate_store: Arc<BoundedSubagentGateResolutionStore>,
+    /// §3 replacement: `subagent_gate_store` split into three trait-object
+    /// handles onto the same underlying await-edge store + resolver pair
+    /// (constructed together in composition, where the `filesystem-goal-store`
+    /// feature is enabled) — kept as trait objects here so `runtime.rs`
+    /// itself stays feature/backend-generic-free.
+    pub subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
+    pub subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
+    pub subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     pub subagent_definition_resolver: Arc<dyn SubagentDefinitionResolver>,
     pub subagent_spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
     pub subagent_spawn_limits: SubagentSpawnLimits,
@@ -521,7 +532,7 @@ where
     }
     let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
     let await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
-        parts.subagent_gate_store.clone();
+        parts.subagent_await_edge_evidence.clone();
     parts.loop_exit_evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::clone(&parts.thread_service),
@@ -613,16 +624,9 @@ where
         )),
         None => scheduler_notifier_base,
     };
-    let turn_state_for_observer: Arc<dyn TurnSpawnTreeStateStore> = parts.turn_state.clone();
-    let completion_observer = Arc::new(SubagentCompletionObserver::new_unbound(
-        Arc::clone(&parts.subagent_gate_store),
-        Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
-        turn_state_for_observer,
-        Arc::clone(&parts.capability_result_writer),
-        Arc::clone(&parts.thread_service),
-    ));
+    let subagent_await_edge_settler = Arc::clone(&parts.subagent_await_edge_settler);
     let subagent_completion_observer: Arc<dyn TurnCommittedEventObserver> =
-        completion_observer.clone();
+        Arc::clone(&subagent_await_edge_settler).as_turn_committed_event_observer();
     let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
     lifecycle_bus
         .subscribe_required(Arc::clone(&subagent_completion_observer))
@@ -646,7 +650,7 @@ where
     let base_coordinator_arc = Arc::new(base_coordinator);
     let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_arc.clone();
     let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_arc;
-    completion_observer
+    subagent_await_edge_settler
         .bind_coordinator(Arc::clone(&coordinator))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
@@ -654,7 +658,6 @@ where
     let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
         Arc::new(GateBackedSubagentPromptMaterialSource::new(
             Arc::clone(&parts.subagent_goal_store),
-            Arc::clone(&parts.subagent_gate_store),
             Arc::clone(&parts.thread_service),
         ));
     let subagent_prompt_composer = SubagentPromptComposer::new(Arc::clone(&subagent_prompt_source));
@@ -665,8 +668,7 @@ where
             turn_state_store: Arc::clone(&parts.turn_state) as Arc<dyn TurnSpawnTreeStateStore>,
             thread_service: Arc::clone(&parts.thread_service),
             goal_store: Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
-            gate_store: Arc::clone(&parts.subagent_gate_store)
-                as Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
+            await_edge_writer: Arc::clone(&parts.subagent_await_edge_writer),
             definition_resolver: Arc::clone(&parts.subagent_definition_resolver),
             spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
             result_writer: Arc::clone(&parts.capability_result_writer),
@@ -797,7 +799,8 @@ where
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
-        .with_poll_interval(parts.config.poll_interval);
+        .with_poll_interval(parts.config.poll_interval)
+        .with_lease_recovery_interval(parts.config.lease_recovery_interval);
     let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
     let scheduler_handle = wake_wiring.start(scheduler);
 

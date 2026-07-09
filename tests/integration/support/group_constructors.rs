@@ -59,6 +59,14 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Group with the two-capability visibility-probe fixture published into
+    /// the active registry and BOTH capabilities granted, so tests can pin
+    /// that only the manifest `visibility` value keeps the `host_internal`
+    /// sibling off the model surface.
+    pub async fn extension_visibility_probe() -> HarnessResult<Self> {
+        Self::builder().extension_visibility_probe().await
+    }
+
     /// Group whose GitHub extension's credential account resolves to
     /// `AuthRequired`, so a scripted `github.*` tool call raises a real
     /// `TurnStatus::BlockedAuth` gate (E-AUTHGATE seam). Drive with
@@ -244,6 +252,15 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::extension::extension_lifecycle_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a visibility-probe group. See
+    /// [`RebornIntegrationGroup::extension_visibility_probe`].
+    pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            super::super::harness::profiles::extension::extension_visibility_probe_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

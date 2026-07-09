@@ -21,7 +21,7 @@ use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
-    PermissionMode, Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    PermissionMode, Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
@@ -32,7 +32,7 @@ use ironclaw_product_workflow::{
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
-    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
     InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
@@ -77,8 +77,15 @@ use ironclaw_product_workflow::{
     StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
+};
+use ironclaw_product_workflow::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -96,9 +103,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -185,6 +193,8 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             sequence: 1,
             kind: MessageKind::User,
             status: MessageStatus::Submitted,
+            created_at: None,
+            updated_at: None,
             actor_id: Some(owner.user_id.as_str().to_string()),
             source_binding_id: Some("webui-src:test".to_string()),
             reply_target_binding_id: Some("webui-reply:test".to_string()),
@@ -245,14 +255,18 @@ struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
+    retries: Mutex<Vec<RetryTurnRequest>>,
+    retry_attempts: Mutex<usize>,
     run_state_requests: Mutex<Vec<GetRunStateRequest>>,
     submit_error: Mutex<Option<TurnError>>,
+    retry_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
+    run_state_failure: Mutex<Option<SanitizedFailure>>,
 }
 
 impl Default for FakeTurnCoordinator {
@@ -261,14 +275,18 @@ impl Default for FakeTurnCoordinator {
             submissions: Mutex::default(),
             cancellations: Mutex::default(),
             resumptions: Mutex::default(),
+            retries: Mutex::default(),
+            retry_attempts: Mutex::default(),
             run_state_requests: Mutex::default(),
             submit_error: Mutex::default(),
+            retry_error: Mutex::default(),
             run_state_error: Mutex::default(),
             run_state_actor: Mutex::new(Some(turn_actor_for_user("user-alpha"))),
             explicit_run_status: Mutex::default(),
             parked_gate_ref: Mutex::default(),
             parked_auth_gate: Mutex::default(),
             parked_approval_gate: Mutex::default(),
+            run_state_failure: Mutex::default(),
         }
     }
 }
@@ -284,6 +302,13 @@ impl FakeTurnCoordinator {
     fn with_run_state_error(error: TurnError) -> Self {
         Self {
             run_state_error: Mutex::new(Some(error)),
+            ..Self::default()
+        }
+    }
+
+    fn with_retry_error(error: TurnError) -> Self {
+        Self {
+            retry_error: Mutex::new(Some(error)),
             ..Self::default()
         }
     }
@@ -318,6 +343,10 @@ impl FakeTurnCoordinator {
         *self.explicit_run_status.lock().expect("lock") = Some(status);
     }
 
+    fn set_run_state_failure(&self, failure: SanitizedFailure) {
+        *self.run_state_failure.lock().expect("lock") = Some(failure);
+    }
+
     fn submission_count(&self) -> usize {
         self.submissions.lock().expect("lock").len()
     }
@@ -328,6 +357,14 @@ impl FakeTurnCoordinator {
 
     fn resumption_count(&self) -> usize {
         self.resumptions.lock().expect("lock").len()
+    }
+
+    fn retry_count(&self) -> usize {
+        self.retries.lock().expect("lock").len()
+    }
+
+    fn retry_attempt_count(&self) -> usize {
+        *self.retry_attempts.lock().expect("lock")
     }
 
     fn run_state_request_count(&self) -> usize {
@@ -348,6 +385,10 @@ impl FakeTurnCoordinator {
             .expect("lock")
             .last()
             .map(|request| request.precondition)
+    }
+
+    fn last_retry(&self) -> Option<RetryTurnRequest> {
+        self.retries.lock().expect("lock").last().cloned()
     }
 
     fn last_submission_scope(&self) -> Option<ironclaw_turns::TurnScope> {
@@ -436,6 +477,19 @@ impl TurnCoordinator for FakeTurnCoordinator {
         })
     }
 
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        *self.retry_attempts.lock().expect("lock") += 1;
+        if let Some(error) = self.retry_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.retries.lock().expect("lock").push(request);
+        Ok(RetryTurnResponse {
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(19),
+        })
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let run_id = request.run_id;
         self.cancellations.lock().expect("lock").push(request);
@@ -488,7 +542,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: self.run_state_failure.lock().expect("lock").clone(),
             event_cursor: EventCursor(17),
             product_context: None,
             resume_disposition: None,
@@ -559,6 +613,13 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("resume_turn is not used by delete submit serialization tests")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by delete submit serialization tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -934,6 +995,7 @@ struct ListAutomationCall {
 enum AutomationMutationAction {
     Pause,
     Resume,
+    Rename { name: AutomationName },
     Delete,
 }
 
@@ -1035,6 +1097,31 @@ impl AutomationProductFacade for RecordingAutomationFacade {
             automation: Some(automation_info(
                 "trigger-resumed",
                 "Daily status",
+                "0 9 * * *",
+                None,
+            )),
+        })
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        name: AutomationName,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Rename { name },
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-renamed",
+                "Renamed status",
                 "0 9 * * *",
                 None,
             )),
@@ -3853,6 +3940,165 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
 }
 
 #[tokio::test]
+async fn retry_run_uses_turn_facade_and_stable_response() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-1",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("retry succeeds");
+
+    assert_eq!(response.status, TurnStatus::Queued);
+    assert_eq!(response.event_cursor, EventCursor(19));
+    assert_eq!(coordinator.retry_count(), 1);
+    let retry = coordinator.last_retry().expect("retry request");
+    assert_eq!(
+        retry.run_id,
+        TurnRunId::parse(&run_id_string()).expect("run id")
+    );
+    assert_eq!(retry.actor, caller().actor());
+    assert_eq!(
+        retry.scope,
+        caller().turn_scope(ThreadId::new("thread-alpha").expect("thread"))
+    );
+    assert!(
+        retry
+            .source_binding_ref
+            .as_str()
+            .contains("webui-retry-src")
+    );
+    assert!(
+        retry
+            .reply_target_binding_ref
+            .as_str()
+            .contains("webui-retry-reply")
+    );
+    assert_eq!(retry.idempotency_key.as_str(), "retry-1");
+}
+
+#[tokio::test]
+async fn retry_run_rejects_invalid_run_id_without_turn_facade() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-invalid-run",
+                "thread_id": "thread-alpha",
+                "run_id": "not-a-run-uuid"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("invalid run id should fail validation");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("run_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidId)
+    );
+    assert_eq!(
+        coordinator.retry_attempt_count(),
+        0,
+        "validation must fail before TurnCoordinator::retry_turn"
+    );
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
+async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let coordinator = Arc::new(FakeTurnCoordinator::with_retry_error(
+        TurnError::RunNotRetryable { run_id },
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-not-retryable",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("not retryable maps to conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert!(!err.retryable);
+    assert_eq!(coordinator.retry_attempt_count(), 1);
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
+async fn retry_run_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    let alice = caller();
+    create_thread_for(&services, alice.clone(), "thread-alice").await;
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            bob,
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-cross",
+                "thread_id": "thread-alice",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-user retry must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.retry_count(),
+        0,
+        "turn coordinator must NOT be called for cross-user retry"
+    );
+}
+
+#[tokio::test]
 async fn approved_gate_resolution_resumes_turn() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
@@ -4983,18 +5229,18 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     )
     .with_connectable_channels_facade(Arc::new(StaticConnectableChannelsProductFacade::new(vec![
         RebornConnectableChannelInfo {
-            channel: "slack".to_string(),
-            display_name: "Slack".to_string(),
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
             strategy: RebornChannelConnectStrategy::InboundProofCode,
             action: RebornChannelConnectAction {
-                title: "Slack account connection".to_string(),
-                instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                input_placeholder: "Enter Slack pairing code...".to_string(),
+                title: "Telegram account connection".to_string(),
+                instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
+                input_placeholder: "Enter Telegram pairing code...".to_string(),
                 submit_label: "Connect".to_string(),
-                success_message: "Slack account connected.".to_string(),
-                error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
+                success_message: "Telegram account connected.".to_string(),
+                error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
             },
-            command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+            command_aliases: vec!["telegram".to_string(), "telegram account".to_string()],
         },
     ])));
 
@@ -5004,25 +5250,24 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
         .expect("connectable channels response");
 
     let channel = response.channels.first().expect("configured channel");
-    assert_eq!(channel.channel, "slack");
-    assert_eq!(channel.display_name, "Slack");
+    assert_eq!(channel.channel, "telegram");
+    assert_eq!(channel.display_name, "Telegram");
     assert_eq!(
         channel.strategy,
         RebornChannelConnectStrategy::InboundProofCode
     );
     assert_eq!(
         channel.action.instructions,
-        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         channel.command_aliases,
-        vec!["slack".to_string(), "slack account".to_string()]
+        vec!["telegram".to_string(), "telegram account".to_string()]
     );
 }
 
 #[test]
-fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legacy_code_placeholder()
-{
+fn channel_connect_action_serializes_neutral_input_placeholder() {
     let action = RebornChannelConnectAction {
         title: "Slack channel access".to_string(),
         instructions: "Choose allowed channels.".to_string(),
@@ -5034,18 +5279,6 @@ fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legac
 
     let serialized = serde_json::to_value(&action).expect("action serializes");
     assert_eq!(serialized["input_placeholder"], "C0123456789");
-    assert!(serialized.get("code_placeholder").is_none());
-
-    let legacy: RebornChannelConnectAction = serde_json::from_value(serde_json::json!({
-        "title": "Slack account connection",
-        "instructions": "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.",
-        "code_placeholder": "Enter Slack pairing code...",
-        "submit_label": "Connect",
-        "success_message": "Slack account connected.",
-        "error_message": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
-    }))
-    .expect("legacy action deserializes");
-    assert_eq!(legacy.input_placeholder, "Enter Slack pairing code...");
 }
 
 #[tokio::test]
@@ -5911,6 +6144,31 @@ async fn resume_automation_rejects_missing_agent_id() {
 }
 
 #[tokio::test]
+async fn rename_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .rename_automation(
+            caller_without_agent(),
+            "trigger-alpha".to_string(),
+            WebUiRenameAutomationRequest {
+                name: Some("Renamed".to_string()),
+            },
+        )
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
 async fn delete_automation_rejects_missing_agent_id() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
     let services = RebornServices::new(
@@ -5930,7 +6188,7 @@ async fn delete_automation_rejects_missing_agent_id() {
 }
 
 #[tokio::test]
-async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade() {
+async fn automation_mutations_forward_caller_scope_to_product_facade() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -5952,6 +6210,18 @@ async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade()
         .expect("resume automation");
     assert!(resume.updated);
 
+    let rename = services
+        .rename_automation(
+            caller.clone(),
+            "trigger-alpha".to_string(),
+            WebUiRenameAutomationRequest {
+                name: Some("  Renamed status  ".to_string()),
+            },
+        )
+        .await
+        .expect("rename automation");
+    assert!(rename.updated);
+
     let delete = services
         .delete_automation(caller.clone(), "trigger-alpha".to_string())
         .await
@@ -5960,7 +6230,7 @@ async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade()
     assert!(delete.automation.is_none());
 
     let calls = automation_facade.mutation_calls();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 4);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[0].automation_id, "trigger-alpha");
     assert_eq!(calls[0].caller.tenant_id, caller.tenant_id);
@@ -5973,12 +6243,64 @@ async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade()
     assert_eq!(calls[1].caller.user_id, caller.user_id);
     assert_eq!(calls[1].caller.agent_id, expected_agent_id);
     assert_eq!(calls[1].caller.project_id, caller.project_id);
-    assert_eq!(calls[2].action, AutomationMutationAction::Delete);
+    assert_eq!(
+        calls[2].action,
+        AutomationMutationAction::Rename {
+            name: AutomationName::new("Renamed status").expect("valid automation name")
+        }
+    );
     assert_eq!(calls[2].automation_id, "trigger-alpha");
     assert_eq!(calls[2].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[2].caller.user_id, caller.user_id);
     assert_eq!(calls[2].caller.agent_id, expected_agent_id);
     assert_eq!(calls[2].caller.project_id, caller.project_id);
+    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
+    assert_eq!(calls[3].automation_id, "trigger-alpha");
+    assert_eq!(calls[3].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[3].caller.user_id, caller.user_id);
+    assert_eq!(calls[3].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[3].caller.project_id, caller.project_id);
+}
+
+#[tokio::test]
+async fn rename_automation_validates_name_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    for (request, expected_code) in [
+        (
+            WebUiRenameAutomationRequest { name: None },
+            WebUiInboundValidationCode::MissingField,
+        ),
+        (
+            WebUiRenameAutomationRequest {
+                name: Some("  ".to_string()),
+            },
+            WebUiInboundValidationCode::Blank,
+        ),
+        (
+            WebUiRenameAutomationRequest {
+                name: Some("x".repeat(257)),
+            },
+            WebUiInboundValidationCode::TooLong,
+        ),
+    ] {
+        let err = services
+            .rename_automation(caller(), "trigger-alpha".to_string(), request)
+            .await
+            .expect_err("invalid name should fail before facade");
+
+        assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(err.status_code, 400);
+        assert_eq!(err.field.as_deref(), Some("name"));
+        assert_eq!(err.validation_code, Some(expected_code));
+    }
+
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
 }
 
 #[test]
@@ -9598,6 +9920,16 @@ fn assert_setup_validation(
 #[tokio::test]
 async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A failed run carries a model-visible `detail` (free-form backend cause
+    // text, scrubbed only for secret VALUES). The public run-state DTO must
+    // keep the user-facing `category` but strip `detail` so internal
+    // diagnostics never reach the browser (see
+    // `SanitizedFailure::public_projection`).
+    coordinator.set_run_state_failure(
+        SanitizedFailure::new("model_unavailable")
+            .expect("valid category")
+            .with_detail("HTTP 500 from provider at /internal/models/route-xyz"),
+    );
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
@@ -9625,12 +9957,19 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
         RunProfileId::default_profile().as_str()
     );
     assert!(response.gate_ref.is_none());
-    assert!(response.failure.is_none());
+    // The user-facing category survives; the model-visible detail is stripped.
+    let failure = response.failure.as_ref().expect("failure present");
+    assert_eq!(failure.category(), "model_unavailable");
+    assert_eq!(
+        failure.detail(),
+        None,
+        "public run-state DTO must not expose the model-visible failure detail"
+    );
     assert!(response.checkpoint_id.is_none());
     assert_eq!(coordinator.run_state_request_count(), 1);
 
-    // Stable DTO must not surface M3-internal binding refs, model route, or
-    // raw turn scope to WebUI consumers.
+    // Stable DTO must not surface M3-internal binding refs, model route, raw
+    // turn scope, or the internal failure detail to WebUI consumers.
     let rendered = serde_json::to_string(&response).expect("json");
     assert!(!rendered.contains("source_binding_ref"));
     assert!(!rendered.contains("reply_target_binding_ref"));
@@ -9638,6 +9977,8 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     assert!(!rendered.contains("webui-src:replayed"));
     assert!(!rendered.contains("webui-reply:replayed"));
     assert!(!rendered.contains("\"scope\""));
+    assert!(!rendered.contains("\"detail\""));
+    assert!(!rendered.contains("/internal/models/route-xyz"));
 }
 
 #[tokio::test]
@@ -11056,14 +11397,14 @@ async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
 /// both that decode→land ran and that the returned refs reach the transcript.
 #[derive(Default)]
 struct RecordingLander {
-    landed: Mutex<Vec<(String, Vec<InboundAttachment>)>>,
+    landed: Mutex<Vec<(ThreadScope, String, Vec<InboundAttachment>)>>,
 }
 
 #[async_trait]
 impl InboundAttachmentLander for RecordingLander {
     async fn land(
         &self,
-        _thread_scope: &ThreadScope,
+        thread_scope: &ThreadScope,
         message_id: &str,
         attachments: Vec<InboundAttachment>,
     ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
@@ -11083,10 +11424,11 @@ impl InboundAttachmentLander for RecordingLander {
                 extracted_text: None,
             })
             .collect();
-        self.landed
-            .lock()
-            .expect("lander mutex")
-            .push((message_id.to_string(), attachments));
+        self.landed.lock().expect("lander mutex").push((
+            thread_scope.clone(),
+            message_id.to_string(),
+            attachments,
+        ));
         Ok(refs)
     }
 }
@@ -11121,14 +11463,16 @@ async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
         .await
         .expect("submit succeeds");
 
-    // The lander was invoked with the decoded attachment bytes + metadata.
+    // The lander was invoked with the caller-derived thread scope plus the
+    // decoded attachment bytes + metadata.
     {
         let landed = lander.landed.lock().expect("lander mutex");
         assert_eq!(landed.len(), 1);
-        assert_eq!(landed[0].1.len(), 1);
-        assert_eq!(landed[0].1[0].mime_type, "application/pdf");
-        assert_eq!(landed[0].1[0].filename.as_deref(), Some("report.pdf"));
-        assert_eq!(landed[0].1[0].bytes, b"%PDF-1.7 body");
+        assert_eq!(landed[0].0, thread_scope_for(&caller()));
+        assert_eq!(landed[0].2.len(), 1);
+        assert_eq!(landed[0].2[0].mime_type, "application/pdf");
+        assert_eq!(landed[0].2[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(landed[0].2[0].bytes, b"%PDF-1.7 body");
     }
 
     // The returned refs are persisted on the accepted user message.
@@ -11253,4 +11597,648 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
         .await
         .expect_err("attachments without a lander must be rejected");
     assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+}
+
+// ---------------------------------------------------------------------------
+// Admin user management: facade authorization + last-admin protection.
+//
+// Drives the facade methods through a fake `AdminUserService` port so the
+// load-bearing NEW logic — role-based authorization (read every request),
+// operator bypass, and last-admin protection — is tested through the caller.
+// The composition adapter over the real identity store is thin mapping;
+// crate-tier is the reachable tier here because the integration harness does
+// not wire the admin service (no token minter in-harness).
+// ---------------------------------------------------------------------------
+
+fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> AdminUserRecord {
+    AdminUserRecord {
+        user_id: UserId::new(user_id).expect("user id"),
+        email: None,
+        display_name: None,
+        status,
+        role,
+        created_at: "2026-07-07T00:00:00Z".to_string(),
+        updated_at: "2026-07-07T00:00:00Z".to_string(),
+        created_by: None,
+        last_login_at: None,
+        metadata: std::collections::BTreeMap::new(),
+    }
+}
+
+#[derive(Default)]
+struct FakeAdminUsers {
+    users: Mutex<HashMap<String, AdminUserRecord>>,
+}
+
+impl FakeAdminUsers {
+    fn with(records: impl IntoIterator<Item = AdminUserRecord>) -> Self {
+        let map = records
+            .into_iter()
+            .map(|record| (record.user_id.as_str().to_string(), record))
+            .collect();
+        Self {
+            users: Mutex::new(map),
+        }
+    }
+}
+
+#[async_trait]
+impl AdminUserService for FakeAdminUsers {
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        status: Option<AdminUserStatus>,
+        after: Option<&UserId>,
+        limit: usize,
+    ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
+        // Mirror the real port contract: status filter, then user_id-ascending
+        // order, then the `after` cursor, then bound to `limit`.
+        let mut records: Vec<AdminUserRecord> = self
+            .users
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| status.is_none_or(|want| record.status == want))
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| a.user_id.as_str().cmp(b.user_id.as_str()));
+        let after = after.map(UserId::as_str);
+        Ok(records
+            .into_iter()
+            .filter(|record| after.is_none_or(|cursor| record.user_id.as_str() > cursor))
+            .take(limit)
+            .collect())
+    }
+
+    async fn get_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        Ok(self.users.lock().unwrap().get(user_id.as_str()).cloned())
+    }
+
+    async fn create_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        fields: AdminCreateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        let record = admin_record("created-user", fields.role, AdminUserStatus::Active);
+        self.users
+            .lock()
+            .unwrap()
+            .insert("created-user".to_string(), record.clone());
+        Ok(AdminCreatedUser {
+            record,
+            api_token: SecretString::from("minted-token"),
+        })
+    }
+
+    async fn update_profile(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        display_name: Option<String>,
+        _metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        if display_name.is_some() {
+            record.display_name = display_name;
+        }
+        Ok(record.clone())
+    }
+
+    async fn set_status(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        status: AdminUserStatus,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        record.status = status;
+        Ok(record.clone())
+    }
+
+    async fn set_role(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        role: AdminUserRole,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        record.role = role;
+        Ok(record.clone())
+    }
+
+    async fn delete_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<(), AdminUserError> {
+        self.users.lock().unwrap().remove(user_id.as_str());
+        Ok(())
+    }
+
+    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| record.status == AdminUserStatus::Active && record.role.is_admin())
+            .count())
+    }
+
+    async fn list_secrets(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        Ok(Vec::new())
+    }
+
+    async fn put_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        handle: SecretHandle,
+        _material: SecretString,
+    ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        Ok(AdminUserSecretMeta {
+            handle: handle.as_str().to_string(),
+            created_at: None,
+            updated_at: None,
+        })
+    }
+
+    async fn delete_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: SecretHandle,
+    ) -> Result<bool, AdminUserError> {
+        Ok(true)
+    }
+}
+
+fn admin_services(fake: FakeAdminUsers) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(fake))
+}
+
+fn assert_forbidden(err: RebornServicesError) {
+    assert_eq!(err.status_code, 403, "expected a 403 authorization failure");
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+}
+
+/// Drive EVERY admin verb through the facade and assert each is a 403.
+/// `authorize_admin` is a predicate that gates side effects, so it must be
+/// tested at every call site — not just `list` (.claude/rules/testing.md,
+/// "test through the caller"): a verb that forgot to call it would be an
+/// unauthorized read/mutation hole invisible to a single-endpoint test.
+async fn assert_every_admin_verb_forbidden(services: &RebornServices) {
+    let target = UserId::new("some-target").expect("user");
+    assert_forbidden(
+        services
+            .list_admin_users(caller(), RebornAdminUserListQuery::default())
+            .await
+            .expect_err("list"),
+    );
+    assert_forbidden(
+        services
+            .get_admin_user(caller(), target.clone())
+            .await
+            .expect_err("get"),
+    );
+    assert_forbidden(
+        services
+            .create_admin_user(
+                caller(),
+                RebornAdminCreateUserRequest {
+                    email: None,
+                    display_name: None,
+                    role: AdminUserRole::Member,
+                },
+            )
+            .await
+            .expect_err("create"),
+    );
+    assert_forbidden(
+        services
+            .update_admin_user(
+                caller(),
+                target.clone(),
+                RebornAdminUpdateUserRequest::default(),
+            )
+            .await
+            .expect_err("update"),
+    );
+    assert_forbidden(
+        services
+            .set_admin_user_status(
+                caller(),
+                target.clone(),
+                RebornAdminSetStatusRequest {
+                    status: AdminUserStatus::Suspended,
+                },
+            )
+            .await
+            .expect_err("status"),
+    );
+    assert_forbidden(
+        services
+            .set_admin_user_role(
+                caller(),
+                target.clone(),
+                RebornAdminSetRoleRequest {
+                    role: AdminUserRole::Admin,
+                },
+            )
+            .await
+            .expect_err("role"),
+    );
+    assert_forbidden(
+        services
+            .delete_admin_user(caller(), target.clone())
+            .await
+            .expect_err("delete"),
+    );
+    assert_forbidden(
+        services
+            .list_admin_user_secrets(caller(), target.clone())
+            .await
+            .expect_err("list_secrets"),
+    );
+    assert_forbidden(
+        services
+            .put_admin_user_secret(
+                caller(),
+                target.clone(),
+                SecretHandle::new("handle").unwrap(),
+                RebornAdminPutSecretRequest {
+                    value: "v".to_string(),
+                },
+            )
+            .await
+            .expect_err("put_secret"),
+    );
+    assert_forbidden(
+        services
+            .delete_admin_user_secret(caller(), target, SecretHandle::new("handle").unwrap())
+            .await
+            .expect_err("delete_secret"),
+    );
+}
+
+#[tokio::test]
+async fn admin_member_caller_is_forbidden_on_every_verb() {
+    // caller() resolves to user-alpha; seeded as a plain member → 403 on EVERY
+    // admin verb, not just list.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Member,
+        AdminUserStatus::Active,
+    )]));
+    assert_every_admin_verb_forbidden(&services).await;
+    // Self-privilege-escalation: a member cannot promote their own record.
+    assert_forbidden(
+        services
+            .set_admin_user_role(
+                caller(),
+                UserId::new("user-alpha").expect("user"),
+                RebornAdminSetRoleRequest {
+                    role: AdminUserRole::Admin,
+                },
+            )
+            .await
+            .expect_err("a member must not promote themselves"),
+    );
+}
+
+#[tokio::test]
+async fn admin_unknown_caller_is_forbidden_on_every_verb() {
+    // The caller has no user record at all. Same 403 as a member — the facade
+    // must never leak (via a different status/code) whether the caller record
+    // exists but is under-privileged vs. does not exist.
+    let services = admin_services(FakeAdminUsers::default());
+    assert_every_admin_verb_forbidden(&services).await;
+}
+
+#[tokio::test]
+async fn admin_suspended_admin_is_forbidden_on_every_verb() {
+    // Regression: `authorize_admin` used to check `role` only, so a SUSPENDED
+    // admin kept full control (the role field still reads Admin). Status now
+    // gates authorization, so suspending an admin revokes their admin API
+    // access immediately — on every verb.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Suspended,
+    )]));
+    assert_every_admin_verb_forbidden(&services).await;
+
+    // A suspended OWNER is likewise locked out (owner also clears the role
+    // boundary, so status must gate it too).
+    let services_owner = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Owner,
+        AdminUserStatus::Suspended,
+    )]));
+    assert_forbidden(
+        services_owner
+            .list_admin_users(caller(), RebornAdminUserListQuery::default())
+            .await
+            .expect_err("a suspended owner must not reach the admin surface"),
+    );
+}
+
+#[tokio::test]
+async fn admin_caller_lists_and_creates_with_one_time_token() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    services
+        .list_admin_users(caller(), RebornAdminUserListQuery::default())
+        .await
+        .expect("an admin may list users");
+    let created = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: Some("new@acme.com".to_string()),
+                display_name: Some("New".to_string()),
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect("an admin may create a user");
+    assert_eq!(created.api_token, "minted-token");
+}
+
+#[tokio::test]
+async fn admin_list_forwards_status_filter_to_the_port() {
+    // A dropped `query.status` extractor or a broken active/suspended mapping
+    // would silently return every user. Seed one active + one suspended admin
+    // and assert `?status=` narrows the caller-visible result.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-active", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record(
+            "user-suspended",
+            AdminUserRole::Admin,
+            AdminUserStatus::Suspended,
+        ),
+    ]));
+
+    let suspended = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                status: Some(AdminUserStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list suspended");
+    assert_eq!(suspended.users.len(), 1, "only the suspended user matches");
+    assert_eq!(suspended.users[0].user_id.as_str(), "user-suspended");
+
+    let active = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                status: Some(AdminUserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list active");
+    assert_eq!(active.users.len(), 1, "only the active user matches");
+    assert_eq!(active.users[0].user_id.as_str(), "user-active");
+
+    let all = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery::default(),
+        )
+        .await
+        .expect("list all");
+    assert_eq!(all.users.len(), 2, "no filter returns both");
+}
+
+#[tokio::test]
+async fn admin_list_bounds_pages_and_threads_the_cursor() {
+    // The facade must clamp the page and derive a `next_cursor` from a full
+    // page, then honor that cursor on the next call — so a large tenant is
+    // paged, not returned (and scanned) in one unbounded response.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-a", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-b", AdminUserRole::Member, AdminUserStatus::Active),
+        admin_record("user-c", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+
+    let page1 = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page 1");
+    assert_eq!(page1.users.len(), 2, "the page honors the limit");
+    assert_eq!(page1.users[0].user_id.as_str(), "user-a");
+    assert_eq!(page1.users[1].user_id.as_str(), "user-b");
+    let cursor = page1.next_cursor.expect("a full page yields a next cursor");
+    assert_eq!(cursor, "user-b", "the cursor is the last id on the page");
+
+    let page2 = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                limit: Some(2),
+                cursor: Some(cursor),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page 2");
+    assert_eq!(page2.users.len(), 1, "the final page holds the remainder");
+    assert_eq!(page2.users[0].user_id.as_str(), "user-c");
+    assert!(
+        page2.next_cursor.is_none(),
+        "a short page means no more users"
+    );
+}
+
+#[tokio::test]
+async fn admin_list_rejects_a_malformed_cursor() {
+    let services = admin_services(FakeAdminUsers::default());
+    let err = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                cursor: Some("not a valid user id \u{7f}".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a malformed cursor is caller input at fault");
+    assert_eq!(err.status_code, 400);
+}
+
+#[tokio::test]
+async fn admin_operator_bypasses_role_check() {
+    // An env-bearer operator has no user record but is an implicit admin.
+    let services = admin_services(FakeAdminUsers::default());
+    let operator = caller().with_operator_webui_config(true);
+    services
+        .list_admin_users(operator, RebornAdminUserListQuery::default())
+        .await
+        .expect("an operator token clears the admin boundary without a user record");
+}
+
+#[tokio::test]
+async fn admin_last_admin_protection_blocks_demote_suspend_and_delete() {
+    // caller() (user-alpha) is the SOLE active admin. Demote, suspend, AND
+    // delete must all be blocked — any of the three would otherwise strand the
+    // tenant with zero active admins. `delete` has its own guard distinct from
+    // the demote/suspend path, so it is covered here explicitly.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    let target = UserId::new("user-alpha").expect("user");
+
+    let demote = services
+        .set_admin_user_role(
+            caller(),
+            target.clone(),
+            RebornAdminSetRoleRequest {
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect_err("demoting the sole admin must be blocked");
+    assert_eq!(demote.status_code, 409);
+    assert_eq!(demote.field.as_deref(), Some("last_admin"));
+
+    let suspend = services
+        .set_admin_user_status(
+            caller(),
+            target.clone(),
+            RebornAdminSetStatusRequest {
+                status: AdminUserStatus::Suspended,
+            },
+        )
+        .await
+        .expect_err("suspending the sole admin must be blocked");
+    assert_eq!(suspend.status_code, 409);
+    assert_eq!(suspend.field.as_deref(), Some("last_admin"));
+
+    let delete = services
+        .delete_admin_user(caller(), target)
+        .await
+        .expect_err("deleting the sole admin must be blocked");
+    assert_eq!(delete.status_code, 409);
+    assert_eq!(delete.field.as_deref(), Some("last_admin"));
+}
+
+#[tokio::test]
+async fn admin_last_admin_protection_allows_demote_with_a_second_admin() {
+    // With two active admins, demoting one is allowed.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Admin, AdminUserStatus::Active),
+    ]));
+    services
+        .set_admin_user_role(
+            caller(),
+            UserId::new("user-beta").expect("user"),
+            RebornAdminSetRoleRequest {
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect("demoting one of two admins is allowed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_last_admin_protection_survives_concurrent_demotion() {
+    // Two active admins. Fire both demotions concurrently: without serialization
+    // each `ensure_not_last_admin` reads "2 admins", both pass, and both land →
+    // 0 admins (a TOCTOU race). The per-tenant admin-mutation lock serializes
+    // the check+mutation, so exactly one demotion succeeds and the other is a
+    // 409 — the tenant always keeps an admin. Runs on a multi-thread runtime so
+    // the two calls are genuinely parallel.
+    let services = std::sync::Arc::new(admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Admin, AdminUserStatus::Active),
+    ])));
+
+    // Both demotions run as an OPERATOR caller (bypasses the role check and is
+    // never itself demoted), so the second failure is deterministically the
+    // 409 last-admin block — not a 403 from the caller losing its own role.
+    let demote = |uid: &'static str| {
+        let services = std::sync::Arc::clone(&services);
+        async move {
+            services
+                .set_admin_user_role(
+                    caller().with_operator_webui_config(true),
+                    UserId::new(uid).expect("user"),
+                    RebornAdminSetRoleRequest {
+                        role: AdminUserRole::Member,
+                    },
+                )
+                .await
+        }
+    };
+
+    let (alpha, beta) = tokio::join!(demote("user-alpha"), demote("user-beta"));
+
+    let successes = [alpha.is_ok(), beta.is_ok()]
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
+    let blocked = [&alpha, &beta]
+        .into_iter()
+        .filter(|result| matches!(result, Err(err) if err.status_code == 409))
+        .count();
+    assert_eq!(successes, 1, "exactly one concurrent demotion may land");
+    assert_eq!(
+        blocked, 1,
+        "the other must be blocked by last-admin protection (never stranded at 0 admins)"
+    );
+
+    let remaining = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery::default(),
+        )
+        .await
+        .expect("list")
+        .users
+        .into_iter()
+        .filter(|u| u.role.is_admin() && u.status == AdminUserStatus::Active)
+        .count();
+    assert_eq!(
+        remaining, 1,
+        "the tenant must never be stranded without an admin"
+    );
 }

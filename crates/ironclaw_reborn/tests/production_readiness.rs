@@ -148,12 +148,20 @@ fn production_readiness_rejects_missing_subagent_completion_observer() {
     ));
 }
 
+// §3 replacement: the 3 dead-component tests that used to live here
+// (`production_readiness_rejects_non_durable_subagent_tombstone_store`,
+// `..._missing_subagent_autonomous_continuation_budget`,
+// `..._missing_subagent_restart_reconciler`) covered readiness fields for
+// components that are now deleted (an unwired tombstone store; readiness
+// metadata for two components that were never built). One test below covers
+// the new `subagent_await_edge_store` field that replaces all three.
+
 #[test]
-fn production_readiness_rejects_non_durable_subagent_tombstone_store() {
+fn production_readiness_rejects_non_durable_subagent_await_edge_store() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
     let mut graph = RebornLoopComponentGraphReadiness::production_verified();
-    graph.subagent_result_tombstone_store =
+    graph.subagent_await_edge_store =
         RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
 
     let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
@@ -166,17 +174,17 @@ fn production_readiness_rejects_non_durable_subagent_tombstone_store() {
 
     assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::SubagentResultTombstoneStore,
+        RebornLoopProductionComponent::SubagentAwaitEdgeStore,
         RebornLoopProductionIssueKind::NonDurableImplementation
     ));
 }
 
 #[test]
-fn production_readiness_rejects_missing_subagent_autonomous_continuation_budget() {
+fn production_readiness_rejects_missing_subagent_await_edge_store() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
     let mut graph = RebornLoopComponentGraphReadiness::production_verified();
-    graph.subagent_autonomous_continuation_budget =
+    graph.subagent_await_edge_store =
         RebornComponentReadiness::missing(RebornComponentRequirement::Required);
 
     let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
@@ -189,30 +197,7 @@ fn production_readiness_rejects_missing_subagent_autonomous_continuation_budget(
 
     assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::SubagentAutonomousContinuationBudget,
-        RebornLoopProductionIssueKind::Missing
-    ));
-}
-
-#[test]
-fn production_readiness_rejects_missing_subagent_restart_reconciler() {
-    let mut registry = DriverRegistry::new();
-    let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
-    graph.subagent_restart_reconciler =
-        RebornComponentReadiness::missing(RebornComponentRequirement::Required);
-
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
-        driver_registry: &registry,
-        component_graph: graph,
-        configured_profiles: vec![selected_profile(key)],
-        active_runs: Vec::new(),
-    });
-
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
-    assert!(report.contains(
-        RebornLoopProductionComponent::SubagentRestartReconciler,
+        RebornLoopProductionComponent::SubagentAwaitEdgeStore,
         RebornLoopProductionIssueKind::Missing
     ));
 }

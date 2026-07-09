@@ -1,0 +1,105 @@
+name: Main CI Slack Alerts
+
+on:
+  workflow_run:
+    workflows:
+      - Code Style
+      - Tests (Reborn)
+      - Reborn E2E
+      - Platform & Compat
+      - Replay Snapshot Gate
+      - Code Coverage
+      - nearai-bench dispatcher tests
+      - Release-plz
+    branches:
+      - main
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  alert:
+    name: Post Slack alert
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      contains(fromJSON('["failure","timed_out","action_required","startup_failure"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post main CI failure to Slack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+          MAIN_CI_SLACK_WEBHOOK_URLS: ${{ secrets.MAIN_CI_SLACK_WEBHOOK_URLS }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${HEAD_SHA:0:10}"
+          failed_jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure") | "\(.name) (\(.conclusion))"] | .[0:12] | join(", ")' \
+            2>/dev/null || true)"
+          if [ -z "$failed_jobs" ]; then
+            failed_jobs="No failed jobs listed; inspect the workflow run for startup or workflow-level errors."
+          fi
+
+          text="Main branch CI failed: ${WORKFLOW_NAME} concluded ${CONCLUSION} on ${short_sha}"
+          payload="$(jq -n \
+            --arg text "$text" \
+            --arg workflow "$WORKFLOW_NAME" \
+            --arg conclusion "$CONCLUSION" \
+            --arg branch "$HEAD_BRANCH" \
+            --arg sha "$short_sha" \
+            --arg actor "$ACTOR" \
+            --arg failed_jobs "$failed_jobs" \
+            --arg url "$RUN_URL" \
+            '{
+              text: $text,
+              blocks: [
+                {
+                  type: "header",
+                  text: {type: "plain_text", text: "Main branch CI failed"}
+                },
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: "*Workflow:* \($workflow)\n*Conclusion:* `\($conclusion)`\n*Branch:* `\($branch)`\n*Commit:* `\($sha)`\n*Actor:* `\($actor)`\n*Failed jobs:* \($failed_jobs)\n<\($url)|Open workflow run>"
+                  }
+                }
+              ]
+            }')"
+
+          webhooks="${MAIN_CI_SLACK_WEBHOOK_URLS:-}"
+          if [ -z "$webhooks" ]; then
+            echo "::error::Set MAIN_CI_SLACK_WEBHOOK_URLS to receive main CI failure alerts."
+            exit 1
+          fi
+
+          webhook_file="$(mktemp)"
+          trap 'rm -f "$webhook_file"' EXIT
+          printf '%s\n' "$webhooks" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d' > "$webhook_file"
+
+          posted=0
+          while IFS= read -r webhook; do
+            if curl -fsS --max-time 30 -X POST -H 'Content-type: application/json' \
+              --data "$payload" "$webhook" > /dev/null; then
+              posted=$((posted + 1))
+            else
+              echo "::warning::Failed to post alert to webhook (HTTP error or timeout)."
+            fi
+          done < "$webhook_file"
+
+          if [ "$posted" -eq 0 ]; then
+            echo "::error::Failed to post alert to any Slack webhook."
+            exit 1
+          fi
+
+          echo "Posted main CI failure alert to ${posted} Slack webhook(s)."

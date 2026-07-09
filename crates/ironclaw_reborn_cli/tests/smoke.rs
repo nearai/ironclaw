@@ -121,6 +121,12 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
         "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
     );
     assert!(
+        dockerfile.contains("corepack enable pnpm")
+            && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
+            && dockerfile.contains("crates/ironclaw_webui_v2/frontend"),
+        "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and final webui-v2-beta builds: {dockerfile}"
+    );
+    assert!(
         dockerfile.contains("config.production.toml"),
         "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
     );
@@ -144,6 +150,23 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
     assert!(
         !dockerfile.contains("\nVOLUME "),
         "Railway's Dockerfile builder rejects Docker VOLUME instructions; configure Railway volumes outside the image: {dockerfile}"
+    );
+}
+
+#[test]
+fn run_reborn_webui_builds_frontend_before_cargo() {
+    let launcher = std::fs::read_to_string(workspace_root().join("scripts/run-reborn-webui.sh"))
+        .expect("scripts/run-reborn-webui.sh");
+
+    let frontend_build = launcher
+        .find("pnpm build")
+        .expect("launcher should build WebUI frontend assets");
+    let cargo_run = launcher
+        .find("CARGO=(cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta")
+        .expect("launcher should run Reborn with webui-v2-beta");
+    assert!(
+        frontend_build < cargo_run,
+        "scripts/run-reborn-webui.sh must build frontend/dist before cargo compiles webui-v2-beta: {launcher}"
     );
 }
 
@@ -1423,13 +1446,21 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
+    let port = unused_local_port();
 
     let mut child = Command::new(reborn_bin())
-        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
         .env_clear()
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            // >=32 bytes: serve now enforces the session-signing entropy
+            // floor unconditionally (it signs admin-minted session tokens
+            // even without SSO).
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1472,8 +1503,53 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         }
     }
 
+    let providers_status = match http_status_line(
+        port,
+        concat!(
+            "GET /auth/providers HTTP/1.1\r\n",
+            "Host: 127.0.0.1\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+        ),
+        "providers route probe",
+    ) {
+        Ok(status_line) => status_line,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{error}");
+        }
+    };
+    let logout_status = match http_status_line(
+        port,
+        concat!(
+            "POST /auth/logout HTTP/1.1\r\n",
+            "Host: 127.0.0.1\r\n",
+            "Authorization: Bearer test-token\r\n",
+            "Content-Length: 0\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+        ),
+        "logout route probe",
+    ) {
+        Ok(status_line) => status_line,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{error}");
+        }
+    };
+
     let _ = child.kill();
     let _ = child.wait();
+    assert!(
+        providers_status.contains(" 200 "),
+        "no-SSO serve must still expose empty provider discovery, got status line: {providers_status}"
+    );
+    assert!(
+        logout_status.contains(" 404 "),
+        "no-SSO env-bearer serve must not mount logout, got status line: {logout_status}"
+    );
     let config = std::fs::read_to_string(reborn_home.join("config.toml"))
         .expect("successful serve startup should seed config");
     assert!(
@@ -1505,7 +1581,13 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
         .env_clear()
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            // >=32 bytes: serve now enforces the session-signing entropy
+            // floor unconditionally (it signs admin-minted session tokens
+            // even without SSO).
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .env("IRONCLAW_REBORN_SLACK_ENABLED", "true")
         .stdout(Stdio::piped())
@@ -1566,7 +1648,7 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
     );
 }
 
-#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
+#[cfg(feature = "webui-v2-beta")]
 fn unused_local_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .expect("bind ephemeral local port")
@@ -1575,8 +1657,8 @@ fn unused_local_port() -> u16 {
         .port()
 }
 
-#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
-fn post_slack_events_status_line(port: u16) -> Result<String, String> {
+#[cfg(feature = "webui-v2-beta")]
+fn http_status_line(port: u16, request: &str, label: &str) -> Result<String, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut stream = loop {
         match std::net::TcpStream::connect(("127.0.0.1", port)) {
@@ -1587,24 +1669,35 @@ fn post_slack_events_status_line(port: u16) -> Result<String, String> {
             Err(error) => return Err(format!("connect to serve listener failed: {error}")),
         }
     };
-    let request = concat!(
-        "POST /webhooks/slack/events HTTP/1.1\r\n",
-        "Host: 127.0.0.1\r\n",
-        "Content-Type: application/json\r\n",
-        "Content-Length: 2\r\n",
-        "Connection: close\r\n",
-        "\r\n",
-        "{}"
-    );
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|error| format!("set {label} read timeout failed: {error}"))?;
     stream
         .write_all(request.as_bytes())
-        .map_err(|error| format!("write Slack route probe failed: {error}"))?;
+        .map_err(|error| format!("write {label} failed: {error}"))?;
     let mut reader = std::io::BufReader::new(stream);
     let mut status_line = String::new();
     reader
         .read_line(&mut status_line)
-        .map_err(|error| format!("read Slack route probe status line failed: {error}"))?;
+        .map_err(|error| format!("read {label} status line failed: {error}"))?;
     Ok(status_line)
+}
+
+#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
+fn post_slack_events_status_line(port: u16) -> Result<String, String> {
+    http_status_line(
+        port,
+        concat!(
+            "POST /webhooks/slack/events HTTP/1.1\r\n",
+            "Host: 127.0.0.1\r\n",
+            "Content-Type: application/json\r\n",
+            "Content-Length: 2\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+            "{}"
+        ),
+        "Slack route probe",
+    )
 }
 
 #[cfg(feature = "webui-v2-beta")]
@@ -1663,7 +1756,13 @@ max_body_bytes_fallback = 0
 
         let output = isolated_no_llm_command(temp.path(), &reborn_home)
             .args(["serve", "--host", "127.0.0.1", "--port", "0"])
-            .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+            .env(
+                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                // >=32 bytes: serve now enforces the session-signing entropy
+                // floor unconditionally (it signs admin-minted session tokens
+                // even without SSO).
+                "reborn-smoke-test-token-0123456789abcdef",
+            )
             .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
             .output()
             .expect("ironclaw-reborn serve should not crash");
@@ -1719,6 +1818,40 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
     assert!(
         !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
         "serve must not bind after SSO admission misconfiguration; got: {stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
+    // Regression for the offline HMAC-oracle gap: serve always wires the admin
+    // API token minter, which signs user-visible session tokens from the env
+    // bearer secret. A weak secret is therefore an offline forgery target even
+    // when no SSO provider is configured, so the >=32-byte entropy floor must
+    // fire unconditionally — not only when SSO startup is present.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = isolated_no_llm_command(temp.path(), &reborn_home)
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        // 16 bytes: below the floor, and NO SSO provider env is set.
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "short-weak-token")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .output()
+        .expect("ironclaw-reborn serve should not crash");
+
+    assert!(
+        !output.status.success(),
+        "serve must fail closed on a low-entropy session-signing secret even without SSO"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("session-signing key") && stderr.contains("at least 32 bytes"),
+        "stderr should explain the session-signing entropy floor; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        "serve must not bind with a low-entropy session-signing secret; got: {stderr}"
     );
 }
 
@@ -3145,7 +3278,13 @@ fn serve_confirmed_local_dev_yolo_rejects_non_loopback_cli_host() {
         &temp,
         &["serve", "--confirm-host-access", "--host", "0.0.0.0"],
     )
-    .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+    .env(
+        "IRONCLAW_REBORN_WEBUI_TOKEN",
+        // >=32 bytes: serve now enforces the session-signing entropy
+        // floor unconditionally (it signs admin-minted session tokens
+        // even without SSO).
+        "reborn-smoke-test-token-0123456789abcdef",
+    )
     .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
     .output()
     .expect("ironclaw-reborn serve should not crash");
@@ -3178,7 +3317,13 @@ listen_host = "0.0.0.0"
     .expect("write config");
 
     let output = local_yolo_command(&temp, &["serve", "--confirm-host-access"])
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            // >=32 bytes: serve now enforces the session-signing entropy
+            // floor unconditionally (it signs admin-minted session tokens
+            // even without SSO).
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .output()
         .expect("ironclaw-reborn serve should not crash");

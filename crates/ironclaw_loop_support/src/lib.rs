@@ -13,6 +13,7 @@ use std::{
     },
 };
 
+mod await_edge_port;
 mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;
@@ -40,6 +41,9 @@ mod token_estimator;
 mod turn_event_publisher;
 pub mod user_profile_context;
 
+pub use await_edge_port::{
+    AwaitEdgeSettler, AwaitEdgeWriter, ResolveOutcome, ResolveReport, ScopeRecoveryInProgress,
+};
 pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
 pub use budget_seeding::BudgetSeedingPolicy;
@@ -100,11 +104,11 @@ pub use subagent_prompt_port::{
 pub use subagent_spawn_port::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
     DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
-    InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
+    InMemoryAwaitEdgeWriter, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
     SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
-    SubagentDefinitionResolver, SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId,
-    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
+    SubagentDefinitionResolver, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
+    SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
@@ -163,7 +167,8 @@ pub fn raw_agent_loop_host_error(
     raw_detail: impl std::fmt::Display,
 ) -> AgentLoopHostError {
     let safe_summary = safe_summary.into();
-    tracing::warn!(
+    let raw_detail = raw_detail.to_string();
+    tracing::debug!(
         component,
         operation,
         kind = ?kind,
@@ -171,7 +176,15 @@ pub fn raw_agent_loop_host_error(
         raw_detail = %raw_detail,
         "agent loop host error mapped to safe summary"
     );
-    AgentLoopHostError::new(kind, safe_summary)
+    // Carry the raw cause to the model as a secret-scrubbed diagnostic. Only
+    // secret VALUES are redacted; paths/codes/raw error text reach the model so
+    // it can retry or explain. The word/delimiter ban is NOT applied here.
+    let mut error = AgentLoopHostError::new(kind, safe_summary);
+    let scrubbed = sanitize_model_visible_text(raw_detail);
+    if !scrubbed.trim().is_empty() {
+        error = error.with_detail(scrubbed);
+    }
+    error
 }
 
 pub fn raw_host_managed_model_error(
@@ -893,6 +906,7 @@ where
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -922,6 +936,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
+            stream_sink: None,
         }
     }
 
@@ -948,6 +963,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
+            stream_sink: None,
         }
     }
 
@@ -997,6 +1013,11 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_stream_sink(mut self, sink: Arc<dyn HostManagedModelStreamSink>) -> Self {
+        self.stream_sink = Some(sink);
         self
     }
 
@@ -1118,8 +1139,22 @@ where
                 } else {
                     Arc::clone(capabilities)
                 };
+            if let Some(stream_sink) = self.stream_sink.as_ref() {
+                self.gateway
+                    .stream_model_with_capabilities_and_progress(
+                        host_request,
+                        capabilities,
+                        Arc::clone(stream_sink),
+                    )
+                    .await
+            } else {
+                self.gateway
+                    .stream_model_with_capabilities(host_request, capabilities)
+                    .await
+            }
+        } else if let Some(stream_sink) = self.stream_sink.as_ref() {
             self.gateway
-                .stream_model_with_capabilities(host_request, capabilities)
+                .stream_model_with_progress(host_request, Arc::clone(stream_sink))
                 .await
         } else {
             self.gateway.stream_model(host_request).await
@@ -1470,12 +1505,30 @@ pub trait HostManagedModelGateway: Send + Sync {
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError>;
 
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        _sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model(request).await
+    }
+
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
         _capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.stream_model(request).await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        _sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model_with_capabilities(request, capabilities)
+            .await
     }
 
     /// Resolve a scope-specific gateway, if this gateway multiplexes by scope.
@@ -1487,6 +1540,11 @@ pub trait HostManagedModelGateway: Send + Sync {
     ) -> Option<std::sync::Arc<dyn HostManagedModelGateway>> {
         None
     }
+}
+
+#[async_trait::async_trait]
+pub trait HostManagedModelStreamSink: Send + Sync {
+    async fn safe_text_update(&self, safe_text: String);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1689,8 +1747,7 @@ pub enum HostManagedModelErrorKind {
     /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
     /// Provider/model output was structurally invalid for the active loop contract.
-    /// This is model-side bad output, not caller misuse — mapped to Unavailable so
-    /// loops can retry on transient provider anomalies.
+    /// This is model-side bad output, not caller misuse.
     #[serde(alias = "invalid_output")]
     InvalidOutput,
     PolicyDenied,
@@ -1710,6 +1767,13 @@ pub struct HostManagedModelError {
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub gate_ref: Option<LoopGateRef>,
+    /// Model-visible, secret-scrubbed raw cause (status line, provider body
+    /// snippet). Unlike `safe_summary`, this carries the original message so the
+    /// failure explainer can describe the real fault. Secret VALUES must be
+    /// redacted by the producer via
+    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`]; the
+    /// summary word/delimiter ban is NOT applied here.
+    pub detail: Option<String>,
 }
 
 impl HostManagedModelError {
@@ -1719,6 +1783,7 @@ impl HostManagedModelError {
             safe_summary: safe_model_summary(kind).to_string(),
             reason_kind: None,
             gate_ref: None,
+            detail: None,
         }
     }
 
@@ -1728,7 +1793,25 @@ impl HostManagedModelError {
             safe_summary: safe_summary.into(),
             reason_kind: None,
             gate_ref: None,
+            detail: None,
         }
+    }
+
+    /// Attach a secret-scrubbed model-visible detail. The caller is responsible
+    /// for scrubbing secret VALUES first (see [`Self::detail`]).
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Attach a model-visible detail, scrubbing credential-looking tokens via
+    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`] before it is
+    /// stored. Use when the raw cause has not already been sanitized.
+    pub fn safe_with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+            detail.into(),
+        ));
+        self
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
@@ -2043,13 +2126,16 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(gate_ref) = error.gate_ref {
         host_error = host_error.with_gate_ref(gate_ref);
     }
+    if let Some(detail) = error.detail {
+        host_error = host_error.with_detail(detail);
+    }
     host_error
 }
 
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
-        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::Unavailable,
+        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::InvalidOutput,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -2081,6 +2167,48 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_gateway_error_threads_detail_into_host_error() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "model service is unavailable",
+        )
+        .with_detail("HTTP 404 model not found");
+
+        let host_error = model_gateway_error(error);
+
+        assert_eq!(
+            host_error.detail.as_deref(),
+            Some("HTTP 404 model not found")
+        );
+    }
+
+    #[test]
+    fn safe_with_detail_scrubs_credential_tokens() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "model service is unavailable",
+        )
+        .safe_with_detail("provider rejected api_key=sk-secretvalue for HTTP 401");
+
+        let detail = error.detail.expect("detail present");
+        assert!(!detail.contains("sk-secretvalue"));
+        assert!(detail.contains("[redacted]"));
+        assert!(detail.contains("HTTP 401"));
+    }
+
+    #[test]
+    fn model_gateway_error_without_detail_leaves_host_detail_none() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "model service is unavailable",
+        );
+
+        let host_error = model_gateway_error(error);
+
+        assert_eq!(host_error.detail, None);
+    }
 
     #[test]
     fn model_gateway_error_sanitizes_raw_detail_without_losing_budget_gate() {

@@ -7,7 +7,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -16,9 +16,9 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
@@ -26,9 +26,9 @@ use ironclaw_llm::{
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
-    ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadContextWindowCache,
+    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
+    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
@@ -42,10 +42,10 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
-        RegisterProviderToolCallRequest,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
+        LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
     },
 };
 use tracing::debug;
@@ -212,6 +212,28 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, None).await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, Some(progress_sink)).await
+    }
+}
+
+impl<S, G> ThreadBackedLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn stream_model_inner(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
@@ -222,7 +244,7 @@ where
             Arc::clone(&context_window_cache),
         )
         .await?;
-        ThreadBackedLoopModelPort::new(
+        let mut port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             request.context,
@@ -230,10 +252,26 @@ where
             self.max_messages,
         )
         .with_instruction_materialization_store(instruction_materialization_store)
-        .with_context_window_cache(context_window_cache)
-        .stream_model(request.request)
-        .await
-        .map_err(host_error_to_model_gateway_error)
+        .with_context_window_cache(context_window_cache);
+        if let Some(progress_sink) = progress_sink {
+            port = port.with_stream_sink(Arc::new(LoopProgressHostStreamSink {
+                inner: progress_sink,
+            }));
+        }
+        port.stream_model(request.request)
+            .await
+            .map_err(host_error_to_model_gateway_error)
+    }
+}
+
+struct LoopProgressHostStreamSink {
+    inner: Arc<dyn LoopModelProgressSink>,
+}
+
+#[async_trait]
+impl HostManagedModelStreamSink for LoopProgressHostStreamSink {
+    async fn safe_text_update(&self, safe_text: String) {
+        self.inner.model_text_update(safe_text).await;
     }
 }
 
@@ -272,7 +310,7 @@ where
                 surface_version: request.surface_version.clone(),
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
-                inline_messages: Vec::new(),
+                inline_messages: request.inline_messages.clone(),
                 capability_view: None,
             })
             .await
@@ -363,6 +401,42 @@ where
             completion,
             None,
             None,
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let route = self
+            .policy
+            .route_for(&request.model_profile_id)
+            .ok_or_else(|| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::PolicyDenied,
+                    "model profile is not permitted",
+                )
+            })?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(model_override);
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+
+        complete_model_request(
+            self.provider.as_ref(),
+            completion,
+            None,
+            None,
+            Some(sink),
             replay_identity,
         )
         .await
@@ -401,6 +475,47 @@ where
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let route = self
+            .policy
+            .route_for(&request.model_profile_id)
+            .ok_or_else(|| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::PolicyDenied,
+                    "model profile is not permitted",
+                )
+            })?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(model_override);
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+
+        let provider_turn_scope = format!(
+            "run={run_id}\nturn={turn_id}\nmodel_call={}",
+            self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
+        );
+        complete_model_request(
+            self.provider.as_ref(),
+            completion,
+            Some(capabilities),
+            Some(provider_turn_scope),
+            Some(sink),
             replay_identity,
         )
         .await
@@ -561,7 +676,53 @@ where
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(provider.as_ref(), completion, None, None, replay_identity).await
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            None,
+            None,
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let slot = slot_for_model_profile(&request.model_profile_id)?;
+        let request_snapshot = request
+            .resolved_model_route
+            .as_ref()
+            .ok_or_else(missing_route_snapshot_error)?;
+        let policy_mode = self.validate_route_snapshot(slot, request_snapshot)?;
+        let snapshot = snapshot_from_host_request(slot, request_snapshot, policy_mode)?;
+        let provider = self.provider_pool.provider_for_route(&snapshot).await?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(
+            snapshot.route().provider_id(),
+            snapshot.route().model_id(),
+        )?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(snapshot.route().model_id().to_string());
+        validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_route_metadata(&mut completion, &snapshot);
+
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            None,
+            None,
+            Some(sink),
+            replay_identity,
+        )
+        .await
     }
 
     async fn stream_model_with_capabilities(
@@ -600,6 +761,50 @@ where
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let slot = slot_for_model_profile(&request.model_profile_id)?;
+        let request_snapshot = request
+            .resolved_model_route
+            .as_ref()
+            .ok_or_else(missing_route_snapshot_error)?;
+        let policy_mode = self.validate_route_snapshot(slot, request_snapshot)?;
+        let snapshot = snapshot_from_host_request(slot, request_snapshot, policy_mode)?;
+        let provider = self.provider_pool.provider_for_route(&snapshot).await?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(
+            snapshot.route().provider_id(),
+            snapshot.route().model_id(),
+        )?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(snapshot.route().model_id().to_string());
+        validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_route_metadata(&mut completion, &snapshot);
+
+        let provider_turn_scope = format!(
+            "run={run_id}\nturn={turn_id}\nmodel_call={}",
+            self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
+        );
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            Some(capabilities),
+            Some(provider_turn_scope),
+            Some(sink),
             replay_identity,
         )
         .await
@@ -837,9 +1042,41 @@ fn validate_replay_identity_text(
     Ok(())
 }
 
+struct ProviderStreamSink {
+    inner: Arc<dyn HostManagedModelStreamSink>,
+    accumulated_text: Mutex<String>,
+}
+
+impl ProviderStreamSink {
+    fn new(inner: Arc<dyn HostManagedModelStreamSink>) -> Self {
+        Self {
+            inner,
+            accumulated_text: Mutex::new(String::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl CompletionStreamSink for ProviderStreamSink {
+    async fn text_delta(&self, delta: String) {
+        if delta.is_empty() {
+            return;
+        }
+        let safe_text = {
+            let mut guard = match self.accumulated_text.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.push_str(&delta);
+            sanitize_model_visible_text(guard.clone())
+        };
+        self.inner.safe_text_update(safe_text).await;
+    }
+}
+
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, replay_identity),
+    skip(provider, completion, capabilities, stream_sink, replay_identity),
     fields(
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
@@ -851,6 +1088,7 @@ async fn complete_model_request<P>(
     completion: CompletionRequest,
     capabilities: Option<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
+    stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     replay_identity: ProviderReplayIdentity,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
@@ -896,7 +1134,16 @@ where
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
-            let response = match provider.complete_with_tools(tool_request.clone()).await {
+            let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+                provider
+                    .complete_with_tools_streaming(
+                        tool_request.clone(),
+                        Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+                    )
+                    .await
+            } else {
+                provider.complete_with_tools(tool_request.clone()).await
+            } {
                 Ok(response) => {
                     trace_model_latency_ok(
                         "provider_complete_with_tools",
@@ -1037,7 +1284,16 @@ where
     }
 
     let provider_started_at = live_latency_started_at();
-    let response = match provider.complete(completion).await {
+    let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+        provider
+            .complete_streaming(
+                completion,
+                Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+            )
+            .await
+    } else {
+        provider.complete(completion).await
+    } {
         Ok(response) => {
             trace_model_latency_ok(
                 "provider_complete",
@@ -1366,27 +1622,66 @@ fn unavailable_requested_capability_guard(
         .iter()
         .map(|definition| definition.capability_id.as_str())
         .collect::<HashSet<_>>();
+    // Namespaces the agent actually has (a visible capability shares the prefix,
+    // e.g. `builtin`). Used only to rescue backticked references to REAL
+    // capability namespaces from the inline-code skip — a backticked `builtin.echo`
+    // is still a request, whereas a backticked `playwright.sync_api` (a library
+    // whose namespace this agent doesn't have) is a code reference.
+    let visible_namespaces = visible_capability_ids
+        .iter()
+        .filter_map(|id| id.split('.').next())
+        .collect::<HashSet<_>>();
 
-    extract_explicit_capability_request_ids(&latest_user.content)
+    extract_explicit_capability_request_ids(&latest_user.content, &visible_namespaces)
         .into_iter()
         .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
         .map(|capability_id| UnavailableCapabilityGuard { capability_id })
 }
 
-fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
+fn extract_explicit_capability_request_ids(
+    content: &str,
+    visible_namespaces: &HashSet<&str>,
+) -> Vec<CapabilityId> {
     let mut ids = Vec::new();
     let mut token_start = None;
+    // Track Markdown inline-code parity (per line) in this same single pass so we
+    // never rescan the line for each token — one long user line with many
+    // capability-shaped tokens would otherwise be O(n^2).
+    let mut in_inline_code = false;
+    let mut token_in_code = false;
     for (index, character) in content.char_indices() {
         if is_capability_token_char(character) {
-            token_start.get_or_insert(index);
+            if token_start.is_none() {
+                token_start = Some(index);
+                token_in_code = in_inline_code;
+            }
             continue;
         }
         if let Some(start) = token_start.take() {
-            push_explicit_capability_request_token(content, start, index, &mut ids);
+            push_explicit_capability_request_token(
+                content,
+                start,
+                index,
+                token_in_code,
+                visible_namespaces,
+                &mut ids,
+            );
+        }
+        match character {
+            '\n' => in_inline_code = false,
+            '`' => in_inline_code = !in_inline_code,
+            _ => {}
         }
     }
     if let Some(start) = token_start {
-        push_explicit_capability_request_token(content, start, content.len(), &mut ids);
+        push_explicit_capability_request_token(
+            content,
+            start,
+            content.len(),
+            token_in_code,
+            visible_namespaces,
+            &mut ids,
+        );
     }
     ids
 }
@@ -1401,11 +1696,26 @@ fn push_explicit_capability_request_token(
     content: &str,
     start: usize,
     end: usize,
+    in_inline_code: bool,
+    visible_namespaces: &HashSet<&str>,
     ids: &mut Vec<CapabilityId>,
 ) {
     let token = &content[start..end];
     if !is_likely_capability_reference(token)
         || !is_explicit_capability_request_token(content, start, end)
+    {
+        return;
+    }
+    // Tokens written in Markdown inline code (e.g. "use `playwright.sync_api`", a
+    // Python module) are code references, not capability requests — ignore them.
+    // Two exceptions keep genuine requests covered even when backticked:
+    //  - the prompt explicitly labels the token a tool/capability
+    //    ("use the `builtin.http` capability"), or
+    //  - the token names a real capability namespace this agent has
+    //    (`builtin.echo` — `builtin` is a live namespace, unlike `playwright`).
+    if in_inline_code
+        && !has_capability_noun_context(content, start, end)
+        && !token_namespace_is_visible(token, visible_namespaces)
     {
         return;
     }
@@ -1420,22 +1730,39 @@ fn is_likely_capability_reference(token: &str) -> bool {
     token.starts_with("builtin.") || token.split('.').count() == 2
 }
 
-fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
-    let previous_content = &content[..start]; // safety: start is produced by char_indices or content.len().
-    let previous_word = previous_content
+/// True when the token's namespace (its first dotted segment) is one the agent
+/// actually has — a backticked reference to a real capability namespace is still
+/// a request, unlike a library reference (`playwright.sync_api`).
+fn token_namespace_is_visible(token: &str, visible_namespaces: &HashSet<&str>) -> bool {
+    token
+        .split('.')
+        .next()
+        .is_some_and(|namespace| visible_namespaces.contains(namespace))
+}
+
+/// The request-word immediately before `start` (alphanumeric/`_`/`-` run).
+fn previous_request_word(content: &str, start: usize) -> Option<&str> {
+    content[..start]
         .trim_end()
         .rsplit(|character: char| !is_capability_request_word_char(character))
-        .find(|word| !word.is_empty());
-    if previous_word.is_some_and(is_capability_request_verb) {
-        return true;
-    }
+        .find(|word| !word.is_empty())
+}
 
+/// True when the word right before or after the token is an explicit "tool" /
+/// "capability" noun — the prompt is calling the token out as a capability, so
+/// it's a genuine request even when written in backticks.
+fn has_capability_noun_context(content: &str, start: usize, end: usize) -> bool {
     let next_word = content[end..]
         .trim_start()
         .split(|character: char| !is_capability_request_word_char(character))
         .find(|word| !word.is_empty());
-    previous_word.is_some_and(is_capability_request_noun)
+    previous_request_word(content, start).is_some_and(is_capability_request_noun)
         || next_word.is_some_and(is_capability_request_noun)
+}
+
+fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
+    previous_request_word(content, start).is_some_and(is_capability_request_verb)
+        || has_capability_noun_context(content, start, end)
 }
 
 fn is_capability_request_word_char(character: char) -> bool {
@@ -1557,6 +1884,7 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::InvalidRequest,
         AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::InvalidOutput
         | AgentLoopHostErrorKind::CheckpointRejected
         | AgentLoopHostErrorKind::TranscriptWriteFailed
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
@@ -1570,12 +1898,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
 
 fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
     match error.kind {
-        AgentLoopHostErrorKind::Invalid | AgentLoopHostErrorKind::InvalidInvocation => {
-            HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidOutput,
-                error.safe_summary,
-            )
-        }
+        AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::InvalidOutput => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            error.safe_summary,
+        ),
         _ => map_capability_host_error(error),
     }
 }
@@ -1969,12 +2297,19 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    // Tier 2b: carry the provider's real message (status line + body snippet)
+    // on the model-visible detail channel so the failure explainer can describe
+    // the actual fault. `safe_with_detail` scrubs credential-looking tokens
+    // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
+    // summary stays a fixed host-authored category string.
+    let provider_detail = error.to_string();
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             MODEL_CREDITS_EXHAUSTED_SUMMARY,
         )
-        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
+        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+        .safe_with_detail(provider_detail.clone());
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
@@ -1996,6 +2331,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             "model service is unavailable",
         ),
     }
+    .safe_with_detail(provider_detail)
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
@@ -2023,6 +2359,83 @@ mod tests {
             provider: "test_provider".to_string(),
             reason: reason.to_string(),
         }
+    }
+
+    fn tool_def(capability_id: &str, name: &str) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: CapabilityId::new(capability_id).unwrap(),
+            name: ProviderToolName::new(name).unwrap(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn guard_ignores_incidental_code_references() {
+        // The playwright/browser tasks literally instruct: "use `playwright.sync_api`"
+        // — a Python module named right after a request verb. That is NOT a
+        // capability request; the guard must not fire and suppress the model's
+        // legitimate write_file calls.
+        let messages = vec![ChatMessage::user(
+            "Read form.html, then use `playwright.sync_api` (Python sync API) to \
+             write an end-to-end test saved as test_form.py.",
+        )];
+        let tools = vec![
+            tool_def("builtin.write_file", "builtin__write_file"),
+            tool_def("builtin.read_file", "builtin__read_file"),
+        ];
+        assert!(
+            unavailable_requested_capability_guard(&messages, &tools).is_none(),
+            "guard must not misfire on the code reference `playwright.sync_api`"
+        );
+    }
+
+    #[test]
+    fn guard_still_fires_on_real_disabled_capability() {
+        // A genuine, un-backticked request for a capability that isn't visible must
+        // still fire (`builtin.http` is gated off here).
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the builtin.http capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "guard should still fire for a real builtin capability that is disabled"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_capability_with_explicit_noun() {
+        // Backticks alone don't excuse a request the prompt explicitly labels a
+        // capability/tool — the inline-code skip must not swallow a genuine
+        // request. Here `builtin.http` is backticked but called a "capability".
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the `builtin.http` capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "explicitly-labeled capability must still fire even when backticked"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_known_namespace_capability() {
+        // A backticked reference to a REAL capability namespace this agent has
+        // (`builtin`) is still a request, even with only a request verb and no
+        // tool/capability noun — unlike a library ref such as `playwright.sync_api`.
+        let messages = vec![ChatMessage::user("Use `builtin.echo` to print the banner.")];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "backticked known-namespace capability must still fire"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
     }
 
     #[test]

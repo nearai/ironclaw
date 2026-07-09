@@ -4,11 +4,12 @@ use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
-    SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
+    RetryTurnResponse, SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
+use tokio::sync::mpsc;
 
 use crate::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
@@ -179,6 +180,7 @@ pub enum RebornChannelConnectStrategy {
     AdminManagedChannels,
     WebGeneratedCode,
     QrCode,
+    #[serde(rename = "oauth")]
     OAuth,
 }
 
@@ -186,7 +188,7 @@ pub enum RebornChannelConnectStrategy {
 pub struct RebornChannelConnectAction {
     pub title: String,
     pub instructions: String,
-    #[serde(rename = "input_placeholder", alias = "code_placeholder")]
+    #[serde(rename = "input_placeholder")]
     pub input_placeholder: String,
     pub submit_label: String,
     pub success_message: String,
@@ -313,6 +315,24 @@ pub struct RebornStreamEventsResponse {
     pub events: Vec<ProductOutboundEnvelope>,
 }
 
+pub struct RebornStreamEventsSubscription {
+    receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::RebornServicesError>>,
+}
+
+impl RebornStreamEventsSubscription {
+    pub fn new(
+        receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, super::RebornServicesError>>,
+    ) -> Self {
+        Self { receiver }
+    }
+
+    pub async fn next(
+        &mut self,
+    ) -> Option<Result<ProductOutboundEnvelope, super::RebornServicesError>> {
+        self.receiver.recv().await
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornCancelRunResponse {
     pub run_id: TurnRunId,
@@ -341,6 +361,23 @@ pub struct RebornResumeGateResponse {
 
 impl From<ResumeTurnResponse> for RebornResumeGateResponse {
     fn from(value: ResumeTurnResponse) -> Self {
+        Self {
+            run_id: value.run_id,
+            status: value.status,
+            event_cursor: value.event_cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRetryRunResponse {
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub event_cursor: EventCursor,
+}
+
+impl From<RetryTurnResponse> for RebornRetryRunResponse {
+    fn from(value: RetryTurnResponse) -> Self {
         Self {
             run_id: value.run_id,
             status: value.status,
@@ -404,7 +441,14 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
             received_at: value.received_at,
             checkpoint_id: value.checkpoint_id,
             gate_ref: value.gate_ref,
-            failure: value.failure,
+            // Public WebUI shape: strip the model-visible `detail` so free-form
+            // backend cause text never reaches the browser. `category` (the
+            // user-facing signal) is retained. See
+            // `SanitizedFailure::public_projection`.
+            failure: value
+                .failure
+                .as_ref()
+                .map(SanitizedFailure::public_projection),
         }
     }
 }

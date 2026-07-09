@@ -8,7 +8,7 @@ sanitized-auth/validation-error slice; see `01-auth.md` and
   `platform/router.rs` (header layers), with auth-error text in
   `platform/auth.rs`.
 - **v2** applies headers via outer `SetResponseHeaderLayer`s in
-  `crates/ironclaw_reborn_composition/src/webui_serve.rs`; errors are
+  `crates/ironclaw_reborn_composition/src/webui/webui_serve.rs`; errors are
   sanitized at the `WebuiAuthenticator` boundary (auth), the
   `WebUiV2HttpError` type (`ironclaw_webui_v2/src/error.rs`), and the
   axum `Json` extractor (validation).

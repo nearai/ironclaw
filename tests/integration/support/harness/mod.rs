@@ -23,7 +23,10 @@ use std::{
 
 use super::{filesystem::BlockingTurnStatePutFilesystem, product_workflow::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
-use ironclaw_auth::{AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel};
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
+    CredentialOwnership, NewCredentialAccount, ProviderScope,
+};
 use ironclaw_filesystem::{
     BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,
     RootFilesystem, ScopedFilesystem, StorageClass,
@@ -39,7 +42,7 @@ use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
-use ironclaw_network::NetworkHttpRequest;
+use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
@@ -58,15 +61,17 @@ use ironclaw_turns::{
 
 pub(crate) use super::doubles::{
     EmptyIdentityContextSource, HarnessCapabilityPortFactory,
-    HostRuntimeHarnessCapabilityPortFactory, RecordingApprovalRequestStore,
-    RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
-    RecordingNetworkHttpEgress, RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
+    HostRuntimeHarnessCapabilityPortFactory, ParkingCapabilityGate, ParkingHostRuntime,
+    RecordingApprovalRequestStore, RecordingCapabilityResultWriter,
+    RecordingDelegatingCapabilityPort, RecordingHostRuntime, RecordingNetworkHttpEgress,
+    RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
     StaticCapabilitySurfaceProfileResolver,
 };
 pub(crate) use assembly::{
     LocalDevRootMounts, bundled_extension_provider_trust, capability_ids_from_strs,
     copy_dir_recursive, host_runtime_storage_roots, http_test_policy, local_dev_all_effects,
     local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
+    local_dev_host_runtime_with_real_egress_pipeline,
     local_dev_host_runtime_with_registry_and_egress, local_dev_mount_descriptor,
     local_dev_root_filesystem, memory_mounts, qa_smoke_mounts, skill_mounts, wildcard_test_policy,
     workspace_mounts,
@@ -167,6 +172,12 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
+    /// S1 seam: wire-level transport recorder installed only by
+    /// `.with_real_egress_pipeline()`. Sits BELOW the real
+    /// `PolicyNetworkHttpEgress` (network-policy enforcement) and the real
+    /// `HostHttpEgressService` (leak scan) — both run for real before a
+    /// request reaches this double. `None` for every other construction.
+    real_egress_transport: Option<Arc<RecordingNetworkHttpTransport>>,
     /// Inert recording process port. `Some` when the harness injected a
     /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
     /// used (`.with_live_shell()` path).
@@ -277,34 +288,103 @@ impl HostRuntimeCapabilityHarness {
         &self,
         scope: &ResourceScope,
     ) -> HarnessResult<()> {
+        self.seed_credential_account_with_material(scope, "github", "journey github", &[])
+            .await
+    }
+
+    /// Provider-generic core of [`Self::seed_github_credential_account`]:
+    /// seeds a Configured credential account WITH real secret material through
+    /// the production manual-token flow, under `scope`. The same
+    /// dispatch-scope caveat applies: `scope` must match the run's actual
+    /// `(tenant, user, agent, project)` or dispatch-time selection never finds
+    /// the account.
+    ///
+    /// When `provider_scopes` is non-empty, a second Configured account
+    /// carrying those scopes is created over the SAME secret handle the
+    /// manual-token flow minted: OAuth-setup requirements only select accounts
+    /// whose stored scopes cover the requirement, and manual-token accounts
+    /// store none — the scoped twin satisfies selection while the shared
+    /// handle keeps dispatch-time staging backed by real material.
+    pub(crate) async fn seed_credential_account_with_material(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+    ) -> HarnessResult<()> {
         let product_auth = self
             .product_auth
             .as_ref()
             .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
         let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        let provider_id = AuthProviderId::new(provider)?;
         let challenge = product_auth
             .request_manual_token_setup(
                 ironclaw_reborn_composition::RebornManualTokenSetupRequest::new(
                     scope.clone(),
-                    AuthProviderId::new("github")?,
-                    CredentialAccountLabel::new("journey github")?,
+                    provider_id.clone(),
+                    CredentialAccountLabel::new(label)?,
                     ironclaw_auth::AuthContinuationRef::SetupOnly,
                     chrono::Utc::now() + chrono::Duration::minutes(10),
                 ),
             )
             .await
             .map_err(|error| format!("manual token setup failed: {error:?}"))?;
-        product_auth
+        let submitted = product_auth
             .submit_manual_token(
                 ironclaw_reborn_composition::RebornManualTokenSubmitRequest::new(
                     scope.clone(),
                     challenge.interaction_id,
-                    secrecy::SecretString::from("journey-github-token"),
+                    secrecy::SecretString::from(format!("itest-{provider}-token")),
                 ),
             )
             .await
             .map_err(|error| format!("manual token submit failed: {error:?}"))?;
+        if provider_scopes.is_empty() {
+            return Ok(());
+        }
+        let record_source = product_auth.credential_account_record_source_for_test();
+        // Match on the account THIS call minted (`submitted.account_id`), not
+        // the first provider match: a scope with multiple existing accounts
+        // for the same provider (e.g. two Google accounts) would otherwise
+        // silently pick an unrelated account's secret handle.
+        let minted_handle = record_source
+            .accounts_for_owner(&scope)
+            .await
+            .map_err(|error| format!("account read-back after manual token failed: {error:?}"))?
+            .into_iter()
+            .find(|account| account.id == submitted.account_id)
+            .and_then(|account| account.access_secret)
+            .ok_or("manual-token account with a secret handle not found on read-back")?;
+        product_auth
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope,
+                provider: provider_id,
+                label: CredentialAccountLabel::new(format!("{label} scoped"))?,
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(minted_handle),
+                refresh_secret: None,
+                scopes: provider_scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new(*scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+            .await
+            .map_err(|error| format!("scoped credential account creation failed: {error:?}"))?;
         Ok(())
+    }
+
+    /// The fixed user this harness dispatches first-party capabilities under
+    /// (see [`Self::with_user_id`]). Credential seeding aimed at a capability's
+    /// dispatch-time account selection must use THIS user — for groups that do
+    /// not align the capability user to the binding subject, it differs from
+    /// the thread's binding actor.
+    pub(crate) fn capability_user_id(&self) -> &UserId {
+        &self.user_id
     }
 
     async fn enable_global_auto_approve_for_product_and_harness_users(&self) -> HarnessResult<()> {
@@ -567,6 +647,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            real_egress_transport: None,
             process_port: None,
             profile_filesystem,
             project_service,
@@ -581,6 +662,18 @@ impl HostRuntimeCapabilityHarness {
             trigger_repository,
             reborn_services: Some(services),
         })
+    }
+
+    /// Park this harness's tool/capability dispatch until released
+    /// (`ParkingCapabilityGate`) — the tool-path analog of
+    /// `RebornThreadBuilder::park_model`, for lease-expiry-under-a-wedged-tool
+    /// coverage (see `tests/integration/lease_wedge.rs`). Wraps whatever
+    /// `self.runtime` already is (e.g. `RecordingHostRuntime` over the real
+    /// runtime), so parking sits outside the existing recorder at the same
+    /// `HostRuntime` trait-object seam.
+    pub(crate) fn park_capability_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
+        self.runtime = Arc::new(ParkingHostRuntime::new(self.runtime, gate));
+        self
     }
 
     /// The full `RebornServices` bundle this harness was built from, if built
@@ -710,6 +803,33 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|egress| egress.requests())
             .unwrap_or_default()
+    }
+
+    /// Every request that reached the S1 wire-level transport recorder, in
+    /// call order. Empty (not an error) for every harness that did not opt
+    /// into `.with_real_egress_pipeline()`.
+    pub(crate) fn real_egress_transport_requests(&self) -> Vec<NetworkTransportRequest> {
+        self.real_egress_transport
+            .as_ref()
+            .map(|transport| transport.requests())
+            .unwrap_or_default()
+    }
+
+    /// Install FIFO scripted response bodies (S1 seam) onto the real-egress
+    /// transport recorder, consumed ahead of its default body. Errors if this
+    /// harness did not wire the real-egress pipeline.
+    pub(crate) fn install_real_egress_response_bodies(
+        &self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> HarnessResult<()> {
+        let transport = self
+            .real_egress_transport
+            .as_ref()
+            .ok_or("host runtime harness has no real-egress transport to script")?;
+        for body in bodies {
+            transport.push_response_body(body);
+        }
+        Ok(())
     }
 
     pub(crate) fn workspace_file_path(&self, relative: &str) -> PathBuf {

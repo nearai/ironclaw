@@ -247,7 +247,9 @@ impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHa
 struct TestNoopContinuationDispatcher;
 
 #[async_trait]
-impl crate::auth::RebornAuthContinuationDispatcher for TestNoopContinuationDispatcher {
+impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
+    for TestNoopContinuationDispatcher
+{
     async fn dispatch_auth_continuation(
         &self,
         _event: ironclaw_auth::AuthContinuationEvent,
@@ -276,7 +278,7 @@ pub struct OAuthProductAuthTestBundle {
 struct OAuthProductAuthInfra {
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     durable: Arc<
-        crate::product_auth_durable::FilesystemAuthProductServices<
+        crate::product_auth::durable::FilesystemAuthProductServices<
             ironclaw_filesystem::InMemoryBackend,
         >,
     >,
@@ -308,7 +310,7 @@ fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
     // Real durable product-auth services over the in-memory scoped filesystem.
     let durable = Arc::new(
-        crate::product_auth_durable::FilesystemAuthProductServices::new(
+        crate::product_auth::durable::FilesystemAuthProductServices::new(
             Arc::clone(&scoped_fs),
             Arc::clone(&secret_store),
         ),
@@ -349,24 +351,27 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
     // Real OAuth provider client wired to the scripted egress.
     // token_endpoint must be HTTPS to pass HostOAuthProviderClient's guard;
     // ScriptedOAuthTokenEgress ignores the actual URL.
-    let spec = crate::oauth_provider_client::HostOAuthProviderSpec {
+    let spec = crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec {
         provider_id: "test-oauth-provider",
         capability_id: "builtin.oauth.test",
         token_endpoint: "https://oauth.test.example.com/token",
         secret_handle_prefix: "test-oauth",
         resource: None,
         exchange_scope_policy:
-            crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+            crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape:
+            crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
     };
-    let provider_client = crate::oauth_provider_client::HostOAuthProviderClient::new(
-        spec,
-        Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
-        Arc::clone(&secret_store),
-        Arc::new(TestNoopObligationHandler),
-        ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
-        ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
-    )
-    .expect("test OAuth provider client must build");
+    let provider_client =
+        crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient::new(
+            spec,
+            Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            Arc::clone(&secret_store),
+            Arc::new(TestNoopObligationHandler),
+            ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
+            ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
+        )
+        .expect("test OAuth provider client must build");
 
     let services = Arc::new(crate::RebornProductAuthServices::new(
         durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
@@ -421,7 +426,9 @@ struct FixedCandidateSource {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait]
-impl crate::credential_refresh_worker::CredentialRefreshCandidateSource for FixedCandidateSource {
+impl crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource
+    for FixedCandidateSource
+{
     async fn list_refresh_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
         self.candidates.clone()
     }
@@ -455,7 +462,9 @@ impl OAuthProductAuthTestBundle {
         settings: crate::runtime_input::CredentialRefreshSettings,
         now: chrono::DateTime<chrono::Utc>,
     ) {
-        use crate::credential_refresh_worker::{CredentialRefreshWorkerDeps, sweep_once};
+        use crate::product_auth::credentials::credential_refresh_worker::{
+            CredentialRefreshWorkerDeps, sweep_once,
+        };
         use tokio_util::sync::CancellationToken;
 
         let candidate_source = std::sync::Arc::new(FixedCandidateSource { candidates });
@@ -463,11 +472,11 @@ impl OAuthProductAuthTestBundle {
         // Build an always-leader lock: no Postgres pool needed for tests.
         #[cfg(not(feature = "postgres"))]
         let leader_lock = std::sync::Arc::new(
-            crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader(),
+            crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader(),
         );
         #[cfg(feature = "postgres")]
         let leader_lock = std::sync::Arc::new(
-            crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
+            crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
         );
 
         let deps = CredentialRefreshWorkerDeps {
@@ -515,17 +524,19 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
 
     // Google OAuth spec: provider_id must be "google" for
     // HostOAuthProviderClient::refresh_token to accept the request.
-    let spec = crate::oauth_provider_client::HostOAuthProviderSpec {
+    let spec = crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec {
         provider_id: "google",
         capability_id: "builtin.oauth.google",
         token_endpoint: "https://oauth2.googleapis.com/token",
         secret_handle_prefix: "google",
         resource: None,
         exchange_scope_policy:
-            crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+            crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape:
+            crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
     };
     let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = Arc::new(
-        crate::oauth_provider_client::HostOAuthProviderClient::new(
+        crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient::new(
             spec,
             Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
             Arc::clone(&secret_store),

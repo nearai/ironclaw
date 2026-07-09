@@ -24,10 +24,30 @@ use ironclaw_host_runtime::{
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 
 use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
-    host_runtime_storage_roots, http_test_policy, local_dev_host_runtime_with_http_egress,
-    local_dev_host_runtime_with_live_http_egress, memory_mounts, workspace_mounts,
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpTransport,
+    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy,
+    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
+    local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
 };
+
+/// How [`core_builtin_tools`] constructs HTTP egress. The three modes are
+/// mutually exclusive by construction: one field holds exactly one mode, and
+/// each setter overwrites it (so the last setter called wins).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EgressMode {
+    /// Default: whole-pipeline-bypassing `RecordingRuntimeHttpEgress` (no
+    /// policy enforcement or leak scan runs; requests/responses are scripted
+    /// and captured on the harness).
+    Recording,
+    /// `local_dev_host_runtime_with_live_http_egress`: real HTTP egress over
+    /// the real network. No recording `RuntimeHttpEgress`/process port is
+    /// captured on the harness.
+    Live,
+    /// S1 seam: `local_dev_host_runtime_with_real_egress_pipeline` — the REAL
+    /// production egress pipeline (network-policy enforcement + leak scan)
+    /// with only the wire-level transport recorded.
+    RealPipeline,
+}
 
 /// Configuration axes for [`core_builtin_tools`]. `Default` matches the
 /// zero-arg `core_builtin_tools(CoreBuiltinOptions::default())` call.
@@ -38,15 +58,14 @@ pub(crate) struct CoreBuiltinOptions {
     /// `true` (default) injects the inert `RecordingProcessPort` so
     /// `builtin.shell` invocations in tests never spawn a real OS process.
     /// `.with_live_shell()` sets this `false`, which skips injection and lets
-    /// `HostRuntimeServices` default to the real `LocalHostProcessPort`. Only
-    /// consulted when `live_http_egress` is `false` — the live-http-egress
-    /// path never wires a process port either way.
+    /// `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+    /// Consulted for `EgressMode::Recording` and `EgressMode::RealPipeline`;
+    /// the `Live` path never wires a process port either way.
     pub(crate) recording_process: bool,
-    /// `true` selects `local_dev_host_runtime_with_live_http_egress` (a real
-    /// HTTP egress; no recording `RuntimeHttpEgress`/process port captured on
-    /// the harness) instead of the default recording-egress runtime
-    /// construction. Set via `.with_live_http_egress()`.
-    pub(crate) live_http_egress: bool,
+    /// HTTP egress construction mode; see [`EgressMode`]. Defaults to
+    /// `Recording`; set via `.with_live_http_egress()` /
+    /// `.with_real_egress_pipeline()`.
+    pub(crate) egress: EgressMode,
 }
 
 impl Default for CoreBuiltinOptions {
@@ -54,7 +73,7 @@ impl Default for CoreBuiltinOptions {
         Self {
             network_policy: http_test_policy(),
             recording_process: true,
-            live_http_egress: false,
+            egress: EgressMode::Recording,
         }
     }
 }
@@ -73,7 +92,14 @@ impl CoreBuiltinOptions {
     }
 
     pub(crate) fn with_live_http_egress(mut self) -> Self {
-        self.live_http_egress = true;
+        self.egress = EgressMode::Live;
+        self
+    }
+
+    /// S1 seam: run the real production egress pipeline (network-policy
+    /// enforcement + leak scan) with only the wire-level transport recorded.
+    pub(crate) fn with_real_egress_pipeline(mut self) -> Self {
+        self.egress = EgressMode::RealPipeline;
         self
     }
 }
@@ -86,52 +112,74 @@ pub(crate) async fn core_builtin_tools(
     let CoreBuiltinOptions {
         network_policy,
         recording_process,
-        live_http_egress,
+        egress,
     } = options;
-    if live_http_egress {
-        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
-        let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
-        core_builtin_tools_from_runtime(
-            root,
-            workspace_root,
-            runtime,
-            network_policy,
-            UserId::new("reborn-e2e-core-builtins-live-http-user")?,
-        )
+    // Inject the inert recording port by default so `builtin.shell`
+    // invocations in tests never spawn a real OS process. `.with_live_shell()`
+    // sets `recording_process = false`, which skips injection and lets
+    // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+    let recording_process_port = if recording_process {
+        Some(Arc::new(
+            super::super::super::process::RecordingProcessPort::new(),
+        ))
     } else {
-        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
-        let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
-            br#"{"accepted":true}"#.to_vec(),
-        ));
-        // Inject the inert recording port by default so `builtin.shell`
-        // invocations in tests never spawn a real OS process. `.with_live_shell()`
-        // sets `recording_process = false`, which skips injection and lets
-        // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
-        let recording_process_port = if recording_process {
-            Some(Arc::new(
-                super::super::super::process::RecordingProcessPort::new(),
-            ))
-        } else {
-            None
-        };
-        let process_port_dyn: Option<Arc<dyn RuntimeProcessPort>> = recording_process_port
-            .as_ref()
-            .map(|p| Arc::clone(p) as Arc<dyn RuntimeProcessPort>);
-        let runtime = local_dev_host_runtime_with_http_egress(
-            storage_root.clone(),
-            Arc::clone(&runtime_http_egress),
-            process_port_dyn,
-        )?;
-        let mut harness = core_builtin_tools_from_runtime(
-            root,
-            workspace_root,
-            runtime,
-            network_policy,
-            UserId::new("reborn-e2e-core-builtins-user")?,
-        )?;
-        harness.http_egress = Some(runtime_http_egress);
-        harness.process_port = recording_process_port;
-        Ok(harness)
+        None
+    };
+    let process_port_dyn: Option<Arc<dyn RuntimeProcessPort>> = recording_process_port
+        .as_ref()
+        .map(|p| Arc::clone(p) as Arc<dyn RuntimeProcessPort>);
+    match egress {
+        EgressMode::RealPipeline => {
+            let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+            let transport = RecordingNetworkHttpTransport::with_body(br#"{"ok":true}"#.to_vec());
+            let runtime = local_dev_host_runtime_with_real_egress_pipeline(
+                storage_root.clone(),
+                transport.clone(),
+                process_port_dyn,
+            )?;
+            let mut harness = core_builtin_tools_from_runtime(
+                root,
+                workspace_root,
+                runtime,
+                network_policy,
+                UserId::new("reborn-e2e-core-builtins-real-egress-user")?,
+            )?;
+            harness.real_egress_transport = Some(Arc::new(transport));
+            harness.process_port = recording_process_port;
+            Ok(harness)
+        }
+        EgressMode::Live => {
+            let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+            let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
+            core_builtin_tools_from_runtime(
+                root,
+                workspace_root,
+                runtime,
+                network_policy,
+                UserId::new("reborn-e2e-core-builtins-live-http-user")?,
+            )
+        }
+        EgressMode::Recording => {
+            let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+            let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+                br#"{"accepted":true}"#.to_vec(),
+            ));
+            let runtime = local_dev_host_runtime_with_http_egress(
+                storage_root.clone(),
+                Arc::clone(&runtime_http_egress),
+                process_port_dyn,
+            )?;
+            let mut harness = core_builtin_tools_from_runtime(
+                root,
+                workspace_root,
+                runtime,
+                network_policy,
+                UserId::new("reborn-e2e-core-builtins-user")?,
+            )?;
+            harness.http_egress = Some(runtime_http_egress);
+            harness.process_port = recording_process_port;
+            Ok(harness)
+        }
     }
 }
 
@@ -220,6 +268,7 @@ fn core_builtin_tools_from_runtime(
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: None,
         network_egress: None,
+        real_egress_transport: None,
         process_port: None,
         profile_filesystem: None,
         project_service: None,

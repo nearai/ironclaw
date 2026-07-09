@@ -89,14 +89,15 @@ pub use milestones::{
 };
 pub use model::{
     HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
-    LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
-    NoOpPolicyGuard,
+    LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelProgressSink, ModelCallOutcome,
+    NoOpBudgetAccountant, NoOpPolicyGuard,
 };
 pub use model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair, CapabilityRecoveryHint,
-    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
-    ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint, ToolObservationDetail,
-    ToolObservationStatus, ToolRecoveryObservation,
+    MODEL_OBSERVATION_DETAIL_MAX_BYTES, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint,
+    ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+    validate_model_observation_detail,
 };
 pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{

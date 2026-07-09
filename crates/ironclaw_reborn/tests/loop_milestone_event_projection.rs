@@ -245,6 +245,12 @@ async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones(
 
     for kind in [
         LoopHostMilestoneKind::IterationStarted { iteration: 1 },
+        LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: "thinking".into(),
+        },
+        LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "visible assistant text".into(),
+        },
         LoopHostMilestoneKind::CapabilityBatchStarted {
             iteration: 1,
             call_count: 2,
@@ -289,7 +295,7 @@ async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones(
         .unwrap();
     assert!(
         snapshot.timeline.entries.is_empty(),
-        "progress milestones carry counters/checkpoint kinds that would be lost in RuntimeEvent"
+        "live-only milestones carry lossy progress/text deltas that should not become durable RuntimeEvents"
     );
     assert!(
         snapshot.runs.is_empty(),
@@ -337,6 +343,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .unwrap();
     let model_response = success_host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: success_prompt.messages,
             surface_version: None,
             model_preference: None,
@@ -412,6 +419,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .unwrap();
     let error = failure_host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: failure_prompt.messages,
             surface_version: None,
             model_preference: None,
@@ -706,6 +714,16 @@ impl TurnStateStore for StaticTurnStateStore {
         _request: ResumeTurnRequest,
     ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
         panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(

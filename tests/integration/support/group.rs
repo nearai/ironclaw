@@ -80,7 +80,11 @@ use ironclaw_reborn::runtime::{
     ToolDisclosureMode, build_default_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    await_edge::{
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+        store::FilesystemAwaitEdgeStore,
+    },
+    flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn_composition::build_default_budget_accountant;
@@ -96,7 +100,8 @@ use ironclaw_turns::run_profile::{
 };
 use ironclaw_turns::{
     FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
-    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
+    TurnStateStore,
 };
 
 use super::builder::{
@@ -190,6 +195,11 @@ pub(crate) struct GroupSharedStorage {
     /// `FilesystemTurnStateStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
+    /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
+    /// rebuild the identical scoped path independently, instead of
+    /// re-deriving it from a second binding resolution.
+    pub(crate) canonical_binding: ResolvedBinding,
     /// The group's single capability recorder, shared by `Arc` with the real
     /// capability factory wired into the one planned runtime. Every thread
     /// clones this (cheap — `HarnessCapabilityRecorder` is `Clone` over
@@ -345,6 +355,8 @@ impl RebornIntegrationGroup {
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            runner_lease_ttl_override: None,
+            lease_recovery_interval_override: None,
             real_gate_dispatch_services: false,
         }
     }
@@ -534,6 +546,14 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// Lease-wedge coverage: overrides the turn-state store's
+    /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
+    /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
+    runner_lease_ttl_override: Option<chrono::Duration>,
+    /// Lease-wedge coverage: overrides the scheduler's
+    /// `lease_recovery_interval` (default 10s) when set. Builder method lives
+    /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
+    lease_recovery_interval_override: Option<Duration>,
     /// When `true`, wire the REAL approval/auth interaction services into
     /// every thread's `DefaultProductWorkflow` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
@@ -616,11 +636,22 @@ impl RebornIntegrationGroupBuilder {
     ) -> HarnessResult<RebornIntegrationGroup> {
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> =
-            Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs_composite(
-                Arc::clone(&base.composite),
-                &base.canonical_binding,
-            )?));
+        // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
+        // public builder method (`ironclaw_turns::filesystem_store`); this only
+        // calls it a second time with a shortened `runner_lease_ttl` when a test
+        // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
+        // `InMemoryTurnStateStoreLimits::default()` untouched, byte-identical to
+        // today's behavior.
+        let mut turn_state_limits = InMemoryTurnStateStoreLimits::default();
+        if let Some(ttl) = self.runner_lease_ttl_override {
+            turn_state_limits.runner_lease_ttl = ttl;
+        }
+        let turns_scoped_fs =
+            scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
+        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
+            FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs))
+                .with_limits(turn_state_limits),
+        );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
 
@@ -663,13 +694,31 @@ impl RebornIntegrationGroupBuilder {
         // `.with_checkpoint_state_store` is the de-mask fix: without it a
         // genuinely-`Failed` run is reported as the masking
         // `driver_protocol_violation` instead of its true failure category.
-        let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
+        // mount) — the await-edge tree lives at
+        // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
+        // "one shared handle, never a per-store fixed view" rule.
+        let await_edge_store =
+            Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
+        let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+            Arc::clone(&await_edge_store),
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+            capability_result_writer.clone(),
+            group_thread_harness.service.clone(),
+        ));
+        let await_edge_driver = Arc::new(ScopeRecoveryDriver::new(
+            Arc::clone(&await_edge_resolver),
+            Arc::clone(&await_edge_store),
+        ));
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
         let mut evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             group_thread_harness.service.clone(),
             turn_state_for_evidence,
             Arc::clone(&loop_checkpoint_store),
-            subagent_gate_store.clone(),
+            Arc::clone(&await_edge_store)
+                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             group_thread_scope.clone(),
         )
         .with_checkpoint_state_store(checkpoint_state_store.clone());
@@ -772,8 +821,13 @@ impl RebornIntegrationGroupBuilder {
             capability_factory,
             capability_surface_resolver,
             capability_result_writer,
-            subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-            subagent_gate_store,
+            subagent_goal_store: await_edge_goal_store,
+            subagent_await_edge_writer: await_edge_driver
+                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+            subagent_await_edge_settler: await_edge_resolver
+                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+            subagent_await_edge_evidence: await_edge_store
+                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
@@ -782,6 +836,9 @@ impl RebornIntegrationGroupBuilder {
             loop_exit_evidence,
             config: DefaultPlannedRuntimeConfig {
                 poll_interval: Duration::from_millis(10),
+                lease_recovery_interval: self
+                    .lease_recovery_interval_override
+                    .unwrap_or(DefaultPlannedRuntimeConfig::default().lease_recovery_interval),
                 // Enabler (b): explicit builder opt-in wins; otherwise resolve
                 // via `from_env()` exactly like `DefaultPlannedRuntimeConfig`'s
                 // own `Default` impl — never mutate the process env from a
@@ -848,6 +905,7 @@ impl RebornIntegrationGroupBuilder {
                 scheduler_handle: composition.scheduler_handle,
                 scope_gateway,
                 turn_store,
+                canonical_binding: base.canonical_binding,
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
