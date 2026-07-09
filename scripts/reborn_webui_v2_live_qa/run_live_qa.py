@@ -2152,6 +2152,63 @@ def _slack_delivery_target_is_dm(channel_id: str | None) -> bool:
     return bool(channel_id and channel_id.startswith("D"))
 
 
+def _marker_match_stats(
+    messages: list[object],
+    *,
+    marker: str,
+    required_text: list[str] | None = None,
+) -> dict[str, object]:
+    """Scan a Slack history window for a delivery marker.
+
+    Scans ALL messages (not first-match-wins) so the result carries
+    exactly-once statistics: the duplicate-delivery bug class posts the same
+    marker twice — once from the bot delivery path and once from the user's
+    own identity via a messaging tool — split here by authorship (`bot_id`
+    present = bot copy; `user` without `bot_id` = human copy).
+    """
+    first_satisfying: dict[str, object] | None = None
+    marker_matches = 0
+    bot_authored_marker_matches = 0
+    human_authored_marker_matches = 0
+    marker_match_authors: list[dict[str, object]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        text = str(message.get("text") or "")
+        if marker not in text:
+            continue
+        marker_matches += 1
+        is_bot = bool(message.get("bot_id"))
+        is_human = bool(message.get("user")) and not is_bot
+        if is_bot:
+            bot_authored_marker_matches += 1
+        elif is_human:
+            human_authored_marker_matches += 1
+        marker_match_authors.append(
+            {"ts": message.get("ts"), "bot": is_bot, "human": is_human}
+        )
+        if first_satisfying is None:
+            normalized = text.lower()
+            missing_required = [
+                piece for piece in (required_text or []) if piece.lower() not in normalized
+            ]
+            first_satisfying = {
+                "checked": True,
+                "found": not missing_required,
+                "marker_found": True,
+                "missing_required_text": missing_required,
+                "message_ts": message.get("ts"),
+                "message_user_present": bool(message.get("user") or message.get("bot_id")),
+            }
+    if first_satisfying is not None:
+        first_satisfying["marker_matches"] = marker_matches
+        first_satisfying["bot_authored_marker_matches"] = bot_authored_marker_matches
+        first_satisfying["human_authored_marker_matches"] = human_authored_marker_matches
+        first_satisfying["marker_match_authors"] = marker_match_authors
+        return first_satisfying
+    return {"checked": True, "found": False, "message_count": len(messages)}
+
+
 async def _slack_history_contains_marker(
     ctx: LiveQaContext,
     *,
@@ -2188,44 +2245,7 @@ async def _slack_history_contains_marker(
     messages = payload.get("messages") if isinstance(payload, dict) else []
     if not isinstance(messages, list):
         messages = []
-    # Scan ALL messages so the result carries exactly-once statistics: the
-    # duplicate-delivery bug class posts the same marker twice (once from the
-    # bot delivery path, once from the user's own identity via a messaging
-    # tool), which a first-match-wins scan cannot observe.
-    first_satisfying: dict[str, object] | None = None
-    marker_matches = 0
-    bot_authored_marker_matches = 0
-    human_authored_marker_matches = 0
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        text = str(message.get("text") or "")
-        if marker not in text:
-            continue
-        marker_matches += 1
-        if message.get("bot_id"):
-            bot_authored_marker_matches += 1
-        elif message.get("user"):
-            human_authored_marker_matches += 1
-        if first_satisfying is None:
-            normalized = text.lower()
-            missing_required = [
-                piece for piece in (required_text or []) if piece.lower() not in normalized
-            ]
-            first_satisfying = {
-                "checked": True,
-                "found": not missing_required,
-                "marker_found": True,
-                "missing_required_text": missing_required,
-                "message_ts": message.get("ts"),
-                "message_user_present": bool(message.get("user") or message.get("bot_id")),
-            }
-    if first_satisfying is not None:
-        first_satisfying["marker_matches"] = marker_matches
-        first_satisfying["bot_authored_marker_matches"] = bot_authored_marker_matches
-        first_satisfying["human_authored_marker_matches"] = human_authored_marker_matches
-        return first_satisfying
-    return {"checked": True, "found": False, "message_count": len(messages)}
+    return _marker_match_stats(messages, marker=marker, required_text=required_text)
 
 
 def _slack_delivery_observed(
@@ -3561,6 +3581,7 @@ async def _slack_delivery_routine_case(
     creation_prompt_extra: str = "",
     exactly_once_grace_seconds: float | None = None,
     require_persisted_delivery_target: bool = False,
+    schedule_instruction: str = "Every minute,",
 ) -> ProbeResult:
     started = time.monotonic()
     wall_started = time.time()
@@ -3575,7 +3596,7 @@ async def _slack_delivery_routine_case(
         marker=creation_marker,
         required_text=["routine"],
         prompt=(
-            f"QA case {case_name}: create a routine named {routine_name}. Every minute, "
+            f"QA case {case_name}: create a routine named {routine_name}. {schedule_instruction} "
             f"{routine_instruction} The routine's final answer and Slack message must "
             f"include the exact marker {delivery_marker}. Create the routine now; do not "
             "run it immediately. During routine creation, do not perform the routine's "
@@ -3656,6 +3677,10 @@ async def _slack_delivery_routine_case(
             )
             matches = int(exactly_once.get("marker_matches") or 0)
             human_matches = int(exactly_once.get("human_authored_marker_matches") or 0)
+            # Exactly-once is only well-defined for one-shot routines: a
+            # recurring schedule posts the same marker again on every fire,
+            # so callers using this arm must create the routine with a
+            # once-schedule (see qa_9b/qa_9d).
             if matches != 1:
                 raise AssertionError(
                     f"expected the delivery marker exactly once after the grace window, "
@@ -4346,6 +4371,13 @@ async def case_qa_9b_routine_dm_delivery_exactly_once(ctx: LiveQaContext) -> Pro
             "send me the result in a Slack DM."
         ),
         required_delivery_text=[],
+        # One-shot: a recurring schedule would legitimately re-post the same
+        # marker on the next fire and break exactly-once counting (observed
+        # live: "found 2" ~60s after the first delivery).
+        schedule_instruction=(
+            "As a one-time routine scheduled about 90 seconds from now "
+            "(compute the time with the time capability, use the UTC timezone),"
+        ),
         # Production parity: users who hit the duplicate-delivery bug had the
         # Slack tools extension installed, so the fired model had a user-token
         # send capability available. Without this the duplicate arm is
@@ -4437,6 +4469,10 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
             "routine's result."
         ),
         required_delivery_text=[],
+        schedule_instruction=(
+            "As a one-time routine scheduled about 90 seconds from now "
+            "(compute the time with the time capability, use the UTC timezone),"
+        ),
         creation_prompt_extra=(
             "Before creating the routine, make sure the Slack tools extension "
             "is installed and activated (the Slack account is already "
