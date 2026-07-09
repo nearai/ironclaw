@@ -5,6 +5,9 @@ edition = "2024"
 rust-version.workspace = true
 publish = false
 
+[package.metadata.ironclaw]
+layer = "runtimes"
+
 [dependencies]
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
 thiserror = "2"

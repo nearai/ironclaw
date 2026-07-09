@@ -223,6 +223,7 @@ registerPack("en", {
 
   // Settings tabs
   "settings.inference": "Inference",
+  "settings.appearance": "Appearance",
   "settings.agent": "Agent",
   "settings.channels": "Channels",
   "settings.networking": "Networking",
@@ -263,6 +264,10 @@ registerPack("en", {
   "traceCommons.recentExplanations": "Recent credit explanations",
   "traceCommons.note":
     "Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
+  "traceCommons.openAccount": "Open Trace Commons account",
+  "traceCommons.openingAccount": "Opening…",
+  "traceCommons.openAccountFailed":
+    "Could not open your Trace Commons account. Check enrollment and try again.",
   "traceCommons.submittedTracesTitle": "Submitted traces",
   "traceCommons.tracesLoadFailed": "Could not load your submitted traces.",
   "traceCommons.traceStatus": "Status",
@@ -289,6 +294,9 @@ registerPack("en", {
   "settings.restartNow": "Restart now",
   "settings.restartStarting": "Restarting...",
   "settings.restartUnavailable": "Restart from the web UI isn't available yet. Restart the gateway process manually to apply pending changes.",
+  "settings.field.showChatTerminalShortcut": "Show chat terminal shortcut",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Displays the floating terminal/logs icon inside chat threads.",
 
   // Restart dialog
   "restart.title": "Restart IronClaw",

@@ -1,4 +1,5 @@
 import { queryClient } from "../../../lib/query-client";
+import { normalizeSidebarTitle } from "../../../lib/thread-title";
 
 const THREADS_QUERY_KEY = ["threads"];
 const TITLE_MAX_CHARS = 60;
@@ -33,6 +34,8 @@ function withNormalizedThreadId(record) {
 export function upsertThreadList(data, thread) {
   const record = withNormalizedThreadId(thread);
   if (!record) return data;
+  const recordTitle = normalizeSidebarTitle(record.title, record.thread_id);
+  const sanitizedRecord = { ...record, title: recordTitle };
 
   const current = threadListData(data);
   const threads = Array.isArray(current.threads) ? current.threads : [];
@@ -45,13 +48,18 @@ export function upsertThreadList(data, thread) {
       continue;
     }
     if (!promoted) {
-      promoted = { ...existing, ...record, thread_id: record.thread_id };
+      promoted = {
+        ...existing,
+        ...sanitizedRecord,
+        thread_id: record.thread_id,
+        title: recordTitle || normalizeSidebarTitle(existing.title, record.thread_id),
+      };
     }
   }
 
   return {
     ...current,
-    threads: [promoted || record, ...remaining],
+    threads: [promoted || sanitizedRecord, ...remaining],
     next_cursor: current.next_cursor ?? null,
   };
 }
@@ -72,10 +80,11 @@ export function touchThreadList(data, { threadId, messageContent, updatedAt }) {
       continue;
     }
     if (!promoted) {
+      const existingTitle = normalizeSidebarTitle(existing.title, threadId);
       promoted = {
         ...existing,
         thread_id: threadId,
-        title: existing.title || derivedTitle || null,
+        title: existingTitle || derivedTitle || null,
         updated_at: timestamp,
       };
     }

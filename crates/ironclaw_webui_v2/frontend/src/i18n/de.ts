@@ -217,6 +217,7 @@ registerPack("de", {
 
   // Settings tabs
   "settings.inference": "Inferenz",
+  "settings.appearance": "Darstellung",
   "settings.agent": "Agent",
   "settings.channels": "Kanäle",
   "settings.networking": "Netzwerk",
@@ -252,6 +253,10 @@ registerPack("de", {
   "traceCommons.lastSyncDesc": "Lokale Ansicht zum Zeitpunkt der letzten Synchronisierung",
   "traceCommons.never": "nie",
   "traceCommons.recentExplanations": "Aktuelle Guthaben-Erläuterungen",
+  "traceCommons.openAccount": "Trace-Commons-Konto öffnen",
+  "traceCommons.openingAccount": "Wird geöffnet…",
+  "traceCommons.openAccountFailed":
+    "Ihr Trace-Commons-Konto konnte nicht geöffnet werden. Prüfen Sie die Registrierung und versuchen Sie es erneut.",
   "traceCommons.submittedTracesTitle": "Eingereichte Traces",
   "traceCommons.tracesLoadFailed": "Ihre eingereichten Traces konnten nicht geladen werden.",
   "traceCommons.traceStatus": "Status",
@@ -280,6 +285,9 @@ registerPack("de", {
   "settings.restartNow": "Jetzt neu starten",
   "settings.restartStarting": "Wird neu gestartet...",
   "settings.restartUnavailable": "Ein Neustart über die Weboberfläche ist noch nicht verfügbar. Starten Sie den Gateway-Prozess manuell neu, um ausstehende Änderungen anzuwenden.",
+  "settings.field.showChatTerminalShortcut": "Chat-Terminal-Kurzbefehl anzeigen",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Zeigt das schwebende Terminal-/Protokollsymbol in Chat-Threads an.",
 
   // Restart dialog
   "restart.title": "IronClaw neu starten",
