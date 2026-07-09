@@ -1,20 +1,27 @@
-//! Private-install ownership and slot policy (#5459 P1, #5525 review).
+//! Membership install policy (#5459 P1, 2026-07-08 pivot).
 //!
 //! Pure decisions only — every store read/write, package registration, and
 //! publish/unpublish stays in the parent module. Extracted so the ownership
-//! rules (who owns a new install, who may operate an existing one, who may
-//! take an occupied slot, and what an eviction must capture for restore) are
-//! reviewable and testable in one place instead of interleaved with the
-//! lifecycle I/O.
+//! rules (who holds a new install, who may operate an existing one, and what
+//! a repeated install of the same id does) are reviewable and testable in
+//! one place instead of interleaved with the lifecycle I/O.
+//!
+//! Contract (`docs/plans/2026-07-01-private-tool-installs.md`): a tenant
+//! (operator) install makes a tool available to everyone; a member install
+//! makes it available to that member — and any number of members can
+//! independently install the same tool by joining the one installation
+//! row's member set. An operator install of a member-held id EVICTS every
+//! member's private installation by replacing the member set with `Tenant`
+//! in a single row write.
 
-use ironclaw_extensions::{
-    ExtensionInstallation, ExtensionManifestRecord, ExtensionPackage, InstallationOwner,
-};
-use ironclaw_host_api::{ExtensionId, UserId};
+use std::collections::BTreeSet;
+
+use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
+use ironclaw_host_api::UserId;
 use ironclaw_product_workflow::{LifecycleInstallScope, ProductWorkflowError};
 
 /// Derive who a NEW install belongs to (#5459 P1): the tenant operator
-/// installs for the whole tenant; anyone else installs privately.
+/// installs for the whole tenant; anyone else installs for themselves.
 pub(super) fn derive_owner(caller: &UserId, tenant_operator: &UserId) -> InstallationOwner {
     if caller == tenant_operator {
         InstallationOwner::Tenant
@@ -24,99 +31,123 @@ pub(super) fn derive_owner(caller: &UserId, tenant_operator: &UserId) -> Install
 }
 
 /// Fail-closed visibility check for lifecycle mutations on an existing
-/// installation: a user-private install is operable ONLY by its owner —
-/// every non-owner, the tenant operator included, gets the masked denial.
-/// The admin's sole power over a foreign private slot is the explicit
-/// shared-install eviction granted by [`decide_occupied_slot`], never direct
-/// activate/remove by id. The error is deliberately the same "is not
-/// installed" shape a missing installation produces, so a foreign caller
-/// cannot distinguish (or enumerate) other users' private installs.
+/// installation: a member-held install is operable ONLY by its members —
+/// every non-member, the tenant operator included, gets the masked denial.
+/// The error is deliberately the same "is not installed" shape a missing
+/// installation produces, so a non-member cannot distinguish (or enumerate)
+/// tools other users hold.
 pub(super) fn ensure_caller_may_operate(
     installation: &ExtensionInstallation,
     caller: &UserId,
 ) -> Result<(), ProductWorkflowError> {
-    match installation.owner() {
-        InstallationOwner::Tenant => Ok(()),
-        InstallationOwner::User { user_id } if user_id == caller => Ok(()),
-        InstallationOwner::User { .. } => Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!(
-                "extension {} is not installed",
-                installation.extension_id().as_str()
-            ),
-        }),
+    if installation.owner().visible_to(caller) {
+        return Ok(());
     }
+    Err(ProductWorkflowError::InvalidBindingRequest {
+        reason: format!(
+            "extension {} is not installed",
+            installation.extension_id().as_str()
+        ),
+    })
 }
 
-/// The one takeover an occupied slot permits.
-pub(super) enum OccupiedSlotDecision {
-    /// Admin-wins (#5459 P1): a tenant claim seizes the slot by evicting the
-    /// existing user-private install.
-    EvictPrivateInstall,
+/// What an install of an id whose installation row already exists does.
+pub(super) enum InstallDecision {
+    /// The caller gains the tool via a single row rewrite (member JOIN, or
+    /// operator EVICT-to-tenant); the bundle is already registered,
+    /// materialized, and — if enabled — published, so there is nothing to
+    /// compensate.
+    UpdateOwner(InstallationOwner),
 }
 
-/// Slot rules for an extension id whose installation row already exists.
-///
-/// Every rejection wording is part of the masking contract: a foreign member
-/// probing another user's private slot learns only that the id is
-/// "unavailable" — never that a private install exists or whose it is.
-pub(super) fn decide_occupied_slot(
-    extension_id: &ExtensionId,
+/// Membership rules for an extension id whose installation row already
+/// exists. `Err` is always "already installed": under membership the
+/// outcome of installing never depends on whether OTHER users hold the
+/// tool, so there is no ownership state left to mask on this path.
+pub(super) fn decide_install_on_existing(
+    extension_id: &ironclaw_host_api::ExtensionId,
     existing_owner: &InstallationOwner,
-    claimant: &InstallationOwner,
-) -> Result<OccupiedSlotDecision, ProductWorkflowError> {
-    match (existing_owner, claimant) {
-        (InstallationOwner::Tenant, InstallationOwner::User { .. }) => {
-            Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} is already available as a shared tool",
-                    extension_id.as_str()
-                ),
-            })
-        }
-        (InstallationOwner::Tenant, InstallationOwner::Tenant) => {
-            Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("extension {} is already installed", extension_id.as_str()),
-            })
-        }
-        (InstallationOwner::User { user_id }, InstallationOwner::User { user_id: caller }) => {
-            if user_id == caller {
-                Err(ProductWorkflowError::InvalidBindingRequest {
-                    reason: format!("extension {} is already installed", extension_id.as_str()),
-                })
+    caller: &UserId,
+    tenant_operator: &UserId,
+) -> Result<InstallDecision, ProductWorkflowError> {
+    let already_installed = || ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("extension {} is already installed", extension_id.as_str()),
+    };
+    match existing_owner {
+        // A tenant-shared tool is already available to every caller.
+        InstallationOwner::Tenant => Err(already_installed()),
+        InstallationOwner::Users { user_ids } => {
+            if caller == tenant_operator {
+                // Operator install evicts every member's private
+                // installation; the tenant row takes the id and everyone
+                // (the evicted members included) reaches the tool through
+                // the shared install.
+                Ok(InstallDecision::UpdateOwner(InstallationOwner::Tenant))
+            } else if user_ids.contains(caller) {
+                Err(already_installed())
             } else {
-                // Generic wording: a foreign caller must not learn that a
-                // private install exists, let alone whose it is.
-                Err(ProductWorkflowError::InvalidBindingRequest {
-                    reason: format!("extension id {} is unavailable", extension_id.as_str()),
-                })
+                // JOIN: the caller becomes a member alongside the others.
+                let mut user_ids = user_ids.clone();
+                user_ids.insert(caller.clone());
+                Ok(InstallDecision::UpdateOwner(
+                    InstallationOwner::users(user_ids).map_err(|error| {
+                        ProductWorkflowError::InvalidBindingRequest {
+                            reason: format!("installation owner update failed: {error}"),
+                        }
+                    })?,
+                ))
             }
         }
-        (InstallationOwner::User { .. }, InstallationOwner::Tenant) => {
-            Ok(OccupiedSlotDecision::EvictPrivateInstall)
+    }
+}
+
+/// What a member's remove does to the installation row.
+pub(super) enum RemoveDecision {
+    /// Other members still hold the tool: the caller leaves the member set
+    /// in a single row rewrite; no teardown.
+    LeaveMembers(InstallationOwner),
+    /// The caller is the last holder (sole member, or the operator removing
+    /// a tenant-shared tool): full teardown.
+    TearDown,
+}
+
+/// Membership rules for removing an installation the caller may operate
+/// (callers must pass [`ensure_caller_may_operate`] first; tenant rows are
+/// additionally operator-only to remove, enforced by the parent module).
+pub(super) fn decide_remove(
+    existing_owner: &InstallationOwner,
+    caller: &UserId,
+) -> Result<RemoveDecision, ProductWorkflowError> {
+    match existing_owner {
+        InstallationOwner::Tenant => Ok(RemoveDecision::TearDown),
+        InstallationOwner::Users { user_ids } => {
+            let remaining: BTreeSet<UserId> = user_ids
+                .iter()
+                .filter(|member| *member != caller)
+                .cloned()
+                .collect();
+            if remaining.is_empty() {
+                Ok(RemoveDecision::TearDown)
+            } else {
+                Ok(RemoveDecision::LeaveMembers(
+                    InstallationOwner::users(remaining).map_err(|error| {
+                        ProductWorkflowError::InvalidBindingRequest {
+                            reason: format!("installation owner update failed: {error}"),
+                        }
+                    })?,
+                ))
+            }
         }
     }
 }
 
-/// Pre-eviction snapshot of a user-private install, captured by
-/// `evict_private_installation` so a tenant install that fails after eviction
-/// can restore the victim untouched (#5525 review: non-interference on failed
-/// shared installs).
-pub(super) struct EvictedPrivateInstall {
-    /// Manifest row as of eviction; `None` when a prior partial attempt
-    /// already dropped it.
-    pub(super) manifest: Option<ExtensionManifestRecord>,
-    /// The victim's installation row (owner + activation state).
-    pub(super) installation: ExtensionInstallation,
-    /// The victim's registered lifecycle package; `None` on the retry path
-    /// where a prior attempt already deregistered it.
-    pub(super) lifecycle_package: Option<ExtensionPackage>,
-}
-
-/// Settings/list projection of an installation owner (#5459 P1).
+/// Settings/list projection of an installation owner (#5459 P1). Rows are
+/// caller-filtered before projection, so a member-held row shown to a
+/// viewer is by construction one they hold — "mine".
 pub(super) fn install_scope_for_owner(owner: &InstallationOwner) -> Option<LifecycleInstallScope> {
     Some(match owner {
         InstallationOwner::Tenant => LifecycleInstallScope::Shared,
-        InstallationOwner::User { .. } => LifecycleInstallScope::Private,
+        InstallationOwner::Users { .. } => LifecycleInstallScope::Private,
     })
 }
 
@@ -127,9 +158,14 @@ mod tests {
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallationId, ExtensionManifestRef,
     };
+    use ironclaw_host_api::ExtensionId;
 
     fn user(id: &str) -> UserId {
         UserId::new(id).expect("valid user")
+    }
+
+    fn members(ids: &[&str]) -> InstallationOwner {
+        InstallationOwner::users(ids.iter().map(|id| user(id)).collect()).expect("member set")
     }
 
     fn installation(owner: InstallationOwner) -> ExtensionInstallation {
@@ -147,62 +183,97 @@ mod tests {
     }
 
     #[test]
-    fn derive_owner_maps_operator_to_tenant_and_members_to_private() {
+    fn derive_owner_maps_operator_to_tenant_and_members_to_singleton() {
         let operator = user("operator");
         assert!(derive_owner(&operator, &operator).is_tenant());
-        assert_eq!(
-            derive_owner(&user("alice"), &operator)
-                .as_user()
-                .map(UserId::as_str),
-            Some("alice")
-        );
+        let alice = user("alice");
+        assert!(derive_owner(&alice, &operator).visible_to(&alice));
+        assert!(!derive_owner(&alice, &operator).is_tenant());
     }
 
     #[test]
-    fn ensure_caller_may_operate_masks_every_non_owner_including_operator() {
+    fn ensure_caller_may_operate_masks_every_non_member_including_operator() {
         let tenant_owned = installation(InstallationOwner::Tenant);
-        let private = installation(InstallationOwner::user(user("alice")));
+        let held = installation(members(&["alice", "bob"]));
 
-        ensure_caller_may_operate(&tenant_owned, &user("bob")).expect("tenant tools are shared");
-        ensure_caller_may_operate(&private, &user("alice")).expect("the owner operates her tool");
-        for non_owner in ["bob", "operator"] {
-            let error = ensure_caller_may_operate(&private, &user(non_owner))
-                .expect_err("non-owners must be denied");
+        ensure_caller_may_operate(&tenant_owned, &user("carol")).expect("tenant tools are shared");
+        for member in ["alice", "bob"] {
+            ensure_caller_may_operate(&held, &user(member)).expect("members operate their tool");
+        }
+        for non_member in ["carol", "operator"] {
+            let error = ensure_caller_may_operate(&held, &user(non_member))
+                .expect_err("non-members must be denied");
             let rendered = error.to_string();
             assert!(
-                rendered.contains("is not installed") && !rendered.contains("alice"),
-                "denial must mask the private install: {rendered}"
+                rendered.contains("is not installed")
+                    && !rendered.contains("alice")
+                    && !rendered.contains("bob"),
+                "denial must mask the membership: {rendered}"
             );
         }
     }
 
     #[test]
-    fn decide_occupied_slot_permits_only_tenant_over_private() {
+    fn decide_install_joins_members_and_evicts_to_tenant_for_operator() {
         let extension_id = ExtensionId::new("fixture").expect("extension id");
-        let tenant = InstallationOwner::Tenant;
-        let alice = InstallationOwner::user(user("alice"));
-        let bob = InstallationOwner::user(user("bob"));
+        let operator = user("operator");
+
+        // Member joins an existing member set.
+        let Ok(InstallDecision::UpdateOwner(joined)) = decide_install_on_existing(
+            &extension_id,
+            &members(&["alice"]),
+            &user("bob"),
+            &operator,
+        ) else {
+            panic!("a second member must join");
+        };
+        assert!(joined.visible_to(&user("alice")) && joined.visible_to(&user("bob")));
+
+        // Operator evicts the whole member set to Tenant.
+        let Ok(InstallDecision::UpdateOwner(evicted)) = decide_install_on_existing(
+            &extension_id,
+            &members(&["alice", "bob"]),
+            &operator,
+            &operator,
+        ) else {
+            panic!("operator install must evict to tenant");
+        };
+        assert!(evicted.is_tenant());
+
+        // Real duplicates are "already installed" — and never leak members.
+        for (existing, caller) in [
+            (InstallationOwner::Tenant, user("alice")),
+            (InstallationOwner::Tenant, operator.clone()),
+            (members(&["alice"]), user("alice")),
+        ] {
+            let error = decide_install_on_existing(&extension_id, &existing, &caller, &operator)
+                .err()
+                .expect("duplicate install rejected");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("already installed") && !rendered.contains("alice"),
+                "unexpected: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_remove_leaves_members_until_the_last_holder() {
+        let Ok(RemoveDecision::LeaveMembers(remaining)) =
+            decide_remove(&members(&["alice", "bob"]), &user("alice"))
+        else {
+            panic!("a member with co-holders leaves the set");
+        };
+        assert!(!remaining.visible_to(&user("alice")) && remaining.visible_to(&user("bob")));
 
         assert!(matches!(
-            decide_occupied_slot(&extension_id, &alice, &tenant),
-            Ok(OccupiedSlotDecision::EvictPrivateInstall)
+            decide_remove(&members(&["bob"]), &user("bob")),
+            Ok(RemoveDecision::TearDown)
         ));
-        for (existing, claimant, expected) in [
-            (&tenant, &alice, "already available as a shared tool"),
-            (&tenant, &tenant, "already installed"),
-            (&alice, &alice, "already installed"),
-            (&alice, &bob, "is unavailable"),
-        ] {
-            let error = decide_occupied_slot(&extension_id, existing, claimant)
-                .err()
-                .expect("occupied slot rejects this claim");
-            let rendered = error.to_string();
-            assert!(rendered.contains(expected), "unexpected: {rendered}");
-            assert!(
-                !rendered.contains("alice"),
-                "slot error must not leak the private owner: {rendered}"
-            );
-        }
+        assert!(matches!(
+            decide_remove(&InstallationOwner::Tenant, &user("operator")),
+            Ok(RemoveDecision::TearDown)
+        ));
     }
 
     #[test]
@@ -212,7 +283,7 @@ mod tests {
             Some(LifecycleInstallScope::Shared)
         );
         assert_eq!(
-            install_scope_for_owner(&InstallationOwner::user(user("alice"))),
+            install_scope_for_owner(&members(&["alice"])),
             Some(LifecycleInstallScope::Private)
         );
     }

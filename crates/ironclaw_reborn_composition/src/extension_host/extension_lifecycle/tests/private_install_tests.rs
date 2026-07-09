@@ -1,102 +1,129 @@
-//! Private-install ownership behavior tests (#5459 P1, #5525 review),
+//! Membership-model ownership tests (#5459 P1, 2026-07-08 pivot),
 //! driven through the lifecycle facade/port like every production caller.
 //! Split out of the parent test module, whose shared fixtures it reuses
 //! via `super::*`.
+//!
+//! Contract under test (docs/plans/2026-07-01-private-tool-installs.md):
+//! a tenant (operator) install makes a tool available to everyone; a
+//! member install makes it available to that member — and any number of
+//! members can independently install the same tool (they join the one
+//! installation row's member set). An operator install evicts every
+//! member's private installation by replacing the member set with
+//! `Tenant` in a single row write.
 
 use super::*;
 use ironclaw_product_workflow::LifecycleInstallScope;
 
-/// #5459 P1 slot rules, driven through the facade (the caller surface the
-/// WebUI and agent-tool paths both enter):
-/// - a member's install is PRIVATE: invisible in others' lists, and
-///   activate/remove/install by others fail without leaking that (or
-///   whose) a private install exists
-/// - a member cannot remove a TENANT-shared tool
-/// - a tenant (operator) install EVICTS the private install (admin-wins),
-///   after which everyone sees the shared tool
+/// Membership install rules through the facade: members install
+/// independently (second member JOINS, not "unavailable"), each sees a
+/// private entry, non-members stay masked, and a duplicate install by
+/// the same member is rejected as already installed.
 #[tokio::test]
-async fn private_install_slot_rules_and_admin_eviction() {
+async fn members_install_the_same_tool_independently() {
     let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
     let fixture_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
     let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
+    let alice = UserId::new("alice").expect("user");
+    let bob = UserId::new("bob").expect("user");
+    let carol = UserId::new("carol").expect("user");
 
-    // alice (member) installs → owner is User(alice) in the store.
-    let response = facade
-        .execute(
-            lifecycle_surface_context_for_user("alice"),
+    let install = |user: &str| {
+        facade.execute(
+            lifecycle_surface_context_for_user(user),
             LifecycleProductAction::ExtensionInstall {
                 package_ref: fixture_ref.clone(),
             },
         )
-        .await
-        .expect("alice installs privately");
+    };
+    let list = |user: &str| {
+        facade.execute(
+            lifecycle_surface_context_for_user(user),
+            LifecycleProductAction::ExtensionList,
+        )
+    };
+
+    // alice installs → visible to alice only.
+    let response = install("alice").await.expect("alice installs for herself");
     assert_eq!(response.phase, LifecyclePhase::Installed);
-    let installation = installation_store
-        .get_installation(&installation_id)
-        .await
-        .expect("store read")
-        .expect("installation row");
-    assert_eq!(
-        installation.owner().as_user().map(UserId::as_str),
-        Some("alice"),
-        "member install must be user-owned"
-    );
-
-    // bob's list is empty; alice's list shows a PRIVATE entry.
-    let bob_list = facade
-        .execute(
-            lifecycle_surface_context_for_user("bob"),
-            LifecycleProductAction::ExtensionList,
-        )
-        .await
-        .expect("bob lists");
-    let Some(LifecycleProductPayload::ExtensionList { count: 0, .. }) = bob_list.payload.as_ref()
-    else {
-        panic!("alice's private install must be invisible to bob: {bob_list:?}");
+    let owner_row = || async {
+        installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("store read")
+            .expect("installation row")
     };
-    let alice_list = facade
-        .execute(
-            lifecycle_surface_context_for_user("alice"),
-            LifecycleProductAction::ExtensionList,
-        )
-        .await
-        .expect("alice lists");
-    let Some(LifecycleProductPayload::ExtensionList {
-        extensions,
-        count: 1,
-    }) = alice_list.payload.as_ref()
-    else {
-        panic!("alice must see her own install: {alice_list:?}");
-    };
-    assert_eq!(
-        extensions[0].install_scope,
-        Some(LifecycleInstallScope::Private)
-    );
-
-    // bob cannot claim the slot — and the error must not leak the owner.
-    let error = facade
-        .execute(
-            lifecycle_surface_context_for_user("bob"),
-            LifecycleProductAction::ExtensionInstall {
-                package_ref: fixture_ref.clone(),
-            },
-        )
-        .await
-        .expect_err("bob cannot claim an id held by another user's private install");
-    let rendered = error.to_string();
-    assert!(rendered.contains("unavailable"), "unexpected: {rendered}");
+    let installation = owner_row().await;
     assert!(
-        !rendered.contains("alice"),
-        "slot error must not leak the private owner: {rendered}"
+        !installation.owner().is_tenant(),
+        "member install is not tenant-wide"
+    );
+    assert!(installation.owner().visible_to(&alice));
+    assert!(!installation.owner().visible_to(&bob));
+
+    // bob installs the SAME tool → joins; both members now hold it.
+    let response = install("bob")
+        .await
+        .expect("bob installs the same tool for himself (membership, not a slot)");
+    assert_eq!(response.phase, LifecyclePhase::Installed);
+    let installation = owner_row().await;
+    assert!(!installation.owner().is_tenant());
+    assert!(
+        installation.owner().visible_to(&alice),
+        "alice keeps the tool"
+    );
+    assert!(installation.owner().visible_to(&bob), "bob gains the tool");
+    assert!(!installation.owner().visible_to(&carol), "carol does not");
+
+    // Each member sees their own PRIVATE entry; carol sees nothing.
+    for member in ["alice", "bob"] {
+        let member_list = list(member).await.expect("member lists");
+        let Some(LifecycleProductPayload::ExtensionList {
+            extensions,
+            count: 1,
+        }) = member_list.payload.as_ref()
+        else {
+            panic!("{member} must see the tool they installed: {member_list:?}");
+        };
+        assert_eq!(
+            extensions[0].install_scope,
+            Some(LifecycleInstallScope::Private)
+        );
+    }
+    let carol_list = list("carol").await.expect("carol lists");
+    let Some(LifecycleProductPayload::ExtensionList { count: 0, .. }) = carol_list.payload.as_ref()
+    else {
+        panic!("members' installs must be invisible to non-members: {carol_list:?}");
+    };
+
+    // Duplicate install by a member who already holds it is a real error…
+    let error = install("alice")
+        .await
+        .expect_err("alice already holds the tool");
+    assert!(
+        error.to_string().contains("already installed"),
+        "unexpected: {error}"
     );
 
-    // bob cannot activate or remove it — reads as not installed. The
-    // tenant operator gets the same masking: a private tool is invisible
-    // and non-dispatchable to every non-owner, admin included — the
-    // admin's only special power is the shared-install eviction below.
+    // …while activate works for both members (the bundle publishes once;
+    // the second activate is an idempotent re-publish).
+    for member in ["alice", "bob"] {
+        let response = facade
+            .execute(
+                lifecycle_surface_context_for_user(member),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: fixture_ref.clone(),
+                },
+            )
+            .await
+            .expect("member activates the tool they hold");
+        assert_eq!(response.phase, LifecyclePhase::Active);
+    }
+
+    // Non-members (carol AND the operator) stay masked on activate/remove:
+    // same "is not installed" a missing row produces, no owner leak.
     for context in [
-        lifecycle_surface_context_for_user("bob"),
+        lifecycle_surface_context_for_user("carol"),
         lifecycle_surface_context(),
     ] {
         for action in [
@@ -110,16 +137,45 @@ async fn private_install_slot_rules_and_admin_eviction() {
             let error = facade
                 .execute(context.clone(), action)
                 .await
-                .expect_err("foreign private install must be inoperable");
+                .expect_err("a tool the caller does not hold must be inoperable");
+            let rendered = error.to_string();
             assert!(
-                error.to_string().contains("is not installed"),
-                "unexpected: {error}"
+                rendered.contains("is not installed"),
+                "unexpected: {rendered}"
+            );
+            assert!(
+                !rendered.contains("alice") && !rendered.contains("bob"),
+                "masking must not leak member identities: {rendered}"
             );
         }
     }
+}
 
-    // alice activates her private install.
-    let response = facade
+/// Remove = leave the member set: the other member keeps the tool; the
+/// LAST member's remove triggers the full teardown, after which the id
+/// is free for a fresh install.
+#[tokio::test]
+async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
+    let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
+    let fixture_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
+    let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
+    let extension_id = ExtensionId::new("fixture").expect("extension id");
+    let alice = UserId::new("alice").expect("user");
+    let bob = UserId::new("bob").expect("user");
+
+    for member in ["alice", "bob"] {
+        facade
+            .execute(
+                lifecycle_surface_context_for_user(member),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: fixture_ref.clone(),
+                },
+            )
+            .await
+            .expect("member installs");
+    }
+    facade
         .execute(
             lifecycle_surface_context_for_user("alice"),
             LifecycleProductAction::ExtensionActivate {
@@ -127,10 +183,121 @@ async fn private_install_slot_rules_and_admin_eviction() {
             },
         )
         .await
-        .expect("alice activates her private install");
-    assert_eq!(response.phase, LifecyclePhase::Active);
+        .expect("alice activates");
 
-    // The operator installs the same id → evicts alice's private install.
+    // alice removes → she leaves the set; bob keeps the (still enabled) tool.
+    let response = facade
+        .execute(
+            lifecycle_surface_context_for_user("alice"),
+            LifecycleProductAction::ExtensionRemove {
+                package_ref: fixture_ref.clone(),
+            },
+        )
+        .await
+        .expect("alice removes the tool for herself");
+    assert_eq!(response.phase, LifecyclePhase::Removed);
+    let installation = installation_store
+        .get_installation(&installation_id)
+        .await
+        .expect("store read")
+        .expect("row survives while another member holds the tool");
+    assert!(!installation.owner().visible_to(&alice), "alice left");
+    assert!(installation.owner().visible_to(&bob), "bob keeps it");
+    let alice_list = facade
+        .execute(
+            lifecycle_surface_context_for_user("alice"),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("alice lists");
+    let Some(LifecycleProductPayload::ExtensionList { count: 0, .. }) = alice_list.payload.as_ref()
+    else {
+        panic!("alice no longer sees the tool: {alice_list:?}");
+    };
+    let bob_list = facade
+        .execute(
+            lifecycle_surface_context_for_user("bob"),
+            LifecycleProductAction::ExtensionList,
+        )
+        .await
+        .expect("bob lists");
+    let Some(LifecycleProductPayload::ExtensionList { count: 1, .. }) = bob_list.payload.as_ref()
+    else {
+        panic!("bob must still see the tool: {bob_list:?}");
+    };
+
+    // bob (last member) removes → full teardown: row and manifest gone…
+    facade
+        .execute(
+            lifecycle_surface_context_for_user("bob"),
+            LifecycleProductAction::ExtensionRemove {
+                package_ref: fixture_ref.clone(),
+            },
+        )
+        .await
+        .expect("last member removes → teardown");
+    assert!(
+        installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("store read")
+            .is_none(),
+        "last member's remove must delete the installation row"
+    );
+    assert!(
+        installation_store
+            .get_manifest(&extension_id)
+            .await
+            .expect("store read")
+            .is_none(),
+        "last member's remove must delete the manifest"
+    );
+
+    // …and the id is free again for a fresh install.
+    facade
+        .execute(
+            lifecycle_surface_context_for_user("carol"),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_ref,
+            },
+        )
+        .await
+        .expect("id is installable again after teardown");
+}
+
+/// The operator installing a member-held tool EVICTS every member's
+/// private installation — one row write replacing the member set with
+/// `Tenant` — after which everyone sees the shared tool and only the
+/// operator can remove it.
+#[tokio::test]
+async fn operator_install_evicts_member_installs_to_tenant_shared() {
+    let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
+    let fixture_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
+    let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
+
+    for member in ["alice", "bob"] {
+        facade
+            .execute(
+                lifecycle_surface_context_for_user(member),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: fixture_ref.clone(),
+                },
+            )
+            .await
+            .expect("member installs");
+    }
+    facade
+        .execute(
+            lifecycle_surface_context_for_user("alice"),
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: fixture_ref.clone(),
+            },
+        )
+        .await
+        .expect("alice activates");
+
+    // Operator installs → evicts both members' private installs to Tenant.
     let response = facade
         .execute(
             lifecycle_surface_context(),
@@ -139,7 +306,7 @@ async fn private_install_slot_rules_and_admin_eviction() {
             },
         )
         .await
-        .expect("tenant install evicts the private install");
+        .expect("operator install evicts member installs and takes the id");
     assert_eq!(response.phase, LifecyclePhase::Installed);
     let installation = installation_store
         .get_installation(&installation_id)
@@ -148,30 +315,52 @@ async fn private_install_slot_rules_and_admin_eviction() {
         .expect("installation row");
     assert!(
         installation.owner().is_tenant(),
-        "tenant install must own the slot after eviction"
+        "operator install must own the id tenant-wide after eviction"
+    );
+    assert_eq!(
+        installation.activation_state(),
+        ExtensionActivationState::Enabled,
+        "eviction must not disable the already-activated tool"
     );
 
-    // Everyone now sees the SHARED entry — bob included.
-    let bob_list = facade
+    // Everyone — evicted members and never-installed users alike — now
+    // sees the SHARED entry.
+    for user in ["alice", "bob", "carol"] {
+        let user_list = facade
+            .execute(
+                lifecycle_surface_context_for_user(user),
+                LifecycleProductAction::ExtensionList,
+            )
+            .await
+            .expect("list");
+        let Some(LifecycleProductPayload::ExtensionList {
+            extensions,
+            count: 1,
+        }) = user_list.payload.as_ref()
+        else {
+            panic!("shared install must be visible to {user}: {user_list:?}");
+        };
+        assert_eq!(
+            extensions[0].install_scope,
+            Some(LifecycleInstallScope::Shared)
+        );
+    }
+
+    // Operator re-install is a real duplicate; members cannot remove the
+    // shared tool; the operator can.
+    let error = facade
         .execute(
-            lifecycle_surface_context_for_user("bob"),
-            LifecycleProductAction::ExtensionList,
+            lifecycle_surface_context(),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_ref.clone(),
+            },
         )
         .await
-        .expect("bob lists after eviction");
-    let Some(LifecycleProductPayload::ExtensionList {
-        extensions,
-        count: 1,
-    }) = bob_list.payload.as_ref()
-    else {
-        panic!("shared install must be visible to bob: {bob_list:?}");
-    };
-    assert_eq!(
-        extensions[0].install_scope,
-        Some(LifecycleInstallScope::Shared)
+        .expect_err("shared tool is already installed");
+    assert!(
+        error.to_string().contains("already installed"),
+        "unexpected: {error}"
     );
-
-    // Members (alice included) cannot remove the shared tool; the operator can.
     for member in ["alice", "bob"] {
         let error = facade
             .execute(
@@ -198,19 +387,53 @@ async fn private_install_slot_rules_and_admin_eviction() {
         .expect("operator removes the shared tool");
 }
 
+/// A member installing a tool the operator already shares gets the real
+/// "already installed" error — the tool is already available to them.
+#[tokio::test]
+async fn member_install_of_a_shared_tool_reports_already_installed() {
+    let (_dir, _root, facade, _registry, _store) = extension_lifecycle_fixture();
+    let fixture_ref =
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
+
+    facade
+        .execute(
+            lifecycle_surface_context(),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_ref.clone(),
+            },
+        )
+        .await
+        .expect("operator installs shared");
+    let error = facade
+        .execute(
+            lifecycle_surface_context_for_user("alice"),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_ref,
+            },
+        )
+        .await
+        .expect_err("the shared tool is already available to alice");
+    assert!(
+        error.to_string().contains("already installed"),
+        "unexpected: {error}"
+    );
+}
+
 /// #5525 review: `LifecycleProductCommandService` dispatches every
 /// `/extension_*` command as `LifecycleProductContext::Command`, so the
 /// facade must derive the caller from the verified command auth claim
-/// instead of rejecting non-surface contexts outright — and the private
-/// ownership masking must hold on the command path too.
+/// instead of rejecting non-surface contexts outright — and the
+/// membership masking must hold on the command path too.
 #[tokio::test]
 async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
     let (_dir, _root, facade, _registry, installation_store) = extension_lifecycle_fixture();
     let fixture_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
     let installation_id = ExtensionInstallationId::new("fixture").expect("fixture installation id");
+    let alice = UserId::new("alice").expect("user");
+    let bob = UserId::new("bob").expect("user");
 
-    // alice installs through the command path → owner derives from the claim.
+    // alice installs through the command path → membership derives from the claim.
     let response = facade
         .execute(
             lifecycle_command_context_for_user("alice"),
@@ -226,11 +449,11 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         .await
         .expect("store read")
         .expect("installation row");
-    assert_eq!(
-        installation.owner().as_user().map(UserId::as_str),
-        Some("alice"),
-        "command install must be owned by the claim subject"
+    assert!(
+        installation.owner().visible_to(&alice) && !installation.owner().is_tenant(),
+        "command install must be held by the claim subject"
     );
+    assert!(!installation.owner().visible_to(&bob));
 
     // alice's command list sees it; bob's command list stays masked.
     let alice_list = facade
@@ -253,10 +476,10 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         .expect("bob lists via command");
     let Some(LifecycleProductPayload::ExtensionList { count: 0, .. }) = bob_list.payload.as_ref()
     else {
-        panic!("alice's private install must stay invisible on the command path: {bob_list:?}");
+        panic!("alice's install must stay invisible on the command path: {bob_list:?}");
     };
 
-    // Owner masking holds for command-path mutations by a non-owner.
+    // Membership masking holds for command-path mutations by a non-member.
     let error = facade
         .execute(
             lifecycle_command_context_for_user("bob"),
@@ -265,14 +488,24 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
             },
         )
         .await
-        .expect_err("foreign private install must be inoperable via command");
+        .expect_err("a tool bob does not hold must be inoperable via command");
     assert!(
         error.to_string().contains("is not installed"),
         "unexpected: {error}"
     );
 
-    // alice activates and removes her install through the command path.
-    let response = facade
+    // bob JOINS through the command path, then alice activates and removes
+    // hers; bob keeps the tool.
+    facade
+        .execute(
+            lifecycle_command_context_for_user("bob"),
+            LifecycleProductAction::ExtensionInstall {
+                package_ref: fixture_ref.clone(),
+            },
+        )
+        .await
+        .expect("bob joins via command");
+    facade
         .execute(
             lifecycle_command_context_for_user("alice"),
             LifecycleProductAction::ExtensionActivate {
@@ -281,7 +514,6 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         )
         .await
         .expect("alice activates via command");
-    assert_eq!(response.phase, LifecyclePhase::Active);
     facade
         .execute(
             lifecycle_command_context_for_user("alice"),
@@ -291,11 +523,17 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         )
         .await
         .expect("alice removes via command");
+    let installation = installation_store
+        .get_installation(&installation_id)
+        .await
+        .expect("store read")
+        .expect("bob still holds the tool");
+    assert!(installation.owner().visible_to(&bob));
 }
 
 /// #5459 P1: the owner join in `active_model_visible_capabilities` — a
-/// privately installed+activated extension's capabilities carry the
-/// owning user, which is what the grant-minting filter keys on.
+/// member-installed+activated extension's capabilities carry the member
+/// set, which is what the grant-minting filter keys on.
 #[tokio::test]
 async fn active_capabilities_carry_installation_owner() {
     let (_dir, _root, port, _registry, _store) =
@@ -304,11 +542,12 @@ async fn active_capabilities_carry_installation_owner() {
             ExtensionLifecycleService::new(ExtensionRegistry::new()),
         );
     let alice = UserId::new("alice").expect("valid user");
+    let bob = UserId::new("bob").expect("valid user");
     let package_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
     port.install(package_ref.clone(), &alice)
         .await
-        .expect("alice installs privately");
+        .expect("alice installs for herself");
     port.activate(package_ref, ExtensionActivationMode::Static, &alice)
         .await
         .expect("alice activates");
@@ -319,139 +558,25 @@ async fn active_capabilities_carry_installation_owner() {
         .expect("active capabilities");
     assert!(!capabilities.is_empty(), "fixture capability published");
     for capability in &capabilities {
-        assert_eq!(
-            capability.owner.as_user().map(UserId::as_str),
-            Some("alice"),
-            "capability must carry the private owner for grant filtering"
+        assert!(
+            capability.owner.visible_to(&alice) && !capability.owner.visible_to(&bob),
+            "capability must carry the member set for grant filtering"
         );
     }
 
     // The operator/settings tool catalog joins THIS owner map to hide a
-    // foreign user's private tool (#5459 P1 leak fix). Pin that the map
-    // reports the private owner keyed by extension id.
+    // tool from users who don't hold it (#5459 P1 leak fix). Pin that the
+    // map reports the membership keyed by extension id.
     let owners = port
         .installation_owners()
         .await
         .expect("installation owners");
-    assert_eq!(
-        owners
-            .get(&ExtensionId::new("fixture").unwrap())
-            .and_then(InstallationOwner::as_user)
-            .map(UserId::as_str),
-        Some("alice"),
-        "installation_owners must report the private owner the catalog filters on"
-    );
-}
-
-/// #5459 P1 (should-fix): a tenant install that fails AFTER eviction has
-/// deregistered the private package must not brick the id tenant-wide.
-/// Eviction is retry-safe, so the admin's retry heals the slot to Tenant.
-#[tokio::test]
-async fn admin_install_retry_heals_after_eviction_then_persist_failure() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-    let mut filesystem = LocalFilesystem::new();
-    filesystem
-        .mount_local(
-            VirtualPath::new("/projects").expect("valid virtual path"),
-            HostPath::from_path_buf(storage_root.clone()),
-        )
-        .expect("mount storage root");
-    filesystem
-        .mount_local(
-            VirtualPath::new("/system/extensions").expect("valid virtual path"),
-            HostPath::from_path_buf(storage_root.join("system/extensions")),
-        )
-        .expect("mount system extensions");
-    let root_filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
-    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-    // Concrete Arc so the test can arm the one-shot persist failure AFTER
-    // alice's install; the port sees it as `dyn ExtensionInstallationStore`.
-    let store = Arc::new(DeleteInstallationFailingStore::default());
-    let store_dyn: Arc<dyn ExtensionInstallationStore> = store.clone();
-    let port = RebornLocalExtensionManagementPort::new(
-        root_filesystem,
-        AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
-        store_dyn,
-        Arc::new(Mutex::new(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        ))),
-        test_active_extension_publisher(
-            Arc::clone(&active_registry),
-            test_extension_trust_policy(),
-        ),
-        None,
-        lifecycle_owner(),
-    );
-
-    let alice = UserId::new("alice").expect("user");
-    let package_ref =
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("fixture ref");
-
-    // alice privately installs + activates (Enabled, package published).
-    port.install(package_ref.clone(), &alice)
-        .await
-        .expect("alice installs privately");
-    port.activate(package_ref.clone(), ExtensionActivationMode::Static, &alice)
-        .await
-        .expect("alice activates");
-
-    // Admin install fails at persist (upsert_installation), AFTER eviction
-    // has already deregistered alice's package.
-    store
-        .fail_next_upsert_installation
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    port.install(package_ref.clone(), &lifecycle_owner())
-        .await
-        .expect_err("persist failure aborts the tenant install");
-
-    // #5525 review (non-interference): the FAILED shared install must
-    // leave alice's private install exactly as it was — owner alice, row
-    // still Enabled, and her capability still published — not disabled/
-    // unpublished until an admin retry shows up.
-    let fixture_id = ExtensionId::new("fixture").expect("extension id");
-    let owners = port.installation_owners().await.expect("owners");
-    assert_eq!(
-        owners
-            .get(&fixture_id)
-            .and_then(InstallationOwner::as_user)
-            .map(UserId::as_str),
-        Some("alice"),
-        "failed tenant install must restore alice's private ownership"
-    );
-    let installation = store
-        .get_installation(&ExtensionInstallationId::new("fixture").expect("installation id"))
-        .await
-        .expect("store read")
-        .expect("installation row survives the failed tenant install");
-    assert_eq!(
-        installation.activation_state(),
-        ExtensionActivationState::Enabled,
-        "failed tenant install must re-enable the evicted private install"
-    );
+    let owner = owners
+        .get(&ExtensionId::new("fixture").unwrap())
+        .expect("fixture owner present");
     assert!(
-        active_registry
-            .snapshot()
-            .get_extension(&fixture_id)
-            .is_some(),
-        "failed tenant install must re-publish the evicted private capability"
-    );
-
-    // Retry: eviction re-runs against the restored private install and the
-    // slot heals to a tenant-owned install rather than dead-ending on
-    // 'not installed'.
-    port.install(package_ref, &lifecycle_owner())
-        .await
-        .expect("admin retry heals the slot after a failed eviction install");
-
-    let owners = port.installation_owners().await.expect("owners");
-    assert!(
-        owners
-            .get(&ExtensionId::new("fixture").unwrap())
-            .expect("fixture installed")
-            .is_tenant(),
-        "the slot must heal to a tenant install, not stay bricked"
+        owner.visible_to(&alice) && !owner.visible_to(&bob) && !owner.is_tenant(),
+        "installation_owners must report the membership the catalog filters on"
     );
 }
 

@@ -88,7 +88,7 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
 use active_publication::extension_trust_policy_input;
 use install_policy::{
-    EvictedPrivateInstall, OccupiedSlotDecision, decide_occupied_slot, derive_owner,
+    InstallDecision, RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,
 };
 
@@ -121,9 +121,10 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// The tenant operator identity (#5459 P1). In local-dev this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics); installs by this
     /// user derive [`InstallationOwner::Tenant`] (shared), installs by anyone
-    /// else derive [`InstallationOwner::User`] (private). Resolved ONCE here —
-    /// when P0 role wiring lands, this becomes a role-derived resolver instead
-    /// of an identity comparison; callers do not re-derive admin-ness.
+    /// else make (or join) the member set [`InstallationOwner::Users`].
+    /// Resolved ONCE here — when P0 role wiring lands, this becomes a
+    /// role-derived resolver instead of an identity comparison; callers do
+    /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
 }
 
@@ -760,68 +761,38 @@ impl RebornLocalExtensionManagementPort {
         // below). Acquired BEFORE `operation_lock`; `import_bundle` takes the
         // write guard before `operation_lock` too, so the lock order is
         // consistent and the two cannot deadlock.
-        let owner = derive_owner(caller, &self.tenant_operator_user_id);
         let catalog = self.catalog.read().await;
         let available = catalog.resolve(&package_ref)?;
-        let plan = prepare_install(available, owner.clone())?;
         let _operation_guard = self.operation_lock.lock().await;
-        let evicted = self
-            .ensure_slot_available(
-                &available.package.id,
-                plan.installation.installation_id(),
-                &owner,
-            )
-            .await?;
-        if let Err(error) = self.register_lifecycle_package(&available.package).await {
-            return Err(self
-                .fail_install_restoring_evicted(
-                    "extension install registration failed",
-                    error,
-                    evicted.as_ref(),
-                )
-                .await);
-        }
-
-        if let Err(error) =
-            materialize_available_extension(self.filesystem.as_ref(), available).await
-        {
-            if let Err(rollback_error) =
-                self.rollback_lifecycle_install(&available.package.id).await
-            {
-                return Err(compensation_failure(
-                    "extension install materialization failed and lifecycle rollback failed",
-                    error,
-                    rollback_error,
-                ));
+        let installation_id =
+            ExtensionInstallationId::new(available.package.id.as_str().to_string())
+                .map_err(map_extension_installation_error)?;
+        let existing = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        match existing {
+            // The id is already installed: membership decides whether the
+            // caller JOINS the member set or the operator EVICTS it to
+            // `Tenant` — either way a single row rewrite; the bundle is
+            // already registered, materialized, and (if enabled) published,
+            // so there is nothing to compensate.
+            Some(existing) => {
+                let InstallDecision::UpdateOwner(new_owner) = decide_install_on_existing(
+                    &available.package.id,
+                    existing.owner(),
+                    caller,
+                    &self.tenant_operator_user_id,
+                )?;
+                self.installation_store
+                    .upsert_installation(existing.with_owner(new_owner))
+                    .await
+                    .map_err(map_extension_installation_error)?;
             }
-            return Err(self
-                .fail_install_restoring_evicted(
-                    "extension install materialization failed",
-                    error,
-                    evicted.as_ref(),
-                )
-                .await);
-        }
-        if let Err(error) = self.persist_install_plan(plan).await {
-            let _ = self
-                .delete_materialized_extension_files(&available.package.id)
-                .await;
-            if let Err(rollback_error) =
-                self.rollback_lifecycle_install(&available.package.id).await
-            {
-                return Err(compensation_failure(
-                    "extension install persistence failed and lifecycle rollback failed",
-                    error,
-                    rollback_error,
-                ));
+            None => {
+                self.install_fresh_locked(available, caller).await?;
             }
-            return Err(self
-                .fail_install_restoring_evicted(
-                    "extension install persistence failed",
-                    error,
-                    evicted.as_ref(),
-                )
-                .await);
         }
 
         Ok(response_with_payload(
@@ -838,6 +809,67 @@ impl RebornLocalExtensionManagementPort {
                 ),
             },
         ))
+    }
+
+    /// First install of an id: register the lifecycle package, materialize
+    /// the bundle, and persist the installation plan, unwinding on failure.
+    /// Callers hold `operation_lock` and have verified no installation row
+    /// exists.
+    async fn install_fresh_locked(
+        &self,
+        available: &AvailableExtensionPackage,
+        caller: &UserId,
+    ) -> Result<(), ProductWorkflowError> {
+        // An orphaned manifest row without an installation still counts as
+        // occupied (pre-#5459 behavior, kept fail-closed).
+        if self
+            .installation_store
+            .get_manifest(&available.package.id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .is_some()
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} is already installed",
+                    available.package.id.as_str()
+                ),
+            });
+        }
+        let owner = derive_owner(caller, &self.tenant_operator_user_id);
+        let plan = prepare_install(available, owner)?;
+        self.register_lifecycle_package(&available.package).await?;
+
+        if let Err(error) =
+            materialize_available_extension(self.filesystem.as_ref(), available).await
+        {
+            if let Err(rollback_error) =
+                self.rollback_lifecycle_install(&available.package.id).await
+            {
+                return Err(compensation_failure(
+                    "extension install materialization failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.persist_install_plan(plan).await {
+            let _ = self
+                .delete_materialized_extension_files(&available.package.id)
+                .await;
+            if let Err(rollback_error) =
+                self.rollback_lifecycle_install(&available.package.id).await
+            {
+                return Err(compensation_failure(
+                    "extension install persistence failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) async fn activate(
@@ -1256,6 +1288,23 @@ impl RebornLocalExtensionManagementPort {
                 ),
             });
         }
+        // Membership remove (#5459 P1 pivot): while other members still hold
+        // the tool, the caller just LEAVES the member set — a single row
+        // rewrite, no teardown. Only the last holder's remove (or the
+        // operator removing a tenant-shared tool) tears the install down.
+        if let RemoveDecision::LeaveMembers(remaining) =
+            decide_remove(installation.owner(), caller)?
+        {
+            self.installation_store
+                .upsert_installation(installation.with_owner(remaining))
+                .await
+                .map_err(map_extension_installation_error)?;
+            return Ok(response_with_payload(
+                Some(package_ref),
+                LifecyclePhase::Removed,
+                LifecycleProductPayload::ExtensionRemove { removed: true },
+            ));
+        }
         let manifest = self
             .installation_store
             .get_manifest(&extension_id)
@@ -1444,10 +1493,11 @@ impl RebornLocalExtensionManagementPort {
         Ok(())
     }
 
-    /// Fail-closed slot check for the catalog import path (#5499): reject a
-    /// zip-imported bundle whose id already has an installation row or manifest.
-    /// The per-user owner/slot rules in [`Self::ensure_slot_available`] apply at
-    /// install time; catalog import only needs the id to be free.
+    /// Fail-closed id check for the catalog import path (#5499): reject a
+    /// zip-imported bundle whose id already has an installation row or manifest
+    /// — a bundle cannot be swapped under live installs. The membership rules
+    /// in [`install_policy::decide_install_on_existing`] apply at install
+    /// time; catalog import only needs the id to be free.
     async fn ensure_not_installed(
         &self,
         extension_id: &ExtensionId,
@@ -1476,161 +1526,6 @@ impl RebornLocalExtensionManagementPort {
             });
         }
         Ok(())
-    }
-
-    /// #5459 P1 slot rules — one installation slot per extension id per tenant,
-    /// with a typed owner deciding who may claim an occupied slot:
-    ///
-    /// - vacant → anyone installs (owner already derived by the caller)
-    /// - `Tenant`-owned → nobody re-installs over it (the update flow is a
-    ///   separate concern); members see "already available as a shared tool"
-    /// - `User`-owned → the owner sees "already installed"; OTHER users get a
-    ///   generic "unavailable" (never leaking who holds the slot); a TENANT
-    ///   install EVICTS the private install (admin-wins: a user must not be
-    ///   able to squat an id against the whole tenant, and "two users want it
-    ///   privately → admin installs it shared" self-heals through this rule)
-    ///
-    /// Eviction supersedes, never destroys: it unpublishes/deregisters the
-    /// private install so the tenant install can take the slot, but touches no
-    /// secret-store rows and no credential accounts — the evicted user's
-    /// personal credentials keep resolving caller-first at dispatch.
-    async fn ensure_slot_available(
-        &self,
-        extension_id: &ExtensionId,
-        installation_id: &ExtensionInstallationId,
-        claimant: &InstallationOwner,
-    ) -> Result<Option<EvictedPrivateInstall>, ProductWorkflowError> {
-        let existing = self
-            .installation_store
-            .get_installation(installation_id)
-            .await
-            .map_err(map_extension_installation_error)?;
-        let Some(existing) = existing else {
-            // No installation record; an orphaned manifest row still counts as
-            // an occupied slot (pre-#5459 behavior, kept fail-closed).
-            if self
-                .installation_store
-                .get_manifest(extension_id)
-                .await
-                .map_err(map_extension_installation_error)?
-                .is_some()
-            {
-                return Err(ProductWorkflowError::InvalidBindingRequest {
-                    reason: format!("extension {} is already installed", extension_id.as_str()),
-                });
-            }
-            return Ok(None);
-        };
-        match decide_occupied_slot(extension_id, existing.owner(), claimant)? {
-            OccupiedSlotDecision::EvictPrivateInstall => self
-                .evict_private_installation(extension_id, &existing)
-                .await
-                .map(Some),
-        }
-    }
-
-    /// Admin-wins eviction (#5459 P1): deregister/unpublish a user-private
-    /// installation so a tenant install can take the slot. The subsequent
-    /// install path overwrites the manifest + installation records via its
-    /// normal upsert (same installation id).
-    ///
-    /// Returns the pre-eviction snapshot so a tenant install that FAILS after
-    /// this point can put the victim back exactly as it was
-    /// ([`Self::restore_evicted_private_install`]) — a failed shared install
-    /// must not interfere with the user's private tool (#5525 review).
-    ///
-    /// Retry-safe by construction: if a prior tenant install partially
-    /// succeeded and crashed before compensation could run, the lifecycle
-    /// package may already be gone. Rather than dead-end at
-    /// `lifecycle_package()` — which would leave the id un-installable/
-    /// -removable tenant-wide until restart — eviction tolerates the absent
-    /// package as already-done, so the admin's retry re-runs eviction and
-    /// reclaims the slot. Grant minting gates on the enabled-installation
-    /// owner join, so the private capability is already denied the moment the
-    /// row flips to Disabled here, independent of the active-registry publish
-    /// state.
-    async fn evict_private_installation(
-        &self,
-        extension_id: &ExtensionId,
-        existing: &ExtensionInstallation,
-    ) -> Result<EvictedPrivateInstall, ProductWorkflowError> {
-        tracing::warn!(
-            extension_id = %extension_id.as_str(),
-            "tenant install is evicting a user-private installation (admin-wins slot rule)"
-        );
-        let was_enabled = existing.activation_state() == ExtensionActivationState::Enabled;
-        let manifest = self
-            .installation_store
-            .get_manifest(extension_id)
-            .await
-            .map_err(map_extension_installation_error)?;
-        let lifecycle_package = self.lifecycle_package(extension_id).await.ok();
-        self.installation_store
-            .set_activation_state(
-                existing.installation_id(),
-                ExtensionActivationState::Disabled,
-            )
-            .await
-            .map_err(map_extension_installation_error)?;
-        if let Some(lifecycle_package) = &lifecycle_package {
-            self.remove_lifecycle_package(extension_id).await?;
-            if was_enabled {
-                self.active_extensions.unpublish(lifecycle_package)?;
-            }
-        }
-        Ok(EvictedPrivateInstall {
-            manifest,
-            installation: existing.clone(),
-            lifecycle_package,
-        })
-    }
-
-    /// Inverse of [`Self::evict_private_installation`] for the FAILED
-    /// tenant-install path: restore the victim's manifest/installation rows,
-    /// re-register its lifecycle package, and re-publish its capability
-    /// surface to the captured pre-eviction state. Runs AFTER the tenant
-    /// package rollback so the lifecycle slot is free again.
-    async fn restore_evicted_private_install(
-        &self,
-        evicted: &EvictedPrivateInstall,
-    ) -> Result<(), ProductWorkflowError> {
-        let previous_state = evicted.installation.activation_state();
-        match &evicted.manifest {
-            Some(manifest) => {
-                self.restore_installation_records(manifest.clone(), evicted.installation.clone())
-                    .await?;
-            }
-            None => self.restore_installation(&evicted.installation).await?,
-        }
-        if let Some(package) = &evicted.lifecycle_package {
-            self.restore_lifecycle_package(package, previous_state)
-                .await?;
-            self.restore_active_publication(package, previous_state)?;
-        }
-        Ok(())
-    }
-
-    /// Shared failure exit for the install path: after the tenant-side
-    /// rollback has run, put any evicted private install back. Returns the
-    /// error to propagate — the original install error, or a
-    /// [`compensation_failure`] when the victim restore itself failed.
-    async fn fail_install_restoring_evicted(
-        &self,
-        context: &str,
-        error: ProductWorkflowError,
-        evicted: Option<&EvictedPrivateInstall>,
-    ) -> ProductWorkflowError {
-        let Some(evicted) = evicted else {
-            return error;
-        };
-        match self.restore_evicted_private_install(evicted).await {
-            Ok(()) => error,
-            Err(restore_error) => compensation_failure(
-                &format!("{context} and evicted private install restore failed"),
-                error,
-                restore_error,
-            ),
-        }
     }
 
     async fn load_installation(

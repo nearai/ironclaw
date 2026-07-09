@@ -5,39 +5,72 @@
 test-tool fixtures to exercise a privately installed "network + key"
 tool end-to-end).
 
-**Goal:** a regular user can install a WASM tool that only they see and
-can dispatch; an admin install stays tenant-wide (today's behavior,
-now explicit). Sibling PRs: #5499 (env-seeded tenant-shared
-credentials), #5513 (admin UI for the same credential rows).
+**Goal:** the tenant (operator) install makes a tool available to
+everyone; anyone else who installs a catalog tool gets it for
+themselves — and **any number of users can independently install the
+same tool**. A member's install is invisible and non-dispatchable to
+everyone who hasn't installed it. Sibling PRs: #5499 (env-seeded
+tenant-shared credentials), #5513 (admin UI for the same credential
+rows).
+
+## 2026-07-08 pivot: membership, not slots
+
+The first iteration of this plan (locked 2026-07-01, reviewed in
+#5525) modeled ownership as **one install slot per extension id per
+tenant** with admin-wins eviction. Manual testing killed it: with a
+tool privately installed by one member, every other user's install
+attempt failed with a masked "extension id unavailable" — surfaced in
+the WebUI as a bare "Validation" banner on a tool that *looked*
+installable (foreign private installs are deliberately invisible).
+Decision (Emil, 2026-07-08): that complexity buys nothing the product
+wants. The model is now **membership**:
+
+- One installation **row** per id (unchanged — the store keys by
+  `installation_id == extension_id`), but the owner is either `Tenant`
+  or a **set of member user ids**.
+- A member installing a tool that others already hold **joins the
+  member set**; the bundle is registered/materialized only once, by
+  the first installer.
+- **Admin-wins eviction survives as a semantic, not as machinery**
+  (Emil, 2026-07-08): an operator install still evicts every member's
+  private installation — but with one row per id, that eviction IS the
+  single write that replaces the member set with `Tenant`. The
+  snapshot/restore/compensation machinery of the slot iteration is
+  deleted, and with it the "unavailable" denial: a member's install of
+  a catalog tool now only fails for real reasons (already theirs, or
+  already tenant-shared).
+
+serrrfirat's #5525 review findings were fixes *within* the slot
+iteration, not a request for slots; the ones about masking, caller
+derivation, credential-preflight ordering, fail-closed owner
+visibility, and policy extraction carry over to the membership model
+unchanged. The eviction-compensation finding is moot (no eviction).
 
 ## Verified mechanism (recon receipts)
 
 - **Identity**: `ExtensionId` = manifest.toml `id`
-  (`available_extensions.rs:1579`); `ExtensionInstallationId::new(extension_id)`
-  — the installation id IS the extension id (`extension_lifecycle.rs:1133`),
-  so there is exactly one install slot per id per tenant.
-  `ensure_not_installed` (`extension_lifecycle.rs:~882`) already rejects
-  duplicates on both axes.
+  (`available_extensions.rs`); `ExtensionInstallationId::new(extension_id)`
+  — the installation id IS the extension id, so there is exactly one
+  installation **row** per id per tenant. That row now carries the
+  member set; it does not limit how many users hold the tool.
 - **Registry**: one global process-wide snapshot; `publish` upserts by
   `ExtensionId`; duplicate `CapabilityId` insert fails closed
-  (`ironclaw_extensions/src/registry.rs:73-79`). Capability ids are
-  validated `<extension_id>.<name>`-prefixed (`v2.rs:884-896`), so
-  renaming an id at install time would mean rewriting the bundle.
-  ⇒ same-id coexistence (shared + private) is NOT cheap; do slots, not
-  shadowing.
-- **Visibility/dispatch today = blanket per-request grant minting**, not
-  authorizer policy: `local_dev_visible_capability_request`
-  (`runtime/local_dev.rs:878-942`) mints a grant for EVERY active
-  capability to `Principal::Extension(loop_driver)` via
-  `extension_surface.grants(&extension_id)`
-  (`runtime/local_dev/extension_surface.rs:82-93`). The caller's
-  `user_id` is computed in the same function (`:894-899`) and unused for
-  filtering. ⇒ one choke point: filter grant minting by installation
-  owner. Grant absence = invisible in the surface AND denied at
-  dispatch — fail closed for free.
+  (`ironclaw_extensions/src/registry.rs`). Capability ids are
+  validated `<extension_id>.<name>`-prefixed. ⇒ the bundle is
+  published **once**; per-user visibility is enforced at grant
+  minting, not by duplicate registration. This is exactly why
+  membership is cheap where same-id *separate installs* were not.
+- **Visibility/dispatch = per-caller grant minting**:
+  `local_dev_visible_capability_request` mints grants via
+  `extension_surface.grants(&extension_id)` filtered by
+  `owner.visible_to(caller)`
+  (`runtime/local_dev/extension_surface.rs`). Grant absence =
+  invisible in the surface AND denied at dispatch — fail closed for
+  free. Membership only changes what `visible_to` checks (set
+  membership instead of single-owner equality).
 - **Persistence**: installations live in ONE snapshot file
-  `/tenants/<t>/system/extensions/.installations/state.json`
-  (`extension_installation_store.rs:12`). Owner becomes a field on the
+  (`.installations/state.json` under the tenant's extension root,
+  `extension_installation_store.rs`). Owner stays a field on the
   record, not a new store.
 - **Reserved first-party ids** (`github`, `notion`, `web-access`,
   `slack`, nearai, gsuite) are the SYSTEM tier of the id namespace;
@@ -46,147 +79,150 @@ credentials), #5513 (admin UI for the same credential rows).
 ## Locked decisions
 
 1. **Typed owner, no name prefixes.**
-   `InstallationOwner { Tenant, User(UserId) }` on `ExtensionInstallation`,
-   `#[serde(default)]` = `Tenant` so existing `state.json` rows
-   deserialize unchanged (no migration). The skills-style `shared-`
-   prefix does NOT transfer to tools: capability-id prefix validation
-   forces bundle rewrites, tool names are model-facing API (prefix churn
-   breaks routines on scope change), and a prefix wouldn't solve
-   user↔user collisions anyway (registry is global; skills never had
-   that problem because skill trees are per-user).
-2. **Slot rules — admin-wins eviction** (Emil, 2026-07-01):
+   `InstallationOwner { Tenant, Users { user_ids: BTreeSet<UserId> } }`
+   on `ExtensionInstallation`, `#[serde(default)]` = `Tenant` so
+   pre-#5459 `state.json` rows deserialize unchanged (no migration).
+   Rows written by the slot iteration (`{kind: "user", user_id}`)
+   deserialize as a singleton member set — dev homes created on this
+   branch keep loading. New writes serialize the set shape.
+2. **Install rules — join, don't gate** (Emil, 2026-07-08):
 
-   | Slot state | User installs same id | Admin installs same id |
+   | Row state | Member installs same id | Operator installs same id |
    |---|---|---|
-   | free | ✓ owned by `User(them)` | ✓ owned by `Tenant` |
-   | `Tenant`-owned | ✗ "already available as a shared tool" | ✗ already installed |
-   | `User(x)`-owned | ✗ generic "extension id unavailable" (don't leak the owner) | ✓ **evicts the private install**; tenant record takes the slot |
+   | no row | ✓ row created, `Users{them}` | ✓ `Tenant` |
+   | `Tenant` | ✗ "already installed" (it is already available to them) | ✗ "already installed" |
+   | `Users(S)`, caller ∈ S | ✗ "already installed" | — |
+   | `Users(S)`, caller ∉ S | ✓ **joins**: row becomes `Users(S ∪ {caller})` | ✓ **evicts every member's private installation**; the tenant row takes the id (members regain the tool through the shared install) |
 
-   Rationale: anti-squatting — a user can never reserve an id against
-   the org (imagine a private `gmail` blocking the admin) — and
-   self-healing escalation: two users want the same tool privately →
-   admin installs it shared → everyone gets it.
-3. **Supersede, don't destroy.** Eviction rewrites installation state
-   only (natural: the store keys by installation_id == extension_id, so
-   the tenant record overwrites the slot). The evicted user's wasm
-   artifacts and private credentials are NOT deleted. Credential
-   cleanup is a separate explicit route
-   (`product_auth_serve/lifecycle.rs`) — never wired into
-   install/remove/evict.
-4. **Credential continuity across eviction.** Secrets are keyed
-   `(owner scope, handle)`, decoupled from installations. After
-   eviction the resolver (`secret_owner_scope`, caller-first →
-   tenant-shared → AuthRequired) still finds the user's personal key
-   under the same handle — their key keeps winning for their calls.
-   Extension-id-keyed credential grants (OAuth `granted_extensions`)
-   keep matching because admin-wins preserves the id string.
-5. **UI: one list, badges.** Entries badged `shared` / `mine`; the
-   badge flip (mine → shared) is the MVP-sufficient eviction notice.
-6. **Admin signal** = `operator_webui_config` capability (env-owner
-   today; role-derived admin when P0 role wiring lands — resolve in one
-   place, don't re-derive per layer).
+   Join and evict-to-tenant are row-only updates: the package is
+   already registered, materialized, and (if enabled) published, so
+   there is nothing to compensate — eviction is one write replacing
+   the member set with `Tenant`, not a disable/deregister/republish
+   dance. Anti-squatting still holds: the operator can always take any
+   id tenant-wide, and nobody loses access when they do.
+3. **Remove = leave the set.** A member removing a tool they hold is
+   removed from the member set (row-only update; others keep the
+   tool). The **last** member leaving triggers the full teardown
+   (disable, deregister, unpublish, delete rows/files) — same
+   compensated path as today. `Tenant` rows stay operator-only to
+   remove. Non-members get the masked "is not installed" denial.
+4. **Masking stays, the install-path denial goes.** Non-members still
+   cannot see, activate, remove, or probe a tool they don't hold
+   (`ensure_caller_may_operate`, list filtering, credential-preflight
+   ordering — all unchanged from the #5525 review fixes). But install
+   by a non-member now *succeeds*, so the anti-enumeration property is
+   strictly stronger: the outcome of "install X" no longer depends on
+   whether someone else holds X.
+5. **Credential continuity, including across eviction.** Secrets are
+   keyed `(owner scope, handle)`, decoupled from installations. Each
+   member's dispatch resolves caller-first → tenant-shared →
+   AuthRequired (`secret_owner_scope`), so two members of the same
+   tool use their own keys (or the tenant-shared one) — and after an
+   operator install evicts their private installations, the resolver
+   still finds each user's personal key under the same handle, so
+   their key keeps winning for their calls. Extension-id-keyed
+   credential grants (OAuth `granted_extensions`) keep matching
+   because eviction preserves the id string. Unchanged from the slot
+   iteration.
+6. **UI: one list, badges.** Entries badged `shared` / `mine`
+   (`install_scope`: `Tenant` → shared, member set containing the
+   caller → mine). A tool held by others but not the caller appears
+   simply as installable — indistinguishable from a fresh tool, by
+   design.
+7. **Admin signal** = `operator_webui_config` capability (env-owner
+   today; role-derived admin when P0 role wiring lands — resolve in
+   one place, don't re-derive per layer).
 
 ## Implementation steps (test-first per step)
 
 1. `crates/ironclaw_extensions/src/installations.rs` —
-   `InstallationOwner` enum + field on `ExtensionInstallation`
-   (`#[serde(default)]` = Tenant). Tests: legacy JSON row (no field)
-   deserializes as Tenant; round-trip with `User(uid)`.
-2. `crates/ironclaw_reborn_composition/src/extension_lifecycle.rs` —
-   install derives owner from the caller (admin → Tenant, else
-   User); slot rules incl. admin-wins eviction; `installed_summaries`
-   filtered to tenant-owned + caller-owned. Tests through the lifecycle
-   facade: each row of the slot table; eviction preserves the evicted
-   user's secret rows.
-3. `active_model_visible_capabilities()`
-   (`RebornLocalExtensionManagementPort`) — carry owner per capability
-   (join from the installation record) into `ActiveExtensionCapability`.
-4. `runtime/local_dev/extension_surface.rs` — `grants()` /
-   `provider_trust()` take the caller's `user_id` (already computed at
-   the call site, `local_dev.rs:894-899`) and filter
-   `owner == Tenant || owner == User(caller)`.
-5. WebUI (`ironclaw_webui_v2` + `_static`) — `shared`/`mine` badge on
-   extension cards; install-button behavior per slot rules; thread the
-   admin flag one hop down into the lifecycle context (same shape as
-   the #5513 operator endpoint).
-6. Integration tests (through the caller, per
-   `tests/support/reborn/CLAUDE.md`): bob cannot SEE or DISPATCH
-   alice's private tool (fail-closed check on both the surface and
-   dispatch paths); admin install evicts alice's private install and
-   alice's personal credential still resolves; market-data fixture
-   installed privately still gates on missing key and runs with the
-   tenant-shared key.
+   `InstallationOwner::Users { user_ids }`; `user(uid)` constructor
+   builds a singleton set (keeps migration + fixture call sites);
+   `visible_to` = tenant or membership; join/leave helpers. Tests:
+   legacy no-field row → Tenant; slot-iteration `{kind:"user"}` row →
+   singleton set; set round-trip; tenant rows still serialize without
+   the field (rollback shape).
+2. `extension_host/extension_lifecycle/install_policy.rs` — replace
+   `decide_occupied_slot`/eviction-snapshot types with a pure
+   `decide_install(existing_owner, claimant)` →
+   `Fresh | Join | EvictToTenant | AlreadyInstalled`;
+   `ensure_caller_may_operate` checks membership. Delete
+   `EvictedPrivateInstall`.
+3. `extension_host/extension_lifecycle.rs` — install branches: fresh
+   (register + materialize + persist, existing compensation), join /
+   evict-to-tenant (row-only upsert). Remove branches: leave-set
+   (row-only) vs last-member full teardown. Delete
+   `ensure_slot_available` / `evict_private_installation` /
+   `restore_evicted_private_install` / `fail_install_restoring_evicted`.
+   `import_bundle`'s `ensure_not_installed` stays (a bundle cannot be
+   swapped under live installs).
+4. Projections — `installation_owners()` map, settings-tools catalog
+   filter, `install_scope_for_owner`, grants/provider-trust filtering:
+   all reduce to `visible_to`/membership; signatures unchanged.
+5. WebUI — badges unchanged; install-button shows for any catalog
+   tool the caller doesn't hold.
+6. Facade-level tests (`tests/private_install_tests.rs`): two members
+   independently install the same tool and both dispatch it;
+   non-member masked on activate/remove and list; member remove
+   leaves the other member intact; last-member remove tears down;
+   operator install evicts both members' private installs and both
+   keep access through the shared tool (with their own credentials
+   still resolving); command-path caller derivation (kept from #5525).
 
-## Adversarial review (2026-07-01, run wmg0t4d3w) — confirmed + resolved
+## Adversarial review (2026-07-01 slot iteration) — what carries over
 
-- **[blocker] settings/tools catalog leaked private tools** — the
-  `GET /api/webchat/v2/settings/tools` catalog
-  (`ActiveRegistryOperatorToolCatalog`) read the global registry with no
-  owner filter, so any member saw another user's private capability id +
-  metadata (dispatch stayed denied — grants are per-caller — but the
-  existence/metadata leaked). FIXED: `RebornOperatorToolCatalog::list_operator_tools`
-  is now `async` + caller-aware; the composition catalog joins
-  `installation_owners()` and drops foreign-private tools; `find_operator_tool`
-  masks them on the get/set-key paths too. Pinned by
-  `operator_tool_catalog_hides_foreign_private_tools` (webui.rs) +
-  `installation_owners` assert in `active_capabilities_carry_installation_owner`.
-- **[should-fix] eviction bricked the id on partial failure** — a tenant
-  install that failed after eviction deregistered the private package left
-  the id un-installable tenant-wide until restart. FIXED: eviction is now
-  retry-safe (tolerates an already-absent lifecycle package), so the admin's
-  retry heals the slot. Pinned by
-  `admin_install_retry_heals_after_eviction_then_persist_failure`.
-- **[minor] activate TOCTOU across hosted-MCP discovery** — ownership was
-  checked only in phase 1; the slot could change hands during the discovery
-  network call. FIXED: `activate_inner` re-runs `ensure_caller_may_operate`
-  after re-acquiring the lock, mapping a change to
-  `hosted_mcp_changed_during_discovery_error`.
-
-Two accepted tradeoffs (documented, not code-fixed — see below).
+- **[blocker] settings/tools catalog leaked private tools** — FIXED
+  and carried over: `RebornOperatorToolCatalog::list_operator_tools`
+  is caller-aware; the composition catalog joins
+  `installation_owners()` and drops foreign-private tools, failing
+  closed on unreadable owner data. Pinned by
+  `operator_tool_catalog_hides_foreign_private_tools` (webui.rs).
+- **[minor] activate TOCTOU across hosted-MCP discovery** — FIXED and
+  carried over: `activate_inner` re-runs `ensure_caller_may_operate`
+  after re-acquiring the lock.
+- **[should-fix] eviction bricked the id on partial failure** —
+  obsolete: eviction no longer exists; join/convert are single row
+  writes.
 
 ## Non-goals / phase 2
 
-- **Multi-user private installs of the same id** (alice AND bob both
-  privately holding `market-data`): requires owner-scoped registry keys
-  + caller-first-then-tenant dispatch resolution (the
-  `secret_owner_scope` precedence, applied to the registry). Only if
-  demanded; the admin-escalation path covers the common case.
+- **Per-user bundle versions** (alice and bob holding *different*
+  builds of the same id): the catalog holds one bundle per id;
+  membership shares it. Owner-scoped catalog/registry keys stay out
+  of scope.
 - **Per-user suppression** of a tenant-wide tool ("hide this shared
   tool for me").
 - **User-uploaded private tools ("bring your own").** `import` (zip →
   catalog) stays admin-only, and the `AvailableExtensionCatalog` is a
-  single tenant-global catalog, so a member can only privately *install*
-  a tool an admin already imported (or a bundled/first-party one) — they
+  single tenant-global catalog, so a member can only *install* a tool
+  an admin already imported (or a bundled/first-party one) — they
   cannot introduce a brand-new WASM tool that only they see. True BYO
   private tools would require owner-scoping the import + catalog-browse
-  layer (one level below P1's install-scope), plus keeping arbitrary-WASM
-  upload behind a deliberate capability gate. Deferred.
-- **Restore-on-admin-remove** (evicted private install coming back when
-  the admin removes the shared tool) — nice-to-have; MVP leaves the
-  user to reinstall.
+  layer, plus keeping arbitrary-WASM upload behind a deliberate
+  capability gate. Deferred.
 - **Skills** — same shared-vs-private axis, different mechanics; owned
   by the P4 plan (`shared-` prefix IS right there, per-user trees).
 
 ## Accepted tradeoffs (operator awareness / release notes)
 
-- **Rollback is a full outage once any private install exists.** Tenant
+- **Rollback is a full outage once any member install exists.** Tenant
   rows serialize byte-identical to pre-#5459 (owner field skipped when
-  `Tenant`), so a rollback loads a state.json holding only shared tools.
-  But a user-private row carries `owner: {kind: user, …}`, which an older
-  binary's `deny_unknown_fields` wire struct rejects — and the store fails
-  the WHOLE state.json load, so `serve` refuses to start until the file is
-  hand-edited. One member clicking "install" turns a rollback into an
-  outage. Flag in release notes; the real fix is a forward-compatible
-  older binary (out of scope here).
-- **SSO users (incl. real admins) always install private on this branch.**
-  The tenant-operator identity is the env-bearer `IRONCLAW_REBORN_WEBUI_USER_ID`;
-  SSO logins mint UUID user ids that never equal it, so every SSO user
-  derives `User(..)`: private installs only, cannot install/administer
-  shared tools, and — one behavior regression — cannot remove a
-  tenant-shared tool (new "only the tenant admin can remove" check) that
-  a browser user could remove pre-#5459. Matches decision 6 (env-owner
-  today, role-derived admin at P0); a private-install squat on a
-  first-party id is un-evictable from an SSO browser until P0 lands.
+  `Tenant`), so a rollback loads a state.json holding only shared
+  tools. But a member row carries `owner: {kind: users, …}`, which an
+  older binary's `deny_unknown_fields` wire struct rejects — and the
+  store fails the WHOLE state.json load, so `serve` refuses to start
+  until the file is hand-edited. One member clicking "install" turns a
+  rollback into an outage. Flag in release notes; the real fix is a
+  forward-compatible older binary (out of scope here).
+- **SSO users (incl. real admins) always install for themselves on
+  this branch.** The tenant-operator identity is the env-bearer
+  (`IRONCLAW_REBORN_WEBUI_USER_ID`); SSO logins mint UUID user ids
+  that never equal it, so every SSO user installs as a member —
+  cannot install shared tools tenant-wide and cannot remove a
+  tenant-shared tool (operator-only check). Under membership this is
+  no longer a functional wall (they can always get the tool for
+  themselves); the remaining gap is administrative and closes when P0
+  role wiring lands (decision 7).
 
 ## Known upstream issue (not this plan's problem)
 

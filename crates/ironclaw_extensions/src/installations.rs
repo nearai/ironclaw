@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -315,49 +315,117 @@ impl ExtensionHealthSnapshot {
     }
 }
 
-/// Who an installation belongs to (#5459 P1 — shared vs private installs).
+/// Who an installation belongs to (#5459 P1 — shared vs member installs,
+/// membership model per the 2026-07-08 pivot in
+/// `docs/plans/2026-07-01-private-tool-installs.md`).
 ///
 /// `Tenant` = installed for the whole tenant (the historical behavior, and
-/// what an admin install produces): every user sees and can dispatch the
-/// extension's capabilities. `User` = private to the installing user: only
-/// they see it, only they get grants minted for it.
+/// what an operator install produces): every user sees and can dispatch the
+/// extension's capabilities. `Users` = held by a set of members: any number
+/// of users can independently install the same tool; only members see it,
+/// only members get grants minted for it.
 ///
 /// Legacy persisted records predate this field and deserialize as `Tenant`
 /// via `#[serde(default)]` — no migration required, no behavior change for
-/// existing installs.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+/// existing installs. Rows written by the slot iteration of this feature
+/// (`{"kind": "user", "user_id": …}`) deserialize as a singleton member set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum InstallationOwner {
     #[default]
     Tenant,
-    User {
-        user_id: UserId,
+    Users {
+        user_ids: BTreeSet<UserId>,
     },
 }
 
 impl InstallationOwner {
+    /// Singleton member set — what a single member's install produces.
     pub fn user(user_id: UserId) -> Self {
-        Self::User { user_id }
+        Self::Users {
+            user_ids: BTreeSet::from([user_id]),
+        }
+    }
+
+    /// Member set; rejects an empty set (an installation must belong to the
+    /// tenant or to at least one member — an empty set would be a row nobody
+    /// can see, operate, or remove).
+    pub fn users(user_ids: BTreeSet<UserId>) -> Result<Self, ExtensionInstallationError> {
+        if user_ids.is_empty() {
+            return Err(ExtensionInstallationError::EmptyOwnerMembers);
+        }
+        Ok(Self::Users { user_ids })
     }
 
     pub fn is_tenant(&self) -> bool {
         matches!(self, Self::Tenant)
     }
 
-    /// The owning user, if the installation is user-private.
-    pub fn as_user(&self) -> Option<&UserId> {
+    /// The member set, if the installation is member-held.
+    pub fn members(&self) -> Option<&BTreeSet<UserId>> {
         match self {
-            Self::User { user_id } => Some(user_id),
+            Self::Users { user_ids } => Some(user_ids),
             Self::Tenant => None,
         }
     }
 
     /// Whether `caller` may see/use this installation: tenant-wide entries
-    /// are visible to everyone, user-private entries only to their owner.
+    /// are visible to everyone, member-held entries only to their members.
     pub fn visible_to(&self, caller: &UserId) -> bool {
         match self {
             Self::Tenant => true,
-            Self::User { user_id } => user_id == caller,
+            Self::Users { user_ids } => user_ids.contains(caller),
+        }
+    }
+}
+
+impl Serialize for InstallationOwner {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        InstallationOwnerWire::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for InstallationOwner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        InstallationOwnerWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Wire shape of [`InstallationOwner`]. `user` is the read-only legacy kind
+/// written by the slot iteration of #5459 P1 (a single owning user); it folds
+/// into a singleton member set on load and is never written back.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum InstallationOwnerWire {
+    Tenant,
+    User { user_id: UserId },
+    Users { user_ids: BTreeSet<UserId> },
+}
+
+impl From<InstallationOwner> for InstallationOwnerWire {
+    fn from(owner: InstallationOwner) -> Self {
+        match owner {
+            InstallationOwner::Tenant => Self::Tenant,
+            InstallationOwner::Users { user_ids } => Self::Users { user_ids },
+        }
+    }
+}
+
+impl TryFrom<InstallationOwnerWire> for InstallationOwner {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(wire: InstallationOwnerWire) -> Result<Self, Self::Error> {
+        match wire {
+            InstallationOwnerWire::Tenant => Ok(Self::Tenant),
+            InstallationOwnerWire::User { user_id } => Ok(Self::user(user_id)),
+            InstallationOwnerWire::Users { user_ids } => Self::users(user_ids),
         }
     }
 }
@@ -439,6 +507,15 @@ impl ExtensionInstallation {
 
     pub fn owner(&self) -> &InstallationOwner {
         &self.owner
+    }
+
+    /// Same installation with a replaced owner (membership join/leave and
+    /// operator eviction-to-tenant are single row rewrites); refreshes
+    /// `updated_at` like every other row mutation.
+    pub fn with_owner(mut self, owner: InstallationOwner) -> Self {
+        self.owner = owner;
+        self.updated_at = Utc::now();
+        self
     }
 
     fn set_activation_state(&mut self, state: ExtensionActivationState) {
@@ -947,8 +1024,42 @@ mod tests {
         )
         .expect("installation");
         let json = serde_json::to_string(&private).expect("serialize");
+        assert!(
+            json.contains(r#""kind":"users""#),
+            "member-held rows serialize the set shape: {json}"
+        );
         let restored: ExtensionInstallation = serde_json::from_str(&json).expect("round-trip");
-        assert_eq!(restored.owner().as_user(), Some(&alice));
+        assert!(restored.owner().visible_to(&alice));
+        assert_eq!(
+            restored.owner().members().map(BTreeSet::len),
+            Some(1),
+            "singleton member set round-trips"
+        );
+    }
+
+    /// Membership pivot (2026-07-08): rows written by the slot iteration
+    /// carry `{"kind": "user", "user_id": …}` — they MUST keep loading, as a
+    /// singleton member set; an empty member set is rejected on the wire and
+    /// at construction (a row nobody could see, operate, or remove).
+    #[test]
+    fn slot_iteration_user_owner_rows_load_as_singleton_member_set() {
+        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
+        let bob = ironclaw_host_api::UserId::new("bob").expect("user id");
+        let legacy: InstallationOwner =
+            serde_json::from_str(r#"{"kind":"user","user_id":"alice"}"#)
+                .expect("slot-iteration owner row loads");
+        assert!(legacy.visible_to(&alice));
+        assert!(!legacy.visible_to(&bob));
+        assert_eq!(legacy, InstallationOwner::user(alice.clone()));
+
+        let set: InstallationOwner =
+            serde_json::from_str(r#"{"kind":"users","user_ids":["alice","bob"]}"#)
+                .expect("member set loads");
+        assert!(set.visible_to(&alice) && set.visible_to(&bob));
+
+        serde_json::from_str::<InstallationOwner>(r#"{"kind":"users","user_ids":[]}"#)
+            .expect_err("empty member set is rejected on the wire");
+        InstallationOwner::users(BTreeSet::new()).expect_err("empty member set is unconstructable");
     }
 
     fn manifest_toml(extension_id: &str) -> String {
@@ -984,6 +1095,8 @@ pub enum ExtensionInstallationError {
     Manifest(#[from] ManifestV2Error),
     #[error("invalid {field}: {reason}")]
     InvalidValue { field: &'static str, reason: String },
+    #[error("installation owner member set must not be empty")]
+    EmptyOwnerMembers,
     #[error("installation references unknown extension manifest {extension_id}")]
     UnknownManifest { extension_id: ExtensionId },
     #[error(

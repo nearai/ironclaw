@@ -237,15 +237,17 @@ mod tests {
     use ironclaw_first_party_extensions::google_api_network_policy;
     use ironclaw_host_api::{CapabilityId, PermissionMode, UserId};
 
-    /// #5459 P1: the grant-minting choke point — a user-private extension's
-    /// capabilities mint grants (and advertise provider trust) ONLY for their
-    /// owner; tenant-owned ones mint for everyone. Grant absence is what makes
-    /// a private tool both invisible in the surface and denied at dispatch,
-    /// so this filter IS the enforcement.
+    /// #5459 P1: the grant-minting choke point — a member-held extension's
+    /// capabilities mint grants (and advertise provider trust) ONLY for its
+    /// members (every member of the set, not just one); tenant-owned ones
+    /// mint for everyone. Grant absence is what makes an un-held tool both
+    /// invisible in the surface and denied at dispatch, so this filter IS
+    /// the enforcement.
     #[test]
-    fn grants_and_provider_trust_filter_user_private_capabilities_to_their_owner() {
+    fn grants_and_provider_trust_filter_member_held_capabilities_to_their_members() {
         let alice = UserId::new("alice").unwrap();
         let bob = UserId::new("bob").unwrap();
+        let carol = UserId::new("carol").unwrap();
         let grantee = ExtensionId::new("caller").unwrap();
         let capability = |id: &str, provider: &str, owner| ActiveExtensionCapability {
             id: CapabilityId::new(id).unwrap(),
@@ -260,7 +262,10 @@ mod tests {
             capability(
                 "market-data.snp500",
                 "market-data",
-                ironclaw_extensions::InstallationOwner::user(alice.clone()),
+                ironclaw_extensions::InstallationOwner::users(
+                    [alice.clone(), bob.clone()].into_iter().collect(),
+                )
+                .expect("member set"),
             ),
             capability(
                 "hacker-news.top_stories",
@@ -269,33 +274,40 @@ mod tests {
             ),
         ]);
 
-        let alice_capabilities: Vec<_> = surface
-            .grants(&grantee, &alice)
-            .into_iter()
-            .map(|grant| grant.capability.as_str().to_string())
-            .collect();
-        assert!(alice_capabilities.contains(&"market-data.snp500".to_string()));
-        assert!(alice_capabilities.contains(&"hacker-news.top_stories".to_string()));
+        for member in [&alice, &bob] {
+            let member_capabilities: Vec<_> = surface
+                .grants(&grantee, member)
+                .into_iter()
+                .map(|grant| grant.capability.as_str().to_string())
+                .collect();
+            assert!(
+                member_capabilities.contains(&"market-data.snp500".to_string()),
+                "every member of the set gets the grant"
+            );
+            assert!(member_capabilities.contains(&"hacker-news.top_stories".to_string()));
+        }
 
-        let bob_capabilities: Vec<_> = surface
-            .grants(&grantee, &bob)
+        let carol_capabilities: Vec<_> = surface
+            .grants(&grantee, &carol)
             .into_iter()
             .map(|grant| grant.capability.as_str().to_string())
             .collect();
         assert!(
-            !bob_capabilities.contains(&"market-data.snp500".to_string()),
-            "alice's private capability must not mint a grant for bob"
+            !carol_capabilities.contains(&"market-data.snp500".to_string()),
+            "a member-held capability must not mint a grant for a non-member"
         );
-        assert!(bob_capabilities.contains(&"hacker-news.top_stories".to_string()));
+        assert!(carol_capabilities.contains(&"hacker-news.top_stories".to_string()));
 
-        let alice_trust = surface.provider_trust(&alice);
-        assert!(alice_trust.contains_key(&ExtensionId::new("market-data").unwrap()));
-        let bob_trust = surface.provider_trust(&bob);
+        for member in [&alice, &bob] {
+            let member_trust = surface.provider_trust(member);
+            assert!(member_trust.contains_key(&ExtensionId::new("market-data").unwrap()));
+        }
+        let carol_trust = surface.provider_trust(&carol);
         assert!(
-            !bob_trust.contains_key(&ExtensionId::new("market-data").unwrap()),
-            "alice's private provider must not be advertised to bob"
+            !carol_trust.contains_key(&ExtensionId::new("market-data").unwrap()),
+            "a member-held provider must not be advertised to a non-member"
         );
-        assert!(bob_trust.contains_key(&ExtensionId::new("hacker-news").unwrap()));
+        assert!(carol_trust.contains_key(&ExtensionId::new("hacker-news").unwrap()));
     }
 
     #[test]
