@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   createThread as createThreadRequest,
   deleteThread as deleteThreadRequest,
   listThreads,
-} from "../../../lib/api.js";
-import { queryClient } from "../../../lib/query-client.js";
-import { upsertThreadInCache } from "../lib/thread-cache.js";
+} from "../../../lib/api";
+import { queryClient } from "../../../lib/query-client";
+import { upsertThreadInCache } from "../lib/thread-cache";
 
 export function useThreads() {
   // No polling: the sidebar is kept current by local cache writes after

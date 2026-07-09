@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FileType, Filter, Page, RecordKind, RootFilesystem, cas_update,
@@ -275,8 +275,8 @@ where
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
+        updated_at: DateTime<Utc>,
     ) -> Result<(), SessionThreadError> {
-        let now = Utc::now();
         let path = thread_index_record_path(scope, thread_id)?;
         let resource_scope = scope.to_resource_scope();
         let scope_for_retry = scope.clone();
@@ -307,11 +307,11 @@ where
                                     false,
                                 ));
                             };
-                            stored.record.updated_at = Some(now);
+                            stored.record.updated_at = Some(updated_at);
                             Self::thread_index_record(&stored)
                         }
                     };
-                    index.record.updated_at = Some(now);
+                    index.record.updated_at = Some(updated_at);
                     Ok(CasApply::new(index, true))
                 }
             },
@@ -880,7 +880,7 @@ mod tests {
         let thread_id = ThreadId::new("thread-missing-touch").unwrap();
 
         service
-            .touch_thread_index_updated_at(&request_scope, &thread_id)
+            .touch_thread_index_updated_at(&request_scope, &thread_id, chrono::Utc::now())
             .await
             .expect("missing touch is a no-op");
         service.mark_thread_index_scope_complete(&request_scope);

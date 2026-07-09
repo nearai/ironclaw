@@ -1030,7 +1030,7 @@ fn build_app_with_authenticator(
 }
 
 async fn read_body_string(response: axum::response::Response) -> String {
-    let bytes = to_bytes(response.into_body(), 64 * 1024)
+    let bytes = to_bytes(response.into_body(), 256 * 1024)
         .await
         .expect("body bytes");
     String::from_utf8_lossy(&bytes).into_owned()
@@ -2272,11 +2272,11 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
         "OAuth auth card must reject non-HTTPS authorization URLs before opening"
     );
     assert!(
-        body.contains("className=\"auth-oauth\""),
+        body.contains("className:`auth-oauth`"),
         "OAuth auth card must keep the UI-test selector on the authorization control"
     );
     assert!(
-        body.contains("href=${") && body.contains("authorizationUrl:void 0"),
+        body.contains("href:") && body.contains("authorizationUrl:void 0"),
         "OAuth auth card must expose the HTTPS authorization URL as a link href"
     );
     assert!(
@@ -2403,7 +2403,7 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // the deferred JS/e2e scaffold.
     let body = served_app_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
-    let provider_segment = bundle_segment(&body, "createContext({lang:", "function Yr");
+    let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient");
 
     assert!(
         provider_segment.contains(".useState(()=>")
@@ -2879,11 +2879,11 @@ async fn static_automations_run_row_spaces_action_button_icons() {
     let body = served_app_javascript().await;
 
     assert!(
-        body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
         "the Open run button icon must be spaced away from its label"
     );
     assert!(
-        body.contains("name=\"file\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`file`,className:`mr-1.5 h-4 w-4`"),
         "the Logs button icon must be spaced away from its label"
     );
 }

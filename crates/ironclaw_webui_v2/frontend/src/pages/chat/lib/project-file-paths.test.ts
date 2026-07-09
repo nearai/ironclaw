@@ -12,7 +12,7 @@ import {
   basename,
   extractWorkspaceFilePaths,
   formatSize,
-} from "./project-file-paths.ts";
+} from "./project-file-paths";
 
 test("extracts a bare workspace path", () => {
   assert.deepEqual(

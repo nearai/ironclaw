@@ -8,7 +8,7 @@ import {
   setAutoActivateLearned as setAutoActivateLearnedRequest,
   setSkillAutoActivate as setSkillAutoActivateRequest,
   updateSkill as updateSkillRequest,
-} from "../lib/settings-api.js";
+} from "../lib/settings-api";
 
 export function useSkills() {
   const queryClient = useQueryClient();
