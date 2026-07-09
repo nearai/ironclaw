@@ -46,7 +46,7 @@ env:
   RUST_LOG: ironclaw=info
 
 jobs:
-  build:
+  reborn-webui-v2-live-qa:
     name: Build shared Reborn WebUI v2 artifact
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -154,7 +154,7 @@ jobs:
 
   live-qa:
     name: Reborn WebUI v2 artifact QA (${{ matrix.shard_name }})
-    needs: build
+    needs: reborn-webui-v2-live-qa
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -262,7 +262,7 @@ jobs:
         if: steps.cases.outputs.skip_shard != '1'
         with:
           persist-credentials: false
-          ref: ${{ needs.build.outputs.checkout_ref }}
+          ref: ${{ needs.reborn-webui-v2-live-qa.outputs.checkout_ref }}
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: steps.cases.outputs.skip_shard != '1' && inputs.target_ref != '' && inputs.use_target_harness != true
@@ -295,7 +295,7 @@ jobs:
         if: steps.cases.outputs.skip_shard != '1'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: reborn-webui-v2-build-${{ needs.build.outputs.product_ref }}
+          name: reborn-webui-v2-build-${{ needs.reborn-webui-v2-live-qa.outputs.product_ref }}
           path: .live-qa-build
 
       - name: Verify and install shared binary
@@ -306,7 +306,7 @@ jobs:
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-build/ironclaw-reborn.tar.gz
           chmod 755 target/debug/ironclaw-reborn
-          test "$(git rev-parse HEAD)" = "${{ needs.build.outputs.product_ref }}"
+          test "$(git rev-parse HEAD)" = "${{ needs.reborn-webui-v2-live-qa.outputs.product_ref }}"
 
       - name: Materialize live QA sensitive secrets to files
         if: steps.cases.outputs.skip_shard != '1'
@@ -368,7 +368,7 @@ jobs:
           mkdir -p "${timing_dir}"
           jq -n \
             --arg job "${{ matrix.shard_id }}" \
-            --arg product_ref "${{ needs.build.outputs.product_ref }}" \
+            --arg product_ref "${{ needs.reborn-webui-v2-live-qa.outputs.product_ref }}" \
             --argjson started_at "${EXPERIMENT_JOB_STARTED_EPOCH}" \
             --argjson finished_at "$(date +%s)" \
             '{job: $job, product_ref: $product_ref, started_at: $started_at, finished_at: $finished_at}' \
