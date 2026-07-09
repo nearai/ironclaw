@@ -217,6 +217,7 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
             .dispatch_json(CapabilityDispatchRequest {
                 capability_id: request.capability_id,
                 scope: request.scope,
+                authenticated_actor_user_id: request.authenticated_actor_user_id,
                 estimate: request.estimate,
                 mounts: Some(request.mounts),
                 resource_reservation: request.resource_reservation,
@@ -522,6 +523,7 @@ mod tests {
                 thread_id: Some(ThreadId::new("thread").unwrap()),
                 invocation_id: InvocationId::new(),
             },
+            authenticated_actor_user_id: None,
             extension_id: ExtensionId::new("system").unwrap(),
             capability_id: CapabilityId::new(capability_id).unwrap(),
             runtime,

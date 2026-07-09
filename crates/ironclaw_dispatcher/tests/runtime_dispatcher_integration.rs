@@ -62,6 +62,7 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 output_bytes: Some(10_000),
@@ -128,6 +129,7 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -158,6 +160,7 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 process_count: Some(1),
@@ -234,6 +237,7 @@ struct RecordedAdapterRequest {
     runtime: RuntimeKind,
     network_mode: NetworkMode,
     scope: ResourceScope,
+    authenticated_actor_user_id: Option<UserId>,
     mounts: Option<MountView>,
     input: Value,
 }
@@ -250,6 +254,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             runtime: request.descriptor.runtime,
             network_mode: request.runtime_policy.network_mode,
             scope: request.scope.clone(),
+            authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             mounts: request.mounts.clone(),
             input: request.input.clone(),
         });

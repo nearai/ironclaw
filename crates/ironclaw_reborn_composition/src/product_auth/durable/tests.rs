@@ -849,9 +849,12 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
     {
         use crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup;
         let (web, web_scope, web_durable) = seeded_facade(&provider).await;
-        SlackPersonalCredentialCleanup::cleanup_credentials_for_lifecycle(&web, request(&web_scope))
-            .await
-            .expect("web-UI disconnect cleanup should succeed");
+        SlackPersonalCredentialCleanup::cleanup_credentials_for_lifecycle(
+            &web,
+            request(&web_scope),
+        )
+        .await
+        .expect("web-UI disconnect cleanup should succeed");
         assert_pending_flow_canceled(&web_durable, &web_scope, &provider).await;
     }
 }

@@ -24,6 +24,7 @@ async fn in_memory_run_state_tracks_running_to_completed() {
             invocation_id,
             capability_id: capability_id.clone(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -54,6 +55,7 @@ async fn in_memory_run_state_tracks_blocked_approval_with_request_id() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -79,6 +81,7 @@ async fn in_memory_run_state_tracks_failed_with_error_kind() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -116,6 +119,7 @@ async fn in_memory_run_state_rejects_duplicate_invocation_in_same_tenant_user() 
             invocation_id,
             capability_id: CapabilityId::new("echo.one").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -124,6 +128,7 @@ async fn in_memory_run_state_rejects_duplicate_invocation_in_same_tenant_user() 
             invocation_id,
             capability_id: CapabilityId::new("echo.two").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap_err();
@@ -155,6 +160,7 @@ async fn filesystem_run_state_rejects_duplicate_invocation_in_same_tenant_user()
             invocation_id,
             capability_id: CapabilityId::new("echo.one").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -163,6 +169,7 @@ async fn filesystem_run_state_rejects_duplicate_invocation_in_same_tenant_user()
             invocation_id,
             capability_id: CapabilityId::new("echo.two").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap_err();
@@ -196,11 +203,13 @@ async fn filesystem_run_state_duplicate_start_is_serialized_across_store_instanc
             invocation_id,
             capability_id: CapabilityId::new("echo.one").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         }),
         second_store.start(RunStart {
             invocation_id,
             capability_id: CapabilityId::new("echo.two").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
     );
 
@@ -241,6 +250,7 @@ async fn in_memory_run_state_allows_same_invocation_id_in_different_tenants() {
             invocation_id,
             capability_id: CapabilityId::new("echo.one").unwrap(),
             scope: tenant_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -249,6 +259,7 @@ async fn in_memory_run_state_allows_same_invocation_id_in_different_tenants() {
             invocation_id,
             capability_id: CapabilityId::new("echo.two").unwrap(),
             scope: tenant_b.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -286,6 +297,7 @@ async fn in_memory_run_state_hides_records_from_other_tenants_and_users() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: tenant_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -317,6 +329,7 @@ async fn filesystem_run_state_store_persists_records_under_run_state_alias() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -357,6 +370,7 @@ async fn filesystem_run_state_store_hides_records_from_other_tenants_and_users()
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: tenant_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -789,6 +803,7 @@ async fn run_state_isolates_records_by_agent_scope() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: agent_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -814,6 +829,7 @@ async fn filesystem_run_state_uses_agent_scoped_paths() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: agent_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -857,6 +873,7 @@ async fn run_state_isolates_records_by_project_scope() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: project_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -892,6 +909,7 @@ async fn filesystem_run_state_isolates_records_by_project_scope() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: project_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -920,6 +938,7 @@ async fn run_state_clears_stale_approval_request_on_non_approval_transitions() {
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -1056,6 +1075,7 @@ async fn filesystem_run_state_store_isolates_two_tenants_with_same_user_project_
             invocation_id,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope_a.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -1174,6 +1194,7 @@ async fn filesystem_run_state_store_start_fails_closed_on_byte_only_backend() {
             invocation_id,
             capability_id,
             scope,
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap_err();

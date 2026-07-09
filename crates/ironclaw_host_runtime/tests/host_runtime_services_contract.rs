@@ -3022,6 +3022,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -3140,6 +3141,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();

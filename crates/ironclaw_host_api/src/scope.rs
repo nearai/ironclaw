@@ -39,6 +39,12 @@ pub struct ExecutionContext {
 
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    /// Authenticated human actor sealed by trusted ingress/loop orchestration.
+    ///
+    /// This is intentionally distinct from `user_id`, which identifies the
+    /// resource subject. Untrusted and system-created contexts leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_actor_user_id: Option<UserId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
@@ -77,6 +83,7 @@ impl ExecutionContext {
             parent_process_id: None,
             tenant_id: resource_scope.tenant_id.clone(),
             user_id,
+            authenticated_actor_user_id: None,
             agent_id: resource_scope.agent_id.clone(),
             project_id: resource_scope.project_id.clone(),
             mission_id: None,

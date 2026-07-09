@@ -695,7 +695,8 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
-    let context = execution_context(CapabilitySet::default());
+    let mut context = execution_context(CapabilitySet::default());
+    context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let estimate = ResourceEstimate::default();
@@ -743,6 +744,41 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
+    let mut forged_context = context.clone();
+    forged_context.authenticated_actor_user_id = Some(UserId::new("slack-bob").unwrap());
+    let forged_error = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context: forged_context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        forged_error,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::PolicyDenied,
+            ..
+        }
+    ));
+    assert!(!dispatcher.has_request());
+    assert_eq!(
+        run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::BlockedApproval
+    );
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+
     let result = resume_host
         .resume_json(CapabilityResumeRequest {
             context: context.clone(),
@@ -756,6 +792,14 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(
+        dispatcher
+            .take_request()
+            .authenticated_actor_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("slack-alice")
+    );
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
     let consumed = leases.get(&scope, lease.grant.id).await.unwrap();

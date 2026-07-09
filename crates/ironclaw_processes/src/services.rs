@@ -254,6 +254,7 @@ impl ProcessManager for BackgroundProcessManager {
             process_id: record.process_id,
             invocation_id: record.invocation_id,
             scope: record.scope.clone(),
+            authenticated_actor_user_id: record.authenticated_actor_user_id.clone(),
             extension_id: record.extension_id.clone(),
             capability_id: record.capability_id.clone(),
             runtime: record.runtime,
