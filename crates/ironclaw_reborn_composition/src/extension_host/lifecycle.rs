@@ -347,8 +347,9 @@ impl RebornLocalLifecycleFacade {
                 } else {
                     None
                 };
+                let owner = lifecycle_resource_scope(&context)?.user_id;
                 extension_management
-                    .search(&query, credential_gate.as_ref())
+                    .search(&query, credential_gate.as_ref(), Some(&owner))
                     .await
             }
             LifecycleProductAction::ExtensionList => {
@@ -361,7 +362,10 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.install(package_ref).await
+                let owner = lifecycle_resource_scope(&context)?.user_id;
+                extension_management
+                    .install(package_ref, Some(&owner))
+                    .await
             }
             LifecycleProductAction::ExtensionActivate { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {

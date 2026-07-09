@@ -7597,7 +7597,7 @@ output_schema_ref = "schemas/write.output.json"
         let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
             .expect("valid notion ref");
         extension_management
-            .install(notion_ref.clone())
+            .install(notion_ref.clone(), None)
             .await
             .expect("install Notion MCP");
         extension_management

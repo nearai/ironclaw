@@ -490,7 +490,7 @@ impl ExtensionDiscovery {
                 root,
                 &entry,
                 expected,
-                source,
+                source.clone(),
                 host_port_catalog,
                 host_api_contracts,
             )
@@ -573,7 +573,7 @@ impl ExtensionDiscovery {
                 root,
                 &entry,
                 expected.clone(),
-                source,
+                source.clone(),
                 host_port_catalog,
                 host_api_contracts,
             )

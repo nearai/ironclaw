@@ -139,19 +139,24 @@ impl HostManagedCredentialExtension {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
     pub(crate) path: String,
     pub(crate) content: AvailableExtensionAssetContent,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
     Filesystem(VirtualPath),
 }
 
-#[derive(Debug)]
+/// Cloneable so an owner-registered package resolved from
+/// [`crate::extension_host::registered_extension_store`] (freshly loaded
+/// from disk, never borrowed from the shared first-party catalog) and a
+/// first-party catalog hit can flow through the same owned
+/// `AvailableExtensionPackage` return type in `resolve_with_owner_overlay`.
+#[derive(Debug, Clone)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
@@ -427,7 +432,7 @@ impl AvailableExtensionCatalog {
         F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root).await?,
+            load_filesystem_packages(fs, root, ManifestSource::HostBundled).await?,
         ))
     }
 
@@ -456,7 +461,10 @@ impl AvailableExtensionCatalog {
     }
 }
 
-fn package_matches_search(package: &AvailableExtensionPackage, normalized_query: &str) -> bool {
+pub(crate) fn package_matches_search(
+    package: &AvailableExtensionPackage,
+    normalized_query: &str,
+) -> bool {
     normalized_query.is_empty()
         || package_search_terms(package)
             .iter()
@@ -1606,9 +1614,20 @@ where
     }
 }
 
-async fn load_filesystem_packages<F>(
+/// Load extension packages from every immediate child directory of `root`
+/// that has a `manifest.toml`, tagging each with `source`. Reused for both
+/// the shared first-party catalog root (`/system/extensions`, `source =
+/// HostBundled`) and an owner's registered-extension subtree
+/// (`/system/extensions/registered/<owner>`, `source = UserRegistered`) —
+/// see [`crate::extension_host::registered_extension_store`]. The resulting
+/// package's `root` is always the canonical `/system/extensions/<id>` path
+/// (see [`canonical_extension_root`]), never `root` itself, so a package
+/// loaded from a nested owner subtree still satisfies
+/// `ExtensionPackage`'s own root/id matching invariant.
+pub(crate) async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
+    source: ManifestSource,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -1671,7 +1690,7 @@ where
         })?;
         let record = ExtensionManifestRecord::from_toml_with_contracts(
             manifest_toml,
-            ManifestSource::HostBundled,
+            source.clone(),
             &host_ports,
             None,
             &contracts,
@@ -1683,8 +1702,10 @@ where
             .clone()
             .try_into()
             .map_err(map_binding_error)?;
-        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
-            .map_err(map_binding_error)?;
+        let package_root = canonical_extension_root(&extension_id)?;
+        let package =
+            ExtensionPackage::from_manifest_toml(manifest, package_root, record.raw_toml())
+                .map_err(map_binding_error)?;
         let mut assets = vec![AvailableExtensionAsset {
             path: "manifest.toml".to_string(),
             content: AvailableExtensionAssetContent::Bytes(record.raw_toml().as_bytes().to_vec()),
@@ -1719,12 +1740,26 @@ fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     ) || is_gsuite_extension_id(extension_id)
 }
 
+/// The canonical `/system/extensions/<id>` root every `ExtensionPackage`
+/// must carry (`ensure_extension_root_matches` in `ironclaw_extensions`
+/// requires it). Used both for the shared first-party catalog (where it is
+/// also the package's real on-disk location) and, via
+/// [`load_filesystem_packages`], for packages loaded from a nested
+/// owner-scoped subtree — those are never materialized under this synthetic
+/// root (see the registered-store skip in `extension_lifecycle.rs`), so the
+/// mismatch between this synthetic root and the real read location is inert.
+fn canonical_extension_root(
+    extension_id: &ExtensionId,
+) -> Result<VirtualPath, ProductWorkflowError> {
+    VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
+        .map_err(map_binding_error)
+}
+
 fn extension_asset_path(
     extension_id: &ExtensionId,
     asset_path: &str,
 ) -> Result<VirtualPath, ProductWorkflowError> {
-    let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
-        .map_err(map_binding_error)?;
+    let root = canonical_extension_root(extension_id)?;
     ExtensionAssetPath::new(asset_path.to_string())
         .map_err(map_binding_error)?
         .resolve_under(&root)

@@ -324,7 +324,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
 
     if phase == LifecyclePhase::Discovered {
         extension_management
-            .install(package_ref.clone())
+            .install(package_ref.clone(), None)
             .await
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("NEAR AI MCP extension install failed: {error}"),

@@ -5949,7 +5949,7 @@ mod tests {
                 .expect("valid ref");
 
         extension_management
-            .install(gmail_ref.clone())
+            .install(gmail_ref.clone(), None)
             .await
             .expect("install Gmail");
         extension_management
@@ -5960,7 +5960,7 @@ mod tests {
             .await
             .expect("activate Gmail");
         extension_management
-            .install(calendar_ref.clone())
+            .install(calendar_ref.clone(), None)
             .await
             .expect("install Google Calendar");
         extension_management
@@ -6087,7 +6087,7 @@ mod tests {
         assert!(capability_ids.contains(&"notion.notion-get-self"));
 
         extension_management
-            .install(notion_ref.clone())
+            .install(notion_ref.clone(), None)
             .await
             .expect("install Notion MCP");
         extension_management
@@ -6143,7 +6143,7 @@ mod tests {
                 .expect("valid ref");
 
         extension_management
-            .install(web_access_ref.clone())
+            .install(web_access_ref.clone(), None)
             .await
             .expect("install Web Access");
         extension_management

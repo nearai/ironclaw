@@ -5,7 +5,7 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, InMemoryExtensionInstallationStore, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, VirtualPath};
+use ironclaw_host_api::{ExtensionId, UserId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -246,18 +246,19 @@ impl From<ExtensionManifestRecord> for WireManifestRecord {
     fn from(record: ExtensionManifestRecord) -> Self {
         Self {
             raw_toml: record.raw_toml().to_string(),
-            source: WireManifestSource::from_manifest_source(record.manifest().source),
+            source: WireManifestSource::from_manifest_source(record.manifest().source.clone()),
             manifest_hash: record.manifest_hash().cloned(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WireManifestSource {
     HostBundled,
     InstalledLocal,
     RegistryInstalled,
+    UserRegistered { owner: String },
 }
 
 impl WireManifestSource {
@@ -266,6 +267,9 @@ impl WireManifestSource {
             ManifestSource::HostBundled => Self::HostBundled,
             ManifestSource::InstalledLocal => Self::InstalledLocal,
             ManifestSource::RegistryInstalled => Self::RegistryInstalled,
+            ManifestSource::UserRegistered { owner } => Self::UserRegistered {
+                owner: owner.into_string(),
+            },
         }
     }
 
@@ -274,6 +278,9 @@ impl WireManifestSource {
             Self::HostBundled => ManifestSource::HostBundled,
             Self::InstalledLocal => ManifestSource::InstalledLocal,
             Self::RegistryInstalled => ManifestSource::RegistryInstalled,
+            Self::UserRegistered { owner } => ManifestSource::UserRegistered {
+                owner: UserId::from_trusted(owner),
+            },
         }
     }
 }

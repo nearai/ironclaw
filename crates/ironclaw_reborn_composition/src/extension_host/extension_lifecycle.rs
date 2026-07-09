@@ -18,8 +18,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
-    sha256_digest_token,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
+    VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -82,6 +82,10 @@ use crate::extension_host::extension_credential_requirements::package_runtime_cr
 use crate::extension_host::lifecycle::response_with_payload;
 use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
+};
+use crate::extension_host::registered_extension_store::{
+    is_owner_registered, resolve_any_owner_for_restore, resolve_with_owner_overlay,
+    search_with_owner_overlay,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -174,17 +178,30 @@ pub(crate) async fn restore_extension_lifecycle_state(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
         )?;
-        let available = catalog.resolve(&package_ref)?;
-        if let Err(hash_error) = validate_restored_manifest_hash(&installation, available) {
+        // The shared catalog never contains `UserRegistered` packages (T1's
+        // fix for the boot-leak blocker), so a miss here falls back to an
+        // any-owner registered-store lookup — see
+        // `registered_extension_store::resolve_any_owner_for_restore`.
+        let available = match catalog.resolve(&package_ref) {
+            Ok(available) => available.clone(),
+            Err(_) => resolve_any_owner_for_restore(filesystem.as_ref(), &package_ref).await?,
+        };
+        if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
             migrate_host_bundled_manifest_hash(
                 installation_store,
-                available,
+                &available,
                 &installation,
                 hash_error,
             )
             .await?;
         }
-        materialize_available_extension(filesystem.as_ref(), available).await?;
+        // Owner-registered manifests already live at their owner-scoped path;
+        // materializing them under `/system/extensions/<id>/` would let the
+        // next boot's catalog scan re-adopt them as first-party (see
+        // `is_owner_registered`).
+        if !is_owner_registered(&available.package.manifest.source) {
+            materialize_available_extension(filesystem.as_ref(), &available).await?;
+        }
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
@@ -288,10 +305,18 @@ impl RebornLocalExtensionManagementPort {
         &self,
         query: &str,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+        owner: Option<&UserId>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let extensions = self.catalog.search(query);
         let mut summaries = Vec::new();
         for extension in extensions {
+            summaries.push(self.search_summary(extension, credential_gate).await?);
+        }
+        // Owner-registered packages never enter the shared catalog above
+        // (boot-leak fix), so they are searched separately and overlaid here.
+        let owner_overlay =
+            search_with_owner_overlay(self.filesystem.as_ref(), owner, query).await?;
+        for extension in &owner_overlay {
             summaries.push(self.search_summary(extension, credential_gate).await?);
         }
         let count = summaries.len();
@@ -472,17 +497,26 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn install(
         &self,
         package_ref: LifecyclePackageRef,
+        owner: Option<&UserId>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let available = self.catalog.resolve(&package_ref)?;
+        // Owner-registered packages never enter the shared catalog (boot-leak
+        // fix), so a catalog miss falls back to `owner`'s registered set.
+        let available = resolve_with_owner_overlay(
+            &self.catalog,
+            self.filesystem.as_ref(),
+            owner,
+            &package_ref,
+        )
+        .await?;
         let _operation_guard = self.operation_lock.lock().await;
-        self.install_available_locked(available).await?;
+        self.install_available_locked(&available).await?;
 
         Ok(response_with_payload(
             Some(package_ref.clone()),
             LifecyclePhase::Installed,
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
-                visible_capability_ids: visible_capability_ids(available)
+                visible_capability_ids: visible_capability_ids(&available)
                     .map(|id| id.as_str().to_string())
                     .collect(),
                 next_step: format!(
@@ -502,9 +536,15 @@ impl RebornLocalExtensionManagementPort {
             .await?;
         self.register_lifecycle_package(&available.package).await?;
 
-        if let Err(error) =
+        // Owner-registered manifests are never materialized under the shared
+        // `/system/extensions/<id>/` directory (mirrors the guard in
+        // `restore_extension_lifecycle_state` — see `is_owner_registered`).
+        let materialize_result = if is_owner_registered(&available.package.manifest.source) {
+            Ok(())
+        } else {
             materialize_available_extension(self.filesystem.as_ref(), available).await
-        {
+        };
+        if let Err(error) = materialize_result {
             if let Err(rollback_error) =
                 self.rollback_lifecycle_install(&available.package.id).await
             {
@@ -1329,9 +1369,14 @@ fn prepare_install(
             reason: format!("host API contract registry rejected extension install: {error}"),
         }
     })?;
+    // Preserve the resolved package's real provenance (first-party catalog
+    // vs. owner-registered) in the persisted record, rather than hardcoding
+    // `HostBundled` for every install — `migrate_host_bundled_manifest_hash`
+    // reads this back at restore time to decide hash-mismatch migration
+    // eligibility, which must stay HostBundled-only.
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        ManifestSource::HostBundled,
+        available.package.manifest.source.clone(),
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -2135,7 +2180,7 @@ mod tests {
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone())
+        port.install(slack_ref.clone(), None)
             .await
             .expect("install Slack tools extension");
 
@@ -2163,7 +2208,10 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(extensions[0].summary.package_ref.id.as_str(), "slack");
 
-        let search = port.search("slack", None).await.expect("search slack");
+        let search = port
+            .search("slack", None, None)
+            .await
+            .expect("search slack");
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload
         else {
             panic!("expected extension search payload");
@@ -2212,7 +2260,7 @@ mod tests {
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone())
+        port.install(slack_ref.clone(), None)
             .await
             .expect("install public Slack extension");
 
@@ -2268,7 +2316,7 @@ mod tests {
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone())
+        port.install(slack_ref.clone(), None)
             .await
             .expect("install public Slack extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -2319,7 +2367,7 @@ mod tests {
             .expect("seed builtin package");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -2414,7 +2462,7 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
         let egress = Arc::new(HostedMcpDiscoveryEgress::default());
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install Notion MCP");
         port.activate_with_prechecked_credentials_for_test(
@@ -2472,7 +2520,7 @@ mod tests {
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install Notion MCP");
         let activate = port
@@ -2512,7 +2560,7 @@ mod tests {
         };
         let calls = Arc::clone(&credential_gate.calls);
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install Notion MCP");
         let error = port
@@ -2559,7 +2607,7 @@ mod tests {
         let (egress, tools_list_started, release_tools_list) =
             BlockingToolsListHostedMcpEgress::new();
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install Notion MCP");
         let activation = tokio::spawn({
@@ -2615,7 +2663,7 @@ mod tests {
             TrustClass::Sandbox
         );
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -2668,7 +2716,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install extension");
         let error = port
@@ -2708,7 +2756,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install extension");
         let error = port
@@ -2748,7 +2796,7 @@ mod tests {
         let extension_id = ExtensionId::new("fixture").expect("valid extension id");
         let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install extension");
         installation_store
@@ -2789,7 +2837,7 @@ mod tests {
             );
 
         let error = port
-            .search("fixture", None)
+            .search("fixture", None, None)
             .await
             .expect_err("search reports installation-store read failure");
 
@@ -2809,7 +2857,7 @@ mod tests {
             );
 
         let error = port
-            .search("fixture", None)
+            .search("fixture", None, None)
             .await
             .expect_err("search reports mismatched installation row");
 
@@ -2829,7 +2877,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -2867,7 +2915,7 @@ mod tests {
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3007,7 +3055,7 @@ mod tests {
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3057,7 +3105,7 @@ mod tests {
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3936,7 +3984,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3999,7 +4047,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4038,7 +4086,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), None)
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(

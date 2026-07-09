@@ -16,6 +16,7 @@ mod reborn_support;
 mod support;
 
 mod scenario_auto_approve_isolation_across_actors;
+mod scenario_extension_registration_isolation_across_actors;
 mod scenario_memory_isolation_across_actors;
 mod scenario_turn_state_isolation_across_actors;
 mod scenario_two_actors_own_threads;
@@ -64,6 +65,19 @@ async fn multiuser_group_e2e() {
     report.record(
         "turn_state_isolation_across_actors",
         scenario_turn_state_isolation_across_actors::run(&g).await,
+    );
+
+    // Scenario 5 (MCP-registration spec test #2): per-user extension-registration
+    // isolation — see scenario_extension_registration_isolation_across_actors for
+    // the seam. RED until T1 (docs/plans/2026-07-08-mcp-reg-t1-plan.md).
+    let extension_registration_group =
+        RebornIntegrationGroup::multiuser_extension_lifecycle_tools()
+            .await
+            .expect("multiuser extension-lifecycle group builds");
+    report.record(
+        "extension_registration_isolation_across_actors",
+        scenario_extension_registration_isolation_across_actors::run(&extension_registration_group)
+            .await,
     );
 
     report.assert_all_passed();

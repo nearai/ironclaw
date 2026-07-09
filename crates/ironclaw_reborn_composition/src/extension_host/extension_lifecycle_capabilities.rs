@@ -159,13 +159,20 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Arc::clone(&self.credential_accounts),
                 );
                 self.extension_management
-                    .search(&input.query, Some(&credential_gate))
+                    .search(
+                        &input.query,
+                        Some(&credential_gate),
+                        Some(&request.scope.user_id),
+                    )
                     .await
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
                 self.extension_management
-                    .install(extension_package_ref(input.extension_id)?)
+                    .install(
+                        extension_package_ref(input.extension_id)?,
+                        Some(&request.scope.user_id),
+                    )
                     .await
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
