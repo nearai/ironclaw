@@ -70,6 +70,94 @@ pub struct McpAddArgs {
     /// Server description
     #[arg(long)]
     pub description: Option<String>,
+
+    /// Per-call transport timeout in seconds (default 30, clamped 5..=21600).
+    /// Raise it for slow local backends (e.g. a cold 27B sandbox).
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
+
+    /// Allow this server's tools to run as background jobs (opt-in).
+    #[arg(long)]
+    pub allow_background: bool,
+}
+
+impl McpAddArgs {
+    /// Build a validated `McpServerConfig` from the parsed CLI args.
+    ///
+    /// Extracted from `add_server` so the arg→config mapping (including the
+    /// timeout / background flags) is unit-testable without touching the DB.
+    pub fn to_config(&self) -> anyhow::Result<McpServerConfig> {
+        let transport_lower = self.transport.to_lowercase();
+
+        let mut config =
+            match transport_lower.as_str() {
+                "stdio" => {
+                    let cmd = self.command.clone().ok_or_else(|| {
+                        anyhow::anyhow!("--command is required for stdio transport")
+                    })?;
+                    let env_map: HashMap<String, String> = self.env.iter().cloned().collect();
+                    McpServerConfig::new_stdio(&self.name, &cmd, self.cmd_args.clone(), env_map)
+                }
+                "unix" => {
+                    let socket_path = self.socket.clone().ok_or_else(|| {
+                        anyhow::anyhow!("--socket is required for unix transport")
+                    })?;
+                    McpServerConfig::new_unix(&self.name, &socket_path)
+                }
+                "http" => {
+                    let url_val = self
+                        .url
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("URL is required for http transport"))?;
+                    McpServerConfig::new(&self.name, url_val)
+                }
+                other => {
+                    anyhow::bail!(
+                        "Unknown transport type '{}'. Supported: http, stdio, unix",
+                        other
+                    );
+                }
+            };
+
+        if !self.headers.is_empty() {
+            let headers_map: HashMap<String, String> = self.headers.iter().cloned().collect();
+            config = config.with_headers(headers_map);
+        }
+
+        if let Some(desc) = self.description.clone() {
+            config = config.with_description(desc);
+        }
+
+        // Set up OAuth if client_id is provided (HTTP transport only)
+        if let Some(client_id) = self.client_id.clone() {
+            if transport_lower != "http" {
+                anyhow::bail!("OAuth authentication is only supported with http transport");
+            }
+
+            let mut oauth = OAuthConfig::new(client_id);
+
+            if let (Some(auth), Some(token)) = (self.auth_url.clone(), self.token_url.clone()) {
+                oauth = oauth.with_endpoints(auth, token);
+            }
+
+            if let Some(scopes_str) = self.scopes.clone() {
+                let scope_list: Vec<String> = scopes_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                oauth = oauth.with_scopes(scope_list);
+            }
+
+            config = config.with_oauth(oauth);
+        }
+
+        // Fields are public on McpServerConfig (Task 1); set directly.
+        config.timeout_secs = self.timeout_secs;
+        config.allow_background = self.allow_background;
+
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -165,91 +253,11 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
 
 /// Add a new MCP server.
 async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
-    let McpAddArgs {
-        name,
-        url,
-        transport,
-        command,
-        cmd_args,
-        env,
-        socket,
-        headers,
-        client_id,
-        auth_url,
-        token_url,
-        scopes,
-        description,
-    } = args;
+    let config = args.to_config()?;
 
-    let transport_lower = transport.to_lowercase();
-
-    let mut config = match transport_lower.as_str() {
-        "stdio" => {
-            let cmd = command
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--command is required for stdio transport"))?;
-            let env_map: HashMap<String, String> = env.into_iter().collect();
-            McpServerConfig::new_stdio(&name, &cmd, cmd_args.clone(), env_map)
-        }
-        "unix" => {
-            let socket_path = socket
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--socket is required for unix transport"))?;
-            McpServerConfig::new_unix(&name, &socket_path)
-        }
-        "http" => {
-            let url_val = url
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("URL is required for http transport"))?;
-            McpServerConfig::new(&name, url_val)
-        }
-        other => {
-            anyhow::bail!(
-                "Unknown transport type '{}'. Supported: http, stdio, unix",
-                other
-            );
-        }
-    };
-
-    // Apply headers if any
-    if !headers.is_empty() {
-        let headers_map: HashMap<String, String> = headers.into_iter().collect();
-        config = config.with_headers(headers_map);
-    }
-
-    if let Some(desc) = description {
-        config = config.with_description(desc);
-    }
-
-    // Track if auth is required
-    let requires_auth = client_id.is_some();
-
-    // Set up OAuth if client_id is provided (HTTP transport only)
-    if let Some(client_id) = client_id {
-        if transport_lower != "http" {
-            anyhow::bail!("OAuth authentication is only supported with http transport");
-        }
-
-        let mut oauth = OAuthConfig::new(client_id);
-
-        if let (Some(auth), Some(token)) = (auth_url, token_url) {
-            oauth = oauth.with_endpoints(auth, token);
-        }
-
-        if let Some(scopes_str) = scopes {
-            let scope_list: Vec<String> = scopes_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-            oauth = oauth.with_scopes(scope_list);
-        }
-
-        config = config.with_oauth(oauth);
-    }
-
-    // Validate
-    config.validate()?;
+    let requires_auth = args.client_id.is_some();
     let has_custom_auth_header = config.has_custom_auth_header();
+    let transport_lower = args.transport.to_lowercase();
 
     // Save (DB if available, else disk)
     let (db, owner_id) = connect_db().await;
@@ -258,29 +266,29 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
     save_servers(db.as_deref(), &owner_id, &servers).await?;
 
     println!();
-    println!("  ✓ Added MCP server '{}'", name);
+    println!("  ✓ Added MCP server '{}'", args.name);
 
     match transport_lower.as_str() {
         "stdio" => {
             println!(
                 "    Transport: stdio (command: {})",
-                command.as_deref().unwrap_or("")
+                args.command.as_deref().unwrap_or("")
             );
         }
         "unix" => {
             println!(
                 "    Transport: unix (socket: {})",
-                socket.as_deref().unwrap_or("")
+                args.socket.as_deref().unwrap_or("")
             );
         }
         _ => {
-            println!("    URL: {}", url.as_deref().unwrap_or(""));
+            println!("    URL: {}", args.url.as_deref().unwrap_or(""));
         }
     }
 
     if requires_auth && !has_custom_auth_header {
         println!();
-        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+        println!("  Run 'ironclaw mcp auth {}' to authenticate.", args.name);
     }
 
     println!();
@@ -689,6 +697,51 @@ fn truncate_description(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Baseline `mcp add` args for an http server with all optional flags
+    /// at their defaults; tests override just the field under test.
+    fn base_add_args(name: &str) -> McpAddArgs {
+        McpAddArgs {
+            name: name.to_string(),
+            url: Some("http://localhost:9999".to_string()),
+            transport: "http".to_string(),
+            command: None,
+            cmd_args: Vec::new(),
+            env: Vec::new(),
+            socket: None,
+            headers: Vec::new(),
+            client_id: None,
+            auth_url: None,
+            token_url: None,
+            scopes: None,
+            description: None,
+            timeout_secs: None,
+            allow_background: false,
+        }
+    }
+
+    #[test]
+    fn add_args_set_timeout_and_background() {
+        let mut args = base_add_args("srv");
+        args.timeout_secs = Some(3600);
+        args.allow_background = true;
+
+        let cfg = args.to_config().expect("build config");
+        assert_eq!(cfg.timeout_secs, Some(3600));
+        assert!(cfg.allow_background);
+        // effective_timeout reflects the override, not the 30s default.
+        assert_eq!(
+            cfg.effective_timeout(),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn add_args_default_flags_are_conservative() {
+        let cfg = base_add_args("srv").to_config().expect("build config");
+        assert_eq!(cfg.timeout_secs, None);
+        assert!(!cfg.allow_background);
+    }
 
     #[test]
     fn test_mcp_command_parsing() {
