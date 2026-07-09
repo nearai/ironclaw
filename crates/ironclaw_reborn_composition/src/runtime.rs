@@ -6780,15 +6780,12 @@ output_schema_ref = "schemas/write.output.json"
             reply: "trigger invalid config".to_string(),
             requests: Arc::new(StdMutex::new(Vec::new())),
         });
-        let trigger_poller = TriggerPollerSettings {
-            enabled: true,
-            worker: ironclaw_triggers::TriggerPollerWorkerConfig {
-                poll_interval: Duration::ZERO,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .with_tenant_scoped_authorizer_for_test();
+        let trigger_poller = TriggerPollerSettings::enabled()
+            .with_worker_config(
+                ironclaw_triggers::TriggerPollerWorkerConfig::default()
+                    .set_poll_interval(Duration::ZERO),
+            )
+            .with_tenant_scoped_authorizer_for_test();
 
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev(

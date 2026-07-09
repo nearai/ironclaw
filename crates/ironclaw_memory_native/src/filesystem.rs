@@ -64,10 +64,7 @@ fn memory_context_with_prompt_safety_enforcement(
 /// Backend write options the adapter passes after it has already run
 /// prompt-write safety, telling the backend to skip its own re-enforcement.
 fn adapter_enforced_backend_write_options() -> MemoryBackendWriteOptions {
-    MemoryBackendWriteOptions {
-        prompt_safety_already_enforced: true,
-        ..MemoryBackendWriteOptions::default()
-    }
+    MemoryBackendWriteOptions::default().with_prompt_safety_already_enforced()
 }
 
 /// [`RootFilesystem`] adapter exposing any [`MemoryBackend`] as `/memory` files.

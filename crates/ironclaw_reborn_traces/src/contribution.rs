@@ -268,6 +268,28 @@ impl Default for OutcomeMetadata {
     }
 }
 
+impl OutcomeMetadata {
+    pub fn set_user_feedback(mut self, user_feedback: UserFeedback) -> Self {
+        self.user_feedback = user_feedback;
+        self
+    }
+
+    pub fn set_task_success(mut self, task_success: TaskSuccess) -> Self {
+        self.task_success = task_success;
+        self
+    }
+
+    pub fn set_failure_modes(mut self, failure_modes: Vec<TraceFailureMode>) -> Self {
+        self.failure_modes = failure_modes;
+        self
+    }
+
+    pub fn set_human_correction(mut self, human_correction: impl Into<String>) -> Self {
+        self.human_correction = Some(human_correction.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UserFeedback {
@@ -529,6 +551,48 @@ pub struct ProcessEvaluationLabels {
     pub overall_score: Option<f32>,
 }
 
+impl ProcessEvaluationLabels {
+    pub fn set_evaluator_version(mut self, evaluator_version: impl Into<String>) -> Self {
+        self.evaluator_version = evaluator_version.into();
+        self
+    }
+
+    pub fn set_labels(mut self, labels: Vec<ProcessEvaluatorLabel>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    pub fn set_tool_selection(mut self, tool_selection: ProcessEvalRating) -> Self {
+        self.tool_selection = Some(tool_selection);
+        self
+    }
+
+    pub fn set_tool_argument_quality(mut self, tool_argument_quality: ProcessEvalRating) -> Self {
+        self.tool_argument_quality = Some(tool_argument_quality);
+        self
+    }
+
+    pub fn set_tool_ordering(mut self, tool_ordering: ProcessEvalRating) -> Self {
+        self.tool_ordering = Some(tool_ordering);
+        self
+    }
+
+    pub fn set_verification(mut self, verification: ProcessEvalRating) -> Self {
+        self.verification = Some(verification);
+        self
+    }
+
+    pub fn set_side_effect_safety(mut self, side_effect_safety: ProcessEvalRating) -> Self {
+        self.side_effect_safety = Some(side_effect_safety);
+        self
+    }
+
+    pub fn set_overall_score(mut self, overall_score: f32) -> Self {
+        self.overall_score = Some(overall_score);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessEvalRating {
@@ -590,6 +654,33 @@ pub struct HindsightRelabelingCandidate {
     pub benchmark_candidate: bool,
     #[serde(default)]
     pub relabeled_training_candidate: bool,
+}
+
+impl HindsightRelabelingCandidate {
+    pub fn set_achieved_subgoals(mut self, achieved_subgoals: Vec<String>) -> Self {
+        self.achieved_subgoals = achieved_subgoals;
+        self
+    }
+
+    pub fn set_failure_type(mut self, failure_type: TraceFailureMode) -> Self {
+        self.failure_type = Some(failure_type);
+        self
+    }
+
+    pub fn set_recoverability_score(mut self, recoverability_score: f32) -> Self {
+        self.recoverability_score = Some(recoverability_score);
+        self
+    }
+
+    pub fn set_benchmark_candidate(mut self, benchmark_candidate: bool) -> Self {
+        self.benchmark_candidate = benchmark_candidate;
+        self
+    }
+
+    pub fn set_relabeled_training_candidate(mut self, relabeled_training_candidate: bool) -> Self {
+        self.relabeled_training_candidate = relabeled_training_candidate;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1325,6 +1416,23 @@ impl Default for RecordedTraceContributionOptions {
     }
 }
 
+impl RecordedTraceContributionOptions {
+    pub fn set_include_message_text(mut self, include_message_text: bool) -> Self {
+        self.include_message_text = include_message_text;
+        self
+    }
+
+    pub fn set_include_tool_payloads(mut self, include_tool_payloads: bool) -> Self {
+        self.include_tool_payloads = include_tool_payloads;
+        self
+    }
+
+    pub fn set_consent_scopes(mut self, consent_scopes: Vec<ConsentScope>) -> Self {
+        self.consent_scopes = consent_scopes;
+        self
+    }
+}
+
 impl RawTraceContribution {
     pub fn from_recorded_trace(
         trace: &TraceFile,
@@ -1620,10 +1728,7 @@ impl RawTraceContribution {
                 revocation_handle: Uuid::new_v4(),
             },
             events,
-            outcome: OutcomeMetadata {
-                task_success,
-                ..OutcomeMetadata::default()
-            },
+            outcome: OutcomeMetadata::default().set_task_success(task_success),
             replay: ReplayMetadata {
                 replayable: !turns.is_empty(),
                 required_tools,
@@ -3971,6 +4076,11 @@ pub struct TraceQueueCompactionReport {
 }
 
 impl TraceQueueCompactionReport {
+    pub fn set_scanned_count(mut self, scanned_count: u32) -> Self {
+        self.scanned_count = scanned_count;
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.scanned_count == 0
             && self.duplicate_envelopes_removed == 0
@@ -7881,10 +7991,7 @@ fn compact_trace_queue_for_scope_unlocked(
     scope: Option<&str>,
 ) -> anyhow::Result<TraceQueueCompactionReport> {
     let paths = queued_trace_envelope_paths_for_scope(scope)?;
-    let mut report = TraceQueueCompactionReport {
-        scanned_count: paths.len() as u32,
-        ..Default::default()
-    };
+    let mut report = TraceQueueCompactionReport::default().set_scanned_count(paths.len() as u32);
     let mut candidates = Vec::new();
     for path in paths {
         let Some(envelope) = load_queued_trace_envelope_or_quarantine(scope, &path, "compaction")?
@@ -9107,11 +9214,9 @@ mod tests {
 
     #[tokio::test]
     async fn text_and_payload_preview_redacts_paths_and_sensitive_fields() {
-        let options = RecordedTraceContributionOptions {
-            include_message_text: true,
-            include_tool_payloads: true,
-            ..Default::default()
-        };
+        let options = RecordedTraceContributionOptions::default()
+            .set_include_message_text(true)
+            .set_include_tool_payloads(true);
         let raw = RawTraceContribution::from_recorded_trace(&sample_trace(), options);
         let envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
@@ -9257,10 +9362,7 @@ mod tests {
         };
         let raw = RawTraceContribution::from_recorded_trace(
             &trace,
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default().set_include_message_text(true),
         );
         let envelope = DeterministicTraceRedactor::new(Vec::new())
             .with_privacy_filter(Arc::new(FakePrivacyFilterAdapter))
@@ -9328,10 +9430,7 @@ mod tests {
         };
         let raw = RawTraceContribution::from_recorded_trace(
             &trace,
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default().set_include_message_text(true),
         );
 
         let envelope = DeterministicTraceRedactor::new(Vec::new())
@@ -9584,11 +9683,9 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_summary_uses_redacted_content_only() {
-        let options = RecordedTraceContributionOptions {
-            include_message_text: true,
-            include_tool_payloads: true,
-            ..Default::default()
-        };
+        let options = RecordedTraceContributionOptions::default()
+            .set_include_message_text(true)
+            .set_include_tool_payloads(true);
         let raw = RawTraceContribution::from_recorded_trace(&sample_trace(), options);
         let envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
@@ -9607,23 +9704,18 @@ mod tests {
     async fn canonical_representations_use_only_redacted_private_values() {
         let mut raw = RawTraceContribution::from_recorded_trace(
             &sample_trace(),
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                include_tool_payloads: true,
-                consent_scopes: vec![ConsentScope::ModelTraining],
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default()
+                .set_include_message_text(true)
+                .set_include_tool_payloads(true)
+                .set_consent_scopes(vec![ConsentScope::ModelTraining]),
         );
-        raw.outcome = OutcomeMetadata {
-            user_feedback: UserFeedback::Correction,
-            task_success: TaskSuccess::Partial,
-            failure_modes: vec![TraceFailureMode::UserIntentMisread],
-            human_correction: Some(
-                "Use alice@example.com and /Users/alice/project/fix.md as the correction"
-                    .to_string(),
-            ),
-            ..OutcomeMetadata::default()
-        };
+        raw.outcome = OutcomeMetadata::default()
+            .set_user_feedback(UserFeedback::Correction)
+            .set_task_success(TaskSuccess::Partial)
+            .set_failure_modes(vec![TraceFailureMode::UserIntentMisread])
+            .set_human_correction(
+                "Use alice@example.com and /Users/alice/project/fix.md as the correction",
+            );
         let envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
         )])
@@ -9686,10 +9778,8 @@ mod tests {
     async fn dataset_eligibility_gates_consent_revocation_and_privacy_risk() {
         let raw = RawTraceContribution::from_recorded_trace(
             &sample_trace(),
-            RecordedTraceContributionOptions {
-                consent_scopes: vec![ConsentScope::ModelTraining],
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default()
+                .set_consent_scopes(vec![ConsentScope::ModelTraining]),
         );
         let mut envelope = DeterministicTraceRedactor::default()
             .redact_trace(raw)
@@ -13380,11 +13470,9 @@ mod tests {
     async fn server_rescrub_redacts_late_leaks_before_storage() {
         let raw = RawTraceContribution::from_recorded_trace(
             &sample_trace(),
-            RecordedTraceContributionOptions {
-                include_message_text: true,
-                include_tool_payloads: true,
-                ..Default::default()
-            },
+            RecordedTraceContributionOptions::default()
+                .set_include_message_text(true)
+                .set_include_tool_payloads(true),
         );
         let mut envelope = DeterministicTraceRedactor::with_known_path_prefixes([PathBuf::from(
             "/Users/alice/project",
@@ -13515,28 +13603,28 @@ mod tests {
             .redact_trace(raw)
             .await
             .expect("redaction should succeed");
-        envelope.process_evaluation = Some(ProcessEvaluationLabels {
-            evaluator_version: "process-evaluator-v1".to_string(),
-            labels: vec![
-                ProcessEvaluatorLabel::CorrectToolSelection,
-                ProcessEvaluatorLabel::MissingVerification,
-            ],
-            tool_selection: Some(ProcessEvalRating::Pass),
-            tool_argument_quality: Some(ProcessEvalRating::Unknown),
-            tool_ordering: Some(ProcessEvalRating::Partial),
-            verification: Some(ProcessEvalRating::Fail),
-            side_effect_safety: Some(ProcessEvalRating::Pass),
-            overall_score: Some(0.72),
-            ..ProcessEvaluationLabels::default()
-        });
-        envelope.hindsight = Some(HindsightRelabelingCandidate {
-            achieved_subgoals: vec!["redacted_subgoal:diagnosed_tool_failure".to_string()],
-            failure_type: Some(TraceFailureMode::MissingVerification),
-            recoverability_score: Some(0.8),
-            benchmark_candidate: true,
-            relabeled_training_candidate: true,
-            ..HindsightRelabelingCandidate::default()
-        });
+        envelope.process_evaluation = Some(
+            ProcessEvaluationLabels::default()
+                .set_evaluator_version("process-evaluator-v1")
+                .set_labels(vec![
+                    ProcessEvaluatorLabel::CorrectToolSelection,
+                    ProcessEvaluatorLabel::MissingVerification,
+                ])
+                .set_tool_selection(ProcessEvalRating::Pass)
+                .set_tool_argument_quality(ProcessEvalRating::Unknown)
+                .set_tool_ordering(ProcessEvalRating::Partial)
+                .set_verification(ProcessEvalRating::Fail)
+                .set_side_effect_safety(ProcessEvalRating::Pass)
+                .set_overall_score(0.72),
+        );
+        envelope.hindsight = Some(
+            HindsightRelabelingCandidate::default()
+                .set_achieved_subgoals(vec!["redacted_subgoal:diagnosed_tool_failure".to_string()])
+                .set_failure_type(TraceFailureMode::MissingVerification)
+                .set_recoverability_score(0.8)
+                .set_benchmark_candidate(true)
+                .set_relabeled_training_candidate(true),
+        );
         envelope.training_dynamics = Some(TrainingDynamicsSignals {
             mean_confidence: Some(0.61),
             variability: Some(0.29),

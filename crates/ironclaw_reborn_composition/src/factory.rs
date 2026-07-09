@@ -4768,23 +4768,11 @@ mod tests {
 
         let reservation = local_runtime
             .resource_governor
-            .reserve(
-                scope,
-                ResourceEstimate {
-                    usd: Some(dec!(0.10)),
-                    ..ResourceEstimate::default()
-                },
-            )
+            .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
             .expect("reservation");
         local_runtime
             .resource_governor
-            .reconcile(
-                reservation.id,
-                ResourceUsage {
-                    usd: dec!(0.10),
-                    ..ResourceUsage::default()
-                },
-            )
+            .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
             .expect("reconcile");
 
         assert_eq!(

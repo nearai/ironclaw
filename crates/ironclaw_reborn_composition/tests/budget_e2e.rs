@@ -222,15 +222,13 @@ async fn f2_crossing_warn_threshold_emits_warned_event() {
     governor
         .set_limit(
             user_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(10.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds {
+            ResourceLimits::default()
+                .set_max_usd(dec!(10.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds {
                     warn_at: 0.5,
                     pause_at: 0.95,
-                },
-                ..ResourceLimits::default()
-            },
+                }),
         )
         .unwrap();
 
@@ -296,10 +294,7 @@ async fn f6_hard_cap_denied_before_provider_call() {
     governor
         .set_limit(
             user_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(0.000001)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(0.000001)),
         )
         .unwrap();
     let sink = runtime.budget_event_sink().expect("sink");
@@ -358,12 +353,10 @@ async fn c1_provider_tokens_reconcile_to_actual_usd() {
     governor
         .set_limit(
             user_account,
-            ResourceLimits {
-                max_usd: Some(dec!(1_000.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds::DISABLED,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1_000.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds::DISABLED),
         )
         .unwrap();
 
@@ -590,26 +583,22 @@ async fn d1_agent_deny_preserves_user_warn_event() {
     governor
         .set_limit(
             ResourceAccount::user(tenant.clone(), user_id.clone()),
-            ResourceLimits {
-                max_usd: Some(dec!(10.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds {
+            ResourceLimits::default()
+                .set_max_usd(dec!(10.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds {
                     warn_at: 0.5,
                     pause_at: 0.95,
-                },
-                ..ResourceLimits::default()
-            },
+                }),
         )
         .unwrap();
     // Agent cap tight enough that the same estimate hard-denies.
     governor
         .set_limit(
             ResourceAccount::agent(tenant.clone(), user_id.clone(), None, agent_id.clone()),
-            ResourceLimits {
-                max_usd: Some(dec!(0.50)),
-                period: BudgetPeriod::Rolling24h,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(0.50))
+                .set_period(BudgetPeriod::Rolling24h),
         )
         .unwrap();
     let sink = runtime.budget_event_sink().expect("sink");
@@ -755,12 +744,10 @@ async fn budget_test_gateway_scripted_replies_drive_per_turn_costs() {
     governor
         .set_limit(
             user_account,
-            ResourceLimits {
-                max_usd: Some(dec!(1_000.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds::DISABLED,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1_000.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds::DISABLED),
         )
         .unwrap();
 

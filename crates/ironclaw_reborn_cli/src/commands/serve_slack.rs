@@ -266,10 +266,7 @@ mod tests {
     fn slack_host_beta_runtime_config_is_disabled_unless_explicitly_enabled() {
         let _lock = env_lock();
         let _enabled = EnvGuard::remove(SLACK_ENABLED_ENV_VAR);
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: None,
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default();
 
         let resolved = resolve_slack_config_for_serve(
             Some(&section),
@@ -289,11 +286,9 @@ mod tests {
     fn slack_host_beta_runtime_config_rejects_legacy_fields_when_disabled() {
         let _lock = env_lock();
         let _enabled = EnvGuard::remove(SLACK_ENABLED_ENV_VAR);
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(false),
-            installation_id: Some("install-alpha".to_string()),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default()
+            .set_enabled(false)
+            .set_installation_id("install-alpha");
 
         let err = resolve_slack_config_for_serve(
             Some(&section),
@@ -313,10 +308,7 @@ mod tests {
     fn slack_host_beta_runtime_config_uses_webui_scope_when_enabled() {
         let _lock = env_lock();
         let _enabled = EnvGuard::remove(SLACK_ENABLED_ENV_VAR);
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(true);
         let project_id = project_id("project");
 
         let resolved = resolve_slack_config_for_serve(
@@ -373,10 +365,7 @@ mod tests {
     fn slack_host_beta_runtime_config_env_enables_disabled_webui_section() {
         let _lock = env_lock();
         let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, "1");
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(false),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(false);
 
         let resolved = resolve_slack_config_for_serve(
             Some(&section),
@@ -397,10 +386,7 @@ mod tests {
     fn slack_host_beta_runtime_config_env_disable_is_webui_kill_switch() {
         let _lock = env_lock();
         let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, "0");
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(true);
 
         let resolved = resolve_slack_config_for_serve(
             Some(&section),
@@ -420,11 +406,9 @@ mod tests {
     fn slack_host_beta_runtime_config_env_disable_is_legacy_kill_switch() {
         let _lock = env_lock();
         let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, "false");
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            installation_id: Some("install-alpha".to_string()),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default()
+            .set_enabled(true)
+            .set_installation_id("install-alpha");
 
         let resolved = resolve_slack_config_for_serve(
             Some(&section),
@@ -547,21 +531,20 @@ mod tests {
         const BOT_ENV: &str = "IRONCLAW_TEST_SLACK_LEGACY_BOT_TOKEN";
         let _signing = EnvGuard::set(SIGNING_ENV, "legacy-signing-secret");
         let _bot = EnvGuard::set(BOT_ENV, "xoxb-legacy");
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            installation_id: Some("install-alpha".to_string()),
-            team_id: Some("T123".to_string()),
-            api_app_id: Some("A123".to_string()),
-            slack_user_id: Some("U123".to_string()),
-            user_id: Some("user:operator".to_string()),
-            shared_subject_user_id: Some("user:shared-slack".to_string()),
-            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+        let section = ironclaw_reborn_config::SlackSection::default()
+            .set_enabled(true)
+            .set_installation_id("install-alpha")
+            .set_team_id("T123")
+            .set_api_app_id("A123")
+            .set_slack_user_id("U123")
+            .set_user_id("user:operator")
+            .set_shared_subject_user_id("user:shared-slack")
+            .set_channel_routes(vec![ironclaw_reborn_config::SlackChannelRouteSection {
                 channel_id: Some("CENG".to_string()),
                 subject_user_id: Some("user:eng-team-agent".to_string()),
-            }],
-            signing_secret_env: Some(SIGNING_ENV.to_string()),
-            bot_token_env: Some(BOT_ENV.to_string()),
-        };
+            }])
+            .set_signing_secret_env(SIGNING_ENV)
+            .set_bot_token_env(BOT_ENV);
 
         let resolved = resolve_slack_config_for_serve(
             Some(&section),
@@ -602,10 +585,7 @@ mod tests {
     fn slack_config_rejects_enabled_section_without_feature() {
         let _lock = env_lock();
         let _enabled = EnvGuard::remove(SLACK_ENABLED_ENV_VAR);
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(true);
 
         let err = reject_enabled_slack_without_feature(Some(&section))
             .expect_err("enabled Slack should require feature");
@@ -636,10 +616,7 @@ mod tests {
     fn slack_enabled_env_false_kills_enabled_section_without_feature() {
         let _lock = env_lock();
         let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, "false");
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(true);
 
         reject_enabled_slack_without_feature(Some(&section))
             .expect("env-disabled Slack should be a no-op without the host-beta feature");
