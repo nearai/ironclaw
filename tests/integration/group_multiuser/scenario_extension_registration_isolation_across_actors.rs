@@ -53,6 +53,7 @@ url = "http://127.0.0.1:9/mcp"
 /// something to filter, exactly as T3-disc will once it wires real MCP tool
 /// discovery through the same registry-publish step.
 const REGISTERED_CAPABILITY_ID: &str = "acme-mcp-registered.search";
+const REGISTERED_CAPABILITY_PROVIDER_TOOL_NAME: &str = "acme-mcp-registered__search";
 const REGISTERED_CAPABILITY_MANIFEST_TOML: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "acme-mcp-registered"
@@ -325,18 +326,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
 
     // ── AC2 seed: publish a real capability descriptor under the SAME owner- ──
-    // registered extension id, into the SAME shared registry, so correction
-    // 10's operator-tool-config catalog below has something to filter.
-    // AC2 itself (`active_model_visible_capabilities`'s owner filter on the
-    // model-facing tool-disclosure path) is pinned at CRATE tier
-    // (`extension_lifecycle.rs::active_model_visible_capabilities_is_owner_scoped`)
-    // — not here: this harness's turn dispatch runs through
-    // `create_recording_capability_port`, which grants capabilities from the
-    // harness's STATIC `capability_ids` list fixed at construction, never
-    // through the production `RefreshingLocalDevCapabilityPort` /
-    // `active_model_visible_capabilities` local-dev path a dynamically
-    // published, owner-scoped extension needs — so this integration tier
-    // cannot reach that specific filter through a real `submit_turn`.
+    // registered extension id, into the SAME shared registry. The enabled
+    // UserRegistered install above supplies the owner-visible lifecycle state;
+    // this package supplies the model-visible descriptor T3-disc will discover.
     let capability_package = registered_capability_probe_package()
         .map_err(|e| format!("[seed] build capability probe package: {e}"))?;
     let schema_dir = capability_harness.storage_root_for_test().join(format!(
@@ -444,6 +436,114 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         )
         .into());
     }
+
+    assert_refreshing_submit_turn_surface_is_owner_scoped().await?;
+
+    Ok(())
+}
+
+async fn assert_refreshing_submit_turn_surface_is_owner_scoped() -> HarnessResult<()> {
+    let g = RebornIntegrationGroup::multiuser_extension_lifecycle_tools_with_refreshing_capability_port()
+        .await
+        .map_err(|e| format!("[refreshing AC2] group builds: {e}"))?;
+    let a = g
+        .thread("conv-ext-reg-refresh-a")
+        .script([RebornScriptedReply::text("surface checked")])
+        .build()
+        .await?;
+    let owner_user_id = a
+        .binding
+        .subject_user_id
+        .as_ref()
+        .ok_or("[refreshing AC2] actor A binding has no subject_user_id")?;
+    let capability_harness = g
+        .capability_harness()
+        .ok_or("[refreshing AC2] group must wire HostRuntime capability harness")?;
+    let services = capability_harness
+        .reborn_services_for_test()
+        .ok_or("[refreshing AC2] RebornServices captured")?;
+    let installation_store = services
+        .extension_installation_store_for_test()
+        .ok_or("[refreshing AC2] local-dev extension management wired")?;
+    let manifest_record = ExtensionManifestRecord::from_toml(
+        REGISTERED_MANIFEST_TOML,
+        ManifestSource::UserRegistered {
+            owner: owner_user_id.clone(),
+        },
+        &HostPortCatalog::empty(),
+        None,
+    )
+    .map_err(|e| format!("[refreshing AC2] parse owner manifest record: {e}"))?;
+    installation_store
+        .upsert_manifest(manifest_record)
+        .await
+        .map_err(|e| format!("[refreshing AC2] upsert owner manifest record: {e}"))?;
+    let extension_id = ExtensionId::new(REGISTERED_EXTENSION_ID)
+        .map_err(|e| format!("[refreshing AC2] extension id: {e}"))?;
+    let installation = ExtensionInstallation::new(
+        ExtensionInstallationId::new(REGISTERED_EXTENSION_ID.to_string())
+            .map_err(|e| format!("[refreshing AC2] installation id: {e}"))?,
+        extension_id.clone(),
+        ExtensionActivationState::Enabled,
+        ExtensionManifestRef::new(extension_id, None),
+        Vec::new(),
+        Utc::now(),
+    )
+    .map_err(|e| format!("[refreshing AC2] build installation: {e}"))?;
+    installation_store
+        .upsert_installation(installation)
+        .await
+        .map_err(|e| format!("[refreshing AC2] upsert installation: {e}"))?;
+
+    let capability_package = registered_capability_probe_package()
+        .map_err(|e| format!("[refreshing AC2] build capability probe package: {e}"))?;
+    let schema_dir = capability_harness.storage_root_for_test().join(format!(
+        "system/extensions/{REGISTERED_EXTENSION_ID}/schemas"
+    ));
+    std::fs::create_dir_all(&schema_dir)
+        .map_err(|e| format!("[refreshing AC2] create schema dir: {e}"))?;
+    std::fs::write(
+        schema_dir.join("search.input.json"),
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#,
+    )
+    .map_err(|e| format!("[refreshing AC2] write input schema: {e}"))?;
+    std::fs::write(
+        schema_dir.join("search.output.json"),
+        r#"{"type":"object"}"#,
+    )
+    .map_err(|e| format!("[refreshing AC2] write output schema: {e}"))?;
+    services
+        .publish_bundled_extension_for_test(&capability_package)
+        .ok_or("[refreshing AC2] local-dev extension management for publish")?
+        .map_err(|e| format!("[refreshing AC2] publish capability probe package: {e}"))?;
+
+    a.submit_turn("which MCP tools can I use?")
+        .await
+        .map_err(|e| format!("[refreshing AC2] A surface submit: {e}"))?;
+    a.assert_model_tools_contains(REGISTERED_CAPABILITY_PROVIDER_TOOL_NAME)
+        .await
+        .map_err(|e| format!("[refreshing AC2] A should see registered capability: {e}"))?;
+
+    let b = g
+        .thread("conv-ext-reg-refresh-b")
+        .with_actor_id("reborn-actor-b")
+        .script([
+            RebornScriptedReply::tool_call(REGISTERED_CAPABILITY_ID, json!({})),
+            RebornScriptedReply::text("not available"),
+        ])
+        .build()
+        .await?;
+    b.submit_turn("use the other user's MCP tool")
+        .await
+        .map_err(|e| format!("[refreshing AC2] B surface submit: {e}"))?;
+    b.assert_model_tools_excludes(REGISTERED_CAPABILITY_PROVIDER_TOOL_NAME)
+        .await
+        .map_err(|e| format!("[refreshing AC2] B must not see A's registered capability: {e}"))?;
+    b.assert_tool_not_invoked(REGISTERED_CAPABILITY_ID)
+        .await
+        .map_err(|e| {
+            format!("[refreshing AC2] B must not dispatch A's registered capability: {e}")
+        })?;
 
     Ok(())
 }

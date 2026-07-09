@@ -99,5 +99,6 @@ pub(crate) async fn mock_mcp_tools(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        refreshing_local_dev_capability_port: false,
     })
 }

@@ -664,13 +664,60 @@ impl RebornIntegrationGroupBuilder {
 
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
 
+        let model_gateway: Arc<dyn HostManagedModelGateway> =
+            Arc::clone(&scope_gateway) as Arc<dyn HostManagedModelGateway>;
         let (
             capability_factory,
             capability_surface_resolver,
             capability_input_resolver,
             capability_result_writer,
             capability_recorder,
-        ) = capability.mode().into_parts(milestone_sink.clone())?;
+            model_gateway,
+        ) = match &capability {
+            GroupCapability::HostRuntime(harness)
+                if harness.uses_refreshing_local_dev_capability_port() =>
+            {
+                let services = harness
+                    .reborn_services_for_test()
+                    .ok_or("refreshing local-dev harness missing RebornServices")?;
+                let wiring = services
+                    .local_dev_capability_wiring_for_test(
+                        group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+                        base.canonical_subject_user()?,
+                        Arc::clone(&model_gateway),
+                        milestone_sink.clone()
+                            as Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
+                    )?
+                    .ok_or("refreshing local-dev harness missing local-dev runtime")?;
+                (
+                    harness.recording_capability_factory_for(wiring.capability_factory),
+                    Arc::new(StaticCapabilitySurfaceProfileResolver {
+                        allow_set: CapabilityAllowSet::All,
+                    }) as Arc<dyn CapabilitySurfaceProfileResolver>,
+                    wiring.capability_input_resolver,
+                    wiring.capability_result_writer,
+                    HarnessCapabilityRecorder::HostRuntime(Arc::clone(harness)),
+                    model_gateway,
+                )
+            }
+            _ => {
+                let (
+                    capability_factory,
+                    capability_surface_resolver,
+                    capability_input_resolver,
+                    capability_result_writer,
+                    capability_recorder,
+                ) = capability.mode().into_parts(milestone_sink.clone())?;
+                (
+                    capability_factory,
+                    capability_surface_resolver,
+                    capability_input_resolver,
+                    capability_result_writer,
+                    capability_recorder,
+                    model_gateway,
+                )
+            }
+        };
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
         // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op
@@ -770,8 +817,6 @@ impl RebornIntegrationGroupBuilder {
 
         // --- the group's ONE planned runtime -------------------------------
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
-        let model_gateway: Arc<dyn HostManagedModelGateway> =
-            Arc::clone(&scope_gateway) as Arc<dyn HostManagedModelGateway>;
         let user_profile_source: Arc<dyn HostUserProfileSource> =
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
                 capability_recorder.profile_filesystem(),

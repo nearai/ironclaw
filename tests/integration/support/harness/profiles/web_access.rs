@@ -81,5 +81,6 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        refreshing_local_dev_capability_port: false,
     })
 }

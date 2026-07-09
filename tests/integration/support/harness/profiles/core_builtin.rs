@@ -282,5 +282,6 @@ fn core_builtin_tools_from_runtime(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        refreshing_local_dev_capability_port: false,
     })
 }

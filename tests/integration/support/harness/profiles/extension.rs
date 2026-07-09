@@ -57,6 +57,13 @@ pub(crate) async fn extension_lifecycle_tools() -> HarnessResult<HostRuntimeCapa
     extension_lifecycle_tools_profile()?.build().await
 }
 
+pub(crate) async fn extension_lifecycle_tools_with_refreshing_capability_port()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    let mut profile = extension_lifecycle_tools_profile()?;
+    profile.options = profile.options.with_refreshing_local_dev_capability_port();
+    profile.build().await
+}
+
 /// Model-visible capability of the visibility-probe fixture extension.
 pub(crate) const VISIBILITY_PROBE_MODEL_CAPABILITY_ID: &str = "visprobe.search";
 /// `host_internal` sibling in the SAME package — must never be advertised to

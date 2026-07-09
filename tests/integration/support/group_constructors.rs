@@ -157,6 +157,16 @@ impl RebornIntegrationGroup {
         Self::builder().multiuser_extension_lifecycle_tools().await
     }
 
+    /// C-MULTIUSER + T3-harness variant of
+    /// [`multiuser_extension_lifecycle_tools`](Self::multiuser_extension_lifecycle_tools):
+    /// model-visible capabilities refresh through production local-dev wiring.
+    pub async fn multiuser_extension_lifecycle_tools_with_refreshing_capability_port()
+    -> HarnessResult<Self> {
+        Self::builder()
+            .multiuser_extension_lifecycle_tools_with_refreshing_capability_port()
+            .await
+    }
+
     /// C-MULTIUSER: file-approval tools (write_file/read_file @ `Ask`) with
     /// **per-actor capability scoping**. A grant via
     /// [`RebornIntegrationGroup::enable_auto_approve_for_owner`] and an explicit
@@ -414,6 +424,21 @@ impl RebornIntegrationGroupBuilder {
         let host_runtime = super::super::harness::profiles::extension::extension_lifecycle_tools()
             .await?
             .with_run_owner_scoped_capability_dispatch();
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Per-actor-scoped extension-lifecycle group that uses production
+    /// `RefreshingLocalDevCapabilityPort` wiring for model-visible capability
+    /// refreshes. This is the T3-harness seam for registered MCP discovery
+    /// tests; default extension-lifecycle groups keep the static harness path.
+    pub async fn multiuser_extension_lifecycle_tools_with_refreshing_capability_port(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            super::super::harness::profiles::extension::extension_lifecycle_tools_with_refreshing_capability_port()
+                .await?
+                .with_run_owner_scoped_capability_dispatch();
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

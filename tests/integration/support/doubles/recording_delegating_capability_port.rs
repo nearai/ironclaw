@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
     CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort, ProviderToolCall,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    ProviderToolCallCapabilityIds, ProviderToolDefinition, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 
 pub(crate) struct RecordingDelegatingCapabilityPort {
@@ -25,6 +26,13 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
         self.inner.validate_provider_tool_call(tool_call)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        self.inner.provider_tool_call_capability_ids(tool_call)
     }
 
     async fn register_provider_tool_call(

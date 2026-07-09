@@ -61,6 +61,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Only `project_tools_with_fault_injection()` sets this; every other
     /// harness leaves the real service unwrapped.
     pub(crate) project_service_fault_injection: bool,
+    /// T3-harness: opt into the production local-dev refreshing capability
+    /// factory. Existing profiles keep the static harness allowlist path.
+    pub(crate) refreshing_local_dev_capability_port: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -77,6 +80,7 @@ impl HostRuntimeHarnessOptions {
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
             project_service_fault_injection: false,
+            refreshing_local_dev_capability_port: false,
         }
     }
 
@@ -114,6 +118,11 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_project_service_fault_injection(mut self) -> Self {
         self.project_service_fault_injection = true;
+        self
+    }
+
+    pub(crate) fn with_refreshing_local_dev_capability_port(mut self) -> Self {
+        self.refreshing_local_dev_capability_port = true;
         self
     }
 }
