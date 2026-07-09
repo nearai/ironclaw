@@ -19,6 +19,9 @@ pub struct StdioSpawnConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    /// Per-request transport timeout, preserved across restarts so a
+    /// long-timeout server keeps its timeout after an auto-restart.
+    pub timeout: Duration,
 }
 
 /// Composite key for a stdio MCP child process: the activating user
@@ -77,6 +80,7 @@ impl McpProcessManager {
         command: impl Into<String>,
         args: Vec<String>,
         env: HashMap<String, String>,
+        timeout: Duration,
     ) -> Result<Arc<StdioMcpTransport>, ToolError> {
         let name = name.into();
         let command = command.into();
@@ -115,10 +119,15 @@ impl McpProcessManager {
                 command: command.clone(),
                 args: args.clone(),
                 env: env.clone(),
+                timeout,
             },
         );
 
-        let transport = Arc::new(StdioMcpTransport::spawn(&name, &command, args, env).await?);
+        let transport = Arc::new(
+            StdioMcpTransport::spawn(&name, &command, args, env)
+                .await?
+                .with_timeout(timeout),
+        );
 
         self.transports
             .write()
@@ -220,7 +229,7 @@ impl McpProcessManager {
             .await
             {
                 Ok(transport) => {
-                    let transport = Arc::new(transport);
+                    let transport = Arc::new(transport.with_timeout(config.timeout));
                     self.transports
                         .write()
                         .await

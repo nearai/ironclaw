@@ -70,6 +70,7 @@ pub async fn create_client_from_config(
                     command,
                     args.to_vec(),
                     env.clone(),
+                    server.effective_timeout(),
                 )
                 .await
                 .map_err(|e| McpFactoryError::StdioSpawn {
@@ -133,6 +134,7 @@ pub async fn create_client_from_config(
             // transport must know about it to read/write the header.
             let transport = Arc::new(
                 HttpMcpTransport::new(server.url.clone(), validated_name.as_str())
+                    .with_timeout(server.effective_timeout())
                     .with_session_manager(Arc::clone(session_manager), user_id),
             );
             Ok(McpClient::new_with_transport(

@@ -283,6 +283,7 @@ impl McpClient {
         let user_id_str: String = user_id.into();
         let transport = Arc::new(
             HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
+                .with_timeout(config.effective_timeout())
                 .with_session_manager(session_manager.clone(), &user_id_str),
         );
 
@@ -762,6 +763,14 @@ impl McpClient {
     ) -> Result<Vec<Arc<dyn Tool>>, ToolError> {
         let mcp_tools = self.list_tools().await?;
         let server_name = self.server_name.as_str().to_string();
+        // Cap each tool's execution at the server's configured timeout so a
+        // long-timeout server isn't re-clipped to the generic tool default.
+        // Falls back to 30s (the transport default) when no config is held.
+        let timeout = self
+            .server_config
+            .as_ref()
+            .map(|c| c.effective_timeout())
+            .unwrap_or_else(|| std::time::Duration::from_secs(30));
 
         // Detect post-normalization collisions before registering. This is
         // a single linear pass; the n is small (a typical MCP server lists
@@ -798,6 +807,7 @@ impl McpClient {
                     provider_extension: server_name.clone(),
                     server_name: server_name.clone(),
                     client_store: store.clone(),
+                    timeout,
                 }) as Arc<dyn Tool>
             })
             .collect())
@@ -899,6 +909,11 @@ struct McpToolWrapper {
     provider_extension: String,
     server_name: String,
     client_store: Arc<super::McpClientStore>,
+    /// Execution cap for this tool, taken from the server's configured
+    /// `effective_timeout()` so a long-timeout MCP server isn't re-clipped
+    /// to the generic 60s tool default. Defaults to 30s when the client
+    /// holds no server config.
+    timeout: std::time::Duration,
 }
 
 #[async_trait]
@@ -915,6 +930,10 @@ impl Tool for McpToolWrapper {
 
     fn provider_extension(&self) -> Option<&str> {
         Some(&self.provider_extension)
+    }
+
+    fn execution_timeout(&self) -> std::time::Duration {
+        self.timeout
     }
 
     async fn execute(
@@ -1708,7 +1727,17 @@ mod tests {
             provider_extension: server.to_string(),
             server_name: server.to_string(),
             client_store: Arc::new(crate::tools::mcp::McpClientStore::new()),
+            timeout: std::time::Duration::from_secs(30),
         }
+    }
+
+    #[test]
+    fn mcp_tool_wrapper_reports_server_timeout() {
+        // A wrapper built with an explicit 900s cap reports it verbatim from
+        // execution_timeout(), rather than the generic 60s tool default.
+        let mut w = test_wrapper(make_test_mcp_tool(false), "srv");
+        w.timeout = std::time::Duration::from_secs(900);
+        assert_eq!(w.execution_timeout(), std::time::Duration::from_secs(900));
     }
 
     #[test]

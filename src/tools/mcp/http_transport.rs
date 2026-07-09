@@ -69,9 +69,6 @@ impl HttpMcpTransport {
     }
 
     /// Override the HTTP request timeout (default 30s).
-    // Wired into the MCP transport factory in Task 3 (per-server
-    // effective_timeout); allow the transient dead-code gap until then.
-    #[allow(dead_code)]
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.http_client = reqwest::Client::builder()
             .timeout(timeout)
