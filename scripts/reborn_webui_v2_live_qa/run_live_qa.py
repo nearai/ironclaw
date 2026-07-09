@@ -186,6 +186,8 @@ Expected result: Slack is connected""",
 Expected result: IronClaw reports any matching HN posts""",
     "qa_8c_hn_keyword_slack_routine": """In WebUI, ask IronClaw, "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack DM."
 Expected result: Routine created""",
+    "qa_9a_slack_connect": """In WebUI, ask IronClaw "connect to Slack." Go through the auth flow.
+Expected result: Slack is connected""",
 }
 
 
@@ -2001,6 +2003,110 @@ def _slack_bot_token(extra_env: dict[str, str]) -> str | None:
     return _env_value(SLACK_BOT_TOKEN_ENV, extra_env)
 
 
+def _slack_personal_token(extra_env: dict[str, str]) -> str | None:
+    return _env_value(SLACK_PERSONAL_ACCESS_TOKEN_ENV, extra_env)
+
+
+async def _slack_search_marker_hits(
+    ctx: LiveQaContext, *, marker: str
+) -> dict[str, object]:
+    """Workspace-wide marker sweep via the personal (user) token.
+
+    Finds stray copies of a delivery marker OUTSIDE the expected DM — the
+    wrong-channel and user-identity-duplicate failure shapes post where the
+    bot-token DM history scan cannot see. Search indexing can lag, so callers
+    must treat "no hits" as inconclusive and only hard-fail on hits in
+    unexpected conversations.
+    """
+    import httpx
+
+    token = _slack_personal_token(ctx.env)
+    if not token:
+        return {"checked": False, "error": "personal token unavailable"}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            "https://slack.com/api/search.messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"query": f'"{marker}"', "count": "20"},
+        )
+    payload = response.json()
+    if not payload.get("ok"):
+        return {
+            "checked": False,
+            "error": payload.get("error") or "slack_search_failed",
+        }
+    matches = (payload.get("messages") or {}).get("matches") or []
+    hits = []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        channel = match.get("channel") or {}
+        hits.append(
+            {
+                "channel_id": (channel.get("id") if isinstance(channel, dict) else None),
+                "channel_name": (
+                    channel.get("name") if isinstance(channel, dict) else None
+                ),
+                "username": match.get("username"),
+                "user": match.get("user"),
+                "ts": match.get("ts"),
+            }
+        )
+    return {"checked": True, "hits": hits}
+
+
+async def _slack_personal_dm_counterpart_names(
+    ctx: LiveQaContext, *, limit: int = 6
+) -> dict[str, object]:
+    """Ground-truth display names of the connected user's DM counterparts,
+    read directly from the Slack API with the personal token — the digest
+    probe requires at least one of these names in the model's answer."""
+    import httpx
+
+    token = _slack_personal_token(ctx.env)
+    if not token:
+        return {"checked": False, "names": [], "error": "personal token unavailable"}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            "https://slack.com/api/conversations.list",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"types": "im", "limit": "20"},
+        )
+        payload = response.json()
+        if not payload.get("ok"):
+            return {
+                "checked": False,
+                "names": [],
+                "error": payload.get("error") or "slack_conversations_list_failed",
+            }
+        names: list[str] = []
+        for channel in (payload.get("channels") or [])[:limit]:
+            counterpart = (
+                channel.get("user") if isinstance(channel, dict) else None
+            )
+            if not counterpart:
+                continue
+            info = await client.get(
+                "https://slack.com/api/users.info",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"user": counterpart},
+            )
+            info_payload = info.json()
+            if not info_payload.get("ok"):
+                continue
+            user = info_payload.get("user") or {}
+            profile = user.get("profile") or {}
+            for candidate in (
+                profile.get("display_name"),
+                profile.get("real_name"),
+                user.get("name"),
+            ):
+                if candidate:
+                    names.append(str(candidate))
+                    break
+    return {"checked": True, "names": names}
+
+
 def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
     slack = _slack_preflight(ctx)
     discovery = slack.get("route_discovery")
@@ -3560,6 +3666,23 @@ async def _slack_delivery_routine_case(
                     f"delivery marker was posted from a non-bot (user) identity — "
                     f"duplicate self-delivery: {exactly_once!r}"
                 )
+            # Workspace-wide sweep: a stray copy in ANY other conversation
+            # (wrong-channel delivery or a user-identity send somewhere else)
+            # is a hard failure. Search-index lag can only under-report, so
+            # "no hits" stays inconclusive rather than passing judgement.
+            sweep = await _slack_search_marker_hits(ctx, marker=delivery_marker)
+            exactly_once["workspace_sweep"] = sweep
+            if sweep.get("checked"):
+                stray_hits = [
+                    hit
+                    for hit in sweep.get("hits") or []
+                    if hit.get("channel_id") and hit.get("channel_id") != channel_id
+                ]
+                if stray_hits:
+                    raise AssertionError(
+                        f"delivery marker found outside the expected DM "
+                        f"({channel_id}): {stray_hits!r}"
+                    )
         # The exact Slack body is not persisted in results to avoid leaking workspace data.
         return _result(
             case_name,
@@ -4265,6 +4388,29 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
             },
         )
     result.details["leaked_raw_user_ids"] = []
+    # Positive arm: the digest must actually NAME someone. Ground truth comes
+    # from the Slack API with the personal token, so a cop-out answer ("you
+    # have no DMs") cannot pass vacuously when DM history exists.
+    ground_truth = await _slack_personal_dm_counterpart_names(ctx)
+    result.details["dm_counterpart_ground_truth"] = ground_truth
+    known_names = [str(name) for name in ground_truth.get("names") or [] if name]
+    if known_names:
+        reply_lower = reply_text.lower()
+        named = [name for name in known_names if name.lower() in reply_lower]
+        result.details["ground_truth_names_found"] = named
+        if not named:
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    **result.details,
+                    "error": (
+                        "digest named none of the user's actual DM counterparts "
+                        f"(expected at least one of {known_names!r})"
+                    ),
+                },
+            )
     return result
 
 
