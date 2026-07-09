@@ -44,11 +44,7 @@ pub fn rank_tools(defs: Vec<ToolDefinition>, query: &str, limit: usize) -> Vec<T
                     score += 1;
                 }
             }
-            if score > 0 {
-                Some((score, d))
-            } else {
-                None
-            }
+            if score > 0 { Some((score, d)) } else { None }
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
@@ -124,7 +120,9 @@ impl Tool for FindToolsTool {
             .clamp(1, 50) as usize;
 
         let registry = self.registry.upgrade().ok_or_else(|| {
-            ToolError::ExecutionFailed("tool registry is no longer available for find_tools".to_string())
+            ToolError::ExecutionFailed(
+                "tool registry is no longer available for find_tools".to_string(),
+            )
         })?;
         let defs = registry.tool_definitions().await;
         let matches = rank_tools(defs, &query, limit);
@@ -163,7 +161,10 @@ mod tests {
 
     fn fixture() -> Vec<ToolDefinition> {
         vec![
-            def("playwright_browser_navigate", "Navigate the browser to a URL"),
+            def(
+                "playwright_browser_navigate",
+                "Navigate the browser to a URL",
+            ),
             def("memory_search", "Search stored memory"),
             def("system_time", "Get the current time"),
             def("wm_get", "Get a world-monitor news/economic snapshot value"),
@@ -190,7 +191,7 @@ mod tests {
         // Query "browser" hits the navigate name (score 2); nothing else.
         // Query with two words where one hits a name and one a desc: name wins.
         let defs = vec![
-            def("web_browser_open", "open a page"),      // name hit on "browser"
+            def("web_browser_open", "open a page"), // name hit on "browser"
             def("fetch_url", "download a web browser page"), // desc hit on "browser"/"web"
         ];
         let out = rank_tools(defs, "browser", 10);
