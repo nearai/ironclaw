@@ -740,6 +740,122 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
     );
 }
 
+/// #4a lifecycle lock — the removal entrypoints cancel a pending flow through
+/// the one shared cleanup, so "disconnect via the bot's `extension_remove` tool"
+/// and "disconnect via the web UI" cannot diverge into duplicated behaviour.
+///
+/// Both doors are thin `pub(crate)` forwarders on `RebornProductAuthServices` to
+/// the single guardrail entry point `cleanup_credentials_for_lifecycle`:
+/// - the model-visible `builtin.extension_remove` capability
+///   ([`ExtensionCredentialCleanup::cleanup_for_lifecycle`]) is ALWAYS compiled,
+///   so its assertion is ungated and runs in the default CI test job — it is the
+///   primary door under test here, never a silent skip;
+/// - the WebUI Slack-disconnect facade
+///   ([`SlackPersonalCredentialCleanup::cleanup_credentials_for_lifecycle`])
+///   only exists under `slack-v2-host-beta`, so when that feature is built we
+///   ALSO drive it and assert identical behaviour, proving the two doors stay in
+///   lockstep.
+///
+/// Each door runs independently against the REAL durable service. Provider-
+/// agnostic ("google", not Slack) so the guarantee cannot silently narrow to a
+/// Slack-only cleanup.
+#[tokio::test]
+async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
+    use crate::extension_host::extension_lifecycle::ExtensionCredentialCleanup;
+
+    // Cleanup never dispatches a continuation, but the facade constructor
+    // requires one.
+    #[derive(Debug, Default)]
+    struct NoopDispatcher;
+    #[async_trait::async_trait]
+    impl crate::RebornAuthContinuationDispatcher for NoopDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
+
+    // Fresh real durable service wired behind the production facade, seeded with
+    // exactly one pending flow, so each door starts from identical state. The
+    // durable service is every product-auth port except the OAuth provider
+    // client (cleanup never exchanges provider material), so it is wired as the
+    // shared cleanup_service with the unused provider slot stubbed.
+    async fn seeded_facade(
+        provider: &AuthProviderId,
+    ) -> (
+        crate::RebornProductAuthServices,
+        AuthProductScope,
+        Arc<FilesystemAuthProductServices<InMemoryBackend>>,
+    ) {
+        let durable = Arc::new(test_service(
+            test_filesystem(),
+            Arc::new(InMemorySecretStore::new()),
+        ));
+        let scope = test_scope();
+        assert_eq!(
+            create_pending_setup_flow(&durable, &scope, provider).await,
+            AuthFlowStatus::AwaitingUser
+        );
+        let services = crate::RebornProductAuthServices::new(
+            durable.clone(),
+            durable.clone(),
+            durable.clone(),
+            durable.clone(),
+            Arc::new(super::provider::UnavailableAuthProviderClient),
+            durable.clone(),
+            Arc::new(NoopDispatcher),
+        );
+        (services, scope, durable)
+    }
+
+    async fn assert_pending_flow_canceled(
+        durable: &FilesystemAuthProductServices<InMemoryBackend>,
+        scope: &AuthProductScope,
+        provider: &AuthProviderId,
+    ) {
+        let flows = durable.flows_for_scope(scope).await.unwrap();
+        let status = flows
+            .iter()
+            .find(|(flow, _)| &flow.provider == provider)
+            .map(|(flow, _)| flow.status);
+        assert_eq!(
+            status,
+            Some(AuthFlowStatus::Canceled),
+            "removal door must cancel the pending flow through the shared cleanup"
+        );
+    }
+
+    let provider = AuthProviderId::new("google").unwrap();
+    let request = |scope: &AuthProductScope| ironclaw_auth::SecretCleanupRequest {
+        scope: scope.clone(),
+        extension_id: ExtensionId::new("example_ext").unwrap(),
+        provider: Some(provider.clone()),
+        action: ironclaw_auth::SecretCleanupAction::Uninstall,
+    };
+
+    // Primary door (always compiled, runs in CI) — the model-visible
+    // `extension_remove` capability.
+    let (tool, tool_scope, tool_durable) = seeded_facade(&provider).await;
+    ExtensionCredentialCleanup::cleanup_for_lifecycle(&tool, request(&tool_scope))
+        .await
+        .expect("extension_remove tool cleanup should succeed");
+    assert_pending_flow_canceled(&tool_durable, &tool_scope, &provider).await;
+
+    // Parity door (only compiled under `slack-v2-host-beta`) — the WebUI
+    // channel-disconnect facade must yield the identical cancel.
+    #[cfg(feature = "slack-v2-host-beta")]
+    {
+        use crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup;
+        let (web, web_scope, web_durable) = seeded_facade(&provider).await;
+        SlackPersonalCredentialCleanup::cleanup_credentials_for_lifecycle(&web, request(&web_scope))
+            .await
+            .expect("web-UI disconnect cleanup should succeed");
+        assert_pending_flow_canceled(&web_durable, &web_scope, &provider).await;
+    }
+}
+
 #[tokio::test]
 async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     let filesystem = test_filesystem();
