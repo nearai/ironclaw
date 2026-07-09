@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
+use crate::channels::IncomingMessage;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::error::{Error, JobError};
@@ -20,6 +21,7 @@ use crate::tools::{
     prepare_tool_params,
 };
 use crate::worker::job::{Worker, WorkerDeps};
+use crate::worker::mcp_job::{McpCaller, McpJobDeps, McpJobSpec, run_mcp_job};
 use ironclaw_llm::LlmProvider;
 use ironclaw_safety::SafetyLayer;
 
@@ -74,6 +76,13 @@ pub struct Scheduler {
     /// model-facing tool list filter applies to background jobs too.
     /// `None` in tests / before `Config::with_runtime_overrides` runs.
     runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    /// Caller used by `dispatch_mcp_job` to invoke MCP tools. `None` until
+    /// wired (MCP background jobs disabled). Held as a trait object so it is
+    /// injectable in tests (production wires `StoreMcpCaller`).
+    mcp_caller: Option<Arc<dyn McpCaller>>,
+    /// Injection channel into the agent loop — how a finished MCP job resumes
+    /// the originating thread. Same `mpsc::Sender` the channels feed.
+    inject_tx: Option<mpsc::Sender<IncomingMessage>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -101,6 +110,8 @@ impl Scheduler {
             sse_tx: None,
             http_interceptor: None,
             runtime_policy: None,
+            mcp_caller: None,
+            inject_tx: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -109,6 +120,18 @@ impl Scheduler {
     /// Set the SSE manager for live job event streaming.
     pub fn set_sse_sender(&mut self, sse: Arc<crate::channels::web::sse::SseManager>) {
         self.sse_tx = Some(sse);
+    }
+
+    /// Wire the dependencies MCP background jobs need: the `McpCaller` that
+    /// invokes tools and the injection channel that resumes the originating
+    /// thread on completion. Until this is called, `dispatch_mcp_job` errors.
+    pub fn set_mcp_deps(
+        &mut self,
+        caller: Arc<dyn McpCaller>,
+        inject_tx: mpsc::Sender<IncomingMessage>,
+    ) {
+        self.mcp_caller = Some(caller);
+        self.inject_tx = Some(inject_tx);
     }
 
     /// Set the HTTP interceptor for trace recording/replay.
@@ -248,6 +271,52 @@ impl Scheduler {
         }
 
         self.schedule_with_context(job_id, approval_context).await?;
+        Ok(job_id)
+    }
+
+    /// Dispatch a single MCP tool call as a durable background job: persist the
+    /// job (so the runner's FK references are valid) then spawn the non-LLM
+    /// [`run_mcp_job`] runner. Unlike LLM jobs there is no `Worker` and no
+    /// scheduling here — and we do NOT transition to `InProgress`, because
+    /// `run_mcp_job` owns that transition. Returns the new job id.
+    pub async fn dispatch_mcp_job(&self, spec: McpJobSpec) -> Result<Uuid, JobError> {
+        // Check config before creating a job so we never leave an orphan.
+        let caller = self.mcp_caller.clone().ok_or_else(|| JobError::Failed {
+            id: Uuid::nil(),
+            reason: "MCP background jobs are not configured".to_string(),
+        })?;
+
+        let title = format!("mcp:{}/{}", spec.server, spec.tool);
+        let description = format!("Background MCP tool call: {}", spec.tool);
+        let job_id = self
+            .context_manager
+            .create_job_for_user(&spec.user_id, &title, &description)
+            .await?;
+
+        // Persist the `mcp_tool` metadata atomically and read the context back
+        // for an FK-valid DB row before spawning (mirrors `dispatch_job_inner`).
+        let ctx = self
+            .context_manager
+            .update_context_and_get(job_id, |c| {
+                c.metadata = spec.to_metadata();
+            })
+            .await?;
+        if let Some(ref store) = self.store {
+            store.save_job(&ctx).await.map_err(|e| JobError::Failed {
+                id: job_id,
+                reason: format!("failed to persist mcp job: {e}"),
+            })?;
+        }
+
+        let deps = McpJobDeps {
+            context_manager: self.context_manager.clone(),
+            store: self.store.clone(),
+            sse_tx: self.sse_tx.clone(),
+            inject_tx: self.inject_tx.clone(),
+            caller,
+            safety: self.safety.clone(),
+        };
+        tokio::spawn(run_mcp_job(job_id, spec, deps));
         Ok(job_id)
     }
 
@@ -928,6 +997,65 @@ mod tests {
         assert!(ctx.metadata.is_null() || ctx.metadata == serde_json::json!({})); // safety: test code
         // No user tokens AND unlimited config means max_tokens stays at default
         assert_eq!(ctx.max_tokens, 0, "unlimited config"); // safety: test code
+    }
+
+    fn test_mcp_spec() -> McpJobSpec {
+        McpJobSpec {
+            server: "msbsandbox".into(),
+            tool: "run_python".into(),
+            params: serde_json::json!({"code":"print(1)"}),
+            user_id: "u1".into(),
+            channel: "gateway".into(),
+            thread_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_mcp_job_creates_completes_and_injects() {
+        struct FakeCaller;
+        #[async_trait::async_trait]
+        impl McpCaller for FakeCaller {
+            async fn call(
+                &self,
+                _user_id: &str,
+                _server: &str,
+                _tool: &str,
+                _params: serde_json::Value,
+            ) -> Result<String, String> {
+                Ok("RESULT_OK".into())
+            }
+        }
+
+        let mut sched = make_test_scheduler(0);
+        let (tx, mut rx) = mpsc::channel(4);
+        sched.set_mcp_deps(Arc::new(FakeCaller), tx);
+
+        let job_id = sched.dispatch_mcp_job(test_mcp_spec()).await.unwrap();
+
+        // Dispatch tagged the job with the mcp_tool mode.
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap();
+        assert_eq!(
+            ctx.metadata.get("mode").and_then(|v| v.as_str()),
+            Some("mcp_tool")
+        );
+
+        // The spawned runner completes and injects the wrapped result — waiting
+        // on the inject channel is the completion signal.
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("runner should inject within 5s")
+            .expect("an inject message");
+        assert!(msg.content.contains("RESULT_OK"), "body: {}", msg.content);
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
+    }
+
+    #[tokio::test]
+    async fn dispatch_mcp_job_without_caller_errors() {
+        // No set_mcp_deps → MCP jobs unconfigured → clean error, no orphan job.
+        let sched = make_test_scheduler(0);
+        assert!(sched.dispatch_mcp_job(test_mcp_spec()).await.is_err());
     }
 
     #[test]
