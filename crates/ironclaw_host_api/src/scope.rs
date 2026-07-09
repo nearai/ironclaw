@@ -138,3 +138,31 @@ impl ExecutionContext {
         self.mounts.validate()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_execution_context_without_authenticated_actor_deserializes() {
+        let mut context = ExecutionContext::local_default(
+            UserId::new("subject").unwrap(),
+            ExtensionId::new("demo").unwrap(),
+            RuntimeKind::Script,
+            TrustClass::Sandbox,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .unwrap();
+        context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
+        let mut legacy = serde_json::to_value(context).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("authenticated_actor_user_id");
+
+        let decoded: ExecutionContext = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(decoded.authenticated_actor_user_id, None);
+    }
+}

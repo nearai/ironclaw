@@ -303,6 +303,48 @@ mod tests {
         cancellation: ProcessCancellationToken,
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingCapabilityDispatcher {
+        calls: Arc<Mutex<Vec<CapabilityDispatchRequest>>>,
+    }
+
+    impl RecordingCapabilityDispatcher {
+        fn calls(&self) -> Vec<CapabilityDispatchRequest> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityDispatcher for RecordingCapabilityDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.clone());
+            Ok(CapabilityDispatchResult {
+                capability_id: request.capability_id,
+                provider: ExtensionId::new("demo").unwrap(),
+                runtime: RuntimeKind::Script,
+                output: json!({"ok": true}),
+                display_preview: None,
+                usage: ResourceUsage::default(),
+                receipt: ResourceReceipt {
+                    id: ResourceReservationId::new(),
+                    scope: request.scope,
+                    status: ReservationStatus::Reconciled,
+                    estimate: ResourceEstimate::default(),
+                    actual: Some(ResourceUsage::default()),
+                },
+            })
+        }
+    }
+
     #[async_trait]
     impl CapabilityDispatcher for CancellingDispatcher {
         async fn dispatch_json(
@@ -440,6 +482,26 @@ mod tests {
         let error = executor.execute(request).await.unwrap_err();
 
         assert_eq!(error.kind, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn runtime_dispatch_executor_preserves_authenticated_actor() {
+        // safety: test dispatcher call is in-memory and does not execute an external capability.
+        let dispatcher = Arc::new(RecordingCapabilityDispatcher::default());
+        let executor = RuntimeDispatchProcessExecutor::new(dispatcher.clone());
+        let mut request = sample_process_request("demo.background", RuntimeKind::Script);
+        let actor = UserId::new("slack-alice").unwrap();
+        request.authenticated_actor_user_id = Some(actor.clone());
+        let expected_scope = request.scope.clone();
+        let expected_capability_id = request.capability_id.clone();
+
+        executor.execute(request).await.unwrap();
+
+        let calls = dispatcher.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].authenticated_actor_user_id, Some(actor));
+        assert_eq!(calls[0].scope, expected_scope);
+        assert_eq!(calls[0].capability_id, expected_capability_id);
     }
 
     #[test]
