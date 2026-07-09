@@ -3206,6 +3206,22 @@ pub async fn build_reborn_runtime(
                     &validated_identity.tenant_id,
                     regex_skill_activation_enabled,
                 )?;
+                let skill_warm_scope = ResourceScope {
+                    tenant_id: validated_identity.tenant_id.clone(),
+                    user_id: actor_user_id.clone(),
+                    agent_id: Some(validated_identity.agent_id.clone()),
+                    project_id: default_project_id.clone(),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                };
+                local_dev_skills
+                    .bundle_source
+                    .warm_system_root_descriptor_cache(&skill_warm_scope)
+                    .await
+                    .map_err(|error| RebornRuntimeError::InvalidArgument {
+                        reason: format!("first-party skills warmup: {error}"),
+                    })?;
                 (
                     Some(local_dev_skills.source),
                     Some(local_dev_skills.activation_source),
@@ -4132,6 +4148,7 @@ async fn append_trusted_laptop_access_audit(
 }
 
 struct LocalDevSkillContextSource {
+    bundle_source: Arc<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
     source: Arc<dyn HostSkillContextSource>,
     activation_source: Arc<LocalDevSelectableSkillContextSource>,
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
@@ -4219,10 +4236,12 @@ fn local_dev_filesystem_skill_context_source(
         Arc::clone(&local_runtime.workspace_filesystem),
         Arc::clone(&local_runtime.skill_auto_activate_learned),
     );
+    let bundle_source = extension.bundle_source();
     Ok(LocalDevSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
         activation_source: selectable_skills.activation_source(),
         execution_adapter: selectable_skills.execution_adapter(),
+        bundle_source,
     })
 }
 
@@ -7019,15 +7038,12 @@ output_schema_ref = "schemas/write.output.json"
             reply: "trigger invalid config".to_string(),
             requests: Arc::new(StdMutex::new(Vec::new())),
         });
-        let trigger_poller = TriggerPollerSettings {
-            enabled: true,
-            worker: ironclaw_triggers::TriggerPollerWorkerConfig {
-                poll_interval: Duration::ZERO,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .with_tenant_scoped_authorizer_for_test();
+        let trigger_poller = TriggerPollerSettings::enabled()
+            .with_worker_config(
+                ironclaw_triggers::TriggerPollerWorkerConfig::default()
+                    .set_poll_interval(Duration::ZERO),
+            )
+            .with_tenant_scoped_authorizer_for_test();
 
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev(
@@ -7281,16 +7297,14 @@ output_schema_ref = "schemas/write.output.json"
         // later read the queue) under `trace_scope_key(tenant, owner)`, not the
         // bare owner id.
         let scope = trace_contribution::trace_scope_key("runtime-trace-capture-tenant", &owner);
-        let policy = trace_contribution::StandingTraceContributionPolicy {
-            enabled: true,
-            // Closed loopback port: the immediate flush fails fast and
-            // locally; no traffic leaves the machine.
-            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
-            min_submission_score: 0.0,
-            require_manual_approval_when_pii_detected: false,
-            auto_submit_high_value_traces: true,
-            ..trace_contribution::StandingTraceContributionPolicy::default()
-        };
+        // Closed loopback port: the immediate flush fails fast and locally; no
+        // traffic leaves the machine.
+        let policy = trace_contribution::StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://127.0.0.1:1/v1/traces")
+            .set_min_submission_score(0.0)
+            .set_require_manual_approval_when_pii_detected(false)
+            .set_auto_submit_high_value_traces(true);
         trace_contribution::write_trace_policy_for_scope(Some(&scope), &policy)
             .expect("write trace policy");
 

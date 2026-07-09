@@ -12,7 +12,7 @@
 
 ## What This Crate Owns
 
-- WASM v2 host runtime for ProductAdapter components.
+- Product-layer WASM v2 host glue for ProductAdapter components.
 - Adapter-specific host control-plane glue: protocol-auth verification, manifest egress preflight, component runtime, runner, bindings, store, config.
 - ProductAdapter WIT/request shapes and parse/render-only component execution path.
 - Seams for host-runtime egress injection; current HTTP egress import fails closed until wired.

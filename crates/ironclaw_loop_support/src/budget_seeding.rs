@@ -30,18 +30,14 @@ impl BudgetSeedingPolicy {
         period: BudgetPeriod,
         thresholds: BudgetThresholds,
     ) -> Self {
-        let user_daily = ResourceLimits {
-            max_usd: Some(user_daily_usd),
-            period: period.clone(),
-            thresholds,
-            ..ResourceLimits::default()
-        };
-        let project_daily = ResourceLimits {
-            max_usd: Some(project_daily_usd),
-            period,
-            thresholds,
-            ..ResourceLimits::default()
-        };
+        let user_daily = ResourceLimits::default()
+            .set_max_usd(user_daily_usd)
+            .set_period(period.clone())
+            .set_thresholds(thresholds);
+        let project_daily = ResourceLimits::default()
+            .set_max_usd(project_daily_usd)
+            .set_period(period)
+            .set_thresholds(thresholds);
         Self {
             user_daily,
             project_daily,
