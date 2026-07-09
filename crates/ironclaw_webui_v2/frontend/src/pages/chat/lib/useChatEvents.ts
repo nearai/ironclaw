@@ -63,6 +63,7 @@ export function useChatEvents({
   toolActivityStateRef,
   noteConnectionInterruptedRunId = noop,
   connectionContextForRunFailure = emptyConnectionContext,
+  onStreamError = noop,
   onRunSettled,
 }) {
   // Track which runIds we've already settled so that SSE replays
@@ -213,6 +214,11 @@ export function useChatEvents({
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
+          onStreamError({
+            error: frame.error,
+            kind: frame.kind,
+            retryable: frame.retryable === true,
+          });
           appendStreamFailureMessage(setMessages, {
             error: frame.error,
             kind: frame.kind,

@@ -225,6 +225,7 @@ export function useChat(threadId) {
   });
   const submitBusyRef = React.useRef(false);
   const localRunAdmissionRef = React.useRef(null);
+  const streamErrorClosedAdmissionThreadIdsRef = React.useRef(new Set());
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -269,6 +270,9 @@ export function useChat(threadId) {
     () => () => {
       if (localRunAdmissionRef.current?.threadId === threadId) {
         localRunAdmissionRef.current = null;
+      }
+      if (threadId) {
+        streamErrorClosedAdmissionThreadIdsRef.current.delete(threadId);
       }
     },
     [threadId],
@@ -380,6 +384,17 @@ export function useChat(threadId) {
     return { connectionStatus, connectionInterrupted };
   }, []);
 
+  const handleStreamError = React.useCallback(() => {
+    const currentThreadId = threadIdRef.current;
+    if (!currentThreadId) return;
+    const localRunAdmission = localRunAdmissionRef.current;
+    if (localRunAdmission?.threadId !== currentThreadId) return;
+    if (!localRunAdmission.runId) {
+      streamErrorClosedAdmissionThreadIdsRef.current.add(currentThreadId);
+    }
+    localRunAdmissionRef.current = null;
+  }, []);
+
   const handleEvent = useChatEvents({
     threadId,
     setMessages,
@@ -391,6 +406,7 @@ export function useChat(threadId) {
     toolActivityStateRef,
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
+    onStreamError: handleStreamError,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -591,6 +607,7 @@ export function useChat(threadId) {
       // target sends are left to the server's rejected_busy response instead.
       const shouldTrackLocalRun = shouldRenderInCurrentThread;
       if (shouldTrackLocalRun) {
+        streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
         localRunAdmissionRef.current = {
           threadId: sendThreadId,
           runId: null,
@@ -628,36 +645,45 @@ export function useChat(threadId) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
         let runSettledBeforeResponse = false;
+        let streamErrorClosedAdmission = false;
         if (response?.run_id && shouldTrackLocalRun) {
+          streamErrorClosedAdmission =
+            streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
           if (connectionInterruptedUnknownRef.current) {
             noteConnectionInterruptedRunId(response.run_id);
             setMessages((prev) =>
               rewriteConnectionLostRunFailures(prev, { runId: response.run_id }),
             );
           }
-          const localRunAdmission = localRunAdmissionRef.current;
-          runSettledBeforeResponse = Boolean(
-            localRunAdmission &&
-              localRunAdmission.threadId === sendThreadId &&
-              localRunAdmission.runId === response.run_id &&
-              localRunAdmission.settledBeforeResponse,
-          );
-          if (runSettledBeforeResponse) {
+          if (streamErrorClosedAdmission) {
             localRunAdmissionRef.current = null;
           } else {
-            localRunAdmissionRef.current = {
-              threadId: sendThreadId,
-              runId: response.run_id,
-              settledBeforeResponse: false,
-            };
+            const localRunAdmission = localRunAdmissionRef.current;
+            runSettledBeforeResponse = Boolean(
+              localRunAdmission &&
+                localRunAdmission.threadId === sendThreadId &&
+                localRunAdmission.runId === response.run_id &&
+                localRunAdmission.settledBeforeResponse,
+            );
+            if (runSettledBeforeResponse) {
+              localRunAdmissionRef.current = null;
+            } else {
+              localRunAdmissionRef.current = {
+                threadId: sendThreadId,
+                runId: response.run_id,
+                settledBeforeResponse: false,
+              };
+            }
           }
         } else if (shouldTrackLocalRun) {
+          streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
           localRunAdmissionRef.current = null;
         }
         if (
           response?.run_id &&
           shouldRenderInCurrentThread &&
-          !runSettledBeforeResponse
+          !runSettledBeforeResponse &&
+          !streamErrorClosedAdmission
         ) {
           setActiveRun({
             runId: response.run_id,
@@ -742,6 +768,7 @@ export function useChat(threadId) {
         return response;
       } catch (err) {
         if (shouldTrackLocalRun) {
+          streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
           localRunAdmissionRef.current = null;
         }
         if (err.status === 429) {

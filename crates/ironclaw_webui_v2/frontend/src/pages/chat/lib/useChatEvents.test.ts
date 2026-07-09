@@ -65,6 +65,7 @@ function createUseChatEventsHarness({
   locallyResolvedGatesRef = { current: new Map() },
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
+  onStreamError = () => {},
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -125,6 +126,7 @@ function createUseChatEventsHarness({
     toolActivityStateRef,
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
+    onStreamError,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
@@ -2208,11 +2210,13 @@ test("useChatEvents: typed failed event settles the run as not successful", () =
 
 test("useChatEvents: stream error event appends inline error and clears active state", () => {
   const seenStreamErrors = [];
+  const callerStreamErrors = [];
   const harness = createUseChatEventsHarness({
     failureMessageForStreamError: (input) => {
       seenStreamErrors.push(input);
       return "The chat stream failed inline.";
     },
+    onStreamError: (input) => callerStreamErrors.push(input),
   });
   harness.setCurrentActiveRun({
     runId: "run-stream-error",
@@ -2244,6 +2248,18 @@ test("useChatEvents: stream error event appends inline error and clears active s
   assert.equal(harness.messages[0].role, "error");
   assert.equal(harness.messages[0].content, "The chat stream failed inline.");
   assert.deepEqual(plain(seenStreamErrors), [
+    {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  ]);
+  assert.deepEqual(plain(callerStreamErrors), [
+    {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
     {
       error: "unavailable",
       kind: "service_unavailable",

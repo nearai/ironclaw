@@ -5586,6 +5586,93 @@ test("useChat.send: clears local admission when navigating away before settlemen
   assert.equal(sendCalls, 2);
 });
 
+test("useChat.send: stream error clears same-thread local admission", async () => {
+  const threadId = "thread-stream-error";
+  let renderedMessages = [];
+  let sendCalls = 0;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: `msg:stream-error-${sendCalls}`,
+        run_id: `run-${sendCalls}`,
+        status: "queued",
+        thread_id: threadId,
+        content,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const first = await chat.send("first request");
+  assert.equal(first.run_id, "run-1");
+
+  context.chatEventsArgs.setPendingGate(null);
+  context.chatEventsArgs.setIsProcessing(false);
+  context.chatEventsArgs.setActiveRun(null);
+  context.chatEventsArgs.onStreamError({
+    error: "unavailable",
+    kind: "service_unavailable",
+    retryable: true,
+  });
+
+  const second = await chat.send("retry after stream error");
+
+  assert.equal(second.run_id, "run-2");
+  assert.equal(sendCalls, 2);
+});
+
 test("useChat.send: a send to another thread is not blocked by an unsettled run (submitBusyRef deadlock #5256)", async () => {
   // The deadlock that hand-rolled unit fixtures missed: `submitBusyRef` is set
   // on send and was only released in `onRunSettled` (delivered over the *open*
