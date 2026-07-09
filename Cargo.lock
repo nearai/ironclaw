@@ -3941,7 +3941,6 @@ dependencies = [
  "ironclaw_mcp",
  "ironclaw_memory",
  "ironclaw_network",
- "ironclaw_oauth",
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_adapters",
@@ -4103,6 +4102,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "urlencoding",
  "uuid",
 ]
 
@@ -4639,16 +4639,6 @@ dependencies = [
  "tokio",
  "url",
  "zeroize",
-]
-
-[[package]]
-name = "ironclaw_oauth"
-version = "0.1.0"
-dependencies = [
- "ironclaw_common",
- "thiserror 2.0.18",
- "tokio",
- "urlencoding",
 ]
 
 [[package]]
