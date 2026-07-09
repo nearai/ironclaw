@@ -27,7 +27,13 @@ impl NetworkResolver for SystemNetworkResolver {
     }
 }
 
-pub(crate) fn resolve_public_ips<R>(
+/// Resolve a target and reject private or host-local answers when
+/// `policy.deny_private_ip_ranges` is set.
+///
+/// This is not a full policy authorizer: callers must separately enforce
+/// `allowed_targets`, method, and egress-byte limits before using the resolved
+/// addresses.
+pub fn resolve_public_ips<R>(
     target: &NetworkTarget,
     policy: &NetworkPolicy,
     resolver: &R,

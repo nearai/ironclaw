@@ -2,7 +2,7 @@
 // its test module; includes restore-time compatibility cleanup for the retired
 // slack_user companion from the model-B remodel
 // (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
@@ -17,10 +17,12 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkPolicy, NetworkScheme,
+    NetworkTarget, NetworkTargetPattern, PermissionMode, ResourceScope,
     RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
     VirtualPath, sha256_digest_token,
 };
+use ironclaw_network::{NetworkResolver, SystemNetworkResolver, resolve_public_ips};
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
@@ -94,6 +96,7 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 use active_publication::extension_trust_policy_input;
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
+const REGISTERED_MCP_DNS_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
@@ -575,13 +578,14 @@ impl RebornLocalExtensionManagementPort {
         url: String,
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let _operation_guard = self.operation_lock.lock().await;
         let input = RegisterHostedMcpDescriptorInput { name, url };
         let draft = RegisteredExtensionStore::synthesize_hosted_mcp_manifest_toml(owner, &input)?;
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             draft.extension_id().as_str(),
         )?;
+        validate_registered_mcp_public_target(draft.normalized_url()).await?;
+        let _operation_guard = self.operation_lock.lock().await;
         let installation_id =
             ExtensionInstallationId::new(draft.extension_id().as_str().to_string())
                 .map_err(map_extension_installation_error)?;
@@ -1648,6 +1652,60 @@ fn registered_descriptor_input_from_available(
     })
 }
 
+async fn validate_registered_mcp_public_target(url: &str) -> Result<(), ProductWorkflowError> {
+    let url = url.to_string();
+    let validation = tokio::task::spawn_blocking(move || {
+        validate_registered_mcp_public_target_with_resolver(&url, &SystemNetworkResolver)
+    });
+    match tokio::time::timeout(REGISTERED_MCP_DNS_VALIDATION_TIMEOUT, validation).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(ProductWorkflowError::Transient {
+            reason: format!("registered MCP URL public IP validation worker failed: {error}"),
+        }),
+        Err(_) => Err(ProductWorkflowError::Transient {
+            reason: "registered MCP URL public IP validation timed out".to_string(),
+        }),
+    }
+}
+
+fn validate_registered_mcp_public_target_with_resolver<R>(
+    url: &str,
+    resolver: &R,
+) -> Result<(), ProductWorkflowError>
+where
+    R: NetworkResolver,
+{
+    let parsed =
+        url::Url::parse(url).map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("registered MCP URL is invalid: {error}"),
+        })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+            reason: "registered MCP URL must include a host".to_string(),
+        })?
+        .to_ascii_lowercase();
+    let target = NetworkTarget {
+        scheme: NetworkScheme::Https,
+        host: host.clone(),
+        port: parsed.port(),
+    };
+    let policy = NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: host,
+            port: parsed.port(),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: None,
+    };
+    resolve_public_ips(&target, &policy, resolver, 0)
+        .map(|_| ())
+        .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("registered MCP URL failed public IP validation: {error}"),
+        })
+}
+
 /// Build an [`ExtensionInstallPlan`] that carries the new manifest hash from `available`
 /// while preserving the activation state and credential bindings from `existing`.
 /// Used during restore to migrate a stored installation when the bundled manifest changes.
@@ -1994,6 +2052,7 @@ fn compensation_failure(
 mod tests {
     use std::{
         collections::BTreeSet,
+        net::IpAddr,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -4216,7 +4275,7 @@ output_schema_ref = "schemas/search.output.json"
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRegister {
                     name: "Acme MCP".to_string(),
-                    url: "https://mcp.example.com/mcp/".to_string(),
+                    url: "https://93.184.216.34/mcp/".to_string(),
                 },
             )
             .await
@@ -4266,6 +4325,48 @@ output_schema_ref = "schemas/search.output.json"
         ));
     }
 
+    #[test]
+    fn registered_mcp_public_target_validation_rejects_private_literal() {
+        let error = validate_registered_mcp_public_target_with_resolver(
+            "https://127.0.0.1/mcp",
+            &StaticTestNetworkResolver::new(vec![public_ip("93.184.216.34")]),
+        )
+        .expect_err("loopback literal is rejected before DNS");
+
+        assert!(
+            error.to_string().contains("private"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn registered_mcp_public_target_validation_rejects_dns_private_and_mixed_answers() {
+        for resolved in [
+            vec![private_ip("10.0.0.5")],
+            vec![public_ip("93.184.216.34"), private_ip("192.168.1.10")],
+        ] {
+            let error = validate_registered_mcp_public_target_with_resolver(
+                "https://mcp.example.test/mcp",
+                &StaticTestNetworkResolver::new(resolved),
+            )
+            .expect_err("private DNS answer is rejected");
+
+            assert!(
+                error.to_string().contains("private"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_mcp_public_target_validation_accepts_public_dns_answers() {
+        validate_registered_mcp_public_target_with_resolver(
+            "https://mcp.example.test/mcp",
+            &StaticTestNetworkResolver::new(vec![public_ip("93.184.216.34"), public_ip("1.1.1.1")]),
+        )
+        .expect("public DNS answers are accepted");
+    }
+
     #[tokio::test]
     async fn extension_register_same_url_is_idempotent_without_deleting_existing_descriptor() {
         let (_dir, storage_root, facade, _active_registry, installation_store) =
@@ -4278,7 +4379,7 @@ output_schema_ref = "schemas/search.output.json"
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRegister {
                     name: "Acme MCP".to_string(),
-                    url: "https://mcp.example.com/mcp".to_string(),
+                    url: "https://93.184.216.34/mcp".to_string(),
                 },
             )
             .await
@@ -4289,7 +4390,7 @@ output_schema_ref = "schemas/search.output.json"
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRegister {
                     name: "Acme MCP".to_string(),
-                    url: "https://mcp.example.com/mcp/".to_string(),
+                    url: "https://93.184.216.34/mcp/".to_string(),
                 },
             )
             .await
@@ -4328,7 +4429,7 @@ output_schema_ref = "schemas/search.output.json"
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRegister {
                     name: "Acme MCP".to_string(),
-                    url: "https://old.example.com/mcp".to_string(),
+                    url: "https://1.1.1.1/mcp".to_string(),
                 },
             )
             .await
@@ -4339,7 +4440,7 @@ output_schema_ref = "schemas/search.output.json"
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRegister {
                     name: "Acme MCP".to_string(),
-                    url: "https://new.example.com/mcp".to_string(),
+                    url: "https://8.8.8.8/mcp".to_string(),
                 },
             )
             .await
@@ -4389,8 +4490,8 @@ output_schema_ref = "schemas/search.output.json"
     #[tokio::test]
     async fn extension_register_same_name_update_rolls_back_replacement_when_prior_remove_fails() {
         let owner = UserId::new("lifecycle-owner").expect("valid user");
-        let old_url = "https://old.example.com/mcp";
-        let new_url = "https://new.example.com/mcp";
+        let old_url = "https://1.1.1.1/mcp";
+        let new_url = "https://8.8.8.8/mcp";
         let old_id = RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, old_url)
             .expect("old id");
         let new_id = RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, new_url)
@@ -4479,7 +4580,7 @@ output_schema_ref = "schemas/search.output.json"
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionRegister {
                     name: "Acme MCP".to_string(),
-                    url: "https://mcp.example.com/mcp".to_string(),
+                    url: "https://93.184.216.34/mcp".to_string(),
                 },
             )
             .await
@@ -4520,7 +4621,7 @@ output_schema_ref = "schemas/search.output.json"
     #[tokio::test]
     async fn extension_unregister_descriptor_delete_failure_keeps_lifecycle_installation() {
         let owner = UserId::new("lifecycle-owner").expect("valid user");
-        let url = "https://mcp.example.com/mcp";
+        let url = "https://93.184.216.34/mcp";
         let extension_id =
             RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, url).expect("id");
         let (dir, port, _active_registry, installation_store, _trust_policy) =
@@ -4578,7 +4679,7 @@ output_schema_ref = "schemas/search.output.json"
             );
         let storage_root = dir.path().join("local-dev");
         let owner = UserId::new("lifecycle-owner").expect("valid user");
-        let url = "https://rollback.example.com/mcp";
+        let url = "https://9.9.9.9/mcp";
         let extension_id =
             RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, url).expect("mint id");
 
@@ -5824,6 +5925,34 @@ output_schema_ref = "schemas/search.output.json"
             InvocationId::new(),
         )
         .expect("valid local scope")
+    }
+
+    struct StaticTestNetworkResolver {
+        ips: Vec<IpAddr>,
+    }
+
+    impl StaticTestNetworkResolver {
+        fn new(ips: Vec<IpAddr>) -> Self {
+            Self { ips }
+        }
+    }
+
+    impl NetworkResolver for StaticTestNetworkResolver {
+        fn resolve_ips(
+            &self,
+            _host: &str,
+            _port: u16,
+        ) -> Result<Vec<IpAddr>, ironclaw_network::NetworkHttpError> {
+            Ok(self.ips.clone())
+        }
+    }
+
+    fn public_ip(raw: &str) -> IpAddr {
+        raw.parse().expect("public IP")
+    }
+
+    fn private_ip(raw: &str) -> IpAddr {
+        raw.parse().expect("private IP")
     }
 
     struct FailsSecondCredentialGate {

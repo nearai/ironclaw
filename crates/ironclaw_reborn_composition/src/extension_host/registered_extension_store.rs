@@ -429,6 +429,10 @@ impl RegisteredHostedMcpDescriptorDraft {
         &self.manifest_toml
     }
 
+    pub(crate) fn normalized_url(&self) -> &str {
+        &self.normalized_url
+    }
+
     fn into_descriptor(self) -> RegisteredHostedMcpDescriptor {
         RegisteredHostedMcpDescriptor {
             extension_id: self.extension_id,
