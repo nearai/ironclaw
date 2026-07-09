@@ -519,11 +519,15 @@ impl ProductConversationBindingService {
             return Ok(());
         }
         actor_pairings
-            .unpair_external_actor(
-                installation_scope.tenant_id.clone(),
-                conversation_adapter_kind(&request.adapter_id)?,
-                conversation_installation_id(&request.installation_id)?,
-                conversation_actor_ref(&request.external_actor_ref)?,
+            .unpair_external_actor_if_owned_by(
+                &installation_scope.tenant_id,
+                &conversation_adapter_kind(&request.adapter_id)?,
+                &conversation_installation_id(&request.installation_id)?,
+                &conversation_actor_ref(&request.external_actor_ref)?,
+                &ironclaw_conversations::ExpectedExternalActorOwner {
+                    user_id: expected_actor.user_id.clone(),
+                    binding_epoch: expected_actor.binding_epoch.clone(),
+                },
             )
             .await
             .map_err(map_conversation_error)?;

@@ -4171,6 +4171,58 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
 }
 
 #[tokio::test]
+async fn actor_user_resolver_revalidation_cannot_unpair_a_newer_generation() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let actor_ref = ExternalActorRef::new("test", "user1", None::<String>).expect("actor");
+    let user_id = UserId::new("user:resolved-slack").expect("user");
+    let actor_resolver = Arc::new(ReplacingProductActorUserResolver::new(
+        conversations.clone(),
+        actor_ref,
+        user_id.clone(),
+    ));
+    let binding =
+        product_binding_service_with_actor_user_resolver_arc(conversations.clone(), actor_resolver);
+
+    binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&sample_envelope(
+            "resolver-replaced-mid-resolution",
+        )))
+        .await
+        .expect_err("a generation change during resolution must reject the stale turn");
+
+    let resolution = conversations
+        .lookup_binding(ironclaw_conversations::ResolveConversationRequest {
+            tenant_id: TenantId::new("tenant:alpha").expect("tenant"),
+            adapter_kind: ironclaw_conversations::AdapterKind::new("test_adapter")
+                .expect("adapter"),
+            adapter_installation_id: ironclaw_conversations::AdapterInstallationId::new(
+                "install_alpha",
+            )
+            .expect("install"),
+            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+                .expect("actor"),
+            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+                None, "conv1", None, None,
+            )
+            .expect("conversation"),
+            external_event_id: ironclaw_conversations::ExternalEventId::new(
+                "evt:resolver-replaced-mid-resolution-lookup",
+            )
+            .expect("event"),
+            route_kind: ironclaw_conversations::ConversationRouteKind::Direct,
+            requested_agent_id: Some(AgentId::new("agent:alpha").expect("agent")),
+            requested_project_id: Some(ProjectId::new("project:alpha").expect("project")),
+        })
+        .await
+        .expect("stale generation cleanup must preserve the replacement pairing and route");
+    assert_eq!(resolution.actor.user_id, user_id);
+    assert_eq!(
+        resolution.binding_epoch,
+        Some(ExternalActorBindingEpoch::new("generation-2").expect("epoch"))
+    );
+}
+
+#[tokio::test]
 async fn actor_user_resolver_propagates_resolver_error_without_turn_submission() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let binding = product_binding_service_with_actor_user_resolver_arc(
@@ -6484,6 +6536,63 @@ struct RevokingProductActorUserResolver {
     actor_ref: ExternalActorRef,
     user_id: UserId,
     calls: AtomicUsize,
+}
+
+struct ReplacingProductActorUserResolver {
+    conversations: Arc<InMemoryConversationServices>,
+    actor_ref: ExternalActorRef,
+    user_id: UserId,
+    calls: AtomicUsize,
+}
+
+impl ReplacingProductActorUserResolver {
+    fn new(
+        conversations: Arc<InMemoryConversationServices>,
+        actor_ref: ExternalActorRef,
+        user_id: UserId,
+    ) -> Self {
+        Self {
+            conversations,
+            actor_ref,
+            user_id,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ProductActorUserResolver for ReplacingProductActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if request.external_actor_ref != self.actor_ref {
+            return Ok(None);
+        }
+        let epoch = if call == 0 {
+            ExternalActorBindingEpoch::new("generation-1").expect("epoch")
+        } else {
+            let epoch = ExternalActorBindingEpoch::new("generation-2").expect("epoch");
+            self.conversations
+                .pair_external_actor_with_epoch(
+                    TenantId::new("tenant:alpha").expect("tenant"),
+                    ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+                    ironclaw_conversations::AdapterInstallationId::new("install_alpha")
+                        .expect("install"),
+                    ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+                    self.user_id.clone(),
+                    epoch.clone(),
+                )
+                .await
+                .expect("replace actor generation");
+            epoch
+        };
+        Ok(Some(ResolvedProductActorUser::with_binding_epoch(
+            self.user_id.clone(),
+            epoch,
+        )))
+    }
 }
 
 impl RevokingProductActorUserResolver {
