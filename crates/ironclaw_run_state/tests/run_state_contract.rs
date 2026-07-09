@@ -12,6 +12,30 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 
+#[test]
+fn legacy_run_record_without_authenticated_actor_deserializes_to_none() {
+    let invocation_id = InvocationId::new();
+    let mut serialized = serde_json::to_value(RunRecord {
+        invocation_id,
+        capability_id: CapabilityId::new("echo.say").unwrap(),
+        scope: sample_scope(invocation_id, "tenant1", "user1"),
+        authenticated_actor_user_id: Some(UserId::new("slack-alice").unwrap()),
+        status: RunStatus::BlockedAuth,
+        approval_request_id: None,
+        error_kind: Some("AuthRequired".to_string()),
+    })
+    .unwrap();
+    serialized
+        .as_object_mut()
+        .expect("run record serializes as an object")
+        .remove("authenticated_actor_user_id");
+
+    let legacy_record: RunRecord = serde_json::from_value(serialized).unwrap();
+
+    assert_eq!(legacy_record.authenticated_actor_user_id, None);
+    assert_eq!(legacy_record.status, RunStatus::BlockedAuth);
+}
+
 #[tokio::test]
 async fn in_memory_run_state_tracks_running_to_completed() {
     let store = InMemoryRunStateStore::new();

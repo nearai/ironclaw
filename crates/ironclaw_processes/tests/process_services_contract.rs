@@ -122,7 +122,10 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
         ..ResourceEstimate::default()
     };
     let reservation_id = ResourceReservationId::new();
+    let authenticated_actor_user_id =
+        UserId::new("slack-alice").expect("valid authenticated actor user id");
     let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.authenticated_actor_user_id = Some(authenticated_actor_user_id.clone());
     start.mounts = mounts.clone();
     start.estimated_resources = estimate.clone();
     start.resource_reservation_id = Some(reservation_id);
@@ -132,6 +135,10 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
     let request = executor.wait_for_request().await;
     assert_eq!(request.process_id, process_id);
     assert_eq!(request.scope, scope);
+    assert_eq!(
+        request.authenticated_actor_user_id,
+        Some(authenticated_actor_user_id.clone())
+    );
     assert_eq!(request.mounts, mounts);
     let reservation = request
         .resource_reservation
@@ -139,6 +146,16 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
     assert_eq!(reservation.id, reservation_id);
     assert_eq!(reservation.scope, request.scope);
     assert_eq!(reservation.estimate, estimate);
+    assert_eq!(
+        services
+            .process_store()
+            .get(&scope, process_id)
+            .await
+            .unwrap()
+            .expect("process record must be persisted")
+            .authenticated_actor_user_id,
+        Some(authenticated_actor_user_id)
+    );
 }
 
 struct SuccessExecutor;

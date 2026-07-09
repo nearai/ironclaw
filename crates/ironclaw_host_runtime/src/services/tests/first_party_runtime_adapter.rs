@@ -69,8 +69,10 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
     assert_eq!(recorded.1.as_ref().map(UserId::as_str), Some("slack-alice"));
 }
 
+type RecordedActorRequest = (ironclaw_host_api::ResourceScope, Option<UserId>);
+
 struct RecordingActorFirstPartyHandler {
-    recorded: Arc<Mutex<Option<(ironclaw_host_api::ResourceScope, Option<UserId>)>>>,
+    recorded: Arc<Mutex<Option<RecordedActorRequest>>>,
 }
 
 #[async_trait]

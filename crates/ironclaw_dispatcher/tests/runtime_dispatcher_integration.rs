@@ -57,12 +57,14 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
     .with_event_sink_arc(Arc::new(events.clone()));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
+    let authenticated_actor_user_id =
+        UserId::new("slack-alice").expect("valid authenticated actor user id");
 
     let result = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
-            authenticated_actor_user_id: None,
+            authenticated_actor_user_id: Some(authenticated_actor_user_id.clone()),
             estimate: ResourceEstimate {
                 concurrency_slots: Some(1),
                 output_bytes: Some(10_000),
@@ -93,6 +95,10 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
     assert_eq!(requests[0].network_mode, NetworkMode::Deny);
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(
+        requests[0].authenticated_actor_user_id,
+        Some(authenticated_actor_user_id)
+    );
     assert_eq!(requests[0].mounts, Some(mounts));
     assert_eq!(
         requests[0].input,
