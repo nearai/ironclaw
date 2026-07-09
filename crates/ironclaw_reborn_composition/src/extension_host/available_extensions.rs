@@ -1688,14 +1688,33 @@ where
                 reason: format!("available extension manifest is not UTF-8: {error}"),
             }
         })?;
-        let record = ExtensionManifestRecord::from_toml_with_contracts(
+        let record = match ExtensionManifestRecord::from_toml_with_contracts(
             manifest_toml,
             source.clone(),
             &host_ports,
             None,
             &contracts,
-        )
-        .map_err(map_binding_error)?;
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                // Skip-and-log, not `?`: this loop is shared by every owner's
+                // registered-store listing (`RegisteredExtensionStore::list_for_owner`/
+                // `list_all`, reached from both the live search path and boot-time
+                // `resolve_any_owner_for_restore`). Propagating a single owner's
+                // unparseable `manifest.toml` here would hard-fail every other
+                // owner's listing and boot restore — a cross-tenant DoS via one
+                // corrupt descriptor. `debug!` (not `warn!`/`info!`): this loop
+                // runs on a live/foreground search path as well as boot, and
+                // per CLAUDE.md `info!`/`warn!` corrupt the REPL/TUI — this is
+                // internal diagnostic, not REPL-intentional user-facing status.
+                tracing::debug!(
+                    path = %entry.path.as_str(),
+                    error = %error,
+                    "skipping unparseable available extension manifest"
+                );
+                continue;
+            }
+        };
         let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
         let manifest = record
             .manifest()
