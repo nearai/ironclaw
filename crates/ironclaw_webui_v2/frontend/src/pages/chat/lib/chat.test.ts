@@ -80,6 +80,7 @@ function renderChat({
   runEffects = false,
   threadStateUpdates = [],
   globalAutoApproveEnabled = false,
+  showChatLogsShortcut = true,
 }) {
   const components = {
     ApprovalCard() {},
@@ -106,7 +107,10 @@ function renderChat({
       },
       useMemo: (fn) => fn(),
       useRef: (initial) => ({ current: initial }),
-      useState: (initial) => [initial, () => {}],
+      useState: (initial) => [
+        typeof initial === "function" ? initial() : initial,
+        () => {},
+      ],
     },
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
@@ -126,6 +130,7 @@ function renderChat({
       removeEventListener: () => {},
     },
     useChat: () => hookState,
+    useInterfacePreferences: () => ({ showChatLogsShortcut }),
     useT: () => (key) => key,
   };
 
@@ -201,6 +206,105 @@ test("Chat leaves the composer editable while a run is processing", () => {
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.disabled, false);
   assert.equal(props.sendDisabled, true);
+});
+
+test("Chat shows typing indicator before assistant text streams", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1", role: "user", content: "hello" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  assert.ok(findComponent(tree, components.TypingIndicator));
+});
+
+test("Chat hides typing indicator once the active run streams assistant text", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [
+        { id: "message-1", role: "user", content: "hello" },
+        {
+          id: "text-text:run-1",
+          role: "assistant",
+          content: "H",
+          isFinalReply: false,
+          turnRunId: "run-1",
+        },
+      ],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  assert.equal(findComponent(tree, components.TypingIndicator), null);
+});
+
+test("Chat keeps typing indicator when streamed text belongs to another run", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [
+        { id: "message-1", role: "user", content: "hello" },
+        {
+          id: "text-text:run-0",
+          role: "assistant",
+          content: "old text",
+          isFinalReply: false,
+          turnRunId: "run-0",
+        },
+      ],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
 test("Chat refuses composer sends while a run is processing", async () => {
@@ -523,6 +627,35 @@ test("Chat does not render a top-level logs header for the active thread run", (
     null,
     "active run logs link should not render as a duplicate top header bar",
   );
+});
+
+test("Chat hides the floating thread logs shortcut when the preference is off", () => {
+  const { tree, components } = renderChat({
+    showChatLogsShortcut: false,
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(componentProps(messageList, components.MessageList).logsPath, null);
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {

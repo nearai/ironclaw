@@ -217,6 +217,7 @@ registerPack("es", {
 
   // Settings tabs
   "settings.inference": "Inferencia",
+  "settings.appearance": "Apariencia",
   "settings.agent": "Agente",
   "settings.channels": "Canales",
   "settings.networking": "Red",
@@ -252,6 +253,10 @@ registerPack("es", {
   "traceCommons.lastSyncDesc": "Vista local a fecha de la última sincronización",
   "traceCommons.never": "nunca",
   "traceCommons.recentExplanations": "Explicaciones de crédito recientes",
+  "traceCommons.openAccount": "Abrir cuenta de Trace Commons",
+  "traceCommons.openingAccount": "Abriendo…",
+  "traceCommons.openAccountFailed":
+    "No se pudo abrir tu cuenta de Trace Commons. Comprueba la inscripción e inténtalo de nuevo.",
   "traceCommons.submittedTracesTitle": "Trazas enviadas",
   "traceCommons.tracesLoadFailed": "No se pudieron cargar tus trazas enviadas.",
   "traceCommons.traceStatus": "Estado",
@@ -280,6 +285,9 @@ registerPack("es", {
   "settings.restartNow": "Reiniciar ahora",
   "settings.restartStarting": "Reiniciando...",
   "settings.restartUnavailable": "Reiniciar desde la interfaz web aún no está disponible. Reinicia el proceso del gateway manualmente para aplicar los cambios pendientes.",
+  "settings.field.showChatTerminalShortcut": "Mostrar acceso directo al terminal del chat",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Muestra el icono flotante de terminal/registros dentro de los hilos de chat.",
 
   // Restart dialog
   "restart.title": "Reiniciar IronClaw",

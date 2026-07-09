@@ -106,7 +106,6 @@ use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
@@ -117,6 +116,7 @@ use crate::outbound::{
     RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -135,16 +135,16 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![self.entry.clone()])
     }
 }
-use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
-    TriggerPollerSettings,
-};
 #[cfg(any(test, feature = "test-support"))]
-use crate::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
-use crate::trigger_poller::{
+use crate::automation::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
+use crate::automation::trigger_poller::{
     AccessCheckerTriggerFireAuthorizer, ConversationContentRefMaterializer,
     SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps,
     TriggerPollerRuntimeHandle, spawn_trigger_poller,
+};
+use crate::runtime_input::{
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
+    TriggerPollerSettings,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornReadiness,
@@ -950,8 +950,10 @@ fn build_trigger_fire_authorizer(
     authorizer_config: TriggerPollerAuthorizerConfig,
     access_checker: Option<Arc<dyn crate::runtime_input::TriggerFireAccessChecker>>,
     tenant_id: TenantId,
-) -> Result<Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>, RebornRuntimeError>
-{
+) -> Result<
+    Arc<dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
+    RebornRuntimeError,
+> {
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = tenant_id;
     match authorizer_config {
@@ -962,7 +964,9 @@ fn build_trigger_fire_authorizer(
         TriggerPollerAuthorizerConfig::CreatorAccessRequired => access_checker
             .map(|checker| {
                 Arc::new(AccessCheckerTriggerFireAuthorizer::new(checker))
-                    as Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>
+                    as Arc<
+                        dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer,
+                    >
             })
             .ok_or_else(trigger_poller_authorization_required_error),
     }
@@ -979,7 +983,7 @@ fn build_trigger_poller_services_from_conversation_services<B, S>(
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
     default_agent_id: AgentId,
-    authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
+    authorizer: Arc<dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
 ) -> TriggerPollerServicesInner
 where
     B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
@@ -1441,11 +1445,13 @@ impl RebornRuntime {
     }
 
     /// Public NEAR AI login callback mount for the host ingress to merge via
-    /// [`crate::webui_serve::WebuiServeConfig::with_public_route_mount`]. Built
+    /// [`crate::webui::webui_serve::WebuiServeConfig::with_public_route_mount`]. Built
     /// from the runtime's private session/reload/boot so those stay internal.
     /// `None` when no LLM seam or boot config was wired.
     #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
-    pub fn nearai_login_callback_mount(&self) -> Option<crate::webui_serve::PublicRouteMount> {
+    pub fn nearai_login_callback_mount(
+        &self,
+    ) -> Option<crate::webui::webui_serve::PublicRouteMount> {
         let boot = self.boot.clone()?;
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
@@ -3562,13 +3568,14 @@ pub async fn build_reborn_runtime(
             Arc::clone(&trace_capture_scopes),
         ),
     );
+    let projection_turn_event_wake_sink = projection_services.turn_event_wake_sink();
     // Skill learning shares the turn-end seam with trace capture (composed
     // additively, so the trace-capture path is unchanged). It is active only
     // when a learning model is configured (a stronger model than the run's, via
     // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
     #[cfg_attr(not(feature = "root-llm-provider"), allow(unused_mut))]
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
-        vec![trace_capture_sink];
+        vec![trace_capture_sink, projection_turn_event_wake_sink];
     #[cfg(feature = "root-llm-provider")]
     let mut skill_learning_extraction_tasks: Option<
         Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>,
@@ -3635,7 +3642,7 @@ pub async fn build_reborn_runtime(
                     lifecycle_facade.with_extension_management(Arc::clone(extension_management));
             }
             Some(Arc::new(
-                crate::communication_context::RuntimeCommunicationContextProvider::new(
+                crate::root::communication_context::RuntimeCommunicationContextProvider::new(
                     outbound_preferences_facade,
                 )
                 .with_lifecycle_facade(Arc::new(lifecycle_facade)),
@@ -5071,7 +5078,7 @@ output_schema_ref = "schemas/write.output.json"
         TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
         TriggerPollerSettings,
     };
-    use crate::webui::build_webui_services;
+    use crate::webui::facade::build_webui_services;
     use crate::{
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
     };

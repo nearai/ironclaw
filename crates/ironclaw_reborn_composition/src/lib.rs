@@ -29,8 +29,6 @@ mod admin_user_directory;
 mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
-mod communication_context;
-mod default_system_prompt;
 mod error;
 mod extension_host;
 mod factory;
@@ -45,10 +43,8 @@ mod local_runtime_profile;
 mod observability;
 mod outbound;
 mod product_auth;
-mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
-mod profile;
 mod profile_approval_authorization;
 mod projection;
 mod slack;
@@ -61,32 +57,19 @@ mod delivered_gate_routing;
 mod host_ingress;
 mod readiness;
 mod retry_disposition;
+mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
-mod trigger_poller;
-mod trigger_poller_trusted_submit;
 mod turn_run_snapshot;
 mod web_access;
 mod webui;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_body_limit;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_operator_auth;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_rate_limit;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_route_match;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_serve;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_ws_origin;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::RebornAutomationProductFacade;
+pub use automation::facade::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
@@ -185,21 +168,21 @@ pub use product_auth::api::auth::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
-pub use product_live_adapters::{
-    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
-    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
-    capability_allowlist, visible_capability_request_for_run,
-};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
-pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
 pub use retry_disposition::{RetryDisposition, retry_disposition};
+pub use root::product_live_adapters::{
+    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
+    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
+    capability_allowlist, visible_capability_request_for_run,
+};
+pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
@@ -277,11 +260,11 @@ pub use slack::slack_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
-pub use webui::{RebornWebuiBundle, build_webui_services};
+pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_rate_limit::RateLimitConfigError;
+pub use webui::webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_serve::{
+pub use webui::webui_serve::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
     WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,

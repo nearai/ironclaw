@@ -11,7 +11,7 @@ use ironclaw_product_workflow::{
 use crate::{
     RebornBuildError, RebornRuntime, RebornWebuiBundle, SlackHostBetaMounts,
     slack::slack_channel_connection::slack_channel_connection_facade,
-    webui::build_webui_services_with_connectable_channels,
+    webui::facade::build_webui_services_with_connectable_channels,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

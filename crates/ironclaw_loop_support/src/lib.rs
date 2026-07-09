@@ -906,6 +906,7 @@ where
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -935,6 +936,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
+            stream_sink: None,
         }
     }
 
@@ -961,6 +963,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             attachment_read_port: None,
+            stream_sink: None,
         }
     }
 
@@ -1010,6 +1013,11 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_stream_sink(mut self, sink: Arc<dyn HostManagedModelStreamSink>) -> Self {
+        self.stream_sink = Some(sink);
         self
     }
 
@@ -1131,8 +1139,22 @@ where
                 } else {
                     Arc::clone(capabilities)
                 };
+            if let Some(stream_sink) = self.stream_sink.as_ref() {
+                self.gateway
+                    .stream_model_with_capabilities_and_progress(
+                        host_request,
+                        capabilities,
+                        Arc::clone(stream_sink),
+                    )
+                    .await
+            } else {
+                self.gateway
+                    .stream_model_with_capabilities(host_request, capabilities)
+                    .await
+            }
+        } else if let Some(stream_sink) = self.stream_sink.as_ref() {
             self.gateway
-                .stream_model_with_capabilities(host_request, capabilities)
+                .stream_model_with_progress(host_request, Arc::clone(stream_sink))
                 .await
         } else {
             self.gateway.stream_model(host_request).await
@@ -1483,12 +1505,30 @@ pub trait HostManagedModelGateway: Send + Sync {
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError>;
 
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        _sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model(request).await
+    }
+
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
         _capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.stream_model(request).await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        _sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model_with_capabilities(request, capabilities)
+            .await
     }
 
     /// Resolve a scope-specific gateway, if this gateway multiplexes by scope.
@@ -1500,6 +1540,11 @@ pub trait HostManagedModelGateway: Send + Sync {
     ) -> Option<std::sync::Arc<dyn HostManagedModelGateway>> {
         None
     }
+}
+
+#[async_trait::async_trait]
+pub trait HostManagedModelStreamSink: Send + Sync {
+    async fn safe_text_update(&self, safe_text: String);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,6 +3,7 @@ import { Navigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { AgentTab } from "./components/agent-tab";
+import { AppearanceTab } from "./components/appearance-tab";
 import { ChannelsTab } from "./components/channels-tab";
 import { InferenceTab } from "./components/inference-tab";
 import { LanguageTab } from "./components/language-tab";
@@ -49,6 +50,7 @@ export function SettingsPage() {
       isLoading={isLoading}
       searchQuery={searchQuery}
     />),
+    appearance: (<AppearanceTab searchQuery={searchQuery} />),
     agent: (<AgentTab
       settings={settings}
       onSave={save}

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "runtimes"
+
 [dependencies]
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }

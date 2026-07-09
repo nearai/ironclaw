@@ -18,8 +18,9 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{
     CapabilityResultWrite, CapabilityWriteResult, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
+    HostManagedModelResponse, HostManagedModelStreamSink, HostManagedToolResultContent,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 
@@ -784,6 +785,16 @@ impl HostManagedModelGateway for LocalDevResultHydratingModelGateway {
             .await
     }
 
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.inner
+            .stream_model_with_progress(self.hydrate_request(request)?, sink)
+            .await
+    }
+
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
@@ -791,6 +802,21 @@ impl HostManagedModelGateway for LocalDevResultHydratingModelGateway {
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.inner
             .stream_model_with_capabilities(self.hydrate_request(request)?, capabilities)
+            .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.inner
+            .stream_model_with_capabilities_and_progress(
+                self.hydrate_request(request)?,
+                capabilities,
+                sink,
+            )
             .await
     }
 }
