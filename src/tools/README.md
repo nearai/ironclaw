@@ -139,3 +139,22 @@ Both are first-class in the extension system (`ironclaw tool install` handles bo
 | Multiple tools share one OAuth token (e.g., Google suite) | **WASM** |
 
 The LLM-facing interface is identical for both (tool name, schema, execute), so swapping between them is transparent to the agent.
+
+### MCP per-server timeout
+
+Each MCP server has its own per-call transport timeout. The default is **30s**;
+raise it for slow local backends (e.g. a cold 27B sandbox or a long shell job)
+and it is clamped to `5..=21600` seconds (6h). This is **per-server DB config**,
+not an environment variable — set it when adding or editing the server:
+
+```bash
+ironclaw mcp add msbsandbox --transport stdio --command node \
+    --arg /usr/local/lib/msb-mcp-shim.js \
+    --timeout-secs 3600 --allow-background
+```
+
+`--allow-background` (opt-in, default off) marks the server's tools as eligible
+to run as durable background jobs. `mcp add` upserts, so re-running it on an
+existing server name edits these settings in place. The configured timeout also
+becomes the tool's execution cap (so a long call isn't re-clipped to the generic
+60s tool default) and is preserved across automatic stdio-process restarts.
