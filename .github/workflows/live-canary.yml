@@ -630,6 +630,17 @@ jobs:
           fi
           cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
           if [[ -z "${cases}" || "${cases}" == "all" || "${cases}" == "ALL" || "${cases}" == "*" ]]; then
+            if [[ "${DISPATCH_ONLY_SHARD}" == "true" ]]; then
+              # dispatch_only shards run ONLY when one of their cases is
+              # explicitly requested — a bare /canary or default dispatch
+              # (cases=all) must not run an expected-red shard on an
+              # unrelated PR.
+              echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+              echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=dispatch-only-shard-default-cases" >> "${GITHUB_ENV}"
+              echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+              echo "Shard is dispatch_only and no shard case was explicitly requested; skipping."
+              exit 0
+            fi
             echo "CASES=${SHARD_CASES}" >> "${GITHUB_ENV}"
             echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=matrix-shard" >> "${GITHUB_ENV}"
             echo "skip_shard=0" >> "${GITHUB_OUTPUT}"

@@ -107,6 +107,7 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     SLACK_OAUTH_CLIENT_ID_ENV,
     SLACK_OAUTH_CLIENT_SECRET_ENV,
     SLACK_PERSONAL_ACCESS_TOKEN_ENV,
+    SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES,
     SLACK_SIGNING_SECRET_ENV,
     _disable_slack_in_config,
     _discover_slack_dm_route_channel,
@@ -1141,6 +1142,20 @@ class AssistantReplyWaitResult:
 
 ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS = 2.0
 ASSISTANT_REPLY_POLL_SECONDS = 0.5
+# Large enough to hold a full DM digest: qa_9c scans the reply for leaked raw
+# user ids, and a truncated excerpt would silently blind that negative arm.
+ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 16000
+
+
+def _exc_text(exc: BaseException) -> str:
+    """Human-readable exception text for probe failure details.
+
+    `str()` of many timeout classes (asyncio.TimeoutError, httpx transport
+    timeouts) is empty, which previously produced probe failures with an
+    empty `error` field. Fall back to `repr()` so the type is preserved.
+    """
+    text = str(exc).strip()
+    return text if text else repr(exc)
 
 
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
@@ -1174,7 +1189,13 @@ def _record_assistant_reply_wait_result(
         observed["semantic_judge"] = reply.semantic_judge
 
 
-def _routine_confirmation_follow_up_for_text(text: str) -> str | None:
+def _routine_confirmation_follow_up_for_text(
+    text: str,
+    *,
+    schedule_timezone_instruction: str = (
+        "Use Europe/London (London time) for the schedule."
+    ),
+) -> str | None:
     normalized = text.lower()
     asks_for_timezone = "timezone" in normalized or "time zone" in normalized
     asks_for_confirmation = any(
@@ -1192,10 +1213,11 @@ def _routine_confirmation_follow_up_for_text(text: str) -> str | None:
         for phrase in ("routine", "trigger", "automation", "schedule", "cron")
     )
     if routine_context and (asks_for_timezone or asks_for_confirmation):
-        return (
-            "Yes, go ahead and create it. Use Europe/London (London time) "
-            "for the schedule."
-        )
+        # Cases that pin a timezone in the creation prompt must pass a
+        # matching instruction here: answering a clarifying question with a
+        # DIFFERENT timezone than the prompt (e.g. London vs a UTC one-shot)
+        # can shift a one-shot fire outside the delivery wait window.
+        return f"Yes, go ahead and create it. {schedule_timezone_instruction}"
     return None
 
 
@@ -1210,6 +1232,7 @@ async def _live_chat_case(
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
     routine_confirmation_follow_up: bool = False,
+    routine_follow_up_timezone_instruction: str | None = None,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1251,7 +1274,14 @@ async def _live_chat_case(
         )
         _record_assistant_reply_wait_result(observed, reply)
         if routine_confirmation_follow_up:
-            follow_up = _routine_confirmation_follow_up_for_text(reply.text_excerpt)
+            follow_up_kwargs: dict[str, str] = {}
+            if routine_follow_up_timezone_instruction:
+                follow_up_kwargs["schedule_timezone_instruction"] = (
+                    routine_follow_up_timezone_instruction
+                )
+            follow_up = _routine_confirmation_follow_up_for_text(
+                reply.text_excerpt, **follow_up_kwargs
+            )
             if follow_up:
                 observed["routine_confirmation_follow_up_sent"] = follow_up
                 observed["routine_confirmation_initial_text_excerpt"] = (
@@ -1304,7 +1334,7 @@ async def _live_chat_case(
             False,
             started,
             {
-                "error": str(exc),
+                "error": _exc_text(exc),
                 "prompt": prompt,
                 "marker": marker,
                 "required_text": required_text,
@@ -1410,7 +1440,7 @@ async def _live_chat_with_extensions_case(
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
     except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc), **observed})
+        return _result(case_name, False, started, {"error": _exc_text(exc), **observed})
 
 
 async def _dismiss_visible_connect_action(page: object) -> bool:
@@ -1488,7 +1518,7 @@ async def _wait_for_assistant_reply(
                         await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
                         continue
                 return AssistantReplyWaitResult(
-                    text_excerpt=text[-2000:],
+                    text_excerpt=text[-ASSISTANT_REPLY_EXCERPT_MAX_CHARS:],
                     semantic_judge_used=False,
                     semantic_judge_reason="literal_required_text_matched",
                     final_reply_wait_ms=int((time.monotonic() - started) * 1000),
@@ -1515,7 +1545,7 @@ async def _wait_for_assistant_reply(
         )
         if _semantic_judge_passed(semantic_judge):
             return AssistantReplyWaitResult(
-                text_excerpt=last_text[-2000:],
+                text_excerpt=last_text[-ASSISTANT_REPLY_EXCERPT_MAX_CHARS:],
                 semantic_judge_used=True,
                 semantic_judge_reason="semantic_judge_completed",
                 final_reply_wait_ms=int((time.monotonic() - started) * 1000),
@@ -1756,36 +1786,97 @@ def _trigger_run_rows(reborn_home: Path, routine_name: str) -> list[dict[str, ob
     return [dict(row) for row in rows]
 
 
-def _trigger_record_delivery_target(
-    reborn_home: Path, routine_name: str
-) -> dict[str, object]:
-    """Read the per-trigger delivery target persisted on the trigger record.
+def _parse_epoch_seconds(value: object) -> float | None:
+    """Parse the trigger store's RFC3339 timestamps (nanosecond precision,
+    trailing Z) into epoch seconds. Returns None when unparseable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    # datetime.fromisoformat rejects nanosecond fractions and (pre-3.11) 'Z'.
+    text = re.sub(r"\.\d+", "", text).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
-    Returns `{"column_missing": True}` when the server predates per-trigger
-    delivery routing (no `delivery_target` column) so probe cases can report
-    the missing capability instead of an opaque sqlite error.
-    """
+
+def _outbound_final_reply_targets(reborn_home: Path) -> dict[str, object]:
+    """Every persisted user-default final-reply target, keyed by row path.
+
+    qa_9d compares this before creation and after delivery: per-trigger
+    routing must NOT be implemented by silently rewriting the user-wide
+    default delivery target."""
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    targets: dict[str, object] = {}
     if not db_path.exists():
-        return {"checked": False, "error": "reborn-local-dev.db missing"}
+        return targets
     try:
         with closing(sqlite3.connect(db_path)) as db:
-            db.row_factory = sqlite3.Row
             rows = db.execute(
-                "SELECT delivery_target FROM trigger_records WHERE name = ?",
+                "SELECT path, contents FROM root_filesystem_entries "
+                "WHERE path LIKE '%/outbound/communication-preferences/%' "
+                "AND is_dir = 0"
+            ).fetchall()
+    except sqlite3.Error:
+        return targets
+    for path, contents in rows:
+        if isinstance(contents, bytes):
+            contents = contents.decode("utf-8", "replace")
+        try:
+            record = json.loads(contents) if contents else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(record, dict):
+            targets[str(path)] = record.get("final_reply_target")
+    return targets
+
+
+def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, object]:
+    """Read count/schedule/delivery-target facts for one routine from the
+    server DB.
+
+    `delivery_target_column_missing` is reported separately (the column only
+    exists on servers with per-trigger delivery routing) while the schedule
+    columns exist on every server version this probe targets, so pre-fix
+    servers still get schedule preconditions checked.
+    """
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    snapshot: dict[str, object] = {
+        "checked": False,
+        "record_count": 0,
+        "schedule_kind": None,
+        "next_run_at": None,
+        "delivery_target": None,
+        "delivery_target_column_missing": False,
+    }
+    if not db_path.exists():
+        snapshot["error"] = "reborn-local-dev.db missing"
+        return snapshot
+    try:
+        with closing(sqlite3.connect(db_path)) as db:
+            rows = db.execute(
+                "SELECT schedule_kind, next_run_at FROM trigger_records WHERE name = ?",
                 (routine_name,),
             ).fetchall()
-    except sqlite3.OperationalError as exc:
-        if "no such column" in str(exc):
-            return {"checked": True, "column_missing": True}
-        return {"checked": False, "error": str(exc)}
-    targets = [row["delivery_target"] for row in rows]
-    return {
-        "checked": True,
-        "column_missing": False,
-        "record_count": len(targets),
-        "delivery_target": targets[0] if targets else None,
-    }
+            snapshot["record_count"] = len(rows)
+            if rows:
+                snapshot["schedule_kind"] = rows[0][0]
+                snapshot["next_run_at"] = rows[0][1]
+            try:
+                target_rows = db.execute(
+                    "SELECT delivery_target FROM trigger_records WHERE name = ?",
+                    (routine_name,),
+                ).fetchall()
+                if target_rows:
+                    snapshot["delivery_target"] = target_rows[0][0]
+            except sqlite3.OperationalError as exc:
+                if "no such column" not in str(exc):
+                    raise
+                snapshot["delivery_target_column_missing"] = True
+            snapshot["checked"] = True
+    except sqlite3.Error as exc:
+        snapshot["error"] = _exc_text(exc)
+    return snapshot
 
 
 def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, object] | None:
@@ -2004,7 +2095,14 @@ def _slack_bot_token(extra_env: dict[str, str]) -> str | None:
 
 
 def _slack_personal_token(extra_env: dict[str, str]) -> str | None:
-    return _env_value(SLACK_PERSONAL_ACCESS_TOKEN_ENV, extra_env)
+    # Same fallback trio the seeding path accepts (slack_helpers), so a local
+    # run configured under an alternate env name keeps the sweep and the
+    # digest ground-truth arms instead of silently skipping them.
+    for env_name in SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES:
+        value = _env_value(env_name, extra_env)
+        if value:
+            return value
+    return None
 
 
 async def _installed_active_extension_ids(ctx: LiveQaContext) -> dict[str, object]:
@@ -2017,14 +2115,22 @@ async def _installed_active_extension_ids(ctx: LiveQaContext) -> dict[str, objec
     """
     import httpx
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(
-            f"{ctx.base_url}/api/webchat/v2/extensions",
-            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
-        )
-    if response.status_code != 200:
-        return {"checked": False, "error": f"extensions API status {response.status_code}"}
-    body = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                f"{ctx.base_url}/api/webchat/v2/extensions",
+                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+            )
+        if response.status_code != 200:
+            return {
+                "checked": False,
+                "error": f"extensions API status {response.status_code}",
+            }
+        body = response.json()
+    except Exception as exc:
+        # A transient HTTP/parse hiccup must fail the CASE with a clear
+        # message, never crash the shard runner and discard its results.
+        return {"checked": False, "error": _exc_text(exc)}
     extensions = body.get("extensions")
     if not isinstance(extensions, list):
         return {"checked": False, "error": "extensions body did not include a list"}
@@ -2054,19 +2160,31 @@ async def _slack_search_marker_hits(
 
     token = _slack_personal_token(ctx.env)
     if not token:
-        return {"checked": False, "error": "personal token unavailable"}
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(
-            "https://slack.com/api/search.messages",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"query": f'"{marker}"', "count": "20"},
-        )
-    payload = response.json()
+        return {"checked": False, "permanent": True, "error": "personal token unavailable"}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                "https://slack.com/api/search.messages",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"query": f'"{marker}"', "count": "20"},
+            )
+        payload = response.json()
+    except Exception as exc:
+        return {"checked": False, "permanent": False, "error": _exc_text(exc)}
     if not payload.get("ok"):
-        return {
-            "checked": False,
-            "error": payload.get("error") or "slack_search_failed",
+        error = str(payload.get("error") or "slack_search_failed")
+        # Permanent token problems mean the sweep can NEVER run in this
+        # environment — callers must surface that instead of fail-opening
+        # forever (a hollow green is worse than a red asking for env repair).
+        permanent = error in {
+            "missing_scope",
+            "invalid_auth",
+            "account_inactive",
+            "token_revoked",
+            "not_allowed_token_type",
+            "no_permission",
         }
+        return {"checked": False, "permanent": permanent, "error": error}
     matches = (payload.get("messages") or {}).get("matches") or []
     hits = []
     for match in matches:
@@ -2088,55 +2206,84 @@ async def _slack_search_marker_hits(
 
 
 async def _slack_personal_dm_counterpart_names(
-    ctx: LiveQaContext, *, limit: int = 6
+    ctx: LiveQaContext, *, limit: int = 20
 ) -> dict[str, object]:
-    """Ground-truth display names of the connected user's DM counterparts,
-    read directly from the Slack API with the personal token — the digest
-    probe requires at least one of these names in the model's answer."""
+    """Ground-truth display names of the connected user's HUMAN DM
+    counterparts, read directly from the Slack API with the personal token —
+    the digest probe requires at least one of these names in the model's
+    answer.
+
+    Slackbot, the user's own self-DM, bot users, and deactivated accounts are
+    excluded: a digest that reasonably reports "no human DMs" must not be
+    failed against ground truth the model was right to omit.
+    """
     import httpx
 
     token = _slack_personal_token(ctx.env)
     if not token:
         return {"checked": False, "names": [], "error": "personal token unavailable"}
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(
-            "https://slack.com/api/conversations.list",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"types": "im", "limit": "20"},
-        )
-        payload = response.json()
-        if not payload.get("ok"):
-            return {
-                "checked": False,
-                "names": [],
-                "error": payload.get("error") or "slack_conversations_list_failed",
-            }
-        names: list[str] = []
-        for channel in (payload.get("channels") or [])[:limit]:
-            counterpart = (
-                channel.get("user") if isinstance(channel, dict) else None
-            )
-            if not counterpart:
-                continue
-            info = await client.get(
-                "https://slack.com/api/users.info",
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            auth_probe = await client.get(
+                "https://slack.com/api/auth.test",
                 headers={"Authorization": f"Bearer {token}"},
-                params={"user": counterpart},
             )
-            info_payload = info.json()
-            if not info_payload.get("ok"):
-                continue
-            user = info_payload.get("user") or {}
-            profile = user.get("profile") or {}
-            for candidate in (
-                profile.get("display_name"),
-                profile.get("real_name"),
-                user.get("name"),
-            ):
-                if candidate:
-                    names.append(str(candidate))
-                    break
-    return {"checked": True, "names": names}
+            auth_payload = auth_probe.json()
+            own_user_id = (
+                str(auth_payload.get("user_id") or "")
+                if auth_payload.get("ok")
+                else ""
+            )
+            response = await client.get(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"types": "im", "limit": str(limit)},
+            )
+            payload = response.json()
+            if not payload.get("ok"):
+                return {
+                    "checked": False,
+                    "names": [],
+                    "error": payload.get("error") or "slack_conversations_list_failed",
+                }
+            names: list[str] = []
+            skipped: list[str] = []
+            for channel in payload.get("channels") or []:
+                counterpart = (
+                    channel.get("user") if isinstance(channel, dict) else None
+                )
+                if not counterpart:
+                    continue
+                if counterpart == "USLACKBOT" or counterpart == own_user_id:
+                    skipped.append(str(counterpart))
+                    continue
+                info = await client.get(
+                    "https://slack.com/api/users.info",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"user": counterpart},
+                )
+                info_payload = info.json()
+                if not info_payload.get("ok"):
+                    continue
+                user = info_payload.get("user") or {}
+                if user.get("is_bot") or user.get("deleted"):
+                    skipped.append(str(counterpart))
+                    continue
+                profile = user.get("profile") or {}
+                for candidate in (
+                    profile.get("display_name"),
+                    profile.get("real_name"),
+                    user.get("name"),
+                ):
+                    if candidate:
+                        names.append(str(candidate))
+                        break
+    except Exception as exc:
+        # Ground truth is an enrichment arm: a transient Slack API failure
+        # must degrade to "unchecked" (the case records the skip), never
+        # crash the shard runner.
+        return {"checked": False, "names": [], "error": _exc_text(exc)}
+    return {"checked": True, "names": names, "skipped_non_human": skipped}
 
 
 def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
@@ -2327,22 +2474,44 @@ async def _wait_for_slack_delivery_marker(
                     if gate_ref in approved_gate_refs:
                         continue
                     approved_gate_refs.add(gate_ref)
-                    approval_attempts.append(
-                        await _resolve_webui_approval_gate(
-                            ctx,
-                            thread_id=str(route["thread_id"]),
-                            run_id=run_id,
-                            gate_ref=gate_ref,
+                    try:
+                        approval_attempts.append(
+                            await _resolve_webui_approval_gate(
+                                ctx,
+                                thread_id=str(route["thread_id"]),
+                                run_id=run_id,
+                                gate_ref=gate_ref,
+                            )
                         )
-                    )
+                    except Exception as approve_exc:
+                        # Record and allow a later loop pass to retry: a slow
+                        # approve POST (server busy mid-fire) must not abort
+                        # the delivery wait with an empty timeout error.
+                        approved_gate_refs.discard(gate_ref)
+                        approval_attempts.append(
+                            {
+                                "gate_ref": gate_ref,
+                                "run_id": run_id,
+                                "error": _exc_text(approve_exc),
+                            }
+                        )
                 if history is None:
-                    history = await _slack_history_contains_marker(
-                        ctx,
-                        channel_id=channel_id,
-                        marker=marker,
-                        oldest_epoch=oldest_epoch,
-                        required_text=required_text,
-                    )
+                    try:
+                        history = await _slack_history_contains_marker(
+                            ctx,
+                            channel_id=channel_id,
+                            marker=marker,
+                            oldest_epoch=oldest_epoch,
+                            required_text=required_text,
+                        )
+                    except Exception as history_exc:
+                        # One flaky Slack API read must not abort the whole
+                        # wait — the loop re-polls until its own deadline.
+                        history = {
+                            "checked": False,
+                            "found": False,
+                            "error": _exc_text(history_exc),
+                        }
                     last_history = history
                 if _slack_delivery_observed(outcome, history):
                     return {
@@ -2606,7 +2775,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
     except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc), **observed})
+        return _result(case_name, False, started, {"error": _exc_text(exc), **observed})
 
 
 async def case_qa_3a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
@@ -2651,7 +2820,7 @@ async def _extension_authenticated_case(
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
     except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc), **observed})
+        return _result(case_name, False, started, {"error": _exc_text(exc), **observed})
 
 
 def _capability_run_statuses(
@@ -2805,7 +2974,7 @@ async def _extension_chat_connect_case(
             )
         return _result(case_name, True, started, observed)
     except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc), **observed})
+        return _result(case_name, False, started, {"error": _exc_text(exc), **observed})
 
 
 async def _ensure_extension_authenticated_on_page(
@@ -3003,7 +3172,7 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
             False,
             started,
             {
-                "error": str(exc),
+                "error": _exc_text(exc),
                 "marker": marker,
                 "target_email_present": False,
             },
@@ -3350,7 +3519,7 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             "qa_5d_slack_strategy_doc_answer",
             False,
             started,
-            {"error": str(exc), **observed},
+            {"error": _exc_text(exc), **observed},
         )
 
 
@@ -3532,6 +3701,7 @@ async def _routine_creation_case(
     required_text: list[str],
     extensions: list[dict[str, object]] | None = None,
     extra_details: dict[str, object] | None = None,
+    follow_up_timezone_instruction: str | None = None,
 ) -> ProbeResult:
     count_name = routine_name if marker else None
     before_count = _trigger_record_count(ctx.reborn_home, count_name)
@@ -3561,6 +3731,7 @@ async def _routine_creation_case(
             timeout=180.0,
             extra_details=details,
             routine_confirmation_follow_up=True,
+            routine_follow_up_timezone_instruction=follow_up_timezone_instruction,
         )
     if result.success:
         after_count, wait_ms = await _wait_for_trigger_record_after_count(
@@ -3615,6 +3786,8 @@ async def _slack_delivery_routine_case(
     require_persisted_delivery_target: bool = False,
     require_slack_tools_on_surface: bool = False,
     schedule_instruction: str = "Every minute,",
+    expect_one_shot_schedule: bool = False,
+    follow_up_timezone_instruction: str | None = None,
 ) -> ProbeResult:
     started = time.monotonic()
     wall_started = time.time()
@@ -3622,6 +3795,9 @@ async def _slack_delivery_routine_case(
     routine_name = f"{routine_prefix}-{suffix}"
     creation_marker = f"{marker_prefix}_ROUTINE_CREATED_{suffix}"
     delivery_marker = f"{marker_prefix}_SLACK_DELIVERED_{suffix}"
+    default_targets_before: dict[str, object] | None = None
+    if require_persisted_delivery_target:
+        default_targets_before = _outbound_final_reply_targets(ctx.reborn_home)
     creation = await _routine_creation_case(
         ctx,
         case_name=case_name,
@@ -3630,77 +3806,106 @@ async def _slack_delivery_routine_case(
         required_text=["routine"],
         prompt=(
             f"QA case {case_name}: create a routine named {routine_name}. {schedule_instruction} "
-            f"{routine_instruction} The routine's final answer and Slack message must "
-            f"include the exact marker {delivery_marker}. Create the routine now; do not "
+            f"{routine_instruction} The routine's final answer must include the exact "
+            f"marker {delivery_marker}. Create the routine now; do not "
             "run it immediately. During routine creation, do not perform the routine's "
             "live check, web/search/HTTP lookup, or Slack send. "
             f"In your final answer include the exact marker {creation_marker} and include "
             "the text routine. "
             f"{creation_prompt_extra}"
         ),
+        follow_up_timezone_instruction=follow_up_timezone_instruction,
     )
     if not creation.success:
         creation.latency_ms = int((time.monotonic() - started) * 1000)
         return creation
+    base_details: dict[str, object] = {
+        **creation.details,
+        "routine_name": routine_name,
+        "creation_marker": creation_marker,
+        "delivery_marker": delivery_marker,
+        "required_delivery_text": required_delivery_text,
+    }
+    record_snapshot: dict[str, object] | None = None
     slack_tools_surface: dict[str, object] | None = None
-    if require_slack_tools_on_surface:
-        # Falsifiability precondition: the duplicate arm is only a real test
-        # when the fired model HAS a user-token send capability. Assert it
-        # instead of trusting the creation prompt was followed.
-        slack_tools_surface = await _installed_active_extension_ids(ctx)
-        active_ids = slack_tools_surface.get("active_extension_ids") or []
-        if not slack_tools_surface.get("checked") or "slack" not in active_ids:
-            return _result(
-                case_name,
-                False,
-                started,
-                {
-                    **creation.details,
-                    "error": (
-                        "probe precondition failed: Slack tools extension is not "
-                        "installed/active after the creation turn, so the "
-                        "duplicate-delivery arm would be vacuous"
-                    ),
-                    "routine_name": routine_name,
-                    "slack_tools_surface": slack_tools_surface,
-                },
-            )
-    persisted_delivery_target: dict[str, object] | None = None
-    if require_persisted_delivery_target:
-        persisted_delivery_target = _trigger_record_delivery_target(
-            ctx.reborn_home, routine_name
-        )
-        if persisted_delivery_target.get("column_missing"):
-            return _result(
-                case_name,
-                False,
-                started,
-                {
-                    **creation.details,
-                    "error": (
-                        "server does not support per-trigger delivery targets "
-                        "(trigger_records.delivery_target column missing)"
-                    ),
-                    "routine_name": routine_name,
-                    "persisted_delivery_target": persisted_delivery_target,
-                },
-            )
-        if not persisted_delivery_target.get("delivery_target"):
-            return _result(
-                case_name,
-                False,
-                started,
-                {
-                    **creation.details,
-                    "error": (
-                        "routine was created without a per-trigger delivery_target_id "
-                        "on the trigger record"
-                    ),
-                    "routine_name": routine_name,
-                    "persisted_delivery_target": persisted_delivery_target,
-                },
-            )
     try:
+        # Server-capability and schedule preconditions run FIRST (and inside
+        # the try, so a transient read failure fails THIS case instead of
+        # crashing the shard): a pre-fix server must red deterministically on
+        # the missing capability, not on model-compliance noise.
+        if require_persisted_delivery_target or expect_one_shot_schedule:
+            record_snapshot = _trigger_record_snapshot(ctx.reborn_home, routine_name)
+            base_details["trigger_record_snapshot"] = record_snapshot
+        if require_persisted_delivery_target and record_snapshot is not None:
+            if record_snapshot.get("delivery_target_column_missing"):
+                raise AssertionError(
+                    "server does not support per-trigger delivery targets "
+                    "(trigger_records.delivery_target column missing)"
+                )
+            if not record_snapshot.get("checked"):
+                raise AssertionError(
+                    "probe could not read trigger_records for the persisted "
+                    f"delivery target: {record_snapshot.get('error')!r}"
+                )
+            if not record_snapshot.get("delivery_target"):
+                raise AssertionError(
+                    "routine was created without a per-trigger delivery_target_id "
+                    "on the trigger record"
+                )
+        if expect_one_shot_schedule and record_snapshot is not None:
+            # Exactly-once counting is only well-defined for once-schedules:
+            # a recurring trigger legitimately re-posts the marker on fire #2
+            # and fabricates a "duplicate delivery" red. Verify the OUTCOME
+            # (the persisted schedule), not the prompt wording.
+            if not record_snapshot.get("checked"):
+                raise AssertionError(
+                    "probe could not read trigger_records for the schedule "
+                    f"precondition: {record_snapshot.get('error')!r}"
+                )
+            record_count = int(record_snapshot.get("record_count") or 0)
+            if record_count != 1:
+                raise AssertionError(
+                    "probe precondition failed: expected exactly one trigger "
+                    f"record named {routine_name!r}, found {record_count}"
+                )
+            schedule_kind = record_snapshot.get("schedule_kind")
+            if schedule_kind != "once":
+                raise AssertionError(
+                    "probe precondition failed: routine is not one-shot "
+                    f"(schedule_kind={schedule_kind!r})"
+                )
+            wait_anchor = time.time()
+            fire_epoch = _parse_epoch_seconds(record_snapshot.get("next_run_at"))
+            window_end = wait_anchor + delivery_timeout - 60.0
+            if fire_epoch is None or not (
+                wall_started - 5.0 <= fire_epoch <= window_end
+            ):
+                raise AssertionError(
+                    "probe precondition failed: one-shot fire time "
+                    f"{record_snapshot.get('next_run_at')!r} is outside the "
+                    f"delivery wait window (case start {wall_started:.0f}, "
+                    f"window end {window_end:.0f}) — a mis-scheduled fire "
+                    "would time out on a correct server"
+                )
+        if require_slack_tools_on_surface:
+            # Falsifiability precondition: the duplicate arm is only a real
+            # test when the fired model HAS a user-token send capability.
+            # Assert it instead of trusting the creation prompt was followed.
+            slack_tools_surface = await _installed_active_extension_ids(ctx)
+            base_details["slack_tools_surface"] = slack_tools_surface
+            if not slack_tools_surface.get("checked"):
+                raise AssertionError(
+                    "probe precondition failed: could not verify the Slack "
+                    "tools surface via the extensions API: "
+                    f"{slack_tools_surface.get('error')!r}"
+                )
+            active_ids = slack_tools_surface.get("active_extension_ids") or []
+            if "slack" not in active_ids:
+                raise AssertionError(
+                    "probe precondition failed: Slack tools extension is not "
+                    "installed/active after the creation turn, so the "
+                    "duplicate-delivery arm would be vacuous"
+                )
         delivery = await _wait_for_slack_delivery_marker(
             ctx,
             routine_name=routine_name,
@@ -3724,19 +3929,42 @@ async def _slack_delivery_routine_case(
                 raise AssertionError(
                     "Slack delivery channel could not be resolved for the exactly-once re-scan"
                 )
-            exactly_once = await _slack_history_contains_marker(
-                ctx,
-                channel_id=channel_id,
-                marker=delivery_marker,
-                oldest_epoch=wall_started,
-                required_text=required_delivery_text,
-            )
+            # The re-scan is judgement-bearing: a transient Slack API error
+            # here must NOT read as "found 0" (a fake duplicate-delivery
+            # verdict). Retry until a clean scan or fail with a distinct
+            # inconclusive error.
+            last_scan_error: str | None = None
+            for _ in range(3):
+                try:
+                    scan = await _slack_history_contains_marker(
+                        ctx,
+                        channel_id=channel_id,
+                        marker=delivery_marker,
+                        oldest_epoch=wall_started,
+                        required_text=required_delivery_text,
+                    )
+                except Exception as scan_exc:
+                    scan = None
+                    last_scan_error = _exc_text(scan_exc)
+                if isinstance(scan, dict) and not scan.get("error"):
+                    exactly_once = scan
+                    break
+                if isinstance(scan, dict):
+                    last_scan_error = str(scan.get("error"))
+                await asyncio.sleep(5.0)
+            if exactly_once is None:
+                raise AssertionError(
+                    "exactly-once re-scan was inconclusive after retries "
+                    f"(last error: {last_scan_error!r}) — cannot distinguish "
+                    "duplicate delivery from a transient Slack API failure"
+                )
             matches = int(exactly_once.get("marker_matches") or 0)
             human_matches = int(exactly_once.get("human_authored_marker_matches") or 0)
             # Exactly-once is only well-defined for one-shot routines: a
             # recurring schedule posts the same marker again on every fire,
             # so callers using this arm must create the routine with a
-            # once-schedule (see qa_9b/qa_9d).
+            # once-schedule (see qa_9b/qa_9d), verified by the persisted
+            # schedule_kind precondition above.
             if matches != 1:
                 raise AssertionError(
                     f"expected the delivery marker exactly once after the grace window, "
@@ -3749,9 +3977,16 @@ async def _slack_delivery_routine_case(
                 )
             # Workspace-wide sweep: a stray copy in ANY other conversation
             # (wrong-channel delivery or a user-identity send somewhere else)
-            # is a hard failure. Search-index lag can only under-report, so
-            # "no hits" stays inconclusive rather than passing judgement.
-            sweep = await _slack_search_marker_hits(ctx, marker=delivery_marker)
+            # is a hard failure. The sweep is load-bearing for that arm, so a
+            # permanently unusable token (missing scope) or repeated transient
+            # failures fail the case with a distinct probe-environment error
+            # instead of silently hollowing out every future green.
+            sweep: dict[str, object] = {}
+            for _ in range(3):
+                sweep = await _slack_search_marker_hits(ctx, marker=delivery_marker)
+                if sweep.get("checked") or sweep.get("permanent"):
+                    break
+                await asyncio.sleep(10.0)
             exactly_once["workspace_sweep"] = sweep
             if sweep.get("checked"):
                 stray_hits = [
@@ -3764,23 +3999,43 @@ async def _slack_delivery_routine_case(
                         f"delivery marker found outside the expected DM "
                         f"({channel_id}): {stray_hits!r}"
                     )
+            elif sweep.get("permanent"):
+                raise AssertionError(
+                    "probe precondition failed: workspace sweep is permanently "
+                    f"unavailable ({sweep.get('error')!r}); repair the personal "
+                    "token (search:read scope) — without the sweep the "
+                    "wrong-channel arm is vacuous"
+                )
+            else:
+                raise AssertionError(
+                    "workspace sweep was inconclusive after retries "
+                    f"({sweep.get('error')!r}); cannot rule out a stray copy"
+                )
+        if require_persisted_delivery_target and default_targets_before is not None:
+            # Per-trigger routing must not be green because the server (or
+            # the model) rewrote the user-wide default target instead of
+            # honoring the trigger's own delivery_target_id.
+            default_targets_after = _outbound_final_reply_targets(ctx.reborn_home)
+            base_details["default_delivery_targets_before"] = default_targets_before
+            base_details["default_delivery_targets_after"] = default_targets_after
+            if default_targets_after != default_targets_before:
+                raise AssertionError(
+                    "user-default outbound delivery target changed during the "
+                    "per-trigger routing case — routing must come from the "
+                    "trigger's own delivery_target_id, not a rewritten default"
+                )
         # The exact Slack body is not persisted in results to avoid leaking workspace data.
         return _result(
             case_name,
             True,
             started,
             {
-                **creation.details,
-                "routine_name": routine_name,
-                "creation_marker": creation_marker,
-                "delivery_marker": delivery_marker,
+                **base_details,
                 "required_delivery_text": text_checks,
                 "trigger_run": delivery.get("trigger_run"),
                 "delivery_outcome": delivery.get("delivery_outcome"),
                 "slack_history": history,
                 "exactly_once": exactly_once,
-                "persisted_delivery_target": persisted_delivery_target,
-                "slack_tools_surface": slack_tools_surface,
             },
         )
     except Exception as exc:
@@ -3789,12 +4044,8 @@ async def _slack_delivery_routine_case(
             False,
             started,
             {
-                **creation.details,
-                "error": str(exc),
-                "routine_name": routine_name,
-                "creation_marker": creation_marker,
-                "delivery_marker": delivery_marker,
-                "required_delivery_text": required_delivery_text,
+                **base_details,
+                "error": _exc_text(exc),
             },
         )
 
@@ -3858,7 +4109,7 @@ async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeR
             False,
             started,
             {
-                "error": str(exc),
+                "error": _exc_text(exc),
                 "marker": marker,
                 "target_email_present": False,
             },
@@ -4094,7 +4345,7 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
         observed["accepted_run_id"] = run_id
         return _result(case_name, True, started, observed)
     except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc), **observed})
+        return _result(case_name, False, started, {"error": _exc_text(exc), **observed})
 
 
 async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
@@ -4214,7 +4465,7 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
             {
                 **observed,
                 "spreadsheet_id": spreadsheet_id,
-                "error": str(exc),
+                "error": _exc_text(exc),
             },
         )
 
@@ -4270,7 +4521,7 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             "qa_7c_slack_bug_logger_routine",
             False,
             started,
-            {"routine_name": routine_name, "error": str(exc)},
+            {"routine_name": routine_name, "error": _exc_text(exc)},
         )
 
 
@@ -4312,7 +4563,7 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
             case_name,
             False,
             started,
-            {"error": str(exc), **observed},
+            {"error": _exc_text(exc), **observed},
         )
 
 
@@ -4446,6 +4697,8 @@ async def case_qa_9b_routine_dm_delivery_exactly_once(ctx: LiveQaContext) -> Pro
         ),
         exactly_once_grace_seconds=60.0,
         require_slack_tools_on_surface=True,
+        expect_one_shot_schedule=True,
+        follow_up_timezone_instruction="Use the UTC timezone for the schedule.",
     )
 
 
@@ -4489,13 +4742,24 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
     result.details["leaked_raw_user_ids"] = []
     # Positive arm: the digest must actually NAME someone. Ground truth comes
     # from the Slack API with the personal token, so a cop-out answer ("you
-    # have no DMs") cannot pass vacuously when DM history exists.
+    # have no DMs") cannot pass vacuously when human DM history exists.
     ground_truth = await _slack_personal_dm_counterpart_names(ctx)
     result.details["dm_counterpart_ground_truth"] = ground_truth
     known_names = [str(name) for name in ground_truth.get("names") or [] if name]
     if known_names:
         reply_lower = reply_text.lower()
-        named = [name for name in known_names if name.lower() in reply_lower]
+        # Token-level matching: "Benjamin Kurrek" in ground truth must accept
+        # a digest that says "Ben Kurrek" or "benjamin" — whole-string
+        # matching false-fails on display-form differences.
+        named = [
+            name
+            for name in known_names
+            if any(
+                token in reply_lower
+                for token in re.split(r"[^a-z0-9]+", name.lower())
+                if len(token) >= 3
+            )
+        ]
         result.details["ground_truth_names_found"] = named
         if not named:
             return _result(
@@ -4510,6 +4774,14 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
                     ),
                 },
             )
+    else:
+        # No usable ground truth (token unavailable, API error, or a
+        # workspace with no human DM counterparts): the positive arm did not
+        # run. Record that visibly instead of letting the green over-read.
+        result.details["vacuous_arms"] = [
+            "dm_counterpart_ground_truth: "
+            + str(ground_truth.get("error") or "no human DM counterparts")
+        ]
     return result
 
 
@@ -4543,6 +4815,8 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
         exactly_once_grace_seconds=60.0,
         require_persisted_delivery_target=True,
         require_slack_tools_on_surface=True,
+        expect_one_shot_schedule=True,
+        follow_up_timezone_instruction="Use the UTC timezone for the schedule.",
     )
 
 
@@ -4729,16 +5003,25 @@ CASES: dict[str, CaseSpec] = {
         case_qa_9b_routine_dm_delivery_exactly_once,
         requires_slack=True,
         requires_slack_target=True,
+        # The workspace sweep runs on the personal token; without this gate a
+        # wrong-workspace token would make the sweep structurally blind.
+        requires_slack_personal_auth=True,
+        # Expected-red on pre-fix servers; keep out of bare local runs until
+        # promoted off dispatch_only.
+        default_enabled=False,
     ),
     "qa_9c_slack_digest_names_not_ids": CaseSpec(
         case_qa_9c_slack_digest_names_not_ids,
         requires_slack=True,
         requires_slack_personal_auth=True,
+        default_enabled=False,
     ),
     "qa_9d_routine_per_trigger_delivery_target": CaseSpec(
         case_qa_9d_routine_per_trigger_delivery_target,
         requires_slack=True,
         requires_slack_target=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
     ),
 }
 
@@ -5326,7 +5609,7 @@ def main() -> int:
             mode=MODE,
             success=False,
             latency_ms=0,
-            details={"error": str(exc)},
+            details={"error": _exc_text(exc)},
         )
         write_results(args.output_dir, [failed], "")
         green_explanation_path = write_green_run_explanation(args.output_dir, [failed])
