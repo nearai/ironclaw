@@ -139,6 +139,16 @@ impl ManifestSource {
     pub fn allows_first_party(&self) -> bool {
         matches!(self, Self::HostBundled)
     }
+
+    /// Temporary pre-installation-owner visibility bridge for user-registered
+    /// manifests. Tenant-wide ownership should use the installation owner once
+    /// private installs land.
+    pub fn visible_to_caller(&self, caller: Option<&UserId>) -> bool {
+        match self {
+            Self::UserRegistered { owner } => caller.is_some_and(|caller| caller == owner),
+            _ => true,
+        }
+    }
 }
 
 /// Per-capability surface visibility.
@@ -720,9 +730,8 @@ impl ExtensionManifestV2 {
     ) -> Result<(), ManifestV2Error> {
         let projection = registry.project_manifest(self, sections, host_port_catalog)?;
         self.capabilities.extend(projection.capabilities);
-        // Checked on the projected output, not the raw `[[host_api]]` shape, so no
-        // future contract type can slip capabilities past it. A registered server's
-        // capabilities come from live discovery, never from its manifest.
+        // Defense in depth for projections introduced after from_raw's
+        // UserRegistered host_api gate.
         if matches!(self.source, ManifestSource::UserRegistered { .. })
             && !self.capabilities.is_empty()
         {
@@ -785,6 +794,11 @@ impl ExtensionManifestV2 {
                 reason:
                     "top-level capabilities are not allowed when host_api contracts are declared"
                         .to_string(),
+            });
+        }
+        if matches!(source, ManifestSource::UserRegistered { .. }) && !raw.host_api.is_empty() {
+            return Err(ManifestV2Error::CapabilitiesForbiddenForRegisteredSource {
+                manifest_source: source,
             });
         }
 

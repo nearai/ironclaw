@@ -8,7 +8,7 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
     MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 use ironclaw_product_adapter_registry::{
     ManifestHash, RegistryError, list_enabled_product_adapter_entries,
     parse_product_adapter_manifest_record, product_adapter_sections,
@@ -28,6 +28,10 @@ fn credential(value: &str) -> ExtensionCredentialHandle {
 
 fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
+}
+
+fn caller_user() -> UserId {
+    UserId::new("registry-caller").unwrap()
 }
 
 fn manifest(required_credential: &str, hash: &str) -> ExtensionManifestRecord {
@@ -114,7 +118,9 @@ async fn explicit_activation_surfaces_in_product_adapter_runtime_entries() {
     let enabled = store.list_enabled_installations().await.unwrap();
     assert_eq!(enabled.len(), 1);
 
-    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    let entries = list_enabled_product_adapter_entries(&store, &caller_user())
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0].adapter().adapter_id().as_str(),
@@ -170,7 +176,9 @@ prompt_doc_ref = "prompts/do.md"
     store.upsert_manifest(plain_manifest).await.unwrap();
     store.upsert_installation(plain_install).await.unwrap();
 
-    let pa_entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    let pa_entries = list_enabled_product_adapter_entries(&store, &caller_user())
+        .await
+        .unwrap();
     assert!(
         pa_entries.is_empty(),
         "plain extension should not appear in product adapter entries"
@@ -199,7 +207,7 @@ async fn credential_binding_must_reference_declared_manifest_handle() {
     .unwrap();
 
     store.upsert_installation(invalid).await.unwrap();
-    let err = list_enabled_product_adapter_entries(&store)
+    let err = list_enabled_product_adapter_entries(&store, &caller_user())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -242,7 +250,7 @@ async fn upsert_manifest_rejects_when_existing_installation_binding_revoked() {
         .upsert_manifest(manifest("other_token", "sha256:abc123"))
         .await
         .unwrap();
-    let err = list_enabled_product_adapter_entries(&store)
+    let err = list_enabled_product_adapter_entries(&store, &caller_user())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -355,7 +363,9 @@ async fn installed_state_does_not_surface_in_enabled_installations() {
         "installed (not enabled) installation should not appear in list_enabled_installations"
     );
 
-    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    let entries = list_enabled_product_adapter_entries(&store, &caller_user())
+        .await
+        .unwrap();
     assert!(
         entries.is_empty(),
         "installed (not enabled) installation should not appear in PA runtime entries"
@@ -448,7 +458,9 @@ handle = "outbound_token"
     store.upsert_manifest(multi_manifest).await.unwrap();
     store.upsert_installation(multi_install).await.unwrap();
 
-    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    let entries = list_enabled_product_adapter_entries(&store, &caller_user())
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 2, "both PA sections should be surfaced");
 
     let ids: Vec<_> = entries
@@ -472,7 +484,7 @@ async fn arc_store_delegation_works() {
         .await
         .unwrap();
 
-    let entries = list_enabled_product_adapter_entries(arc_store.as_ref())
+    let entries = list_enabled_product_adapter_entries(arc_store.as_ref(), &caller_user())
         .await
         .unwrap();
     assert_eq!(entries.len(), 1);

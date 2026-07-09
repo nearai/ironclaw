@@ -40,10 +40,7 @@ pub(crate) fn is_owner_registered(source: &ManifestSource) -> bool {
 /// own owner; every other source is visible to any caller (including a
 /// caller with no resolved identity).
 pub(crate) fn manifest_visible_to_caller(source: &ManifestSource, caller: Option<&UserId>) -> bool {
-    match source {
-        ManifestSource::UserRegistered { owner } => caller.is_some_and(|caller| caller == owner),
-        _ => true,
-    }
+    source.visible_to_caller(caller)
 }
 
 /// AC2: the set of extension ids that are BOTH enabled AND visible to

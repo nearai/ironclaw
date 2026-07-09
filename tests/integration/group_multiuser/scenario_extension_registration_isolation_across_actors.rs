@@ -434,10 +434,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         json!({"state": "disabled"}),
     )
     .await;
-    if set_status == axum::http::StatusCode::OK {
+    if set_status != axum::http::StatusCode::BAD_REQUEST
+        || set_body["error"] != "invalid_request"
+        || set_body["validation_code"] != "unknown_key"
+    {
         return Err(format!(
-            "isolation failure: B set a tool-permission override against owner A's \
-             capability id {REGISTERED_CAPABILITY_ID}: {set_status} {set_body}"
+            "isolation failure: B's write against owner A's registered capability should \
+             be rejected as an unknown tool key; got {set_status} {set_body}"
         )
         .into());
     }

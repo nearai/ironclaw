@@ -3439,6 +3439,9 @@ impl RebornServicesApi for RebornServices {
         };
         let scope = caller_resource_scope(&caller);
         let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
+        // Dropping `scope.tenant_id` is intentional: `UserId` is globally
+        // minted once per person, so it is already the discriminator for
+        // owner-scoped user registrations.
         let tools = config
             .tool_catalog
             .list_operator_tools(&caller.user_id)

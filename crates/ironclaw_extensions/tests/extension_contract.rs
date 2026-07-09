@@ -359,13 +359,9 @@ async fn discovery_registers_capability_provider_projected_capabilities() {
 
 #[test]
 fn user_registered_manifest_cannot_forge_capabilities_via_host_api() {
-    // T2 regression: v2.rs:687 only closes the LEGACY top-level [[capabilities]]
-    // path for non-first-party sources. A UserRegistered manifest declaring
-    // [[host_api]] id ironclaw.capability_provider/v1 took the sibling branch
-    // (project_and_extend_capabilities) which applied no source gate, letting a
-    // registered manifest forge a capability naming an arbitrary
-    // ProductAuthAccount provider + attacker-controlled audience. A registered
-    // server's capabilities must come from live discovery, never its manifest.
+    // A registered server's capabilities must come from live discovery, never
+    // its manifest. Reject the raw [[host_api]] declaration before any contract
+    // projection can publish forged capabilities or credentials.
     let result = ExtensionManifest::parse_with_optional_host_api_contracts(
         FORGED_CAPABILITY_PROVIDER_MANIFEST,
         ManifestSource::UserRegistered {
@@ -410,16 +406,9 @@ fn user_registered_zero_capability_mcp_descriptor_still_parses() {
 
 #[test]
 fn user_registered_wasm_manifest_with_zero_capability_host_api_is_rejected() {
-    // T2 fold-in (docs/plans/2026-07-08-mcp-reg-t3-plan.md AC4): `installed_allows()`
-    // (v2.rs) permits Wasm/Mcp/Script for any non-bundled source, and the only
-    // two UserRegistered gates (CapabilitiesForbiddenForRegisteredSource, the
-    // zero-content MCP relaxation) never restrict runtime KIND. A
-    // UserRegistered + Wasm manifest whose [[host_api]] projects zero
-    // capabilities (TestProductAdapterContract's default projection, same as
-    // HOST_API_MANIFEST above) used to survive every gate and would resolve
-    // its module under the shared, owner-unscoped `canonical_extension_root`
-    // instead of an owner-scoped path. A registered manifest may declare only
-    // an MCP runtime.
+    // A UserRegistered descriptor may not declare host_api at all, even when
+    // the contract projects zero capabilities. This keeps registered manifests
+    // limited to live-discovered hosted MCP tools.
     let mut contracts = HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(TestProductAdapterContract {
@@ -442,12 +431,11 @@ fn user_registered_wasm_manifest_with_zero_capability_host_api_is_rejected() {
     assert!(
         matches!(
             err,
-            ExtensionError::ManifestV2(ManifestV2Error::RuntimeKindForbiddenForRegisteredSource {
+            ExtensionError::ManifestV2(ManifestV2Error::CapabilitiesForbiddenForRegisteredSource {
                 manifest_source: ManifestSource::UserRegistered { .. },
-                kind: RuntimeKind::Wasm,
             })
         ),
-        "expected RuntimeKindForbiddenForRegisteredSource, got {err:?}"
+        "expected CapabilitiesForbiddenForRegisteredSource, got {err:?}"
     );
 }
 
