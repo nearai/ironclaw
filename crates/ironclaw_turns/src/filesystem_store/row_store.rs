@@ -1610,12 +1610,7 @@ where
                     let overlay_baseline =
                         matches!(overlay, RunnerLeaseOverlay::All).then(|| state.snapshot.clone());
                     let overlay_run = match overlay {
-                        RunnerLeaseOverlay::Run(run_id) => state
-                            .snapshot
-                            .runs
-                            .iter()
-                            .find(|record| record.run_id == run_id)
-                            .cloned(),
+                        RunnerLeaseOverlay::Run(run_id) => state.run_record_by_id(run_id),
                         RunnerLeaseOverlay::None | RunnerLeaseOverlay::All => None,
                     };
                     (

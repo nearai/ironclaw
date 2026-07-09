@@ -2158,6 +2158,7 @@ async fn build_local_dev_store_graph(
     }
     let resource_governor = FilesystemResourceGovernor::new(Arc::clone(&scoped_filesystem))
         .with_event_sink(Arc::clone(&budget_event_sink));
+    resource_governor.warm_authority()?;
     let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(resource_governor);
     let skill_mounts =
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
@@ -4246,6 +4247,7 @@ where
         secret_master_key,
     )
     .await?;
+    resource_governor.warm_authority()?;
     let governor = Arc::new(resource_governor);
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
@@ -4416,6 +4418,7 @@ where
             Arc::clone(&scoped_filesystem),
             secret_master_key,
         )?;
+        resource_governor.warm_authority()?;
 
         Ok(Self {
             filesystem,

@@ -72,6 +72,12 @@ impl RowSnapshotState {
         (record.scope == *scope).then_some(record)
     }
 
+    pub(super) fn run_record_by_id(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        let key = run_id.to_string();
+        let index = self.indexes.runs.get(&key).copied()?;
+        self.snapshot.runs.get(index).cloned()
+    }
+
     pub(super) fn turn_record_for_run(
         &self,
         scope: &TurnScope,
