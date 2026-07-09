@@ -8,6 +8,7 @@ scenarios exercise the real Reborn binary without duplicating process plumbing.
 """
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -25,6 +26,12 @@ YOLO_PROFILE = "local-dev-yolo"
 DEFAULT_MODEL = "mock-model"
 VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
+
+# Shared tenant secret for the test-tools/market-data fixture (test-tools/README.md).
+# `IRONCLAW_REBORN_DEV_SECRET__<handle>` is read once at `serve` boot, so it must
+# be present in the process env before start — see
+# reborn_v2_private_installs_yolo_server below.
+MARKET_DATA_DEV_SECRET = "e2e-market-data-shared-key"
 
 
 def find_free_port() -> int:
@@ -226,6 +233,32 @@ async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_pat
         home_dir=home_dir,
         profile=YOLO_PROFILE,
         log_prefix="reborn-v2-yolo",
+    )
+    await enable_reborn_global_auto_approve(base_url)
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_private_installs_yolo_server(
+    ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
+):
+    """Yolo-profile server with the market-data tenant-shared dev secret seeded.
+
+    Used by the private-tool-installs scenario (#5459 P1): auto-approve so
+    installed third-party WASM capabilities dispatch without an approval
+    gate, plus the market-data fixture's shared API key present at boot.
+    """
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-private-installs-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=YOLO_PROFILE,
+        log_prefix="reborn-v2-private-installs-yolo",
+        extra_env={"IRONCLAW_REBORN_DEV_SECRET__market_data_api_key": MARKET_DATA_DEV_SECRET},
     )
     await enable_reborn_global_auto_approve(base_url)
     try:
@@ -444,6 +477,52 @@ async def wait_for_assistant_message(
 
     raise AssertionError(
         f"Timed out waiting for a finalized assistant message in thread {thread_id}. "
+        f"Last timeline: {last_timeline}"
+    )
+
+
+def capability_preview_payload(message: dict) -> dict | None:
+    """Parse a `capability_display_preview` timeline message's JSON content.
+
+    Returns `None` for any other message kind.
+    """
+    if message.get("kind") != "capability_display_preview":
+        return None
+    content = message.get("content")
+    assert isinstance(content, str), f"preview content must be a string: {message!r}"
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as error:
+        raise AssertionError(f"preview content is not valid JSON: {content!r}") from error
+
+
+async def wait_for_capability_preview(
+    client: httpx.AsyncClient,
+    base_url: str,
+    thread_id: str,
+    capability_id: str,
+    *,
+    output_fragment: str | None = None,
+    timeout: float = 45.0,
+) -> dict:
+    """Poll the timeline until a `capability_display_preview` for `capability_id`
+    appears (optionally containing `output_fragment` in its output)."""
+    last_timeline: dict = {}
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        last_timeline = await fetch_timeline(client, base_url, thread_id)
+        for message in last_timeline.get("messages", []):
+            preview = capability_preview_payload(message)
+            if not preview or preview.get("capability_id") != capability_id:
+                continue
+            output = preview.get("output_preview") or preview.get("output_summary") or ""
+            if output_fragment and output_fragment.lower() not in output.lower():
+                continue
+            return preview
+        await asyncio.sleep(0.25)
+
+    raise AssertionError(
+        f"Timed out waiting for {capability_id!r} preview in thread {thread_id}. "
         f"Last timeline: {last_timeline}"
     )
 

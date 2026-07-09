@@ -26,9 +26,9 @@ use ironclaw::tools::wasm::{StoredWasmTool, ToolStatus, WasmToolStore};
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord, ExtensionManifestRef,
-    HostApiContractRegistry, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 use crate::error::MigrationError;
@@ -240,6 +240,21 @@ async fn convert_installation(
         }
     };
     let manifest_ref = ExtensionManifestRef::new(extension_id.clone(), None);
+    // v1 installs were per-user; carry that owner across so migrated tools stay
+    // private to their v1 owner under the #5459 P1 ownership model.
+    let owner = match UserId::new(input.owner) {
+        Ok(user_id) => InstallationOwner::user(user_id),
+        Err(e) => {
+            report.record_loss(
+                Domain::Extension,
+                &source_id,
+                "owner",
+                LossReason::Unparseable,
+                format!("invalid owner user id: {e}"),
+            );
+            return Ok(());
+        }
+    };
     let installation = match ExtensionInstallation::new(
         installation_id,
         extension_id,
@@ -247,6 +262,7 @@ async fn convert_installation(
         manifest_ref,
         input.bindings,
         input.updated_at,
+        owner,
     ) {
         Ok(installation) => installation,
         Err(e) => {

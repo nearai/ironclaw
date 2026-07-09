@@ -81,9 +81,20 @@ impl LocalDevExtensionSurface {
         })
     }
 
-    pub(in crate::runtime) fn grants(&self, grantee: &ExtensionId) -> Vec<CapabilityGrant> {
+    /// Mint capability grants for one request (#5459 P1: filtered to the
+    /// CALLER — tenant-owned capabilities grant to everyone, user-private ones
+    /// only to their owner). This is the single choke point: dispatch
+    /// authorization reuses the grants minted here, so a capability filtered
+    /// out is both invisible in the surface AND denied at dispatch — grant
+    /// absence fails closed with no separate preflight.
+    pub(in crate::runtime) fn grants(
+        &self,
+        grantee: &ExtensionId,
+        caller: &ironclaw_host_api::UserId,
+    ) -> Vec<CapabilityGrant> {
         self.active_capabilities
             .iter()
+            .filter(|capability| capability.owner.visible_to(caller))
             .map(|capability| CapabilityGrant {
                 id: CapabilityGrantId::new(),
                 capability: capability.id.clone(),
@@ -103,9 +114,18 @@ impl LocalDevExtensionSurface {
             .find(|capability| capability.id == *capability_id)
     }
 
-    pub(super) fn provider_trust(&self) -> BTreeMap<ExtensionId, TrustDecision> {
+    /// Provider trust for the same request; filtered by the same owner rule as
+    /// [`Self::grants`] so a user-private extension's provider is not even
+    /// advertised to other users' surfaces.
+    pub(super) fn provider_trust(
+        &self,
+        caller: &ironclaw_host_api::UserId,
+    ) -> BTreeMap<ExtensionId, TrustDecision> {
         let mut effects_by_provider: BTreeMap<ExtensionId, Vec<EffectKind>> = BTreeMap::new();
         for capability in &self.active_capabilities {
+            if !capability.owner.visible_to(caller) {
+                continue;
+            }
             let effects = effects_by_provider
                 .entry(capability.provider.clone())
                 .or_default();
@@ -215,7 +235,80 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
 mod tests {
     use super::*;
     use ironclaw_first_party_extensions::google_api_network_policy;
-    use ironclaw_host_api::{CapabilityId, PermissionMode};
+    use ironclaw_host_api::{CapabilityId, PermissionMode, UserId};
+
+    /// #5459 P1: the grant-minting choke point — a member-held extension's
+    /// capabilities mint grants (and advertise provider trust) ONLY for its
+    /// members (every member of the set, not just one); tenant-owned ones
+    /// mint for everyone. Grant absence is what makes an un-held tool both
+    /// invisible in the surface and denied at dispatch, so this filter IS
+    /// the enforcement.
+    #[test]
+    fn grants_and_provider_trust_filter_member_held_capabilities_to_their_members() {
+        let alice = UserId::new("alice").unwrap();
+        let bob = UserId::new("bob").unwrap();
+        let carol = UserId::new("carol").unwrap();
+        let grantee = ExtensionId::new("caller").unwrap();
+        let capability = |id: &str, provider: &str, owner| ActiveExtensionCapability {
+            id: CapabilityId::new(id).unwrap(),
+            provider: ExtensionId::new(provider).unwrap(),
+            effects: vec![EffectKind::DispatchCapability],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            owner,
+        };
+        let surface = LocalDevExtensionSurface::from_active_capabilities(vec![
+            capability(
+                "market-data.snp500",
+                "market-data",
+                ironclaw_extensions::InstallationOwner::users(
+                    [alice.clone(), bob.clone()].into_iter().collect(),
+                )
+                .expect("member set"),
+            ),
+            capability(
+                "hacker-news.top_stories",
+                "hacker-news",
+                ironclaw_extensions::InstallationOwner::Tenant,
+            ),
+        ]);
+
+        for member in [&alice, &bob] {
+            let member_capabilities: Vec<_> = surface
+                .grants(&grantee, member)
+                .into_iter()
+                .map(|grant| grant.capability.as_str().to_string())
+                .collect();
+            assert!(
+                member_capabilities.contains(&"market-data.snp500".to_string()),
+                "every member of the set gets the grant"
+            );
+            assert!(member_capabilities.contains(&"hacker-news.top_stories".to_string()));
+        }
+
+        let carol_capabilities: Vec<_> = surface
+            .grants(&grantee, &carol)
+            .into_iter()
+            .map(|grant| grant.capability.as_str().to_string())
+            .collect();
+        assert!(
+            !carol_capabilities.contains(&"market-data.snp500".to_string()),
+            "a member-held capability must not mint a grant for a non-member"
+        );
+        assert!(carol_capabilities.contains(&"hacker-news.top_stories".to_string()));
+
+        for member in [&alice, &bob] {
+            let member_trust = surface.provider_trust(member);
+            assert!(member_trust.contains_key(&ExtensionId::new("market-data").unwrap()));
+        }
+        let carol_trust = surface.provider_trust(&carol);
+        assert!(
+            !carol_trust.contains_key(&ExtensionId::new("market-data").unwrap()),
+            "a member-held provider must not be advertised to a non-member"
+        );
+        assert!(carol_trust.contains_key(&ExtensionId::new("hacker-news").unwrap()));
+    }
 
     #[test]
     fn web_access_search_gets_exa_mcp_network_target_without_credentials() {
@@ -226,6 +319,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -251,6 +345,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -282,6 +377,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -310,6 +406,7 @@ mod tests {
                 host_pattern: "news.ycombinator.com".to_string(),
                 port: None,
             }],
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -351,6 +448,7 @@ mod tests {
                 required: true,
             }],
             network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -373,6 +471,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
@@ -394,6 +493,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
         };
 
         let policy = extension_network_policy(&capability);
