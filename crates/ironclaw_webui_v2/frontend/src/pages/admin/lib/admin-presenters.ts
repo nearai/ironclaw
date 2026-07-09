@@ -51,7 +51,9 @@ export function formatUptime(secs) {
 
 export function formatRelativeTime(iso, t) {
   if (!iso) return tx(t, "admin.relative.never", {}, "Never");
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  const parsed = new Date(iso).getTime();
+  if (Number.isNaN(parsed)) return tx(t, "admin.relative.never", {}, "Never");
+  const diff = (Date.now() - parsed) / 1000;
   if (diff < 0) return tx(t, "admin.relative.justNow", {}, "Just now");
   if (diff < 60) return tx(t, "admin.relative.justNow", {}, "Just now");
   if (diff < 3600) {

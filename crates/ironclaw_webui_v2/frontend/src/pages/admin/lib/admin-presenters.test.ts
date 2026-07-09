@@ -1,6 +1,6 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import {
   formatRelativeTime,
   formatUserRole,
@@ -19,15 +19,16 @@ test("user role and status labels use i18n keys", () => {
 });
 
 test("relative admin timestamps use i18n keys", () => {
-  const originalNow = Date.now;
-  Date.now = () => new Date("2026-07-09T12:00:00Z").getTime();
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-09T12:00:00Z"));
   try {
     assert.equal(formatRelativeTime(null, keyedT), "admin.relative.never");
+    assert.equal(formatRelativeTime("not-a-date", keyedT), "admin.relative.never");
     assert.equal(formatRelativeTime("2026-07-09T11:59:30Z", keyedT), "admin.relative.justNow");
     assert.equal(formatRelativeTime("2026-07-09T11:45:00Z", keyedT), "admin.relative.minutesAgo:15");
     assert.equal(formatRelativeTime("2026-07-09T09:00:00Z", keyedT), "admin.relative.hoursAgo:3");
     assert.equal(formatRelativeTime("2026-07-07T12:00:00Z", keyedT), "admin.relative.daysAgo:2");
   } finally {
-    Date.now = originalNow;
+    vi.useRealTimers();
   }
 });
