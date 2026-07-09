@@ -1075,6 +1075,13 @@ registerPack("uk", {
   "admin.dashboard.jobs": "Завдання",
   "admin.dashboard.lastActive": "Остання активність",
 
+  // Admin — relative time
+  "admin.relative.never": "Ніколи",
+  "admin.relative.justNow": "щойно",
+  "admin.relative.minutesAgo": "{count} хв тому",
+  "admin.relative.hoursAgo": "{count} год тому",
+  "admin.relative.daysAgo": "{count} дн тому",
+
   // Admin — users list
   "admin.users.user": "користувач",
   "admin.users.userFallback": "користувача",

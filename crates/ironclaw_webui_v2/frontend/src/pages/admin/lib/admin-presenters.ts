@@ -1,4 +1,30 @@
 // @ts-nocheck
+import { interpolateParams } from "../../../lib/i18n-format.js";
+
+function tx(t, key, params = {}, fallback = key) {
+  return typeof t === "function" ? t(key, params) : interpolateParams(fallback, params);
+}
+
+const USER_ROLE_LABELS = {
+  member: "Member",
+  admin: "Admin",
+};
+
+const USER_ROLE_KEYS = {
+  member: "admin.users.member",
+  admin: "admin.users.admin",
+};
+
+const USER_STATUS_LABELS = {
+  active: "Active",
+  suspended: "Suspended",
+};
+
+const USER_STATUS_KEYS = {
+  active: "admin.users.filter.active",
+  suspended: "admin.users.filter.suspended",
+};
+
 export function formatTokenCount(n) {
   if (n == null || n === 0) return "0";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
@@ -23,14 +49,20 @@ export function formatUptime(secs) {
   return `${m}m`;
 }
 
-export function formatRelativeTime(iso) {
-  if (!iso) return "Never";
+export function formatRelativeTime(iso, t) {
+  if (!iso) return tx(t, "admin.relative.never", {}, "Never");
   const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 0) return "Just now";
-  if (diff < 60) return "Just now";
-  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-  if (diff < 2592000) return Math.floor(diff / 86400) + "d ago";
+  if (diff < 0) return tx(t, "admin.relative.justNow", {}, "Just now");
+  if (diff < 60) return tx(t, "admin.relative.justNow", {}, "Just now");
+  if (diff < 3600) {
+    return tx(t, "admin.relative.minutesAgo", { count: Math.floor(diff / 60) }, "{count}m ago");
+  }
+  if (diff < 86400) {
+    return tx(t, "admin.relative.hoursAgo", { count: Math.floor(diff / 3600) }, "{count}h ago");
+  }
+  if (diff < 2592000) {
+    return tx(t, "admin.relative.daysAgo", { count: Math.floor(diff / 86400) }, "{count}d ago");
+  }
   return new Date(iso).toLocaleDateString();
 }
 
@@ -48,6 +80,20 @@ export function statusTone(status) {
 export function roleTone(role) {
   if (role === "admin") return "signal";
   return "muted";
+}
+
+export function formatUserRole(role, t) {
+  const value = String(role || "member").toLowerCase();
+  const fallback = USER_ROLE_LABELS[value];
+  if (!fallback) return String(role || USER_ROLE_LABELS.member);
+  return tx(t, USER_ROLE_KEYS[value], {}, fallback);
+}
+
+export function formatUserStatus(status, t) {
+  const value = String(status || "active").toLowerCase();
+  const fallback = USER_STATUS_LABELS[value];
+  if (!fallback) return String(status || USER_STATUS_LABELS.active);
+  return tx(t, USER_STATUS_KEYS[value], {}, fallback);
 }
 
 export function summarizeUsers(users) {

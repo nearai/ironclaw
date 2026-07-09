@@ -1075,6 +1075,13 @@ registerPack("de", {
   "admin.dashboard.jobs": "Jobs",
   "admin.dashboard.lastActive": "Zuletzt aktiv",
 
+  // Admin — relative time
+  "admin.relative.never": "Nie",
+  "admin.relative.justNow": "gerade eben",
+  "admin.relative.minutesAgo": "vor {count} Min.",
+  "admin.relative.hoursAgo": "vor {count} Std.",
+  "admin.relative.daysAgo": "vor {count} T.",
+
   // Admin — users list
   "admin.users.user": "Benutzer",
   "admin.users.userFallback": "Benutzer",

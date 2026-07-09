@@ -1075,6 +1075,13 @@ registerPack("ar", {
   "admin.dashboard.jobs": "المهام",
   "admin.dashboard.lastActive": "آخر نشاط",
 
+  // Admin — relative time
+  "admin.relative.never": "أبدًا",
+  "admin.relative.justNow": "الآن للتو",
+  "admin.relative.minutesAgo": "منذ {count} د",
+  "admin.relative.hoursAgo": "منذ {count} س",
+  "admin.relative.daysAgo": "منذ {count} يوم",
+
   // Admin — users list
   "admin.users.user": "مستخدم",
   "admin.users.userFallback": "مستخدم",

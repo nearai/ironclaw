@@ -1075,6 +1075,13 @@ registerPack("zh-CN", {
   "admin.dashboard.jobs": "任务",
   "admin.dashboard.lastActive": "最后活跃",
 
+  // Admin — relative time
+  "admin.relative.never": "从未",
+  "admin.relative.justNow": "刚刚",
+  "admin.relative.minutesAgo": "{count} 分钟前",
+  "admin.relative.hoursAgo": "{count} 小时前",
+  "admin.relative.daysAgo": "{count} 天前",
+
   // Admin — users list
   "admin.users.user": "用户",
   "admin.users.userFallback": "用户",

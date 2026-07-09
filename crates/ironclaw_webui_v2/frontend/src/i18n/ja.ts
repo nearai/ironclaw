@@ -1075,6 +1075,13 @@ registerPack("ja", {
   "admin.dashboard.jobs": "ジョブ",
   "admin.dashboard.lastActive": "最終アクティブ",
 
+  // Admin — relative time
+  "admin.relative.never": "なし",
+  "admin.relative.justNow": "たった今",
+  "admin.relative.minutesAgo": "{count}分前",
+  "admin.relative.hoursAgo": "{count}時間前",
+  "admin.relative.daysAgo": "{count}日前",
+
   // Admin — users list
   "admin.users.user": "ユーザー",
   "admin.users.userFallback": "ユーザー",
