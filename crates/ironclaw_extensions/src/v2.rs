@@ -538,6 +538,10 @@ pub enum ManifestV2Error {
     )]
     LegacyTopLevelCapabilitiesForInstalledSource { manifest_source: ManifestSource },
     #[error(
+        "manifest source {manifest_source:?} may not declare capabilities via [[host_api]] or any other projection; a registered server's capabilities come from live discovery, never its manifest"
+    )]
+    CapabilitiesForbiddenForRegisteredSource { manifest_source: ManifestSource },
+    #[error(
         "capability {capability} declares unknown host port '{port}' (not in host-defined catalog)"
     )]
     UnknownHostPort {
@@ -709,6 +713,16 @@ impl ExtensionManifestV2 {
     ) -> Result<(), ManifestV2Error> {
         let projection = registry.project_manifest(self, sections, host_port_catalog)?;
         self.capabilities.extend(projection.capabilities);
+        // Checked on the projected output, not the raw `[[host_api]]` shape, so no
+        // future contract type can slip capabilities past it. A registered server's
+        // capabilities come from live discovery, never from its manifest.
+        if matches!(self.source, ManifestSource::UserRegistered { .. })
+            && !self.capabilities.is_empty()
+        {
+            return Err(ManifestV2Error::CapabilitiesForbiddenForRegisteredSource {
+                manifest_source: self.source.clone(),
+            });
+        }
         Ok(())
     }
 
