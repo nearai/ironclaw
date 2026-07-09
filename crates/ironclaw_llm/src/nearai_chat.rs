@@ -26,7 +26,7 @@ use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::tool_args::parse_tool_call_args;
+use crate::tool_args::parse_tool_call_args_lossy;
 
 #[path = "nearai_tool_message_flattening.rs"]
 mod nearai_tool_message_flattening;
@@ -619,6 +619,7 @@ impl NearAiChatProvider {
                             state.name = name;
                         }
                         if let Some(arguments) = function.arguments {
+                            state.arguments_delta_seen = true;
                             state.arguments.push_str(&arguments);
                         }
                     }
@@ -1562,28 +1563,40 @@ struct NearAiStreamingToolCallState {
     id: String,
     name: String,
     arguments: String,
+    arguments_delta_seen: bool,
 }
 
 impl NearAiStreamingToolCallState {
     fn into_tool_call(self) -> Result<Option<ToolCall>, LlmError> {
-        if self.id.is_empty() && self.name.is_empty() && self.arguments.is_empty() {
+        let Self {
+            id,
+            name,
+            arguments: raw_arguments,
+            arguments_delta_seen,
+        } = self;
+
+        if id.is_empty() && name.is_empty() && raw_arguments.is_empty() && !arguments_delta_seen {
             return Ok(None);
         }
-        let arguments = if self.arguments.trim().is_empty() {
-            serde_json::Value::Object(Default::default())
-        } else {
-            parse_tool_call_args(&self.arguments).map_err(|error| LlmError::InvalidResponse {
-                provider: "nearai_chat".to_string(),
-                reason: error.reason,
-            })?
-        };
+        let (arguments, arguments_parse_error) =
+            if raw_arguments.is_empty() && !arguments_delta_seen {
+                (serde_json::Value::Object(Default::default()), None)
+            } else {
+                parse_tool_call_args_lossy(&raw_arguments)
+            };
+        let arguments_parse_error = arguments_parse_error.map(|parse_error| {
+            format!(
+                "{parse_error}\nRaw malformed tool-call arguments (verbatim, {} bytes):\n{raw_arguments}",
+                raw_arguments.len()
+            )
+        });
         Ok(Some(ToolCall {
-            id: self.id,
-            name: self.name,
+            id,
+            name,
             arguments,
             reasoning: None,
             signature: None,
-            arguments_parse_error: None,
+            arguments_parse_error,
         }))
     }
 }
@@ -2029,7 +2042,7 @@ data: [DONE]
     }
 
     #[tokio::test]
-    async fn complete_with_tools_streaming_rejects_malformed_tool_arguments_after_done() {
+    async fn complete_with_tools_streaming_preserves_malformed_tool_arguments_for_repair() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
 
@@ -2063,19 +2076,89 @@ data: [DONE]
 
         let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
             .expect("provider");
-        let result = complete_search_tool_streaming(provider).await;
+        let response = complete_search_tool_streaming(provider)
+            .await
+            .expect("malformed streamed tool arguments should be preserved for host repair");
 
         server_task.await.expect("server task");
-        match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
-                assert_eq!(provider, "nearai_chat");
-                assert!(
-                    reason.starts_with("failed to parse tool-call arguments JSON: "),
-                    "unexpected reason: {reason}"
-                );
-            }
-            other => panic!("expected invalid malformed tool arguments, got {other:?}"),
-        }
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_search");
+        assert_eq!(response.tool_calls[0].name, "search");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::Value::Object(Default::default())
+        );
+        let parse_error = response.tool_calls[0]
+            .arguments_parse_error
+            .as_deref()
+            .expect("malformed arguments should carry parse error metadata");
+        assert!(
+            parse_error.starts_with("failed to parse tool-call arguments JSON: "),
+            "unexpected parse error: {parse_error}"
+        );
+        assert!(
+            parse_error
+                .contains("Raw malformed tool-call arguments (verbatim, 9 bytes):\n{\"query\":"),
+            "raw malformed arguments must be available for model repair: {parse_error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_marks_empty_tool_arguments_for_repair() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let (headers, body) = read_http_request_body(&mut socket).await;
+            assert!(headers.starts_with("POST /v1/chat/completions "));
+            let request_json: serde_json::Value =
+                serde_json::from_str(&body).expect("request json");
+            assert_eq!(request_json["stream"], true);
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write sse headers");
+            socket
+                .write_all(
+                    br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":""}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+                )
+                .await
+                .expect("write empty-arguments tool call stream");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let response = complete_search_tool_streaming(provider)
+            .await
+            .expect("empty streamed tool arguments should be preserved for host repair");
+
+        server_task.await.expect("server task");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_search");
+        assert_eq!(response.tool_calls[0].name, "search");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::Value::Object(Default::default())
+        );
+        let parse_error = response.tool_calls[0]
+            .arguments_parse_error
+            .as_deref()
+            .expect("empty arguments should carry parse error metadata");
+        assert!(parse_error.starts_with("empty arguments string"));
+        assert!(
+            parse_error.contains("Raw malformed tool-call arguments (verbatim, 0 bytes):\n"),
+            "empty raw arguments must still be explicit for model repair: {parse_error}"
+        );
     }
 
     #[test]
