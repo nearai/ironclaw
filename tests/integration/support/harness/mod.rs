@@ -16,7 +16,7 @@ pub(crate) use options::HostRuntimeHarnessOptions;
 pub(crate) use recorder::{HarnessCapabilityRecorder, RecordedCapabilityResult};
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -58,8 +58,8 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome,
         LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext, ProviderToolCall,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -1359,6 +1359,14 @@ impl HostRuntimeCapabilityHarness {
                 .await
             {
                 let active_authority = active_authority.map_err(host_runtime_harness_error)?;
+                let active_capability_ids = active_authority
+                    .grants
+                    .iter()
+                    .map(|grant| grant.capability.clone())
+                    .collect::<HashSet<_>>();
+                grants
+                    .grants
+                    .retain(|grant| !active_capability_ids.contains(&grant.capability));
                 grants.grants.extend(active_authority.grants);
                 active_extension_provider_trust = active_authority.provider_trust;
             }
@@ -1562,6 +1570,14 @@ impl LoopCapabilityPort for RefreshingHostRuntimeHarnessCapabilityPort {
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
         self.current_port()?.validate_provider_tool_call(tool_call)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        self.current_port()?
+            .provider_tool_call_capability_ids(tool_call)
     }
 
     async fn register_provider_tool_call(
