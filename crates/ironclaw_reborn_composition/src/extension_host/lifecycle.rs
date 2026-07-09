@@ -420,7 +420,9 @@ impl RebornLocalLifecycleFacade {
                 // extension's exclusive credential (the convergence point shared
                 // with the agent capability path).
                 let scope = lifecycle_resource_scope(&context)?;
-                extension_management.remove(package_ref, &scope).await
+                extension_management
+                    .remove(package_ref, &scope, Some(&scope.user_id))
+                    .await
             }
             LifecycleProductAction::ExtensionAuth { package_ref }
             | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {

@@ -17,7 +17,7 @@ use futures::future::try_join_all;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountUpdateBinding, ProviderScope, SLACK_PERSONAL_PROVIDER_ID,
+    CredentialAccountUpdateBinding, ProviderScope,
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
@@ -46,16 +46,15 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecycleExtensionSummary,
-    LifecycleExtensionSurfaceKind, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    ListPendingApprovalsRequest, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
+    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -171,8 +170,6 @@ type SkillActivationClearer =
 
 const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
-const SLACK_EXTENSION_ID: &str = "slack";
-pub(crate) const SLACK_CHANNEL_ID: &str = "slack";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {
@@ -267,86 +264,6 @@ pub trait ChannelConnectionFacade: Send + Sync {
     ) -> Result<(), RebornServicesError> {
         Err(RebornServicesError::service_unavailable(false))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemovableChannelCleanup {
-    Required(String),
-    IfConnectionFacadeSupportsChannel(String),
-}
-
-impl RemovableChannelCleanup {
-    pub fn into_parts(self) -> (String, bool) {
-        match self {
-            Self::Required(channel) => (channel, false),
-            Self::IfConnectionFacadeSupportsChannel(channel) => (channel, true),
-        }
-    }
-}
-
-pub fn removable_channel_cleanup_for_summary(
-    summary: &LifecycleExtensionSummary,
-) -> Option<RemovableChannelCleanup> {
-    if summary
-        .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
-    {
-        return Some(RemovableChannelCleanup::Required(
-            summary.package_ref.id.as_str().to_string(),
-        ));
-    }
-    // Slack tools use a personal OAuth token, but the DM/app-mention binding
-    // is still owned by the Slack channel connection facade.
-    if summary.package_ref.kind == LifecyclePackageKind::Extension
-        && summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
-        && summary
-            .credential_requirements
-            .iter()
-            .any(|requirement| requirement.provider == SLACK_PERSONAL_PROVIDER_ID)
-    {
-        return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            SLACK_CHANNEL_ID.to_string(),
-        ));
-    }
-    None
-}
-
-pub fn removable_channel_cleanup_for_lifecycle_response(
-    package_ref: &LifecyclePackageRef,
-    lifecycle: &LifecycleProductResponse,
-) -> Option<RemovableChannelCleanup> {
-    if package_ref.kind != LifecyclePackageKind::Extension {
-        return None;
-    }
-    let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = &lifecycle.payload else {
-        return None;
-    };
-    extensions
-        .iter()
-        .find(|installed| installed.summary.package_ref == *package_ref)
-        .and_then(|installed| removable_channel_cleanup_for_summary(&installed.summary))
-}
-
-pub async fn disconnect_channel_for_cleanup(
-    facade: &dyn ChannelConnectionFacade,
-    caller: WebUiAuthenticatedCaller,
-    cleanup: RemovableChannelCleanup,
-) -> Result<(), RebornServicesError> {
-    let (channel, requires_connection_facade_support) = cleanup.into_parts();
-    let should_disconnect = if requires_connection_facade_support {
-        facade
-            .caller_channel_connections(caller.clone())
-            .await?
-            .contains_key(&channel)
-    } else {
-        true
-    };
-    if should_disconnect {
-        facade
-            .disconnect_channel_for_caller(caller, &channel)
-            .await?;
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4841,13 +4758,7 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(
-            self.lifecycle_facade.as_ref(),
-            self.channel_connection_facade.clone(),
-            caller,
-            package_ref,
-        )
-        .await
+        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
     async fn setup_extension(

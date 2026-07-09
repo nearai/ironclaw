@@ -1662,14 +1662,19 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
-    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        extension_filesystem,
-        available_extensions,
-        extension_installation_store,
-        extension_lifecycle_service,
-        active_extensions,
-        Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
-    ));
+    let extension_management = Arc::new(
+        RebornLocalExtensionManagementPort::new(
+            extension_filesystem,
+            available_extensions,
+            extension_installation_store,
+            extension_lifecycle_service,
+            active_extensions,
+            Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
+        )
+        .with_channel_connection_facade_slot(Arc::clone(
+            &store_graph.local_runtime.channel_connection_facade_slot,
+        )),
+    );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
@@ -1724,7 +1729,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         &mut first_party_registry,
         extension_management,
         product_auth.runtime_credential_account_selection_service(),
-        Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
@@ -6723,14 +6727,16 @@ mod tests {
             .extension_management
             .as_ref()
             .expect("extension management");
+        let removal_scope = ironclaw_host_api::ResourceScope::local_default(
+            ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("valid scope");
         extension_management
             .remove(
                 nearai_ref.clone(),
-                &ironclaw_host_api::ResourceScope::local_default(
-                    ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
-                    ironclaw_host_api::InvocationId::new(),
-                )
-                .expect("valid scope"),
+                &removal_scope,
+                Some(&removal_scope.user_id),
             )
             .await
             .expect("disable NEAR AI MCP extension");

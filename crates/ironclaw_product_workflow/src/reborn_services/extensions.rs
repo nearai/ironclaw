@@ -13,8 +13,7 @@ use crate::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
     RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornServicesError, RemovableChannelCleanup, WebUiAuthenticatedCaller,
-    disconnect_channel_for_cleanup, removable_channel_cleanup_for_lifecycle_response,
+    RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -134,15 +133,10 @@ pub(super) async fn activate_extension(
 
 pub(super) async fn remove_extension(
     facade: &dyn LifecycleProductFacade,
-    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    let context = lifecycle_surface_context(caller.clone());
-    let cleanup = removable_channel_cleanup(facade, context.clone(), &package_ref).await?;
-    if let Some(cleanup) = cleanup {
-        disconnect_channel_for_cleanup(channel_connection_facade.as_ref(), caller, cleanup).await?;
-    }
+    let context = lifecycle_surface_context(caller);
     let lifecycle = execute_lifecycle(
         facade,
         context,
@@ -150,19 +144,6 @@ pub(super) async fn remove_extension(
     )
     .await?;
     Ok(action_response(&lifecycle, None, None))
-}
-
-async fn removable_channel_cleanup(
-    facade: &dyn LifecycleProductFacade,
-    context: LifecycleProductContext,
-    package_ref: &LifecyclePackageRef,
-) -> Result<Option<RemovableChannelCleanup>, RebornServicesError> {
-    let lifecycle =
-        execute_lifecycle(facade, context, LifecycleProductAction::ExtensionList).await?;
-    Ok(removable_channel_cleanup_for_lifecycle_response(
-        package_ref,
-        &lifecycle,
-    ))
 }
 
 async fn execute_lifecycle(
@@ -432,8 +413,6 @@ mod tests {
     #[derive(Default)]
     struct TestConnections {
         connections: std::collections::HashMap<String, bool>,
-        disconnects: Mutex<Vec<(UserId, String)>>,
-        disconnect_failures: Mutex<usize>,
     }
 
     impl TestConnections {
@@ -443,17 +422,7 @@ mod tests {
                     .iter()
                     .map(|(key, value)| ((*key).to_string(), *value))
                     .collect(),
-                disconnects: Mutex::new(Vec::new()),
-                disconnect_failures: Mutex::new(0),
             }
-        }
-
-        fn disconnects(&self) -> Vec<(UserId, String)> {
-            self.disconnects.lock().expect("lock").clone()
-        }
-
-        fn fail_next_disconnects(&self, count: usize) {
-            *self.disconnect_failures.lock().expect("lock") = count;
         }
     }
 
@@ -464,23 +433,6 @@ mod tests {
             _caller: WebUiAuthenticatedCaller,
         ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
             Ok(self.connections.clone())
-        }
-
-        async fn disconnect_channel_for_caller(
-            &self,
-            caller: WebUiAuthenticatedCaller,
-            channel: &str,
-        ) -> Result<(), RebornServicesError> {
-            self.disconnects
-                .lock()
-                .expect("lock")
-                .push((caller.user_id, channel.to_string()));
-            let mut failures = self.disconnect_failures.lock().expect("lock");
-            if *failures > 0 {
-                *failures -= 1;
-                return Err(RebornServicesError::service_unavailable(true));
-            }
-            Ok(())
         }
     }
 
@@ -538,27 +490,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_action_disconnects_callers_channel_when_removing_channel_extension() {
+    async fn remove_action_delegates_once_with_authenticated_surface_context() {
         let facade = RemoveFacade::default();
         let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
-        let response =
-            remove_extension(&facade, channel_connections, caller.clone(), package_ref())
-                .await
-                .expect("remove response");
+        let response = remove_extension(&facade, caller.clone(), package_ref())
+            .await
+            .expect("remove response");
 
         assert!(response.success);
-        assert_eq!(
-            connections.disconnects(),
-            vec![(caller.user_id.clone(), "fixture".to_string())],
-            "the WebUI remove path must clear the caller's per-channel personal connection"
-        );
         let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 2);
-        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
-        let (context, action) = &calls[1];
+        assert_eq!(calls.len(), 1);
+        let (context, action) = &calls[0];
         assert_eq!(
             *action,
             LifecycleProductAction::ExtensionRemove {
@@ -577,131 +520,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_action_disconnects_slack_when_removing_visible_slack_extension() {
-        let facade = RemoveFacade::slack_tools_extension();
-        let caller = caller();
-        let connections = Arc::new(TestConnections::with_connections(&[(
-            super::super::SLACK_CHANNEL_ID,
-            false,
-        )]));
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
-
-        let response = remove_extension(
-            &facade,
-            channel_connections,
-            caller.clone(),
-            slack_package_ref(),
-        )
-        .await
-        .expect("remove response");
-
-        assert!(response.success);
-        assert_eq!(
-            connections.disconnects(),
-            vec![(caller.user_id.clone(), "slack".to_string())],
-            "removing the visible Slack extension must clear the caller's Slack identity binding"
-        );
-    }
-
-    #[tokio::test]
-    async fn remove_action_removes_slack_extension_when_slack_connection_facade_unwired() {
-        let facade = RemoveFacade::slack_tools_extension();
-        let caller = caller();
-
-        let response = remove_extension(
-            &facade,
-            Arc::new(StaticChannelConnectionFacade),
-            caller,
-            slack_package_ref(),
-        )
-        .await
-        .expect("unwired Slack cleanup must not block extension removal");
-
-        assert!(response.success);
-        let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 2);
-        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
-        assert!(matches!(
-            calls[1].1,
-            LifecycleProductAction::ExtensionRemove { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn remove_action_does_not_remove_channel_extension_when_disconnect_fails() {
-        let facade = RemoveFacade::default();
-        let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        connections.fail_next_disconnects(1);
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
-
-        let error = remove_extension(&facade, channel_connections, caller.clone(), package_ref())
-            .await
-            .expect_err("disconnect failure must stop removal");
-
-        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-        assert_eq!(
-            connections.disconnects(),
-            vec![(caller.user_id.clone(), "fixture".to_string())],
-            "the caller's channel cleanup should be attempted"
-        );
-        let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 1);
-        assert!(
-            matches!(calls[0].1, LifecycleProductAction::ExtensionList),
-            "extension removal must remain retryable when channel cleanup fails"
-        );
-    }
-
-    #[tokio::test]
     async fn remove_action_stays_retryable_when_removal_fails_after_disconnect() {
-        // Disconnect deliberately runs before `ExtensionRemove` and is
-        // destructive: when removal then fails, the caller's pairing is
-        // already gone and they re-pair afterwards (accepted cost). What must
-        // hold is that the failure surfaces to the caller and a retry
-        // converges — the pre-remove lookup still finds the installed package
-        // and the disconnect is idempotent for an already-unpaired caller, so
-        // removal is re-attempted instead of being skipped.
         let facade = RemoveFacade::default();
         facade.fail_next_removes(1);
         let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
-        let error = remove_extension(
-            &facade,
-            channel_connections.clone(),
-            caller.clone(),
-            package_ref(),
-        )
-        .await
-        .expect_err("removal failure must surface after disconnect succeeded");
+        let error = remove_extension(&facade, caller.clone(), package_ref())
+            .await
+            .expect_err("removal failure must surface after disconnect succeeded");
         assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
         assert!(error.retryable, "transient removal failures stay retryable");
 
-        remove_extension(&facade, channel_connections, caller.clone(), package_ref())
+        remove_extension(&facade, caller, package_ref())
             .await
             .expect("retry converges once removal succeeds");
 
-        assert_eq!(
-            connections.disconnects(),
-            vec![
-                (caller.user_id.clone(), "fixture".to_string()),
-                (caller.user_id.clone(), "fixture".to_string()),
-            ],
-            "each attempt re-runs the idempotent caller disconnect"
-        );
         let calls = facade.calls.lock().expect("lock");
         let actions: Vec<_> = calls.iter().map(|(_, action)| action.clone()).collect();
-        assert_eq!(actions.len(), 4, "list+remove per attempt");
-        assert!(matches!(actions[0], LifecycleProductAction::ExtensionList));
+        assert_eq!(actions.len(), 2, "one remove call per attempt");
         assert!(matches!(
-            actions[1],
+            actions[0],
             LifecycleProductAction::ExtensionRemove { .. }
         ));
-        assert!(matches!(actions[2], LifecycleProductAction::ExtensionList));
         assert!(matches!(
-            actions[3],
+            actions[1],
             LifecycleProductAction::ExtensionRemove { .. }
         ));
     }
@@ -715,31 +557,6 @@ mod tests {
 
         assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
         assert!(!error.retryable);
-    }
-
-    #[tokio::test]
-    async fn remove_action_does_not_disconnect_non_channel_extensions() {
-        let facade = RemoveFacade::non_channel();
-        let caller = caller();
-        let connections = Arc::new(TestConnections::default());
-        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
-
-        let response = remove_extension(&facade, channel_connections, caller, package_ref())
-            .await
-            .expect("remove response");
-
-        assert!(response.success);
-        assert!(
-            connections.disconnects().is_empty(),
-            "non-channel extension removal must not clear channel personal connections"
-        );
-        let calls = facade.calls.lock().expect("lock");
-        assert_eq!(calls.len(), 2);
-        assert!(matches!(calls[0].1, LifecycleProductAction::ExtensionList));
-        assert!(matches!(
-            calls[1].1,
-            LifecycleProductAction::ExtensionRemove { .. }
-        ));
     }
 
     #[tokio::test]
@@ -1327,24 +1144,6 @@ mod tests {
     }
 
     impl RemoveFacade {
-        fn non_channel() -> Self {
-            Self {
-                calls: Mutex::new(Vec::new()),
-                summary: summary_with_onboarding(),
-                channel: false,
-                remove_failures: Mutex::new(0),
-            }
-        }
-
-        fn slack_tools_extension() -> Self {
-            Self {
-                calls: Mutex::new(Vec::new()),
-                summary: slack_tools_summary(),
-                channel: false,
-                remove_failures: Mutex::new(0),
-            }
-        }
-
         fn fail_next_removes(&self, count: usize) {
             *self.remove_failures.lock().expect("lock") = count;
         }
@@ -1426,27 +1225,8 @@ mod tests {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("valid ref")
     }
 
-    fn slack_package_ref() -> LifecyclePackageRef {
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref")
-    }
-
     fn summary_with_onboarding() -> LifecycleExtensionSummary {
         summary_with_onboarding_for("fixture")
-    }
-
-    fn slack_tools_summary() -> LifecycleExtensionSummary {
-        let mut summary = summary_with_onboarding_for("slack");
-        summary.name = "Slack".to_string();
-        summary.credential_requirements = vec![LifecycleExtensionCredentialRequirement {
-            name: "slack_personal".to_string(),
-            provider: "slack_personal".to_string(),
-            required: true,
-            setup: LifecycleExtensionCredentialSetup::OAuth {
-                scopes: vec!["search:read".to_string()],
-            },
-        }];
-        summary.onboarding = None;
-        summary
     }
 
     fn summary_with_onboarding_for(package_id: &str) -> LifecycleExtensionSummary {
