@@ -204,8 +204,8 @@ test("RecentRunRow renders failed run actions as real links when thread and run 
 
   assert.equal(openRun.as, Link);
   assert.equal(openRun.to, "/chat/thread%3Afailed");
-  assert.equal(openRun.disabled, undefined);
+  assert.equal(openRun.disabled, false);
   assert.equal(logs.as, Link);
   assert.equal(logs.to, "/logs?thread=thread:failed&run=run-failed");
-  assert.equal(logs.disabled, undefined);
+  assert.equal(logs.disabled, false);
 });

@@ -111,54 +111,28 @@ export function RecentRunRow({ run }) {
         )}
       </div>
       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-        {chatPath
-          ? (
-              <Button
-                as={Link}
-                to={chatPath}
-                variant="secondary"
-                size="sm"
-                data-testid="automation-run-open"
-              >
-                <Icon name="chat" className="mr-1.5 h-4 w-4" />
-                {t("automations.detail.openRun")}
-              </Button>
-            )
-          : (
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled
-                data-testid="automation-run-open"
-              >
-                <Icon name="chat" className="mr-1.5 h-4 w-4" />
-                {t("automations.detail.openRun")}
-              </Button>
-            )}
-        {canOpenLogs
-          ? (
-              <Button
-                as={Link}
-                to={logsPath}
-                variant="ghost"
-                size="sm"
-                data-testid="automation-run-logs"
-              >
-                <Icon name="file" className="mr-1.5 h-4 w-4" />
-                {t("nav.logs")}
-              </Button>
-            )
-          : (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled
-                data-testid="automation-run-logs"
-              >
-                <Icon name="file" className="mr-1.5 h-4 w-4" />
-                {t("nav.logs")}
-              </Button>
-            )}
+        <Button
+          as={chatPath ? Link : "button"}
+          to={chatPath || undefined}
+          variant="secondary"
+          size="sm"
+          disabled={!chatPath}
+          data-testid="automation-run-open"
+        >
+          <Icon name="chat" className="mr-1.5 h-4 w-4" />
+          {t("automations.detail.openRun")}
+        </Button>
+        <Button
+          as={canOpenLogs ? Link : "button"}
+          to={canOpenLogs ? logsPath : undefined}
+          variant="ghost"
+          size="sm"
+          disabled={!canOpenLogs}
+          data-testid="automation-run-logs"
+        >
+          <Icon name="file" className="mr-1.5 h-4 w-4" />
+          {t("nav.logs")}
+        </Button>
       </div>
     </div>
   );

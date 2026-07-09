@@ -320,14 +320,21 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
     await page.route("**/api/webchat/v2/logs**", handle_logs)
+    row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
 
-    try:
-        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
-        row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
-        await expect(page.locator(row_selector)).to_be_visible(timeout=15000)
+    async def select_automation() -> None:
+        row = page.locator(row_selector)
+        await expect(row).to_be_visible(timeout=15000)
+        await row.locator(
+            SEL_V2["automation_name_button_for"].format(id=automation_id)
+        ).click()
         await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
             timeout=15000
         )
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await select_automation()
 
         open_run = page.locator(SEL_V2["automation_run_open"]).first
         logs = page.locator(SEL_V2["automation_run_logs"]).first
@@ -338,9 +345,7 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
         await page.wait_for_url(f"**/v2/chat/{thread_id}", timeout=10000)
 
         await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
-        await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
-            timeout=15000
-        )
+        await select_automation()
         await page.locator(SEL_V2["automation_run_logs"]).first.click()
         await asyncio.wait_for(logs_requested.wait(), timeout=10)
 

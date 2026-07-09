@@ -99,10 +99,10 @@ export function Button({
   const sizeClass  = SIZES[size] ?? SIZES.md;
   const fullClass  = fullWidth ? "w-full" : "";
   const isDisabled = disabled || loading;
-  const isAnchor = Tag === "a";
-  const disabledAnchorClass = isAnchor && isDisabled ? "cursor-not-allowed opacity-50" : "";
+  const isLinkLike = Tag === "a" || rest.href != null || rest.to != null;
+  const disabledAnchorClass = isLinkLike && isDisabled ? "cursor-not-allowed opacity-50" : "";
   const elementProps =
-    isAnchor && isDisabled
+    isLinkLike && isDisabled
       ? {
           ...rest,
           onClick: (event) => {
@@ -130,9 +130,9 @@ export function Button({
           className
         )}
         disabled={isDisabled}
-        aria-disabled={isAnchor && isDisabled ? true : undefined}
+        aria-disabled={isLinkLike && isDisabled ? true : undefined}
         aria-busy={loading || undefined}
-        tabIndex={isAnchor && isDisabled ? -1 : undefined}
+        tabIndex={isLinkLike && isDisabled ? -1 : undefined}
         {...elementProps}
       >
         <span
@@ -155,9 +155,9 @@ export function Button({
     <Element
       className={cn(BASE, sizeClass, fullClass, disabledAnchorClass, variantClass, className)}
       disabled={isDisabled}
-      aria-disabled={isAnchor && isDisabled ? true : undefined}
+      aria-disabled={isLinkLike && isDisabled ? true : undefined}
       aria-busy={loading || undefined}
-      tabIndex={isAnchor && isDisabled ? -1 : undefined}
+      tabIndex={isLinkLike && isDisabled ? -1 : undefined}
       {...elementProps}
     >
       {loading ? (
