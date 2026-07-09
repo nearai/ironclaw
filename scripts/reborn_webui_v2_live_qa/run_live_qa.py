@@ -1132,7 +1132,13 @@ class AssistantReplyWaitResult:
     text_excerpt: str
     semantic_judge_used: bool
     semantic_judge_reason: str
+    final_reply_wait_ms: int
+    final_reply_reason: str
     semantic_judge: dict[str, object] | None = None
+
+
+ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS = 2.0
+ASSISTANT_REPLY_POLL_SECONDS = 0.5
 
 
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
@@ -1160,6 +1166,8 @@ def _record_assistant_reply_wait_result(
     observed["text_excerpt"] = reply.text_excerpt
     observed["semantic_judge_used"] = reply.semantic_judge_used
     observed["semantic_judge_reason"] = reply.semantic_judge_reason
+    observed["assistant_reply_wait_ms"] = reply.final_reply_wait_ms
+    observed["assistant_reply_wait_reason"] = reply.final_reply_reason
     if reply.semantic_judge is not None:
         observed["semantic_judge"] = reply.semantic_judge
 
@@ -1425,9 +1433,13 @@ async def _wait_for_assistant_reply(
     timeout: float,
     semantic_goal: str | None = None,
 ) -> AssistantReplyWaitResult:
+    started = time.monotonic()
     deadline = time.monotonic() + timeout
     assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
+    last_observed_text = ""
+    last_text_change_at = started
+    last_final_reply_state: str | None = None
     while time.monotonic() < deadline:
         await _approve_visible_tool_gate(page)
         assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
@@ -1436,6 +1448,13 @@ async def _wait_for_assistant_reply(
                 text = await assistant.inner_text(timeout=1000)
             except Exception:
                 text = ""
+            try:
+                last_final_reply_state = await assistant.get_attribute(
+                    "data-final-reply",
+                    timeout=1000,
+                )
+            except Exception:
+                last_final_reply_state = None
             try:
                 block_texts = [
                     block.strip()
@@ -1447,23 +1466,42 @@ async def _wait_for_assistant_reply(
             if block_texts:
                 text = "\n".join(block_texts)
             if text:
+                now = time.monotonic()
+                if text != last_observed_text:
+                    last_observed_text = text
+                    last_text_change_at = now
                 last_text = text
             normalized = text.lower()
             marker_matches = not marker or marker in text
             if marker_matches and required_text_matches(normalized, required_text):
+                final_reply_observed = last_final_reply_state in ("true", "false")
+                if final_reply_observed and last_final_reply_state != "true":
+                    await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
+                    continue
+                if not final_reply_observed:
+                    quiet_for = time.monotonic() - last_text_change_at
+                    if quiet_for < ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS:
+                        await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
+                        continue
                 return AssistantReplyWaitResult(
                     text_excerpt=text[-2000:],
                     semantic_judge_used=False,
                     semantic_judge_reason="literal_required_text_matched",
+                    final_reply_wait_ms=int((time.monotonic() - started) * 1000),
+                    final_reply_reason=(
+                        "final_reply_marker_matched"
+                        if final_reply_observed
+                        else "fallback_quiet_period_matched"
+                    ),
                 )
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
     main_text = ""
     try:
         main_text = await page.locator("main").inner_text(timeout=1000)  # type: ignore[attr-defined]
     except Exception:
         pass
     semantic_judge: dict[str, object] | None = None
-    if last_text and (not marker or marker in last_text):
+    if last_text and (not marker or marker in last_text) and last_final_reply_state != "false":
         semantic_judge = await _judge_assistant_reply_completion(
             marker=marker,
             required_text=required_text,
@@ -1476,11 +1514,18 @@ async def _wait_for_assistant_reply(
                 text_excerpt=last_text[-2000:],
                 semantic_judge_used=True,
                 semantic_judge_reason="semantic_judge_completed",
+                final_reply_wait_ms=int((time.monotonic() - started) * 1000),
+                final_reply_reason=(
+                    "semantic_judge_final_reply_marker_matched"
+                    if last_final_reply_state == "true"
+                    else "semantic_judge_timeout_fallback"
+                ),
                 semantic_judge=semantic_judge,
             )
     raise AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
+        f"latest_final_reply_state={last_final_reply_state!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
     )
