@@ -67,6 +67,17 @@ pub struct McpServerConfig {
     /// while the server is currently inactive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cached_tools: Vec<McpTool>,
+
+    /// Max seconds for a single call to this server before the transport times
+    /// out. `None` uses the default 30s. Clamped to 5..=21600 by
+    /// `effective_timeout()`. Local backends (a cold 27B sandbox) need more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+
+    /// Whether this server's tools may be run as background jobs
+    /// (`tool_job_start`). Opt-in; defaults false.
+    #[serde(default)]
+    pub allow_background: bool,
 }
 
 fn default_true() -> bool {
@@ -85,6 +96,8 @@ impl McpServerConfig {
             enabled: true,
             description: None,
             cached_tools: Vec::new(),
+            timeout_secs: None,
+            allow_background: false,
         }
     }
 
@@ -108,6 +121,8 @@ impl McpServerConfig {
             enabled: true,
             description: None,
             cached_tools: Vec::new(),
+            timeout_secs: None,
+            allow_background: false,
         }
     }
 
@@ -124,6 +139,8 @@ impl McpServerConfig {
             enabled: true,
             description: None,
             cached_tools: Vec::new(),
+            timeout_secs: None,
+            allow_background: false,
         }
     }
 
@@ -156,6 +173,12 @@ impl McpServerConfig {
                 EffectiveTransport::Unix { socket_path }
             }
         }
+    }
+
+    /// Per-call transport timeout, clamped to a sane range. Default 30s.
+    pub fn effective_timeout(&self) -> std::time::Duration {
+        let secs = self.timeout_secs.unwrap_or(30).clamp(5, 21_600);
+        std::time::Duration::from_secs(secs)
     }
 
     /// Validate the server configuration.
@@ -1761,5 +1784,27 @@ mod tests {
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
         }
+    }
+
+    #[test]
+    fn effective_timeout_defaults_to_30s_and_clamps() {
+        let mut c = McpServerConfig::new("s", "http://x");
+        assert_eq!(c.effective_timeout(), std::time::Duration::from_secs(30));
+        c.timeout_secs = Some(3600);
+        assert_eq!(c.effective_timeout(), std::time::Duration::from_secs(3600));
+        c.timeout_secs = Some(1); // below floor
+        assert_eq!(c.effective_timeout(), std::time::Duration::from_secs(5));
+        c.timeout_secs = Some(999_999); // above ceiling
+        assert_eq!(c.effective_timeout(), std::time::Duration::from_secs(21600));
+    }
+
+    #[test]
+    fn allow_background_defaults_false_and_roundtrips() {
+        let c = McpServerConfig::new("s", "http://x");
+        assert!(!c.allow_background);
+        let json = serde_json::to_string(&c).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back.allow_background);
+        assert_eq!(back.timeout_secs, None);
     }
 }
