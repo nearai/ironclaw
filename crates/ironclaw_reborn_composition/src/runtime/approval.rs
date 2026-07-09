@@ -29,17 +29,29 @@ pub(super) struct LocalDevApprovalLeaseTermsProvider {
     extension_surface_source: LocalDevExtensionSurfaceSource,
 }
 
+pub(super) struct LocalDevApprovalLeaseTermsProviderConfig {
+    pub(super) policy: Arc<LocalDevCapabilityPolicy>,
+    pub(super) registry: Arc<ExtensionRegistry>,
+    pub(super) owner_user_id: UserId,
+    pub(super) workspace_mounts: MountView,
+    pub(super) skill_mounts: MountView,
+    pub(super) memory_mounts: MountView,
+    pub(super) system_extensions_lifecycle_mounts: MountView,
+    pub(super) extension_surface_source: LocalDevExtensionSurfaceSource,
+}
+
 impl LocalDevApprovalLeaseTermsProvider {
-    pub(super) fn new(
-        policy: Arc<LocalDevCapabilityPolicy>,
-        registry: Arc<ExtensionRegistry>,
-        owner_user_id: UserId,
-        workspace_mounts: MountView,
-        skill_mounts: MountView,
-        memory_mounts: MountView,
-        system_extensions_lifecycle_mounts: MountView,
-        extension_surface_source: LocalDevExtensionSurfaceSource,
-    ) -> Self {
+    pub(super) fn new(config: LocalDevApprovalLeaseTermsProviderConfig) -> Self {
+        let LocalDevApprovalLeaseTermsProviderConfig {
+            policy,
+            registry,
+            owner_user_id,
+            workspace_mounts,
+            skill_mounts,
+            memory_mounts,
+            system_extensions_lifecycle_mounts,
+            extension_surface_source,
+        } = config;
         Self {
             policy,
             registry,
@@ -269,18 +281,41 @@ mod tests {
 
     use super::*;
 
+    fn terms_provider(
+        owner_user_id: UserId,
+        workspace_mounts: MountView,
+        extension_surface_source: LocalDevExtensionSurfaceSource,
+    ) -> LocalDevApprovalLeaseTermsProvider {
+        LocalDevApprovalLeaseTermsProvider::new(LocalDevApprovalLeaseTermsProviderConfig {
+            policy: Arc::new(local_dev_capability_policy().expect("policy parses")),
+            registry: Arc::new(ExtensionRegistry::new()),
+            owner_user_id,
+            workspace_mounts,
+            skill_mounts: MountView::default(),
+            memory_mounts: MountView::default(),
+            system_extensions_lifecycle_mounts: MountView::default(),
+            extension_surface_source,
+        })
+    }
+
+    fn default_terms_provider(
+        extension_surface_source: LocalDevExtensionSurfaceSource,
+    ) -> LocalDevApprovalLeaseTermsProvider {
+        terms_provider(
+            UserId::new("user").expect("owner user id"),
+            crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
+                .expect("workspace mounts"),
+            extension_surface_source,
+        )
+    }
+
     #[tokio::test]
     async fn non_owner_workspace_lease_terms_use_scoped_workspace_mounts() {
         let owner = UserId::new("owner").expect("owner user id");
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
+        let terms_provider = terms_provider(
             owner,
             crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
                 .expect("workspace mounts"),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
             LocalDevExtensionSurfaceSource::default(),
         );
         let capability = CapabilityId::new("builtin.read_file").expect("capability id");
@@ -332,16 +367,7 @@ mod tests {
                 runtime_credentials: Vec::new(),
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            UserId::new("owner").expect("owner user id"),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let request_id = ApprovalRequestId::new();
         let gate = approval_gate_record(
             request_id,
@@ -403,16 +429,7 @@ mod tests {
                 }],
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            UserId::new("owner").expect("owner user id"),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let request_id = ApprovalRequestId::new();
         let gate = approval_gate_record(
             request_id,
@@ -455,16 +472,7 @@ mod tests {
                 runtime_credentials: Vec::new(),
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            UserId::new("owner").expect("owner user id"),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),
@@ -494,16 +502,7 @@ mod tests {
                 runtime_credentials: Vec::new(),
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            UserId::new("owner").expect("owner user id"),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),
@@ -524,16 +523,7 @@ mod tests {
         let capability =
             CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
         let caller = ExtensionId::new("loop-driver").expect("caller id");
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            UserId::new("owner").expect("owner user id"),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            LocalDevExtensionSurfaceSource::default(),
-        );
+        let terms_provider = default_terms_provider(LocalDevExtensionSurfaceSource::default());
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),
@@ -563,16 +553,7 @@ mod tests {
                 runtime_credentials: Vec::new(),
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            UserId::new("owner").expect("owner user id"),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),

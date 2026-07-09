@@ -7,7 +7,7 @@ use ironclaw_host_api::{
 pub(crate) const WORKSPACE_ALIAS: &str = "/workspace";
 pub(crate) const WORKSPACE_TARGET: &str = "/projects/workspace";
 const HOST_ALIAS: &str = "/host";
-const HOST_TARGET: &str = "/projects/host";
+pub(crate) const HOST_TARGET: &str = "/projects/host";
 const MEMORY_ALIAS: &str = "/memory";
 const MEMORY_TARGET: &str = "/memory";
 

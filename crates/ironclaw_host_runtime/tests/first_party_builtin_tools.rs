@@ -3209,7 +3209,7 @@ async fn builtin_shell_delegates_command_execution_to_process_port() {
         requests[0]
             .mounts
             .as_ref()
-            .is_some_and(|mounts| mounts.mounts.is_empty())
+            .is_none_or(|mounts| mounts.mounts.is_empty())
     );
     assert!(requests[0].extra_env.is_empty());
     assert_eq!(requests[0].scope.user_id.as_str(), "user");

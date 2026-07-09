@@ -28,6 +28,10 @@ impl LocalHostWorkdirAlias {
         &self.alias
     }
 
+    pub(crate) fn host_path(&self) -> &Path {
+        &self.host_path
+    }
+
     fn resolve(&self, workdir: &str) -> Option<PathBuf> {
         if workdir == self.alias {
             return Some(PathBuf::new());
