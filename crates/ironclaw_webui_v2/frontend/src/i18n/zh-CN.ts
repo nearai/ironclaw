@@ -217,6 +217,7 @@ registerPack("zh-CN", {
 
   // Settings tabs
   "settings.inference": "推理",
+  "settings.appearance": "外观",
   "settings.agent": "代理",
   "settings.channels": "频道",
   "settings.networking": "网络",
@@ -284,6 +285,9 @@ registerPack("zh-CN", {
   "settings.restartNow": "立即重启",
   "settings.restartStarting": "正在重启...",
   "settings.restartUnavailable": "暂不支持从网页界面重启。请手动重启网关进程以应用待生效的更改。",
+  "settings.field.showChatTerminalShortcut": "显示聊天终端快捷入口",
+  "settings.field.showChatTerminalShortcutDesc":
+    "在聊天线程中显示浮动的终端/日志图标。",
 
   // Restart dialog
   "restart.title": "重启 IronClaw",

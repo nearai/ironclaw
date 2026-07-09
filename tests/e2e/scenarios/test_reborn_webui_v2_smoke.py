@@ -638,6 +638,111 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     ).to_contain_text("slack")
 
 
+async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
+    reborn_v2_server, reborn_v2_browser
+):
+    """A non-admin logs deep link reads URL scope before active chat state exists."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    requested_queries: list[dict[str, list[str]]] = []
+    operator_logs_requested = False
+    logs_requested = asyncio.Event()
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(route, {"threads": [], "next_cursor": None})
+
+    async def handle_logs(route):
+        parsed = urlparse(route.request.url)
+        requested_queries.append(parse_qs(parsed.query))
+        logs_requested.set()
+        await fulfill_json(
+            route,
+            {
+                "logs": {
+                    "source": "in_memory_tracing",
+                    "entries": [
+                        {
+                            "id": "direct-log-1",
+                            "timestamp": "2026-07-08T10:11:12.123Z",
+                            "level": "info",
+                            "target": "ironclaw::ui::logs",
+                            "message": "direct scoped deep link log",
+                            "thread_id": "thread-direct",
+                            "run_id": "run-direct",
+                        }
+                    ],
+                    "next_cursor": None,
+                    "tail_supported": True,
+                    "follow_supported": False,
+                },
+            },
+        )
+
+    async def handle_operator_logs(route):
+        nonlocal operator_logs_requested
+        operator_logs_requested = True
+        await fulfill_json(route, {"logs": {"entries": []}}, status=403)
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads**", handle_threads)
+    await page.route("**/api/webchat/v2/logs**", handle_logs)
+    await page.route("**/api/webchat/v2/operator/logs**", handle_operator_logs)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/logs"
+            "?thread_id=thread-direct&run_id=run-direct"
+            f"&token={REBORN_V2_AUTH_TOKEN}"
+        )
+
+        await asyncio.wait_for(logs_requested.wait(), timeout=10)
+        first_query = requested_queries[0]
+        assert first_query.get("thread_id") == ["thread-direct"], first_query
+        assert first_query.get("run_id") == ["run-direct"], first_query
+        assert first_query.get("limit") == ["500"], first_query
+        assert not operator_logs_requested
+
+        await expect(page.locator(SEL_V2["logs_scope_toolbar"])).to_be_visible(
+            timeout=10000
+        )
+        await expect(
+            page.locator(SEL_V2["logs_scope_chip"].format(key="thread_id"))
+        ).to_contain_text("thread-direct")
+        await expect(
+            page.locator(SEL_V2["logs_scope_chip"].format(key="run_id"))
+        ).to_contain_text("run-direct")
+        entry = page.locator(SEL_V2["logs_entry"]).first
+        await expect(entry.locator(SEL_V2["logs_entry_message"])).to_contain_text(
+            "direct scoped deep link log"
+        )
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
     """Threads are listed for the caller and deletion removes the thread and transcript."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}

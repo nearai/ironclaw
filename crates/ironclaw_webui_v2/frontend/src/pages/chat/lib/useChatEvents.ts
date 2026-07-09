@@ -11,6 +11,10 @@ import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
 } from "./tool-activity-state";
+import {
+  isFinalAssistantForRun,
+  replaceAssistantReplyForRun,
+} from "./stream-order-memory";
 
 const noop = () => {};
 const emptyConnectionContext = () => ({});
@@ -148,17 +152,18 @@ export function useChatEvents({
 
         case "final_reply": {
           const reply = frame.reply || {};
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `reply-${reply.turn_run_id || Date.now()}`,
-              role: "assistant",
-              content: reply.text || "",
-              timestamp: reply.generated_at || new Date().toISOString(),
-              turnRunId: reply.turn_run_id,
-              isFinalReply: true,
-            },
-          ]);
+          const turnRunId = reply.turn_run_id || null;
+          const replyMessage = {
+            id: `reply-${turnRunId || Date.now()}`,
+            role: "assistant",
+            content: reply.text || "",
+            timestamp: reply.generated_at || new Date().toISOString(),
+            turnRunId,
+            isFinalReply: true,
+          };
+          setMessages((prev) =>
+            replaceAssistantReplyForRun(prev, replyMessage, turnRunId),
+          );
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
@@ -507,15 +512,22 @@ function applyProjectionItems({
     }
 
     if (item.text) {
-      // ProductProjectionItem::Text { id, body } — the body is the
+      // ProductProjectionItem::Text { id, run_id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id and by the matching durable timeline message id so a
       // late projection cannot duplicate a reply already rendered from
-      // history. Text can arrive in the same projection snapshot as a
-      // still-blocked gate, so run_status remains the source of truth for
-      // clearing pendingGate.
+      // history. Text can stream while the run is still active or arrive in the same
+      // projection snapshot as a still-blocked gate; run_status remains the source of
+      // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
+      const textRunId = item.text.run_id || null;
       setMessages((prev) => {
+        if (
+          textRunId &&
+          prev.some((m) => isFinalAssistantForRun(m, textRunId))
+        ) {
+          return prev;
+        }
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
         const existing = prev.findIndex(
           (m) => m.id === messageId || (timelineMessageId && m.id === timelineMessageId),
@@ -526,7 +538,8 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: prev[existing]?.timestamp || new Date().toISOString(),
-          isFinalReply: true,
+          turnRunId: prev[existing]?.turnRunId || textRunId,
+          isFinalReply: false,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -535,7 +548,6 @@ function applyProjectionItems({
         }
         return [...prev, next];
       });
-      setIsProcessing(false);
     }
 
     if (item.thinking) {

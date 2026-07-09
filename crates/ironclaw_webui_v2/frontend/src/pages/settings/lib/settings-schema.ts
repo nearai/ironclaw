@@ -1,5 +1,6 @@
 export const SETTINGS_TABS = [
   { id: "inference", labelKey: "settings.inference", icon: "spark" },
+  { id: "appearance", labelKey: "settings.appearance", icon: "sun" },
   { id: "agent", labelKey: "settings.agent", icon: "bolt" },
   { id: "channels", labelKey: "settings.channels", icon: "send" },
   { id: "networking", labelKey: "settings.networking", icon: "pulse" },

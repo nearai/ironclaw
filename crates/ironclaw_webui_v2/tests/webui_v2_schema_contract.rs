@@ -153,6 +153,7 @@ fn projection_state() -> ProductProjectionState {
         vec![
             ProductProjectionItem::Text {
                 id: "message-1".to_string(),
+                run_id: None,
                 body: "hello".to_string(),
             },
             ProductProjectionItem::RunStatus {
