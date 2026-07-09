@@ -280,7 +280,8 @@ impl<'de> Deserialize<'de> for TriggerInboundContentRef {
 ///
 /// Values must be non-empty, at most 256 bytes, and free of control
 /// characters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct TriggerDeliveryTargetId(String);
 
 impl TriggerDeliveryTargetId {
@@ -293,6 +294,10 @@ impl TriggerDeliveryTargetId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
     }
 }
 
@@ -317,23 +322,9 @@ impl TryFrom<String> for TriggerDeliveryTargetId {
     }
 }
 
-impl Serialize for TriggerDeliveryTargetId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for TriggerDeliveryTargetId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
+impl From<TriggerDeliveryTargetId> for String {
+    fn from(id: TriggerDeliveryTargetId) -> Self {
+        id.0
     }
 }
 

@@ -2910,10 +2910,21 @@ async fn resolve_per_trigger_delivery_route(
     target: &ironclaw_triggers::TriggerDeliveryTargetId,
 ) -> Result<ReplyTargetBindingRef, TriggeredRunDeliveryOutcomeKind> {
     let Some(provider) = outbound_target_provider else {
+        tracing::warn!(
+            target = "ironclaw::reborn::slack_delivery",
+            "per-trigger delivery target present but no outbound target provider is wired"
+        );
         return Err(TriggeredRunDeliveryOutcomeKind::TargetUnavailable);
     };
     let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
-        .map_err(|_| TriggeredRunDeliveryOutcomeKind::TargetUnavailable)?;
+        .map_err(|error| {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                %error,
+                "per-trigger delivery target id failed outbound target id validation"
+            );
+            TriggeredRunDeliveryOutcomeKind::TargetUnavailable
+        })?;
     // The caller for target ownership checks is the trigger creator in the
     // fire's scope — the same identity that selected the target at creation.
     let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
@@ -2927,8 +2938,21 @@ async fn resolve_per_trigger_delivery_route(
         .await
     {
         Ok(Some(entry)) => Ok(entry.reply_target_binding_ref),
-        Ok(None) => Err(TriggeredRunDeliveryOutcomeKind::TargetUnavailable),
-        Err(_) => Err(TriggeredRunDeliveryOutcomeKind::Failed),
+        Ok(None) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                "per-trigger delivery target did not resolve for the trigger creator (stale, foreign, or disconnected)"
+            );
+            Err(TriggeredRunDeliveryOutcomeKind::TargetUnavailable)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                %error,
+                "outbound delivery target lookup failed during triggered delivery"
+            );
+            Err(TriggeredRunDeliveryOutcomeKind::Failed)
+        }
     }
 }
 

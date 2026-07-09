@@ -2501,7 +2501,14 @@ async fn validate_trigger_delivery_target_against_registry(
         reason,
     };
     let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
-        .map_err(|_| invalid("delivery target id is not a valid outbound target id".to_string()))?;
+        .map_err(|error| {
+            tracing::debug!(
+                target = "ironclaw::reborn::trigger_create",
+                %error,
+                "per-trigger delivery target id failed outbound target id validation"
+            );
+            invalid("delivery target id is not a valid outbound target id".to_string())
+        })?;
     let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
         scope.tenant_id.clone(),
         scope.user_id.clone(),
@@ -2517,9 +2524,16 @@ async fn validate_trigger_delivery_target_against_registry(
         Ok(None) => Err(invalid(
             "delivery target is not available to this caller".to_string(),
         )),
-        Err(_) => Err(TriggerError::Backend {
-            reason: "outbound delivery target lookup unavailable".to_string(),
-        }),
+        Err(error) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::trigger_create",
+                %error,
+                "outbound delivery target lookup failed during trigger create validation"
+            );
+            Err(TriggerError::Backend {
+                reason: "outbound delivery target lookup unavailable".to_string(),
+            })
+        }
     }
 }
 

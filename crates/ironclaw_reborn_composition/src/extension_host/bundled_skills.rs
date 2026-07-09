@@ -489,6 +489,10 @@ mod tests {
             skill_md.contains("delivered automatically"),
             "routine-advisor must state host-owned result delivery"
         );
+        assert!(
+            skill_md.contains("delivery_target_id"),
+            "routine-advisor must teach per-trigger routing, not only the user-wide default"
+        );
     }
 
     #[tokio::test]
