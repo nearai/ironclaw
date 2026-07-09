@@ -89,7 +89,7 @@ async fn reborn_provider_tool_arguments_are_schema_coerced_before_http_dispatch(
             .iter()
             .any(|(name, value)| name.eq_ignore_ascii_case("x-coercion") && value == "ok"),
         "stringified headers should be coerced before HTTP dispatch: {:?}",
-        &request.headers
+        request.headers
     );
     assert!(
         request
@@ -98,7 +98,7 @@ async fn reborn_provider_tool_arguments_are_schema_coerced_before_http_dispatch(
             .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
                 && value == "application/json"),
         "JSON body coercion should trigger the default content-type header: {:?}",
-        &request.headers
+        request.headers
     );
     assert_eq!(request.body.as_slice(), br#"{"ok":true}"#);
 
