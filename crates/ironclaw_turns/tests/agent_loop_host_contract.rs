@@ -212,9 +212,15 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             .iter()
             .map(|milestone| milestone.kind.kind_name())
             .collect::<Vec<_>>(),
-        vec!["model_started", "model_reasoning_delta", "model_completed"]
+        vec![
+            "model_started",
+            "model_reasoning_delta",
+            "model_text_delta",
+            "model_completed",
+        ]
     );
     let serialized_milestones = serde_json::to_string(&milestone_sink.milestones()).unwrap();
+    assert!(serialized_milestones.contains("safe delta"));
     assert!(!serialized_milestones.contains("RAW_ASSISTANT_CONTENT_SENTINEL"));
     assert!(!serialized_milestones.contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456"));
     assert!(serialized_milestones.contains("[redacted]"));
@@ -258,7 +264,10 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
         "model response survived start milestone failure"
     );
     assert_eq!(gateway.requests().len(), 1);
-    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+    assert_eq!(
+        milestone_sink.kind_names(),
+        vec!["model_text_delta", "model_completed"]
+    );
 }
 
 #[tokio::test]
@@ -296,7 +305,10 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
     };
     assert_eq!(reply.content, "model response survived milestone failure");
     assert_eq!(gateway.requests().len(), 1);
-    assert_eq!(milestone_sink.kind_names(), vec!["model_started"]);
+    assert_eq!(
+        milestone_sink.kind_names(),
+        vec!["model_started", "model_text_delta"]
+    );
 }
 
 #[tokio::test]
@@ -3771,7 +3783,10 @@ async fn model_started_failure_still_accounts_provider_outcome() {
     assert!(accountant.was_post_called());
     assert!(!accountant.post_saw_failure());
     assert_eq!(gateway.requests().len(), 1);
-    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+    assert_eq!(
+        milestone_sink.kind_names(),
+        vec!["model_text_delta", "model_completed"]
+    );
 }
 
 /// Budget accounting on failure: post hook still fires.

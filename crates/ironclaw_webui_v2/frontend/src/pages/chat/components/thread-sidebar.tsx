@@ -1,5 +1,6 @@
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
+import { displaySidebarTitle } from "../../../lib/thread-title";
 
 function formatTime(iso) {
   if (!iso) return "";
@@ -43,11 +44,17 @@ export function ThreadSidebar({
         >
           <option value="">{t("chat.selectConversation")}</option>
           {threads.map(
-            (thread) => (
-              <option key={thread.id} value={thread.id}>
-                {thread.title || `Thread ${thread.id.slice(0, 8)}`}
-              </option>
-            )
+            (thread) => {
+              const title = displaySidebarTitle(
+                thread,
+                t("notifications.approval.untitled"),
+              );
+              return (
+                <option key={thread.id} value={thread.id}>
+                  {title}
+                </option>
+              );
+            }
           )}
         </select>
       </div>
@@ -93,6 +100,7 @@ export function ThreadSidebar({
         </div>)}
         {threads.map((thread) => {
           const active = thread.id === activeThreadId;
+          const title = displaySidebarTitle(thread, t("notifications.approval.untitled"));
           return (
             <button
               key={thread.id}
@@ -106,7 +114,7 @@ export function ThreadSidebar({
             >
               <div className="flex items-center gap-2">
                 <span className="truncate max-w-[150px] text-sm font-medium text-iron-100">
-                  {thread.title || `Thread ${thread.id.slice(0, 8)}`}
+                  {title}
                 </span>
                 {thread.state === "Processing" &&
                 (<span

@@ -193,8 +193,9 @@ pub async fn onboard(
 /// (`trace_contribution_dir_for_scope(None)`), so all users without their own
 /// personal-invite enrollment inherit it via `resolve_trace_credentials`.
 ///
-/// This is an admin-only operation at the call boundary (the host gates it
-/// behind `AdminScope`); the function itself only knows it targets the base dir.
+/// This is an admin-only operation at the call boundary (the caller must gate
+/// it: host-shell possession for the CLI, an admin identity for any future
+/// product surface); the function itself only knows it targets the base dir.
 pub async fn onboard_instance_with_sink(
     invite_url: &str,
     consents: OnboardConsents,
@@ -202,6 +203,22 @@ pub async fn onboard_instance_with_sink(
 ) -> Result<OnboardOutcome, OnboardError> {
     let dir = trace_contribution_dir_for_scope(None);
     onboard_at_dir_with_sink(&dir, invite_url, consents, sink).await
+}
+
+/// Base-dir-parameterised instance enrollment using the default
+/// direct-`reqwest` sink — the admin CLI path (`ironclaw-reborn traces
+/// enroll-instance`), where host-shell possession is the admin gate and there
+/// is no host egress pipeline to route through. Targets
+/// `<base>/trace_contributions/` (the scope-`None` location), so all users
+/// without a personal enrollment inherit it via `resolve_trace_credentials`.
+/// Tests supply an isolated tempdir base.
+pub async fn onboard_instance_at_base(
+    base_dir: &Path,
+    invite_url: &str,
+    consents: OnboardConsents,
+) -> Result<OnboardOutcome, OnboardError> {
+    let dir = crate::contribution::trace_contribution_dir_for_scope_at(base_dir, None);
+    onboard_at_dir(&dir, invite_url, consents).await
 }
 
 /// Dir-parameterised core using the default direct-`reqwest` sink —

@@ -10,8 +10,9 @@
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_reborn_traces::contribution::{
-    authorize_manual_review_hold_for_scope, fetch_account_traces, read_trace_policy_for_scope,
-    resolve_trace_credentials, scoped_credit_view,
+    AccountLoginLinkError, authorize_manual_review_hold_for_scope, fetch_account_traces,
+    mint_account_login_link, read_trace_policy_for_scope, resolve_trace_credentials,
+    scoped_credit_view,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +100,59 @@ pub struct RebornTraceHoldAuthorizeResponse {
     /// authorized for submission; false when there was no such held trace
     /// (already authorized, already submitted, or never held).
     pub authorized: bool,
+}
+
+/// One-time Trace Commons browser login link, minted for the authenticated
+/// caller. SECURITY: the `url` is a code-bearing account-access credential.
+/// It is delivered ONLY over the authenticated WebUI response to the caller's
+/// own browser — it must never be logged, persisted, or placed on any
+/// model-visible surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornAccountLoginLinkResponse {
+    /// Whether a link was minted. `false` with `enrolled: false` is the
+    /// unenrolled zero-state, not an error.
+    pub minted: bool,
+    pub enrolled: bool,
+    /// The one-time login URL (present iff `minted`). Expires shortly and is
+    /// single-use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Typed failure for [`account_login_link_for_user`]. Mirrors
+/// [`AccountTracesError`]: the operation is named and the cause chain is
+/// preserved for a diagnosable (but sanitized at the wire) 500.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AccountLoginLinkMintError {
+    /// Minting the link failed (policy read, claim mint, transport, issuer).
+    #[error("mint account login link: {0}")]
+    Mint(String),
+}
+
+/// Mint a one-time Trace Commons browser login link for the caller.
+///
+/// Uses the crate-local pinned direct client (no host-egress sink) — the same
+/// network lane as [`account_traces_for_user`]. An unenrolled caller gets the
+/// zero-state (`minted: false, enrolled: false`), never an error; hosted
+/// multi-tenant users have no host-file access, so the authenticated response
+/// is the only delivery channel for the link.
+pub(super) async fn account_login_link_for_user(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<RebornAccountLoginLinkResponse, AccountLoginLinkMintError> {
+    match mint_account_login_link(tenant_id, user_id).await {
+        Ok(link) => Ok(RebornAccountLoginLinkResponse {
+            minted: true,
+            enrolled: true,
+            url: Some(link.url),
+        }),
+        Err(AccountLoginLinkError::NotEnrolled) => Ok(RebornAccountLoginLinkResponse {
+            minted: false,
+            enrolled: false,
+            url: None,
+        }),
+        Err(error) => Err(AccountLoginLinkMintError::Mint(format!("{error:#}"))),
+    }
 }
 
 /// Typed failure for [`account_traces_for_user`]. Each variant names the backend

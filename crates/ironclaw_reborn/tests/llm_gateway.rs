@@ -8,13 +8,13 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason, LlmError,
+    LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
-    HostManagedToolResultContent, ThreadBackedLoopContextPort,
+    HostManagedModelStreamSink, HostManagedToolResultContent, ThreadBackedLoopContextPort,
 };
 use ironclaw_reborn::model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
@@ -98,6 +98,45 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
     assert_eq!(requests[0].messages[1].content, "hello model");
+}
+
+#[tokio::test]
+async fn gateway_stream_model_with_progress_uses_provider_streaming_and_sanitizes_updates() {
+    let provider = Arc::new(StreamingRecordingLlmProvider::new(
+        vec!["Done.".to_string(), " sk-live-secret".to_string()],
+        "Done. sk-live-secret",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let response = gateway
+        .stream_model_with_progress(model_request(interactive_model()), sink.clone())
+        .await
+        .unwrap();
+
+    assert!(
+        provider.complete_requests.lock().unwrap().is_empty(),
+        "progress path must call provider complete_streaming, not complete"
+    );
+    let streaming_requests = provider.streaming_requests.lock().unwrap();
+    assert_eq!(streaming_requests.len(), 1);
+    assert_eq!(
+        streaming_requests[0].model.as_deref(),
+        Some("host-selected-model")
+    );
+    assert_eq!(
+        sink.updates(),
+        vec!["Done.".to_string(), "Done. [redacted]".to_string()]
+    );
+    assert_eq!(
+        response.safe_text_deltas,
+        vec!["Done. [redacted]".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -751,6 +790,72 @@ async fn gateway_preserves_invalid_output_from_provider_tool_validation() {
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
+fn repair_request_messages(
+    tool_requests: &[ToolCompletionRequest],
+) -> &[ironclaw_llm::ChatMessage] {
+    assert_eq!(tool_requests.len(), 2);
+    &tool_requests[1].messages
+}
+
+fn repair_assistant_tool_calls(messages: &[ironclaw_llm::ChatMessage]) -> &[ToolCall] {
+    messages
+        .iter()
+        .find(|message| message.role == Role::Assistant && message.tool_calls.is_some())
+        .expect("repair request includes assistant tool call replay")
+        .tool_calls
+        .as_ref()
+        .expect("tool calls replayed")
+}
+
+fn repair_tool_result<'a>(
+    messages: &'a [ironclaw_llm::ChatMessage],
+    tool_call_id: &str,
+) -> &'a ironclaw_llm::ChatMessage {
+    messages
+        .iter()
+        .find(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some(tool_call_id)
+        })
+        .expect("repair request includes rejected tool result")
+}
+
+fn malformed_args_repair_provider(
+    parse_error: &str,
+    final_content: &str,
+) -> Arc<ToolAwareProvider> {
+    Arc::new(ToolAwareProvider::tool_response_sequence(vec![
+        ToolCompletionResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call_bad_args".to_string(),
+                name: "demo__echo".to_string(),
+                arguments: serde_json::json!({}),
+                reasoning: Some("malformed args call reasoning".to_string()),
+                signature: None,
+                arguments_parse_error: Some(parse_error.to_string()),
+            }],
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("response reasoning".to_string()),
+            reasoning_details: None,
+        },
+        ToolCompletionResponse {
+            content: Some(final_content.to_string()),
+            tool_calls: Vec::new(),
+            input_tokens: 2,
+            output_tokens: 2,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+            reasoning_details: None,
+        },
+    ]))
+}
+
 #[tokio::test]
 async fn gateway_repairs_oversized_provider_tool_arguments_before_registration() {
     // Must exceed the host provider-argument limit so the gateway exercises its
@@ -824,16 +929,8 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
     assert!(capabilities.registered.lock().unwrap().is_empty());
 
     let tool_requests = provider.tool_requests.lock().unwrap();
-    assert_eq!(tool_requests.len(), 2);
-    let repair_messages = &tool_requests[1].messages;
-    let repair_assistant = repair_messages
-        .iter()
-        .find(|message| message.role == Role::Assistant && message.tool_calls.is_some())
-        .expect("repair request includes assistant tool call replay");
-    let repair_tool_calls = repair_assistant
-        .tool_calls
-        .as_ref()
-        .expect("tool calls replayed");
+    let repair_messages = repair_request_messages(&tool_requests);
+    let repair_tool_calls = repair_assistant_tool_calls(repair_messages);
     assert_eq!(repair_tool_calls.len(), 2);
     assert_eq!(
         repair_tool_calls[0].arguments,
@@ -853,17 +950,136 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
         repair_tool_calls[1].reasoning.as_deref(),
         Some("oversized call reasoning")
     );
-    let repair_tool_result = repair_messages
-        .iter()
-        .find(|message| {
-            message.role == Role::Tool && message.tool_call_id.as_deref() == Some("call_2")
-        })
-        .expect("repair request includes rejected tool result");
+    let repair_tool_result = repair_tool_result(repair_messages, "call_2");
     assert!(repair_tool_result.content.contains(&format!(
         "provider tool arguments exceed {} bytes",
         ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES
     )));
     assert!(!repair_tool_result.content.contains("xxxxx"));
+}
+
+#[tokio::test]
+async fn gateway_repairs_malformed_provider_tool_arguments_before_registration() {
+    let parse_error =
+        "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3";
+    let provider = malformed_args_repair_provider(parse_error, "Finished after parse repair.");
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap();
+
+    let usage = response
+        .usage
+        .expect("repaired response reports accumulated provider usage");
+    assert_eq!(usage.input_tokens, 3);
+    assert_eq!(usage.output_tokens, 3);
+
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected repaired assistant reply");
+    };
+    assert_eq!(reply.content, "Finished after parse repair.");
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "malformed provider tool arguments must not register or execute a capability"
+    );
+
+    let tool_requests = provider.tool_requests.lock().unwrap();
+    let repair_messages = repair_request_messages(&tool_requests);
+    let repair_tool_calls = repair_assistant_tool_calls(repair_messages);
+    assert_eq!(repair_tool_calls.len(), 1);
+    assert_eq!(
+        repair_tool_calls[0].arguments,
+        serde_json::json!({
+            "error": "arguments omitted because the provider emitted malformed tool-call JSON"
+        })
+    );
+    assert_eq!(
+        repair_tool_calls[0].reasoning.as_deref(),
+        Some("malformed args call reasoning")
+    );
+    assert!(
+        repair_tool_calls[0].arguments_parse_error.is_none(),
+        "repair replay must not expose internal parse-error metadata as tool-call fields"
+    );
+    let repair_tool_result = repair_tool_result(repair_messages, "call_bad_args");
+    assert!(
+        repair_tool_result.content.contains(parse_error),
+        "repair prompt must carry the parse failure without executing the call"
+    );
+}
+
+#[tokio::test]
+async fn gateway_repairs_streamed_malformed_provider_tool_arguments_before_registration() {
+    let parse_error = "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3\nRaw malformed tool-call arguments (verbatim, 9 bytes):\n{\"query\":";
+    let provider = malformed_args_repair_provider(parse_error, "Finished after streamed repair.");
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let response = gateway
+        .stream_model_with_capabilities_and_progress(
+            model_request(interactive_model()),
+            capabilities.clone(),
+            sink,
+        )
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected repaired assistant reply");
+    };
+    assert_eq!(reply.content, "Finished after streamed repair.");
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "malformed streamed provider tool arguments must not register or execute a capability"
+    );
+
+    assert_eq!(
+        provider.streaming_tool_requests.lock().unwrap().len(),
+        1,
+        "initial tool-capable provider call must use the streaming gateway path"
+    );
+    let tool_requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(
+        tool_requests.len(),
+        1,
+        "repair retry should be a normal tool-capable provider call"
+    );
+    let repair_messages = &tool_requests[0].messages;
+    let repair_tool_calls = repair_assistant_tool_calls(repair_messages);
+    assert_eq!(repair_tool_calls.len(), 1);
+    assert_eq!(
+        repair_tool_calls[0].arguments,
+        serde_json::json!({
+            "error": "arguments omitted because the provider emitted malformed tool-call JSON"
+        })
+    );
+    assert!(
+        repair_tool_calls[0].arguments_parse_error.is_none(),
+        "repair replay must not expose internal parse-error metadata as tool-call fields"
+    );
+    let repair_tool_result = repair_tool_result(repair_messages, "call_bad_args");
+    assert!(
+        repair_tool_result.content.contains(parse_error),
+        "repair prompt must carry the parse failure from the streamed response"
+    );
+    assert!(
+        repair_tool_result.content.contains("{\"query\":"),
+        "model-only repair prompt must carry raw malformed arguments"
+    );
 }
 
 #[tokio::test]
@@ -1881,10 +2097,12 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
             LoopHostMilestoneKind::ModelStarted {
                 requested_model_profile_id: None
             },
+            LoopHostMilestoneKind::ModelTextDelta { safe_text },
             LoopHostMilestoneKind::ModelCompleted {
                 effective_model_profile_id
             }
-        ] if effective_model_profile_id.as_str() == "interactive_model"
+        ] if safe_text == "production response"
+            && effective_model_profile_id.as_str() == "interactive_model"
     ));
 }
 
@@ -3091,6 +3309,93 @@ impl HostManagedModelGateway for InvalidSummaryModelGateway {
     }
 }
 
+#[derive(Default)]
+struct RecordingHostStreamSink {
+    updates: Mutex<Vec<String>>,
+}
+
+impl RecordingHostStreamSink {
+    fn updates(&self) -> Vec<String> {
+        self.updates.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl HostManagedModelStreamSink for RecordingHostStreamSink {
+    async fn safe_text_update(&self, safe_text: String) {
+        self.updates.lock().unwrap().push(safe_text);
+    }
+}
+
+struct StreamingRecordingLlmProvider {
+    model_name: String,
+    complete_requests: Mutex<Vec<CompletionRequest>>,
+    streaming_requests: Mutex<Vec<CompletionRequest>>,
+    streaming_deltas: Vec<String>,
+    response_content: String,
+}
+
+impl StreamingRecordingLlmProvider {
+    fn new(streaming_deltas: Vec<String>, response_content: &str) -> Self {
+        Self {
+            model_name: "streaming-recording-model".to_string(),
+            complete_requests: Mutex::new(Vec::new()),
+            streaming_requests: Mutex::new(Vec::new()),
+            streaming_deltas,
+            response_content: response_content.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for StreamingRecordingLlmProvider {
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.complete_requests.lock().unwrap().push(request);
+        Err(LlmError::RequestFailed {
+            provider: self.model_name.clone(),
+            reason: "non-streaming completion is not expected".to_string(),
+        })
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.streaming_requests.lock().unwrap().push(request);
+        for delta in &self.streaming_deltas {
+            sink.text_delta(delta.clone()).await;
+        }
+        Ok(CompletionResponse {
+            content: self.response_content.clone(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            reasoning: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: self.model_name.clone(),
+            reason: "tool completion is not expected".to_string(),
+        })
+    }
+}
+
 struct RecordingLlmProvider {
     model_name: String,
     requests: Mutex<Vec<CompletionRequest>>,
@@ -3217,6 +3522,7 @@ impl LlmProvider for BarrierRecordingLlmProvider {
 struct ToolAwareProvider {
     complete_requests: Mutex<Vec<CompletionRequest>>,
     tool_requests: Mutex<Vec<ToolCompletionRequest>>,
+    streaming_tool_requests: Mutex<Vec<ToolCompletionRequest>>,
     plain_response: Mutex<Option<CompletionResponse>>,
     tool_responses: Mutex<VecDeque<ToolCompletionResponse>>,
 }
@@ -3226,6 +3532,7 @@ impl ToolAwareProvider {
         Self {
             complete_requests: Mutex::new(Vec::new()),
             tool_requests: Mutex::new(Vec::new()),
+            streaming_tool_requests: Mutex::new(Vec::new()),
             plain_response: Mutex::new(Some(CompletionResponse {
                 content: content.to_string(),
                 input_tokens: 1,
@@ -3275,6 +3582,7 @@ impl ToolAwareProvider {
         Self {
             complete_requests: Mutex::new(Vec::new()),
             tool_requests: Mutex::new(Vec::new()),
+            streaming_tool_requests: Mutex::new(Vec::new()),
             plain_response: Mutex::new(None),
             tool_responses: Mutex::new(responses.into()),
         }
@@ -3306,6 +3614,20 @@ impl LlmProvider for ToolAwareProvider {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.tool_requests.lock().unwrap().push(request);
+        Ok(self
+            .tool_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("tool response configured"))
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        _sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.streaming_tool_requests.lock().unwrap().push(request);
         Ok(self
             .tool_responses
             .lock()
