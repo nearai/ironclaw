@@ -798,6 +798,7 @@ pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
                 local_dev_capability_policy,
                 Arc::clone(&local_runtime.extension_registry),
+                local_runtime.owner_user_id.clone(),
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
                 local_runtime.memory_mounts.clone(),

@@ -3430,7 +3430,7 @@ async fn builtin_shell_does_not_inherit_unlisted_parent_env() {
 }
 
 #[tokio::test]
-async fn builtin_shell_rejects_scoped_mount_workdir_until_process_backend_handles_it() {
+async fn builtin_shell_rejects_scoped_mount_workdir_without_trusted_mount_source() {
     let temp = tempfile::tempdir().unwrap();
     let mut permissions = MountPermissions::read_write();
     permissions.execute = true;

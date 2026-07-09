@@ -6,10 +6,15 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{MountView, ResourceScope};
+use ironclaw_host_api::{MountGrant, MountView, ResourceScope, VirtualPath};
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
 use thiserror::Error;
@@ -176,6 +181,13 @@ pub(crate) enum LocalHostProcessEnvMode {
 pub struct LocalHostProcessPort {
     env_mode: LocalHostProcessEnvMode,
     workdir_aliases: Vec<LocalHostWorkdirAlias>,
+    mount_sources: Vec<LocalHostMountSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalHostMountSource {
+    virtual_root: VirtualPath,
+    host_root: PathBuf,
 }
 
 impl LocalHostProcessPort {
@@ -183,6 +195,7 @@ impl LocalHostProcessPort {
         Self {
             env_mode: LocalHostProcessEnvMode::Scrubbed,
             workdir_aliases: Vec::new(),
+            mount_sources: Vec::new(),
         }
     }
 
@@ -190,6 +203,7 @@ impl LocalHostProcessPort {
         Self {
             env_mode: LocalHostProcessEnvMode::Inherited,
             workdir_aliases: Vec::new(),
+            mount_sources: Vec::new(),
         }
     }
 
@@ -207,6 +221,154 @@ impl LocalHostProcessPort {
         }
         self
     }
+
+    pub fn with_mount_source(
+        mut self,
+        virtual_root: impl Into<String>,
+        host_root: impl Into<PathBuf>,
+    ) -> Self {
+        let virtual_root = match VirtualPath::new(virtual_root.into()) {
+            Ok(virtual_root) => virtual_root,
+            Err(reason) => {
+                tracing::debug!(
+                    reason = %reason,
+                    "ignoring invalid local host process mount source"
+                );
+                return self;
+            }
+        };
+        let host_root = match std::fs::canonicalize(host_root.into()) {
+            Ok(host_root) if host_root.is_dir() => host_root,
+            Ok(host_root) => {
+                tracing::debug!(
+                    host_root = ?host_root,
+                    "ignoring local host process mount source because it is not a directory"
+                );
+                return self;
+            }
+            Err(reason) => {
+                tracing::debug!(
+                    reason = %reason,
+                    "ignoring unresolved local host process mount source"
+                );
+                return self;
+            }
+        };
+        if self
+            .mount_sources
+            .iter()
+            .any(|source| source.virtual_root == virtual_root)
+        {
+            tracing::debug!(
+                virtual_root = %virtual_root,
+                "ignoring duplicate local host process mount source"
+            );
+            return self;
+        }
+        self.mount_sources.push(LocalHostMountSource {
+            virtual_root,
+            host_root,
+        });
+        self
+    }
+
+    fn effective_workdir_aliases(
+        &self,
+        mounts: Option<&MountView>,
+    ) -> Result<Vec<LocalHostWorkdirAlias>, RuntimeProcessError> {
+        let mut aliases = self.workdir_aliases.clone();
+        let Some(mounts) = mounts else {
+            return Ok(aliases);
+        };
+
+        for grant in &mounts.mounts {
+            let source = self.resolve_mount_source(grant)?;
+            let Some(host_path) = source else {
+                continue;
+            };
+            let alias = LocalHostWorkdirAlias::try_new(grant.alias.as_str(), host_path)
+                .map_err(RuntimeProcessError::ExecutionFailed)?;
+            if let Some(existing) = aliases
+                .iter_mut()
+                .find(|existing| existing.alias() == alias.alias())
+            {
+                *existing = alias;
+            } else {
+                aliases.push(alias);
+            }
+        }
+
+        Ok(aliases)
+    }
+
+    fn resolve_mount_source(
+        &self,
+        grant: &MountGrant,
+    ) -> Result<Option<PathBuf>, RuntimeProcessError> {
+        let source = self
+            .mount_sources
+            .iter()
+            .filter(|source| {
+                virtual_path_prefix_matches(source.virtual_root.as_str(), grant.target.as_str())
+            })
+            .max_by_key(|source| source.virtual_root.as_str().len());
+
+        let Some(source) = source else {
+            if self
+                .workdir_aliases
+                .iter()
+                .any(|alias| alias.alias() == grant.alias.as_str())
+            {
+                return Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "no trusted local host mount source is configured for virtual path {}",
+                    grant.target
+                )));
+            }
+            return Ok(None);
+        };
+
+        let mut joined = source.host_root.clone();
+        let tail = grant
+            .target
+            .as_str()
+            .strip_prefix(source.virtual_root.as_str())
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        if !tail.is_empty() {
+            for segment in tail.split('/') {
+                joined.push(segment);
+            }
+        }
+
+        if grant.permissions.write {
+            std::fs::create_dir_all(&joined).map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "local host mount target {} could not be initialized: {error}",
+                    grant.target
+                ))
+            })?;
+        }
+        let canonical = std::fs::canonicalize(&joined).map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "local host mount target {} could not be resolved: {error}",
+                grant.target
+            ))
+        })?;
+        if !canonical.starts_with(&source.host_root) {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "local host mount target {} escapes its trusted source",
+                grant.target
+            )));
+        }
+        if !canonical.is_dir() {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "local host mount target {} is not a directory",
+                grant.target
+            )));
+        }
+
+        Ok(Some(canonical))
+    }
 }
 
 #[async_trait]
@@ -215,7 +377,8 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let cwd = resolve_local_host_workdir(request.workdir.as_deref(), &self.workdir_aliases)
+        let workdir_aliases = self.effective_workdir_aliases(request.mounts.as_ref())?;
+        let cwd = resolve_local_host_workdir(request.workdir.as_deref(), &workdir_aliases)
             .map_err(|e| {
                 RuntimeProcessError::ExecutionFailed(format!(
                     "cannot determine working directory: {e}"
@@ -231,7 +394,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
                 "running local host command with inherited environment"
             );
         }
-        let command = rewrite_local_host_command_aliases(&request.command, &self.workdir_aliases);
+        let command = rewrite_local_host_command_aliases(&request.command, &workdir_aliases);
         let start = std::time::Instant::now();
         let (output, exit_code) = execute_local_command(
             &request.scope,
@@ -248,7 +411,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         // `/workspace` terms and never leaks the host layout into the reply.
         // (The saved-output full result is a separate, non-model-facing UI
         // surface and is left to the result-fetch path.)
-        let preview = rewrite_local_host_output_aliases(&output.preview, &self.workdir_aliases);
+        let preview = rewrite_local_host_output_aliases(&output.preview, &workdir_aliases);
         Ok(CommandExecutionOutput {
             output: preview,
             saved_output: output.saved_output,
@@ -257,6 +420,10 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             duration: start.elapsed(),
         })
     }
+}
+
+fn virtual_path_prefix_matches(prefix: &str, path: &str) -> bool {
+    Path::new(path).starts_with(Path::new(prefix))
 }
 
 async fn execute_local_command(
@@ -363,6 +530,7 @@ mod tests {
     use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
     #[cfg(unix)]
     use crate::process_output::SavedCommandOutputSanitization;
+    use ironclaw_host_api::{MountAlias, MountPermissions};
     use std::sync::Mutex;
 
     #[derive(Debug)]
@@ -694,6 +862,50 @@ mod tests {
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.output, "ok");
         assert!(scratch.exists());
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_scopes_workspace_alias_from_request_mounts() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root.clone());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "printf '# Hello\\n' > /workspace/hello.md && printf '%s' \"$PWD\""
+                    .to_string(),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "/workspace");
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("tenants/tenant-a/users/user-a/hello.md"))
+                .expect("scoped shell artifact"),
+            "# Hello\n"
+        );
+        assert!(
+            !workspace_root.join("hello.md").exists(),
+            "scoped shell writes must not land in the raw workspace root"
+        );
     }
 
     #[cfg(windows)]

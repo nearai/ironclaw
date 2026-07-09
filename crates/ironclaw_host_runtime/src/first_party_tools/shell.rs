@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use ironclaw_host_api::{
     EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    RuntimeDispatchErrorKind, SandboxQuota, ScopedPath, VirtualPath,
+    RuntimeDispatchErrorKind, SandboxQuota, VirtualPath,
 };
 use serde_json::{Value, json};
 
@@ -64,7 +64,7 @@ pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<(Value, Duration), FirstPartyCapabilityError> {
     let parsed = shell_core::parse_shell_request(&request.input).map_err(shell_error)?;
-    reject_unbacked_scoped_workdir(request, parsed.workdir.as_deref())?;
+    ensure_scoped_workdir_is_mounted(request, parsed.workdir.as_deref())?;
     if parsed
         .timeout_secs
         .is_some_and(|timeout_secs| timeout_secs > MAX_SHELL_TIMEOUT_SECS)
@@ -206,7 +206,7 @@ fn render_shell_output(
     format!("{output}\n\n{note}")
 }
 
-fn reject_unbacked_scoped_workdir(
+fn ensure_scoped_workdir_is_mounted(
     request: &FirstPartyCapabilityRequest,
     workdir: Option<&str>,
 ) -> Result<(), FirstPartyCapabilityError> {
@@ -220,23 +220,22 @@ fn reject_unbacked_scoped_workdir(
     else {
         return Ok(());
     };
-    let scoped_path = ScopedPath::new(workdir.to_string())
+    let scoped_path = mounts
+        .scoped_path(workdir.to_string())
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
     let (_virtual_path, grant) = mounts
         .resolve_with_grant(&scoped_path)
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Client))?;
-    if !grant.permissions.execute {
+    if !(grant.permissions.read
+        || grant.permissions.write
+        || grant.permissions.list
+        || grant.permissions.execute)
+    {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::Client,
         ));
     }
-
-    // Shell execution still uses the local process fallback. Until the resolved
-    // process backend can receive virtual cwd + scoped mounts, fail closed rather
-    // than translating scoped paths to ambient host paths in this handler.
-    Err(FirstPartyCapabilityError::new(
-        RuntimeDispatchErrorKind::Client,
-    ))
+    Ok(())
 }
 
 fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityError {
