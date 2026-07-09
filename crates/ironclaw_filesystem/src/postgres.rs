@@ -1644,7 +1644,10 @@ async fn postgres_delete_with_client(
 /// the current row's `created_at` with the initial candidate lets the Rust
 /// classifier treat "expected row was deleted and a later incarnation now
 /// exists at another version" as NotFound, while still reporting
-/// VersionMismatch for ordinary updates that preserve `created_at`.
+/// VersionMismatch for ordinary updates that preserve `created_at`. This
+/// relies on `created_at` being immutable after row creation; if a future
+/// writer mutates it on update, replacement detection would classify that
+/// update as a new incarnation.
 #[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
     WITH candidate AS MATERIALIZED (
@@ -1661,6 +1664,9 @@ const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
             candidate.version AS candidate_version,
             candidate.created_at AS candidate_created_at
         FROM root_filesystem_entries
+        -- `candidate` is materialized and path-unique, so this carries the
+        -- statement-start snapshot alongside the post-lock row without
+        -- multiplying rows.
         LEFT JOIN candidate ON TRUE
         WHERE root_filesystem_entries.path = $1
           AND root_filesystem_entries.is_dir = FALSE
