@@ -21,13 +21,13 @@ use rand::RngExt;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) use crate::automation::trigger_poller_trusted_submit::AccessCheckerTriggerFireAuthorizer;
+pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_delivery::PostSubmitDeliveryHook;
-pub(crate) use crate::trigger_poller_trusted_submit::AccessCheckerTriggerFireAuthorizer;
-pub(crate) use crate::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
