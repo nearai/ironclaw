@@ -1267,12 +1267,25 @@ impl BuiltinObligationHandler {
 
         let mut material = Vec::with_capacity(handles.len());
         for handle in handles {
+            // Lease/consume at the scope the secret is actually stored under —
+            // the run scope, or its owner-level fallback for user-installed
+            // secrets. The ciphertext AAD is bound to that scope, so leasing at
+            // the wrong one would decrypt to an error; `insert` below still
+            // keys on the run scope so the egress planner finds the material.
+            let effective_scope = resolve_present_secret_scope(
+                secret_store.as_ref(),
+                &request.context.resource_scope,
+                handle,
+            )
+            .await
+            .map_err(|_| secret_obligation_failed())?
+            .ok_or_else(secret_obligation_failed)?;
             let lease = secret_store
-                .lease_once(&request.context.resource_scope, handle)
+                .lease_once(&effective_scope, handle)
                 .await
                 .map_err(|_| secret_obligation_failed())?;
             let secret = secret_store
-                .consume(&request.context.resource_scope, lease.id)
+                .consume(&effective_scope, lease.id)
                 .await
                 .map_err(|_| secret_obligation_failed())?;
             material.push((handle.clone(), secret));
@@ -2050,7 +2063,55 @@ fn secret_obligation_failed() -> CapabilityObligationError {
     }
 }
 
-/// Single source of truth for "is this required secret present in `scope`".
+/// The owner (user-level) fallback for `scope`, or `None` when `scope` is
+/// already owner-scoped.
+///
+/// Capability runs carry an `agent_id` (and possibly `project_id`) sub-scope,
+/// but user-level secrets — e.g. those installed through the user-scoped admin
+/// secrets API, whose write path hard-codes `agent_id: None` — live at the
+/// owner scope (`/secrets/<handle>`, not `/secrets/agents/<agent>/<handle>`).
+/// A strict agent-scoped lookup can therefore never see them. This mirrors
+/// `persistent_approval_lookup_scopes`, which already falls back to the owner
+/// scope for approvals; secret resolution simply lacked the same fallback.
+///
+/// Only `agent_id`/`project_id` (the two axes `secret_owner_alias` +
+/// `same_scope_owner` key on) are stripped; tenant/user are preserved, so the
+/// fallback can only ever reach the SAME user's owner-level secrets.
+fn secret_owner_fallback_scope(scope: &ResourceScope) -> Option<ResourceScope> {
+    if scope.agent_id.is_none() && scope.project_id.is_none() {
+        return None;
+    }
+    Some(ResourceScope {
+        agent_id: None,
+        project_id: None,
+        ..scope.clone()
+    })
+}
+
+/// The scope at which `handle` is actually stored for a run at `scope`: the run
+/// scope itself, or its owner-level fallback ([`secret_owner_fallback_scope`])
+/// for user-installed secrets. `None` when the secret is absent at both.
+///
+/// Callers MUST lease/consume at the returned scope (not the original run
+/// scope): the ciphertext AAD is bound to the scope it was written under, so a
+/// mismatched scope decrypts to an error even when the path is found.
+pub(crate) async fn resolve_present_secret_scope(
+    store: &dyn SecretStore,
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<Option<ResourceScope>, SecretStoreError> {
+    if store.metadata(scope, handle).await?.is_some() {
+        return Ok(Some(scope.clone()));
+    }
+    if let Some(owner_scope) = secret_owner_fallback_scope(scope) {
+        if store.metadata(&owner_scope, handle).await?.is_some() {
+            return Ok(Some(owner_scope));
+        }
+    }
+    Ok(None)
+}
+
+/// Single source of truth for "is this required secret present for `scope`".
 ///
 /// Both the credential pre-flight (ordering — `DefaultHostRuntime::
 /// credential_preflight_check`) and the dispatch-time obligation backstop
@@ -2058,12 +2119,16 @@ fn secret_obligation_failed() -> CapabilityObligationError {
 /// consult this one rule so "what counts as a present credential" cannot drift
 /// between the two call sites. Each caller decides how to treat a store `Err`
 /// (the pre-flight fails open and skips; the obligation backstop fails closed).
+/// Presence includes the owner-level fallback (see
+/// [`resolve_present_secret_scope`]).
 pub(crate) async fn secret_present(
     store: &dyn SecretStore,
     scope: &ResourceScope,
     handle: &SecretHandle,
 ) -> Result<bool, SecretStoreError> {
-    Ok(store.metadata(scope, handle).await?.is_some())
+    Ok(resolve_present_secret_scope(store, scope, handle)
+        .await?
+        .is_some())
 }
 
 fn resource_obligation_failed() -> CapabilityObligationError {
@@ -2719,6 +2784,58 @@ mod tests {
             thread_id: None,
             invocation_id: InvocationId::new(),
         }
+    }
+
+    /// A user-installed secret lives at the owner scope (`agent_id: None`,
+    /// e.g. the user-scoped admin secrets API) but capability runs lease under
+    /// an agent sub-scope. `resolve_present_secret_scope` must fall back to the
+    /// owner scope so the agent-scoped run still finds it — without the
+    /// fallback the tool call fails `AuthRequired` and the model loops.
+    #[tokio::test]
+    async fn resolve_present_secret_scope_falls_back_to_owner_scope() {
+        let store = InMemorySecretStore::new();
+        let handle = SecretHandle::new("agent-market-token").unwrap();
+
+        let agent_scope = resource_scope_with_agent("reborn-cli-agent");
+        let owner_scope = ResourceScope {
+            agent_id: None,
+            project_id: None,
+            ..agent_scope.clone()
+        };
+
+        // Written at the owner scope (as the user-scoped admin API does).
+        store
+            .put(owner_scope.clone(), handle.clone(), SecretMaterial::from("axm_secret"), None)
+            .await
+            .unwrap();
+
+        // A strict agent-scoped read misses …
+        assert!(store.metadata(&agent_scope, &handle).await.unwrap().is_none());
+        // … but the resolver falls back to the owner scope, and `secret_present`
+        // (both pre-flight and the dispatch backstop) reports it present.
+        let resolved = resolve_present_secret_scope(&store, &agent_scope, &handle)
+            .await
+            .unwrap()
+            .expect("owner-scope fallback resolves the secret");
+        assert_eq!(resolved.agent_id, None, "leased at the owner scope for a matching AAD");
+        assert_eq!(resolved.user_id, owner_scope.user_id);
+        assert!(secret_present(&store, &agent_scope, &handle).await.unwrap());
+
+        // A secret genuinely stored at the agent scope resolves to that scope
+        // directly (no fallback), and a truly-absent handle resolves to None.
+        let direct = SecretHandle::new("agent-local-token").unwrap();
+        store
+            .put(agent_scope.clone(), direct.clone(), SecretMaterial::from("v"), None)
+            .await
+            .unwrap();
+        let resolved = resolve_present_secret_scope(&store, &agent_scope, &direct)
+            .await
+            .unwrap()
+            .expect("agent-scoped secret resolves directly");
+        assert_eq!(resolved.agent_id, agent_scope.agent_id);
+        let absent = SecretHandle::new("nope-token").unwrap();
+        assert!(resolve_present_secret_scope(&store, &agent_scope, &absent).await.unwrap().is_none());
+        assert!(!secret_present(&store, &agent_scope, &absent).await.unwrap());
     }
 
     fn execution_context() -> ExecutionContext {
