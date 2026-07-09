@@ -1434,13 +1434,18 @@ impl RebornServicesApi for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
-        // Capture the forwarded caller so the contract test can verify the
-        // caller-scoped route threads the authenticated identity, then return
-        // a hermetic canned mint (no network / filesystem).
+        // Capture the forwarded caller (tenant AND user — this is the trusted
+        // identity boundary) so the contract test can verify the caller-scoped
+        // route threads the authenticated identity, then return a hermetic
+        // canned mint (no network / filesystem).
         self.trace_account_login_link_callers
             .lock()
             .expect("lock")
-            .push(caller.actor().user_id.as_str().to_string());
+            .push(format!(
+                "{}/{}",
+                caller.tenant_id.as_str(),
+                caller.actor().user_id.as_str()
+            ));
         Ok(RebornAccountLoginLinkResponse {
             minted: true,
             enrolled: true,
@@ -2607,15 +2612,16 @@ async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
         "https://commons.example/account/login?code=stub"
     );
 
-    // The route must forward the authenticated caller's user id to the
-    // facade (fails if it stops threading the caller).
+    // The route must forward the authenticated caller's tenant AND user id to
+    // the facade — the scope is trusted-caller-derived, never request input
+    // (fails if the handler stops threading the caller).
     assert_eq!(
         services
             .trace_account_login_link_callers
             .lock()
             .expect("lock")
-            .len(),
-        1,
+            .clone(),
+        vec!["tenant-alpha/user-alpha".to_string()],
     );
 }
 

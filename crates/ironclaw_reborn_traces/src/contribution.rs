@@ -5528,6 +5528,7 @@ pub struct ContributionHttpRequest {
     pub timeout_ms: u32,
 }
 
+#[derive(Debug)]
 pub struct ContributionHttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
@@ -6860,20 +6861,31 @@ async fn mint_account_login_link_inner(
     // navigation, local delivery file) receives an absolute URL instead of
     // one that would resolve against the WRONG origin (e.g. the IronClaw
     // WebUI's own host).
-    let link_url = match reqwest::Url::parse(&link_url) {
-        Ok(absolute) => absolute.to_string(),
-        Err(_) => endpoint_url
-            .join(&link_url)
-            .map_err(|e| {
-                AccountLoginLinkError::Backend(
-                    anyhow::Error::new(e).context("login-link response url is not resolvable"),
-                )
-            })?
-            .to_string(),
+    let resolved = match reqwest::Url::parse(&link_url) {
+        Ok(absolute) => absolute,
+        Err(_) => endpoint_url.join(&link_url).map_err(|e| {
+            AccountLoginLinkError::Backend(
+                anyhow::Error::new(e).context("login-link response url is not resolvable"),
+            )
+        })?,
     };
+    // ORIGIN PIN: the caller navigates an authenticated user's browser to this
+    // URL. A hostile or compromised issuer response must not be able to steer
+    // that navigation anywhere else — the final URL must stay on the
+    // trust-anchored issuer origin (same scheme + host + port as the
+    // login-links endpoint; this also excludes non-HTTP(S) schemes such as
+    // `javascript:`) and must carry no userinfo.
+    let same_origin = resolved.scheme() == endpoint_url.scheme()
+        && resolved.host_str() == endpoint_url.host_str()
+        && resolved.port_or_known_default() == endpoint_url.port_or_known_default();
+    if !same_origin || !resolved.username().is_empty() || resolved.password().is_some() {
+        return Err(AccountLoginLinkError::Backend(anyhow::anyhow!(
+            "login-link response url is not on the issuer origin"
+        )));
+    }
     Ok(AccountLoginLink {
         account_id,
-        url: link_url,
+        url: resolved.to_string(),
     })
 }
 
@@ -16694,6 +16706,188 @@ mod tests {
         assert_eq!(
             profiles[0]["display_handle"],
             serde_json::json!("pilot_alice")
+        );
+    }
+
+    /// Helper: instance-enroll a tempdir against a mock whose
+    /// `/v1/account/login-links` returns `link_url`, then mint via the direct
+    /// path. Pins the origin-anchoring contract for hostile response URLs.
+    async fn mint_login_link_with_response_url(
+        link_url: &str,
+    ) -> (Result<AccountLoginLink, AccountLoginLinkError>, String) {
+        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "k1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+        let link_url = link_url.to_string();
+        let app = axum::Router::new()
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_for_mock.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt, "token_type": "Bearer", "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/login-links",
+                axum::routing::post(move || {
+                    let url = link_url.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "account_id": "11111111-1111-1111-1111-111111111111",
+                            "url": url
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = tempfile::tempdir().unwrap();
+        enroll_instance_with_device_key(base.path(), addr);
+        let result = mint_account_login_link_direct(base.path(), "tenant-dev", "alice").await;
+        (result, format!("http://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn mint_account_login_link_pins_url_to_issuer_origin() {
+        // Relative url: absolutized against the trust-anchored issuer origin.
+        let (result, origin) = mint_login_link_with_response_url("/account/login?code=rel").await;
+        let link = result.expect("relative url absolutizes");
+        assert_eq!(link.url, format!("{origin}/account/login?code=rel"));
+
+        // Cross-origin ABSOLUTE url: a hostile issuer response must not steer
+        // the authenticated browser to another origin.
+        let (result, _) =
+            mint_login_link_with_response_url("https://attacker.example/account/login").await;
+        let error = result.expect_err("cross-origin absolute url must be rejected");
+        assert!(
+            error.to_string().to_lowercase().contains("login link")
+                || matches!(error, AccountLoginLinkError::Backend(_)),
+            "cross-origin rejection surfaces as a Backend error: {error}"
+        );
+
+        // Non-HTTP(S) scheme: must be rejected (javascript: would execute in
+        // the opened tab's context).
+        let (result, _) =
+            mint_login_link_with_response_url("javascript:alert(document.domain)").await;
+        result.expect_err("non-http scheme must be rejected");
+
+        // Userinfo smuggling: rejected even when the host would match. (The
+        // mock's port isn't knowable before it binds, so a same-host+userinfo
+        // URL can't be fabricated exactly — but userinfo is rejected before
+        // the origin comparison, which cross-host coverage above pins anyway.)
+        let (result, _) =
+            mint_login_link_with_response_url("http://user:pass@127.0.0.1/account/login").await;
+        result.expect_err("userinfo in the login-link url must be rejected");
+    }
+
+    #[tokio::test]
+    async fn direct_pinned_sink_rejects_private_hosts_and_bounds_bodies() {
+        // Disallowed (link-local/metadata) host: rejected at resolution, before
+        // any request is built.
+        let error = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: "http://169.254.169.254/v1/anything".to_string(),
+                bearer_token: Some("secret".to_string()),
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 2_000,
+            })
+            .await
+            .expect_err("link-local host must be rejected");
+        assert!(
+            error.to_string().contains("resolution rejected")
+                || error.to_string().contains("rejected"),
+            "rejection must come from host resolution: {error}"
+        );
+
+        // Redirects are NOT followed: the 3xx surfaces as the response status
+        // and the Location target is never contacted.
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hit_for_target = hit.clone();
+        let target_app = axum::Router::new().route(
+            "/stolen",
+            axum::routing::get(move || {
+                let hit = hit_for_target.clone();
+                async move {
+                    hit.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    "leaked"
+                }
+            }),
+        );
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(target_listener, target_app).await;
+        });
+        let redirect_to = format!("http://{target_addr}/stolen");
+        let redirect_app = axum::Router::new().route(
+            "/hop",
+            axum::routing::get(move || {
+                let location = redirect_to.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::FOUND,
+                        [(axum::http::header::LOCATION, location)],
+                        "",
+                    )
+                }
+            }),
+        );
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(redirect_listener, redirect_app).await;
+        });
+        let response = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: format!("http://{redirect_addr}/hop"),
+                bearer_token: Some("secret".to_string()),
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 2_000,
+            })
+            .await
+            .expect("redirect response surfaces, not followed");
+        assert_eq!(response.status, 302, "3xx must surface as the status");
+        assert_eq!(
+            hit.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the redirect target must never be contacted"
+        );
+
+        // Oversized body: rejected DURING the read, not buffered.
+        let big_app = axum::Router::new().route(
+            "/big",
+            axum::routing::get(|| async { "x".repeat(64 * 1024) }),
+        );
+        let big_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let big_addr = big_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(big_listener, big_app).await;
+        });
+        let error = DirectPinnedContributionSink
+            .execute(ContributionHttpRequest {
+                method: ContributionHttpMethod::Get,
+                url: format!("http://{big_addr}/big"),
+                bearer_token: None,
+                json_body: None,
+                response_body_limit: 1024,
+                timeout_ms: 5_000,
+            })
+            .await
+            .expect_err("oversized body must be rejected");
+        assert!(
+            error.to_string().contains("exceeds"),
+            "rejection names the byte limit: {error}"
         );
     }
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Card } from "../../../design-system/card";
 import { useT } from "../../../lib/i18n";
@@ -86,14 +86,30 @@ export function TraceCommonsTab({ searchQuery = "" }) {
   const { credits, query, authorize } = useTraceCredits();
   const { traces, enrolled: tracesEnrolled, query: tracesQuery } = useAccountTraces();
   const [openState, setOpenState] = useState("idle");
+  // Imperative guards: `openInFlightRef` makes double-click protection
+  // independent of render timing (each extra click would burn a one-time
+  // link), and `mountedRef` prevents a state update landing after unmount.
+  const openInFlightRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    []
+  );
 
   const handleOpenAccount = async () => {
+    if (openInFlightRef.current) return;
+    openInFlightRef.current = true;
     setOpenState("pending");
     const result = await openAccountLoginLink({
       mint: mintAccountLoginLink,
       open: (url, target) => window.open(url, target),
     });
-    setOpenState(result.status === "opened" ? "idle" : "failed");
+    openInFlightRef.current = false;
+    if (mountedRef.current) {
+      setOpenState(result.status === "opened" ? "idle" : "failed");
+    }
   };
 
   if (
