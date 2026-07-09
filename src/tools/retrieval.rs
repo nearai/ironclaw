@@ -116,10 +116,23 @@ pub async fn narrow_tools(
     match retriever.select(message, embeddings).await {
         Ok(names) => {
             let keep: HashSet<&str> = names.iter().map(String::as_str).collect();
-            baseline
+            let baseline_n = baseline.len();
+            let narrowed: Vec<ToolDefinition> = baseline
                 .into_iter()
                 .filter(|d| keep.contains(d.name.as_str()))
-                .collect()
+                .collect();
+            // Retrieval telemetry: per-turn narrowing measurement (token proxy = tool
+            // count; capability = which tools survived). Observe with
+            // RUST_LOG=ironclaw::tools::retrieval=debug.
+            let kept_names: Vec<&str> = narrowed.iter().map(|d| d.name.as_str()).collect();
+            tracing::debug!(
+                target: "ironclaw::tools::retrieval",
+                baseline_tools = baseline_n,
+                narrowed_tools = narrowed.len(),
+                ?kept_names,
+                "tool retrieval narrowed the model-facing tool set"
+            );
+            narrowed
         }
         Err(e) => {
             tracing::warn!("tool retrieval failed ({e}); using all tools");
