@@ -499,6 +499,19 @@ impl ToolRegistry {
         tracing::debug!("Registered tool_info discovery tool");
     }
 
+    /// Register the `find_tools` keyword-discovery tool.
+    ///
+    /// Requires `Arc<Self>` so the tool can enumerate the full registry at
+    /// call time. Call after `register_builtin_tools()`. This is the
+    /// always-in-core escape hatch for tool retrieval: it lets the model find
+    /// (and then call) tools that per-turn narrowing did not advertise.
+    pub fn register_find_tools(self: &Arc<Self>) {
+        use crate::tools::builtin::FindToolsTool;
+        let tool = FindToolsTool::new(Arc::downgrade(self));
+        self.register_sync(Arc::new(tool));
+        tracing::debug!("Registered find_tools discovery tool");
+    }
+
     /// Register system introspection tools (tools_list, version).
     ///
     /// Requires `Arc<Self>` because `SystemToolsListTool` queries the

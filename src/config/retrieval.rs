@@ -17,6 +17,12 @@ pub struct RetrievalConfig {
 
 fn default_core_set() -> Vec<String> {
     [
+        // Discovery escape hatch: always advertised so the model can find and
+        // then call any tool that per-turn narrowing did not surface. Without
+        // these, retrieval can silently hide a needed capability.
+        "find_tools",
+        "tool_info",
+        // Core memory + messaging surface.
         "memory_search",
         "memory_write",
         "memory_tree",
@@ -75,7 +81,11 @@ mod tests {
         assert_eq!(c.top_k, 10);
         assert!((c.min_score - 0.2).abs() < 1e-6);
         assert!(c.core_set.contains(&"memory_tree".to_string()));
-        assert_eq!(c.core_set.len(), 5);
+        // Discovery escape hatch must always be in core so retrieval can never
+        // hide a needed tool beyond recovery.
+        assert!(c.core_set.contains(&"find_tools".to_string()));
+        assert!(c.core_set.contains(&"tool_info".to_string()));
+        assert_eq!(c.core_set.len(), 7);
     }
 
     #[test]

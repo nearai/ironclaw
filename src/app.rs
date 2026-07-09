@@ -543,6 +543,7 @@ impl AppBuilder {
         let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
+        tools.register_find_tools();
         tools.register_system_tools();
 
         if let Some(ref ss) = self.secrets_store {
