@@ -94,6 +94,77 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
     }));
 }
 
+#[tokio::test]
+async fn webui_event_stream_drains_live_assistant_text_projection_from_update_source() {
+    let fixture = live_projection_fixture("webui-text");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let secret_like_token = "sk-proj-abcdefghijklmnopqrstuvwxyz123456";
+
+    for safe_text in [
+        "partial answer".to_string(),
+        format!("partial answer with {secret_like_token}"),
+    ] {
+        fixture
+            .sink
+            .publish_loop_milestone(LoopHostMilestone {
+                scope: scope.clone(),
+                actor: None,
+                turn_id: TurnId::new(),
+                run_id,
+                loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+                kind: LoopHostMilestoneKind::ModelTextDelta { safe_text },
+            })
+            .await
+            .unwrap();
+    }
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let expected_id = format!("text:{run_id}");
+    let text_bodies = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string() =>
+            {
+                state.items.iter().find_map(|item| match item {
+                    ProductProjectionItem::Text {
+                        id,
+                        run_id: observed_run_id,
+                        body,
+                    } if id == &expected_id && *observed_run_id == Some(run_id) => {
+                        Some(body.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        text_bodies,
+        vec![
+            "partial answer".to_string(),
+            "partial answer with [redacted]".to_string()
+        ],
+        "assistant text should drain as incremental updates to one stable text item"
+    );
+    let wire = serde_json::to_string(&events).unwrap();
+    assert!(!wire.contains(secret_like_token));
+}
+
 // The post-run skill-learning notifier publishes a learned-skill bubble
 // through a `LiveProjectionPublisher` that shares the runtime's live update
 // source. This guards that such a bubble actually drains to the WebUI

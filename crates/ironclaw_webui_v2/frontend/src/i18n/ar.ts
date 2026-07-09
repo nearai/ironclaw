@@ -217,6 +217,7 @@ registerPack("ar", {
 
   // Settings tabs
   "settings.inference": "الاستدلال",
+  "settings.appearance": "المظهر",
   "settings.agent": "الوكيل",
   "settings.channels": "القنوات",
   "settings.networking": "الشبكات",
@@ -252,6 +253,10 @@ registerPack("ar", {
   "traceCommons.lastSyncDesc": "عرض محلي حتى آخر مزامنة",
   "traceCommons.never": "أبدًا",
   "traceCommons.recentExplanations": "تفسيرات الرصيد الأخيرة",
+  "traceCommons.openAccount": "فتح حساب Trace Commons",
+  "traceCommons.openingAccount": "جارٍ الفتح…",
+  "traceCommons.openAccountFailed":
+    "تعذر فتح حساب Trace Commons الخاص بك. تحقق من التسجيل وحاول مرة أخرى.",
   "traceCommons.submittedTracesTitle": "الآثار المُرسَلة",
   "traceCommons.tracesLoadFailed": "تعذّر تحميل آثارك المُرسَلة.",
   "traceCommons.traceStatus": "الحالة",
@@ -280,6 +285,9 @@ registerPack("ar", {
   "settings.restartNow": "أعد التشغيل الآن",
   "settings.restartStarting": "إعادة التشغيل...",
   "settings.restartUnavailable": "إعادة التشغيل من واجهة الويب غير متاحة بعد. أعد تشغيل عملية البوابة يدويًا لتطبيق التغييرات المعلّقة.",
+  "settings.field.showChatTerminalShortcut": "إظهار اختصار طرفية الدردشة",
+  "settings.field.showChatTerminalShortcutDesc":
+    "يعرض أيقونة الطرفية/السجلات العائمة داخل محادثات الدردشة.",
 
   // Restart dialog
   "restart.title": "أعد تشغيل IronClaw",

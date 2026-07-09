@@ -1,17 +1,20 @@
 import { useT } from "../../../lib/i18n";
+import { CONNECTION_STATUS } from "../lib/connection-status";
 
-const STYLES = {
-  connected: "bg-mint/20 text-mint border-mint/30",
-  reconnecting: "bg-copper/20 text-copper border-copper/30",
-  disconnected: "bg-red-500/20 text-red-200 border-red-400/30",
-  connecting: "bg-iron-700/50 text-iron-200 border-iron-700/50",
-  paused: "bg-iron-700/50 text-iron-200 border-iron-700/50",
-  idle: "hidden",
-};
+const FALLBACK_STYLE = "bg-iron-700/50 text-iron-200 border-iron-700/50";
+
+const HIDDEN_STATUSES = new Set([
+  CONNECTION_STATUS.IDLE,
+  CONNECTION_STATUS.CONNECTING,
+  CONNECTION_STATUS.CONNECTED,
+  CONNECTION_STATUS.RECONNECTING,
+  CONNECTION_STATUS.DISCONNECTED,
+  CONNECTION_STATUS.PAUSED,
+]);
 
 export function ConnectionStatus({ status }) {
   const t = useT();
-  if (status === "idle" || status === "connecting" || status === "connected" || !status) return null;
+  if (!status || HIDDEN_STATUSES.has(status)) return null;
 
   const labelKey = "connection." + status;
   const label = t(labelKey);
@@ -20,7 +23,7 @@ export function ConnectionStatus({ status }) {
     <div
       className={[
         "sticky top-4 z-20 mx-auto mt-4 md:mt-0 mb-2 max-w-md rounded-full border px-4 py-1.5 text-center text-xs font-medium backdrop-blur-xl",
-        STYLES[status] || STYLES.connecting,
+        FALLBACK_STYLE,
       ].join(" ")}
     >
       {label !== labelKey ? label : status}
