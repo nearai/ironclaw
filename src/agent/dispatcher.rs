@@ -302,10 +302,15 @@ impl Agent {
         // deployments cannot surface provider-host shell affordances to the
         // model. Action-time authorization in `ironclaw_authorization` still
         // gates every invocation that reaches dispatch.
-        let initial_tool_defs = match &self.deps.runtime_policy {
-            Some(policy) => self.tools().tool_definitions_visible_under(policy).await,
-            None => self.tools().tool_definitions().await,
-        };
+        let initial_tool_defs = crate::tools::retrieval::resolve_available_tools(
+            self.tools(),
+            self.deps.runtime_policy.as_ref(),
+            self.deps.retriever.as_deref(),
+            self.deps.embeddings.as_deref(),
+            self.deps.retrieval.enabled,
+            Some(&message.content),
+        )
+        .await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
         } else {
@@ -507,15 +512,15 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // this, hosted-multi-tenant deployments would surface
         // provider-host-class tools (e.g. `shell` once any tool builder
         // registers it) to the model after the first turn.
-        let tool_defs = match &self.agent.deps.runtime_policy {
-            Some(policy) => {
-                self.agent
-                    .tools()
-                    .tool_definitions_visible_under(policy)
-                    .await
-            }
-            None => self.agent.tools().tool_definitions().await,
-        };
+        let tool_defs = crate::tools::retrieval::resolve_available_tools(
+            self.agent.tools(),
+            self.agent.deps.runtime_policy.as_ref(),
+            self.agent.deps.retriever.as_deref(),
+            self.agent.deps.embeddings.as_deref(),
+            self.agent.deps.retrieval.enabled,
+            Some(&self.message.content),
+        )
+        .await;
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {
