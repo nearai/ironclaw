@@ -2007,6 +2007,38 @@ def _slack_personal_token(extra_env: dict[str, str]) -> str | None:
     return _env_value(SLACK_PERSONAL_ACCESS_TOKEN_ENV, extra_env)
 
 
+async def _installed_active_extension_ids(ctx: LiveQaContext) -> dict[str, object]:
+    """Active extension package ids from the server's own extensions API.
+
+    Used as an ASSERTED precondition by the exactly-once probes: without the
+    Slack tools extension active, the fired model has no user-token send
+    capability and the duplicate arm cannot fail — a vacuous pass. The probe
+    must verify the precondition, not hope the model installed it.
+    """
+    import httpx
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            f"{ctx.base_url}/api/webchat/v2/extensions",
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+        )
+    if response.status_code != 200:
+        return {"checked": False, "error": f"extensions API status {response.status_code}"}
+    body = response.json()
+    extensions = body.get("extensions")
+    if not isinstance(extensions, list):
+        return {"checked": False, "error": "extensions body did not include a list"}
+    active_ids: list[str] = []
+    for extension in extensions:
+        if not isinstance(extension, dict):
+            continue
+        package_ref = extension.get("package_ref")
+        ref_id = package_ref.get("id") if isinstance(package_ref, dict) else None
+        if ref_id and extension.get("active") is True:
+            active_ids.append(str(ref_id))
+    return {"checked": True, "active_extension_ids": active_ids}
+
+
 async def _slack_search_marker_hits(
     ctx: LiveQaContext, *, marker: str
 ) -> dict[str, object]:
@@ -3581,6 +3613,7 @@ async def _slack_delivery_routine_case(
     creation_prompt_extra: str = "",
     exactly_once_grace_seconds: float | None = None,
     require_persisted_delivery_target: bool = False,
+    require_slack_tools_on_surface: bool = False,
     schedule_instruction: str = "Every minute,",
 ) -> ProbeResult:
     started = time.monotonic()
@@ -3609,6 +3642,29 @@ async def _slack_delivery_routine_case(
     if not creation.success:
         creation.latency_ms = int((time.monotonic() - started) * 1000)
         return creation
+    slack_tools_surface: dict[str, object] | None = None
+    if require_slack_tools_on_surface:
+        # Falsifiability precondition: the duplicate arm is only a real test
+        # when the fired model HAS a user-token send capability. Assert it
+        # instead of trusting the creation prompt was followed.
+        slack_tools_surface = await _installed_active_extension_ids(ctx)
+        active_ids = slack_tools_surface.get("active_extension_ids") or []
+        if not slack_tools_surface.get("checked") or "slack" not in active_ids:
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    **creation.details,
+                    "error": (
+                        "probe precondition failed: Slack tools extension is not "
+                        "installed/active after the creation turn, so the "
+                        "duplicate-delivery arm would be vacuous"
+                    ),
+                    "routine_name": routine_name,
+                    "slack_tools_surface": slack_tools_surface,
+                },
+            )
     persisted_delivery_target: dict[str, object] | None = None
     if require_persisted_delivery_target:
         persisted_delivery_target = _trigger_record_delivery_target(
@@ -3724,6 +3780,7 @@ async def _slack_delivery_routine_case(
                 "slack_history": history,
                 "exactly_once": exactly_once,
                 "persisted_delivery_target": persisted_delivery_target,
+                "slack_tools_surface": slack_tools_surface,
             },
         )
     except Exception as exc:
@@ -4388,6 +4445,7 @@ async def case_qa_9b_routine_dm_delivery_exactly_once(ctx: LiveQaContext) -> Pro
             "connected); install and activate it if it is not."
         ),
         exactly_once_grace_seconds=60.0,
+        require_slack_tools_on_surface=True,
     )
 
 
@@ -4484,6 +4542,7 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
         ),
         exactly_once_grace_seconds=60.0,
         require_persisted_delivery_target=True,
+        require_slack_tools_on_surface=True,
     )
 
 
