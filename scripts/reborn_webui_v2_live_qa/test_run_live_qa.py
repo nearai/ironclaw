@@ -3529,7 +3529,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         selected_cases = run_live_qa._selected_case_names(args)
 
-        self.assertEqual(len(selected_cases), 33)
+        self.assertEqual(len(selected_cases), 37)
         self.assertNotIn("qa_1a_telegram_connect", selected_cases)
         self.assertNotIn("qa_1b_telegram_near_news_chat", selected_cases)
         self.assertNotIn("qa_1c_telegram_near_news_routine", selected_cases)
@@ -3542,6 +3542,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_6c_gmail_to_sheet_live_chat",
             "qa_6e_gmail_to_sheet_delivery",
             "qa_7e_slack_bug_sheet_delivery",
+            "qa_9b_routine_dm_delivery_exactly_once",
+            "qa_9c_slack_digest_names_not_ids",
+            "qa_9d_routine_per_trigger_delivery_target",
         ):
             self.assertIn(case_name, selected_cases)
 
@@ -3563,7 +3566,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
 
         shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
-        self.assertEqual(len(shard_case_lines), 7)
+        self.assertEqual(len(shard_case_lines), 8)
         sharded_cases = [
             case_name
             for line in shard_case_lines

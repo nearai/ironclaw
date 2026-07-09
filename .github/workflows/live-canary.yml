@@ -577,6 +577,14 @@ jobs:
           - shard_id: qa-8
             shard_name: QA 8
             cases: qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+          # Automation delivery probes (wrong-channel / duplicate-delivery /
+          # raw-user-id / per-trigger routing). dispatch_only until the
+          # per-trigger delivery-target fixes (#5898) merge: on pre-fix servers
+          # these are expected-red, so they must not page the 3-hourly cron.
+          - shard_id: qa-9
+            shard_name: QA 9
+            cases: qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target
+            dispatch_only: true
     env:
       REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
       REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
@@ -600,6 +608,7 @@ jobs:
         shell: bash
         env:
           REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all' }}
+          DISPATCH_ONLY_SHARD: ${{ matrix.dispatch_only || false }}
           SHARD_CASES: ${{ matrix.cases }}
           ALL_SHARD_CASES: >-
             qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
@@ -608,9 +617,17 @@ jobs:
             qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
             qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
             qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery,
-            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery,
+            qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target
         run: |
           set -euo pipefail
+          if [[ "${DISPATCH_ONLY_SHARD}" == "true" && "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=dispatch-only-shard" >> "${GITHUB_ENV}"
+            echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+            echo "Shard is dispatch_only; skipping on schedule."
+            exit 0
+          fi
           cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
           if [[ -z "${cases}" || "${cases}" == "all" || "${cases}" == "ALL" || "${cases}" == "*" ]]; then
             echo "CASES=${SHARD_CASES}" >> "${GITHUB_ENV}"

@@ -240,4 +240,30 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
         "feature": "Hacker News keyword monitor Slack delivery",
         "gate": "requires live Slack message delivery verification",
     },
+    "qa_9a_slack_connect": {
+        "rows": ["9A"],
+        "feature": "Slack connect for automation delivery probes",
+        "gate": "requires live Slack host-beta bot/signing-secret env",
+    },
+    "qa_9b_routine_dm_delivery_exactly_once": {
+        "rows": ["9B"],
+        "feature": (
+            "Routine result reaches the requester's Slack DM exactly once, "
+            "bot-identity only (wrong-channel/duplicate-delivery probe)"
+        ),
+        "gate": "requires live Slack message delivery verification",
+    },
+    "qa_9c_slack_digest_names_not_ids": {
+        "rows": ["9C"],
+        "feature": "Slack DM digest names senders instead of raw Slack user ids",
+        "gate": "requires live Slack personal OAuth",
+    },
+    "qa_9d_routine_per_trigger_delivery_target": {
+        "rows": ["9D"],
+        "feature": (
+            "Routine routed through its own delivery_target_id end to end "
+            "(per-trigger routing probe)"
+        ),
+        "gate": "requires live Slack message delivery verification",
+    },
 }

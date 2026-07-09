@@ -1754,6 +1754,38 @@ def _trigger_run_rows(reborn_home: Path, routine_name: str) -> list[dict[str, ob
     return [dict(row) for row in rows]
 
 
+def _trigger_record_delivery_target(
+    reborn_home: Path, routine_name: str
+) -> dict[str, object]:
+    """Read the per-trigger delivery target persisted on the trigger record.
+
+    Returns `{"column_missing": True}` when the server predates per-trigger
+    delivery routing (no `delivery_target` column) so probe cases can report
+    the missing capability instead of an opaque sqlite error.
+    """
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        return {"checked": False, "error": "reborn-local-dev.db missing"}
+    try:
+        with closing(sqlite3.connect(db_path)) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                "SELECT delivery_target FROM trigger_records WHERE name = ?",
+                (routine_name,),
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such column" in str(exc):
+            return {"checked": True, "column_missing": True}
+        return {"checked": False, "error": str(exc)}
+    targets = [row["delivery_target"] for row in rows]
+    return {
+        "checked": True,
+        "column_missing": False,
+        "record_count": len(targets),
+        "delivery_target": targets[0] if targets else None,
+    }
+
+
 def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, object] | None:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
@@ -2050,16 +2082,31 @@ async def _slack_history_contains_marker(
     messages = payload.get("messages") if isinstance(payload, dict) else []
     if not isinstance(messages, list):
         messages = []
+    # Scan ALL messages so the result carries exactly-once statistics: the
+    # duplicate-delivery bug class posts the same marker twice (once from the
+    # bot delivery path, once from the user's own identity via a messaging
+    # tool), which a first-match-wins scan cannot observe.
+    first_satisfying: dict[str, object] | None = None
+    marker_matches = 0
+    bot_authored_marker_matches = 0
+    human_authored_marker_matches = 0
     for message in messages:
         if not isinstance(message, dict):
             continue
         text = str(message.get("text") or "")
-        if marker in text:
+        if marker not in text:
+            continue
+        marker_matches += 1
+        if message.get("bot_id"):
+            bot_authored_marker_matches += 1
+        elif message.get("user"):
+            human_authored_marker_matches += 1
+        if first_satisfying is None:
             normalized = text.lower()
             missing_required = [
                 piece for piece in (required_text or []) if piece.lower() not in normalized
             ]
-            return {
+            first_satisfying = {
                 "checked": True,
                 "found": not missing_required,
                 "marker_found": True,
@@ -2067,6 +2114,11 @@ async def _slack_history_contains_marker(
                 "message_ts": message.get("ts"),
                 "message_user_present": bool(message.get("user") or message.get("bot_id")),
             }
+    if first_satisfying is not None:
+        first_satisfying["marker_matches"] = marker_matches
+        first_satisfying["bot_authored_marker_matches"] = bot_authored_marker_matches
+        first_satisfying["human_authored_marker_matches"] = human_authored_marker_matches
+        return first_satisfying
     return {"checked": True, "found": False, "message_count": len(messages)}
 
 
@@ -3400,6 +3452,9 @@ async def _slack_delivery_routine_case(
     routine_instruction: str,
     required_delivery_text: list[str],
     delivery_timeout: float = 240.0,
+    creation_prompt_extra: str = "",
+    exactly_once_grace_seconds: float | None = None,
+    require_persisted_delivery_target: bool = False,
 ) -> ProbeResult:
     started = time.monotonic()
     wall_started = time.time()
@@ -3420,12 +3475,48 @@ async def _slack_delivery_routine_case(
             "run it immediately. During routine creation, do not perform the routine's "
             "live check, web/search/HTTP lookup, or Slack send. "
             f"In your final answer include the exact marker {creation_marker} and include "
-            "the text routine."
+            "the text routine. "
+            f"{creation_prompt_extra}"
         ),
     )
     if not creation.success:
         creation.latency_ms = int((time.monotonic() - started) * 1000)
         return creation
+    persisted_delivery_target: dict[str, object] | None = None
+    if require_persisted_delivery_target:
+        persisted_delivery_target = _trigger_record_delivery_target(
+            ctx.reborn_home, routine_name
+        )
+        if persisted_delivery_target.get("column_missing"):
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    **creation.details,
+                    "error": (
+                        "server does not support per-trigger delivery targets "
+                        "(trigger_records.delivery_target column missing)"
+                    ),
+                    "routine_name": routine_name,
+                    "persisted_delivery_target": persisted_delivery_target,
+                },
+            )
+        if not persisted_delivery_target.get("delivery_target"):
+            return _result(
+                case_name,
+                False,
+                started,
+                {
+                    **creation.details,
+                    "error": (
+                        "routine was created without a per-trigger delivery_target_id "
+                        "on the trigger record"
+                    ),
+                    "routine_name": routine_name,
+                    "persisted_delivery_target": persisted_delivery_target,
+                },
+            )
     try:
         delivery = await _wait_for_slack_delivery_marker(
             ctx,
@@ -3439,6 +3530,36 @@ async def _slack_delivery_routine_case(
         history = delivery.get("slack_history")
         if not isinstance(history, dict) or not history.get("found"):
             raise AssertionError(f"Slack marker not found in history: {history!r}")
+        exactly_once: dict[str, object] | None = None
+        if exactly_once_grace_seconds is not None:
+            # A duplicate copy (bot delivery + user-identity messaging-tool
+            # send) can trail the first message, so re-scan after a grace
+            # window and require exactly one bot-authored marker message.
+            await asyncio.sleep(exactly_once_grace_seconds)
+            channel_id = _slack_delivery_channel_id(ctx)
+            if not channel_id:
+                raise AssertionError(
+                    "Slack delivery channel could not be resolved for the exactly-once re-scan"
+                )
+            exactly_once = await _slack_history_contains_marker(
+                ctx,
+                channel_id=channel_id,
+                marker=delivery_marker,
+                oldest_epoch=wall_started,
+                required_text=required_delivery_text,
+            )
+            matches = int(exactly_once.get("marker_matches") or 0)
+            human_matches = int(exactly_once.get("human_authored_marker_matches") or 0)
+            if matches != 1:
+                raise AssertionError(
+                    f"expected the delivery marker exactly once after the grace window, "
+                    f"found {matches}: {exactly_once!r}"
+                )
+            if human_matches != 0:
+                raise AssertionError(
+                    f"delivery marker was posted from a non-bot (user) identity — "
+                    f"duplicate self-delivery: {exactly_once!r}"
+                )
         # The exact Slack body is not persisted in results to avoid leaking workspace data.
         return _result(
             case_name,
@@ -3453,6 +3574,8 @@ async def _slack_delivery_routine_case(
                 "trigger_run": delivery.get("trigger_run"),
                 "delivery_outcome": delivery.get("delivery_outcome"),
                 "slack_history": history,
+                "exactly_once": exactly_once,
+                "persisted_delivery_target": persisted_delivery_target,
             },
         )
     except Exception as exc:
@@ -4059,6 +4182,117 @@ def _gated_case(case_name: str) -> CaseFn:
     return run_gated
 
 
+RAW_SLACK_USER_ID_PATTERN = re.compile(r"\bU[A-Z0-9]{8,}\b")
+
+
+def _raw_slack_user_ids_in_text(text: str) -> list[str]:
+    """Raw Slack user ids (U…) leaked into user-facing text.
+
+    Requires at least one digit so all-caps words like UNDERSTAND never
+    false-positive; real Slack ids always mix letters and digits.
+    """
+    return [
+        match
+        for match in RAW_SLACK_USER_ID_PATTERN.findall(text or "")
+        if any(ch.isdigit() for ch in match)
+    ]
+
+
+async def case_qa_9a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
+    return await _slack_connect_case(ctx, case_name="qa_9a_slack_connect")
+
+
+async def case_qa_9b_routine_dm_delivery_exactly_once(ctx: LiveQaContext) -> ProbeResult:
+    """Wrong-channel/duplicate-delivery probe.
+
+    Uses the historically bug-triggering phrasing ("… and send me the result
+    in a Slack DM") so the stored routine prompt reads like a delivery
+    instruction, then asserts the result reaches the requester's Slack DM
+    EXACTLY once, from the bot identity only, after a grace window. Failure
+    modes this catches live: result delivered to another conversation (marker
+    never appears in the DM → timeout), duplicate delivery (marker appears
+    twice), and user-identity self-delivery (marker from a non-bot author).
+    """
+    return await _slack_delivery_routine_case(
+        ctx,
+        case_name="qa_9b_routine_dm_delivery_exactly_once",
+        routine_prefix="reborn-qa-9b-dm-exactly-once",
+        marker_prefix="REBORN_QA_9B_DM_EXACTLY_ONCE",
+        routine_instruction=(
+            "report the current UTC time using the time capability and "
+            "send me the result in a Slack DM."
+        ),
+        required_delivery_text=[],
+        exactly_once_grace_seconds=60.0,
+    )
+
+
+async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResult:
+    """Raw-user-id probe: a Slack DM digest must name senders, never echo
+    raw U… ids from the history tools."""
+    case_name = "qa_9c_slack_digest_names_not_ids"
+    started = time.monotonic()
+    marker = f"REBORN_QA_9C_DIGEST_{int(time.time() * 1000)}"
+    result = await _live_chat_case(
+        ctx,
+        case_name=case_name,
+        prompt=(
+            "Using my connected Slack account, give me a digest of my direct "
+            "message conversations: list each person I have a DM with by their "
+            "name and one line about the most recent message. "
+            f"Include the exact marker {marker} in your answer."
+        ),
+        marker=marker,
+        required_text=[],
+        timeout=240.0,
+    )
+    if not result.success:
+        return result
+    reply_text = str(result.details.get("text_excerpt") or "")
+    leaked_ids = _raw_slack_user_ids_in_text(reply_text)
+    if leaked_ids:
+        return _result(
+            case_name,
+            False,
+            started,
+            {
+                **result.details,
+                "error": (
+                    "digest leaked raw Slack user ids instead of display names: "
+                    f"{sorted(set(leaked_ids))}"
+                ),
+                "leaked_raw_user_ids": sorted(set(leaked_ids)),
+            },
+        )
+    result.details["leaked_raw_user_ids"] = []
+    return result
+
+
+async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> ProbeResult:
+    """Per-trigger routing probe: the routine must be created with its OWN
+    delivery_target_id (persisted on the trigger record) and deliver through
+    it — not by mutating the user-wide default delivery target."""
+    return await _slack_delivery_routine_case(
+        ctx,
+        case_name="qa_9d_routine_per_trigger_delivery_target",
+        routine_prefix="reborn-qa-9d-per-trigger-target",
+        marker_prefix="REBORN_QA_9D_PER_TRIGGER_TARGET",
+        routine_instruction=(
+            "report the current UTC time using the time capability as this "
+            "routine's result."
+        ),
+        required_delivery_text=[],
+        creation_prompt_extra=(
+            "Route THIS routine's results to my Slack DM by listing my outbound "
+            "delivery targets and passing the Slack DM target id as "
+            "delivery_target_id when creating the trigger. Do not change my "
+            "default outbound delivery target."
+        ),
+        exactly_once_grace_seconds=60.0,
+        require_persisted_delivery_target=True,
+    )
+
+
 CASES: dict[str, CaseSpec] = {
     "qa_1a_telegram_connect": CaseSpec(
         _gated_case("qa_1a_telegram_connect"),
@@ -4230,6 +4464,26 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_8d_hn_keyword_slack_delivery": CaseSpec(
         case_qa_8d_hn_keyword_slack_delivery,
+        requires_slack=True,
+        requires_slack_target=True,
+    ),
+    "qa_9a_slack_connect": CaseSpec(
+        case_qa_9a_slack_connect,
+        requires_slack=True,
+        requires_slack_personal_auth=True,
+    ),
+    "qa_9b_routine_dm_delivery_exactly_once": CaseSpec(
+        case_qa_9b_routine_dm_delivery_exactly_once,
+        requires_slack=True,
+        requires_slack_target=True,
+    ),
+    "qa_9c_slack_digest_names_not_ids": CaseSpec(
+        case_qa_9c_slack_digest_names_not_ids,
+        requires_slack=True,
+        requires_slack_personal_auth=True,
+    ),
+    "qa_9d_routine_per_trigger_delivery_target": CaseSpec(
+        case_qa_9d_routine_per_trigger_delivery_target,
         requires_slack=True,
         requires_slack_target=True,
     ),
