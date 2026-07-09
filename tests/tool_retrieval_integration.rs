@@ -10,7 +10,7 @@
 //! `ToolRetriever`, and that disabling retrieval returns the full
 //! baseline unchanged (fail toward capability).
 //!
-//! Run with: cargo test --features integration tool_retrieval
+//! Run with: cargo test --features integration --test tool_retrieval_integration
 
 use std::sync::Arc;
 
