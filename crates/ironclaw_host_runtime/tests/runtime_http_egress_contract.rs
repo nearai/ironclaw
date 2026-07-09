@@ -3853,6 +3853,171 @@ async fn host_http_egress_blocks_credential_shaped_response_body() {
     assert_eq!(error.response_bytes(), 43);
 }
 
+/// Caller-level regression for the credential-exchange egress path (audit MJ5).
+///
+/// `execute_credential_exchange` is the only unsanitized response path, used
+/// solely by the host OAuth provider client: a Slack `oauth.v2.access` response
+/// legitimately carries an `xoxp-` user token that the host auth system stores
+/// as a secret handle. Nearly every egress fake inherits the trait's default
+/// forward to `execute`, so before this test the skip-sanitization branch was
+/// exercised by no caller-level test. This drives the real host pipeline and
+/// pins both halves of the contract with an identical token-shaped body:
+/// `execute_credential_exchange` passes it through un-sanitized (token
+/// preserved, no redaction), while the default `execute` blocks it as a leak.
+#[tokio::test]
+async fn credential_exchange_passes_token_body_that_default_execute_blocks() {
+    const SLACK_USER_TOKEN: &str = "xoxp-1234567890-9876543210-abcdefghijklmnopqrstuvwxyz";
+    let token_body = format!(
+        r#"{{"ok":true,"app_id":"A0123456789","authed_user":{{"id":"U0123456789","access_token":"{SLACK_USER_TOKEN}","scope":"chat:write","token_type":"user"}},"team":{{"id":"T0123456789"}}}}"#
+    )
+    .into_bytes();
+
+    // The OAuth provider client POSTs a benign form body; the credential lives
+    // in the *response*. The same request shape drives both egress entry points.
+    let oauth_token_request =
+        |scope: ResourceScope, capability_id: CapabilityId| RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::System,
+            scope,
+            capability_id,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/api/oauth.v2.access".to_string(),
+            headers: vec![],
+            body: b"grant_type=authorization_code&code=stub-auth-code".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        };
+    let token_response = |body: Vec<u8>| NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: body.len() as u64,
+            resolved_ip: None,
+        },
+        body,
+    };
+
+    // Credential-exchange path: the token must reach the host auth caller intact.
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service =
+        services.host_http_egress(RecordingNetwork::ok(token_response(token_body.clone())));
+
+    let response = service
+        .execute_credential_exchange(oauth_token_request(scope, capability_id))
+        .await
+        .expect("credential exchange must deliver the token body to the host auth system");
+
+    assert_eq!(response.status, 200);
+    assert!(
+        !response.redaction_applied,
+        "credential-exchange responses must not be sanitized/redacted"
+    );
+    assert_eq!(
+        response.body, token_body,
+        "the token body must be delivered byte-for-byte"
+    );
+    assert!(
+        String::from_utf8_lossy(&response.body).contains(SLACK_USER_TOKEN),
+        "the xoxp- user token must survive the credential-exchange path"
+    );
+
+    // Default (sanitized) path: the identical token body is blocked as a leak.
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service =
+        services.host_http_egress(RecordingNetwork::ok(token_response(token_body.clone())));
+
+    let error = service
+        .execute(oauth_token_request(scope, capability_id))
+        .await
+        .expect_err("default execute must block a credential-shaped response body");
+
+    assert!(
+        matches!(
+            error,
+            RuntimeHttpEgressError::Response { ref reason, .. } if reason == "response_leak_blocked"
+        ),
+        "expected response_leak_blocked, got {error:?}"
+    );
+    assert!(
+        !error.to_string().contains(SLACK_USER_TOKEN),
+        "the blocked-leak error must not echo the token"
+    );
+}
+
+/// The skip-sanitization contract of `execute_credential_exchange` is only safe
+/// because token-exchange requests carry no injected credentials to redact (the
+/// response sanitizer is the layer that would scrub them from the body). A
+/// request that *does* carry injections on this path is a contract violation by
+/// the caller, so the pipeline fails closed before any credential staging or
+/// network dispatch instead of trusting the doc comment.
+#[tokio::test]
+async fn credential_exchange_rejects_requests_carrying_credential_injections() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let requests = Arc::clone(&network.requests);
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute_credential_exchange(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::System,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/api/oauth.v2.access".to_string(),
+            headers: vec![],
+            body: b"grant_type=authorization_code&code=stub-auth-code".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("stub-cred").expect("secret handle"),
+                source: RuntimeCredentialSource::StagedObligation { capability_id },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("credential exchange must reject requests carrying credential injections");
+
+    assert!(
+        matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "credential_exchange_injections_unsupported"
+        ),
+        "expected credential_exchange_injections_unsupported, got {error:?}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "the rejected exchange must never reach the network transport"
+    );
+}
+
 #[tokio::test]
 async fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
@@ -4519,6 +4684,22 @@ impl RuntimeHttpEgress for RequestPolicyStagingEgress {
             request.network_policy.clone(),
         );
         self.inner.execute(request).await
+    }
+
+    // Forward the exchange entry point too: without this, an exchange routed
+    // through the staging helper would silently take the trait default (the
+    // SANITIZING path) and green-light against the wrong pipeline.
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        stage_policy_sync(
+            &self.services,
+            &request.scope,
+            &request.capability_id,
+            request.network_policy.clone(),
+        );
+        self.inner.execute_credential_exchange(request).await
     }
 }
 

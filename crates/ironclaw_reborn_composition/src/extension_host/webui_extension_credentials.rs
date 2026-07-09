@@ -116,7 +116,8 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
             503,
             error.retryable,
         ),
-        AuthErrorCode::AccountSelectionRequired => services_error(
+        AuthErrorCode::AccountSelectionRequired
+        | AuthErrorCode::ProviderIdentityAlreadyConnected => services_error(
             RebornServicesErrorCode::Conflict,
             RebornServicesErrorKind::BlockedAuthentication,
             409,
@@ -146,9 +147,6 @@ fn runtime_credential_setup(
         }
         LifecycleExtensionCredentialSetup::OAuth { scopes } => {
             ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes }
-        }
-        LifecycleExtensionCredentialSetup::ChannelPairing { channel } => {
-            ironclaw_host_api::RuntimeCredentialAccountSetup::ChannelPairing { channel }
         }
     }
 }

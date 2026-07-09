@@ -53,9 +53,8 @@ mod router;
 mod schema;
 #[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
-// Browser SPA asset bundle folded in from the former `ironclaw_webui_v2_static`
-// crate: the JSON route surface and the static bytes it drives now ship from one
-// crate behind the single `webui-v2-beta` feature.
+// Browser SPA asset bundle: the JSON route surface and the static bytes it
+// drives now ship from one crate behind the single `webui-v2-beta` feature.
 #[cfg(feature = "webui-v2-beta")]
 pub mod static_assets;
 
@@ -65,6 +64,11 @@ pub use descriptors::is_webui_v2_llm_config_route_id;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
+    WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
+    WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_USER,
+    WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS, WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
+    WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
+    WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS, WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
     WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_PROJECT,
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_DELETE_AUTOMATION,
@@ -87,7 +91,8 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_STATUS,
     WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG, WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
     WEBUI_V2_ROUTE_READ_FS_FILE, WEBUI_V2_ROUTE_READ_PROJECT_FILE, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
-    WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL, WEBUI_V2_ROUTE_RESOLVE_GATE,
+    WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL,
+    WEBUI_V2_ROUTE_RENAME_AUTOMATION, WEBUI_V2_ROUTE_RESOLVE_GATE,
     WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_RETRY_RUN, WEBUI_V2_ROUTE_SEARCH_SKILLS,
     WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
     WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
@@ -114,7 +119,7 @@ pub use handlers::{
     list_extension_registry, list_extensions, list_fs_mounts, list_llm_models,
     list_operator_config, list_outbound_delivery_targets, list_settings_tools, list_skills,
     list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
-    remove_extension, remove_skill, resolve_gate, resume_automation, retry_run,
+    remove_extension, remove_skill, rename_automation, resolve_gate, resume_automation, retry_run,
     run_operator_service_lifecycle, run_operator_setup, search_skills, send_message,
     set_active_llm, set_auto_activate_learned, set_operator_config_key, set_outbound_preferences,
     set_settings_tool_permission, set_settings_tools_auto_approve, set_skill_auto_activate,
@@ -130,8 +135,7 @@ pub use router::{
 #[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
 // Re-export the static-bundle router factory at the crate root so host
-// composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)` (formerly
-// `ironclaw_webui_v2_static::mount_at_prefix`).
+// composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)`.
 #[cfg(feature = "webui-v2-beta")]
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
 #[cfg(feature = "webui-v2-beta")]

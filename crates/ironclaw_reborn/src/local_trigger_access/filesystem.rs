@@ -413,7 +413,9 @@ fn access_record_path(
     .map_err(backend)
 }
 
-fn optional_axis_path(value: Option<&str>) -> String {
+/// `pub(crate)`: shared with `subagent::await_edge` (§4.2's identical
+/// `{some/<v>|none}` optional-axis path encoding for await-edge paths).
+pub(crate) fn optional_axis_path(value: Option<&str>) -> String {
     match value {
         Some(value) => format!("some/{value}"),
         None => "none".to_string(),

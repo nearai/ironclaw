@@ -46,6 +46,13 @@ CANNED_RESPONSES = [
         re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
         "Done - saved the approval test file.",
     ),
+    (
+        re.compile(
+            r"reborn create automation rename target (?P<label>[a-z0-9_-]+)",
+            re.IGNORECASE,
+        ),
+        "Created the automation for rename testing.",
+    ),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (
@@ -205,6 +212,22 @@ TOOL_CALL_PATTERNS = [
         lambda m: {
             "path": f"/workspace/reborn-approval-{m.group('label')}.txt",
             "content": f"approved {m.group('label')}\n",
+        },
+    ),
+    (
+        re.compile(
+            r"reborn create automation rename target (?P<label>[a-z0-9_-]+)",
+            re.IGNORECASE,
+        ),
+        "builtin__trigger_create",
+        lambda m: {
+            "name": f"E2E rename original {m.group('label')}",
+            "prompt": f"E2E automation rename prompt {m.group('label')}",
+            "schedule": {
+                "kind": "once",
+                "at": "2999-06-02T00:00:00",
+                "timezone": "UTC",
+            },
         },
     ),
     (

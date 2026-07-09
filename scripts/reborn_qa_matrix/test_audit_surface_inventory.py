@@ -54,9 +54,9 @@ def _write_workbook(path: Path, feature_rows: list[list[str]]) -> None:
 
 
 def _write_repo(root: Path) -> None:
-    app_dir = root / "crates/ironclaw_webui_v2_static/static/js/app"
+    app_dir = root / "crates/ironclaw_webui_v2/frontend/src/app"
     app_dir.mkdir(parents=True)
-    (app_dir / "app.js").write_text(
+    (app_dir / "app.ts").write_text(
         """
         <${Route} path="chat" element=${html`<${ChatPage} />`} />
         <${Route} path="jobs" element=${html`<${JobsPage} />`} />

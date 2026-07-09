@@ -970,7 +970,7 @@ pub enum AuthPromptChallengeKind {
     OAuthUrl,
     /// User pastes a secret string into the chat form. Wire value is
     /// `manual_token` (via `rename_all = "snake_case"`): paste a secret. Covers
-    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Slack): the
+    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Telegram): the
     /// interaction modality — "paste a string" — is identical; what differs is
     /// the resolve route, which rides in `connection` context (present for
     /// channel pairing, absent for a stored-credential secret).
@@ -982,7 +982,7 @@ pub enum AuthPromptChallengeKind {
 
 /// Connection context for a channel-pairing challenge riding the `manual_token`
 /// modality. Present on an auth prompt when the paste is a pairing code that
-/// connects an inbound channel (e.g. Slack), carrying the render copy and the
+/// connects an inbound channel (e.g. Telegram), carrying the render copy and the
 /// resolve-route discriminator (`channel`) so one paste card serves both a
 /// stored-credential secret and a channel pairing code. Additive + serde-default
 /// so rows written before this field deserialize as `None`.
@@ -1670,17 +1670,17 @@ mod tests {
                 auth_context: Some(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::ManualToken,
-                        Some("slack".to_string()),
+                        Some("telegram".to_string()),
                         None,
                         None,
                         None,
                         Some(ConnectionPromptContext {
-                            channel: "slack".to_string(),
+                            channel: "telegram".to_string(),
                             strategy: Some("inbound_proof_code".to_string()),
                             instructions: Some(
                                 "Message the app to get a pairing code.".to_string(),
                             ),
-                            input_placeholder: Some("Enter Slack pairing code...".to_string()),
+                            input_placeholder: Some("Enter Telegram pairing code...".to_string()),
                             submit_label: Some("Connect".to_string()),
                             error_message: Some("Invalid or expired pairing code.".to_string()),
                         }),
@@ -1700,11 +1700,11 @@ mod tests {
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["connection"]["channel"],
-            "slack"
+            "telegram"
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["connection"]["input_placeholder"],
-            "Enter Slack pairing code..."
+            "Enter Telegram pairing code..."
         );
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize connection gate projection");
