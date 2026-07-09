@@ -993,6 +993,65 @@ where
         thread_id: &ThreadId,
     ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
         let root = summaries_root(scope, thread_id)?;
+        let mut summaries = Vec::new();
+        let mut offset = 0_u64;
+
+        loop {
+            let entries = match self
+                .filesystem
+                .query(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &Filter::All,
+                    Page::new(offset, Page::MAX_LIMIT),
+                )
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::Unsupported {
+                    operation: FilesystemOperation::Query,
+                    ..
+                }) => {
+                    return self
+                        .list_thread_summaries_by_directory(scope, thread_id)
+                        .await;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let entry_count = entries.len();
+
+            for versioned in entries {
+                if !versioned.path.as_str().ends_with(".json") {
+                    continue;
+                }
+                let record = deserialize::<SummaryArtifact>(&versioned.entry.body)?;
+                if &record.thread_id == thread_id {
+                    summaries.push(record);
+                }
+            }
+
+            if entry_count < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(entry_count as u64);
+        }
+
+        summaries.sort_by_key(|summary| {
+            (
+                summary.start_sequence,
+                summary.end_sequence,
+                summary.summary_id.to_string(),
+            )
+        });
+        Ok(summaries)
+    }
+
+    async fn list_thread_summaries_by_directory(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
+        let root = summaries_root(scope, thread_id)?;
         let entries = match self
             .filesystem
             .list_dir(&scope.to_resource_scope(), &root)
