@@ -95,7 +95,8 @@ Inbound order (outer → inner → handler):
    bearer-validation step). Today: `create_thread`, product-auth OAuth
    start, manual-token setup/secret-submit, accounts list/select/recovery/
    refresh, and lifecycle cleanup — all 16 KiB; `send_message` 14 MiB
-   (text + base64 inline attachments); `cancel_run` and `resolve_gate` 4 KiB; `get_timeline`,
+   (text + base64 inline attachments); `cancel_run`, `resolve_gate`, and
+   `rename_automation` 4 KiB; `get_timeline`,
    `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
@@ -135,7 +136,7 @@ Inbound order (outer → inner → handler):
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension, list-automations).
+   cancel-run, resolve-gate, setup-extension, list/rename automations).
 
 ### Product-auth routes
 
@@ -181,15 +182,14 @@ Reborn-native product-auth surface:
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
 
-### Extension pairing routes
+### Slack personal OAuth setup
 
-When Slack host-beta personal binding is configured, `webui_v2_app`
-mounts `POST /api/webchat/v2/extensions/pairing/redeem` inside the same
-bearer-auth layer as the native WebUI v2 extension routes. The request
-body carries `{ channel, code }`; the route validates the channel server-side
-and currently resolves the supported Slack channel aliases to the Slack
-personal-binding pairing service. The browser must not call provider-specific
-pairing paths directly.
+Slack host-beta normal personal setup is extension-card driven: the user
+installs the Slack extension, clicks Configure, and the card starts the
+`slack_personal` product-auth OAuth flow. The successful callback binds the
+Slack `authed_user.id` to the authenticated Reborn user through the host-owned
+identity binding store. Slack personal setup is OAuth-only; the old browser
+manual-code redeem route and Slack command flow are not mounted.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
 `GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` and

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def _filesystem_secret_aad(scope: dict[str, object], handle: str) -> bytes:
 
 
 def _root_filesystem_json(db_path: Path, path: str) -> dict[str, object]:
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         row = db.execute(
             "SELECT contents FROM root_filesystem_entries WHERE path = ?",
             (path,),
@@ -45,7 +46,7 @@ def _root_filesystem_json(db_path: Path, path: str) -> dict[str, object]:
 
 def _root_filesystem_secret_by_handle(db_path: Path, handle: str) -> dict[str, object]:
     suffix = f"/{handle}.json"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         rows = db.execute(
             "SELECT path, contents FROM root_filesystem_entries WHERE path LIKE ?",
             (f"%{suffix}",),
@@ -123,7 +124,7 @@ def _encrypt_filesystem_secret(
 
 def _root_filesystem_create_table(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS root_filesystem_entries (
@@ -153,7 +154,7 @@ def _write_new_secret_file_0600(path: Path, value: str) -> None:
 def _put_root_filesystem_json(db_path: Path, path: str, payload: dict[str, object]) -> None:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     contents = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.execute(
             """
             INSERT INTO root_filesystem_entries

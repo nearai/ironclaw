@@ -148,7 +148,9 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
             OAuthCallbackInput {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized { exchange },
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(exchange),
+                },
             },
         )
         .await

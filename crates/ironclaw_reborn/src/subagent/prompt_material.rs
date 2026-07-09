@@ -14,7 +14,6 @@ use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, Lo
 use crate::subagent::{
     directions::direction_prompt,
     flavors::{SubagentFlavorId, lookup_flavor, parse_flavor_id},
-    gate_resolution::BoundedSubagentGateResolutionStore,
     goal_store::{SubagentGoalStore, SubagentGoalStoreError},
 };
 
@@ -40,12 +39,18 @@ where
     }
 }
 
+/// §3 replacement inventory: the gate-store read this type was named for
+/// (`GateBackedSubagentPromptMaterialSource::material_for_run`'s
+/// `.gate_store.subagent_kind_for_child(...)` call) dies outright — the
+/// existing thread-metadata fallback below already covers every case the
+/// gate read did, per the design doc's verified ruling. The struct keeps its
+/// name (a rename would ripple further with no behavior change) but no
+/// longer holds a gate/edge dependency at all.
 pub struct GateBackedSubagentPromptMaterialSource<G>
 where
     G: SubagentGoalStore + ?Sized,
 {
     goal_store: Arc<G>,
-    gate_store: Arc<BoundedSubagentGateResolutionStore>,
     thread_service: Arc<dyn SessionThreadService>,
 }
 
@@ -53,14 +58,9 @@ impl<G> GateBackedSubagentPromptMaterialSource<G>
 where
     G: SubagentGoalStore + ?Sized,
 {
-    pub fn new(
-        goal_store: Arc<G>,
-        gate_store: Arc<BoundedSubagentGateResolutionStore>,
-        thread_service: Arc<dyn SessionThreadService>,
-    ) -> Self {
+    pub fn new(goal_store: Arc<G>, thread_service: Arc<dyn SessionThreadService>) -> Self {
         Self {
             goal_store,
-            gate_store,
             thread_service,
         }
     }
@@ -75,22 +75,15 @@ where
         &self,
         run_context: &LoopRunContext,
     ) -> Result<SubagentPromptMaterial, AgentLoopHostError> {
-        let flavor_id = self
-            .gate_store
-            .subagent_kind_for_child(run_context.run_id)
-            .map_err(|error| AgentLoopHostError::new(error.kind, error.safe_summary))?;
-        let flavor_id = match flavor_id {
-            Some(flavor_id) => flavor_id,
-            None => thread_metadata_for_run(self.thread_service.as_ref(), run_context)
-                .await?
-                .map(|metadata| metadata.subagent_kind)
-                .ok_or_else(|| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::InvalidInvocation,
-                        "subagent run has no recorded flavor",
-                    )
-                })?,
-        };
+        let flavor_id = thread_metadata_for_run(self.thread_service.as_ref(), run_context)
+            .await?
+            .map(|metadata| metadata.subagent_kind)
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "subagent run has no recorded flavor",
+                )
+            })?;
         let flavor_id = parse_flavor_id(flavor_id.as_str()).ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -297,17 +290,13 @@ fn map_goal_error(error: SubagentGoalStoreError) -> AgentLoopHostError {
 mod tests {
     use std::sync::Arc;
 
-    use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId};
-    use ironclaw_loop_support::{
-        AwaitedChildSetRecord, SpawnSubagentMode, SubagentGateResolutionStore, SubagentKindId,
-    };
+    use ironclaw_host_api::{AgentId, ThreadId};
+    use ironclaw_loop_support::{SpawnSubagentMode, SubagentKindId};
     use ironclaw_threads::{
         AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
         MessageContent,
     };
-    use ironclaw_turns::{
-        GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,
-    };
+    use ironclaw_turns::{GateRef, LoopResultRef, TurnRunId};
 
     use crate::subagent::{
         flavors::SubagentFlavorId,
@@ -356,45 +345,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn gate_backed_material_source_uses_gate_flavor_and_goal_store() {
-        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
-        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
-        let context = ironclaw_agent_loop::test_support::test_run_context("gate-backed-goal");
-        store
-            .put_goal(
-                &context.scope,
-                context.run_id,
-                SubagentGoal {
-                    task: "research task".to_string(),
-                    handoff: None,
-                },
-            )
-            .await
-            .unwrap();
-        gate_store
-            .record_awaited_child(awaited_child_record(
-                &context,
-                SubagentKindId::new("planner").unwrap(),
-            ))
-            .await
-            .unwrap();
-        let source = GateBackedSubagentPromptMaterialSource::new(
-            store,
-            gate_store,
-            Arc::new(InMemorySessionThreadService::default()),
-        );
-
-        let material = source.material_for_run(&context).await.unwrap();
-
-        assert!(material.direction_markdown.contains("planning subagent"));
-        assert_eq!(material.goal.task, "research task");
-    }
+    // `gate_backed_material_source_uses_gate_flavor_and_goal_store` deleted:
+    // it tested the gate-store-priority-over-thread-metadata path, which
+    // dies with this PR's replacement of the gate store (§3 — the existing
+    // thread-metadata fallback, exercised by the tests below, already
+    // covers every case the deleted gate read did).
 
     #[tokio::test]
-    async fn gate_backed_material_source_falls_back_to_thread_metadata() {
+    async fn material_source_uses_thread_metadata_for_flavor() {
         let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
-        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("thread-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-thread-flavor").unwrap());
@@ -405,7 +364,7 @@ mod tests {
             Some("task from thread"),
         )
         .await;
-        let source = GateBackedSubagentPromptMaterialSource::new(store, gate_store, thread_service);
+        let source = GateBackedSubagentPromptMaterialSource::new(store, thread_service);
 
         let material = source.material_for_run(&context).await.unwrap();
 
@@ -418,14 +377,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_backed_material_source_errors_when_no_flavor_is_recorded() {
+    async fn material_source_errors_when_no_flavor_is_recorded() {
         let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
-        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("missing-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-missing-flavor").unwrap());
         ensure_subagent_thread(thread_service.as_ref(), &context, None, None).await;
-        let source = GateBackedSubagentPromptMaterialSource::new(store, gate_store, thread_service);
+        let source = GateBackedSubagentPromptMaterialSource::new(store, thread_service);
 
         let error = source.material_for_run(&context).await.unwrap_err();
 
@@ -434,9 +392,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_backed_material_source_errors_when_flavor_is_unknown() {
+    async fn material_source_errors_when_flavor_is_unknown() {
         let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
-        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let mut context = ironclaw_agent_loop::test_support::test_run_context("unknown-flavor");
         context.scope.agent_id = Some(AgentId::new("agent-unknown-flavor").unwrap());
@@ -447,7 +404,7 @@ mod tests {
             None,
         )
         .await;
-        let source = GateBackedSubagentPromptMaterialSource::new(store, gate_store, thread_service);
+        let source = GateBackedSubagentPromptMaterialSource::new(store, thread_service);
 
         let error = source.material_for_run(&context).await.unwrap_err();
 
@@ -472,36 +429,6 @@ mod tests {
         assert_eq!(strip_persisted_handoff("task", None), "task");
     }
 
-    fn awaited_child_record(
-        context: &LoopRunContext,
-        subagent_kind: SubagentKindId,
-    ) -> AwaitedChildSetRecord {
-        let tenant = TenantId::new("tenant").unwrap();
-        let agent = AgentId::new("agent").unwrap();
-        AwaitedChildSetRecord {
-            gate_ref: GateRef::new("gate:subagent:prompt-material").unwrap(),
-            parent_run_context: context.clone(),
-            tree_root_run_id: context.run_id,
-            child_scope: TurnScope::new(
-                tenant,
-                Some(agent),
-                None,
-                ThreadId::new("child-thread").unwrap(),
-            ),
-            child_run_id: context.run_id,
-            child_thread_id: context.thread_id.clone(),
-            source_binding_ref: SourceBindingRef::new("subagent-source:prompt").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:prompt").unwrap(),
-            subagent_kind,
-            spawn_capability_id: CapabilityId::new(
-                ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
-            )
-            .unwrap(),
-            result_ref: LoopResultRef::new("result:subagent.prompt").unwrap(),
-            mode: SpawnSubagentMode::Blocking,
-        }
-    }
-
     async fn ensure_subagent_thread(
         thread_service: &InMemorySessionThreadService,
         context: &LoopRunContext,
@@ -519,6 +446,8 @@ mod tests {
                 mode: SpawnSubagentMode::Blocking,
                 result_ref: LoopResultRef::new("result:subagent.prompt").unwrap(),
                 handoff: None,
+                parent_run_context: context.clone(),
+                gate_ref: GateRef::new("gate:subagent-prompt-test").unwrap(),
             })
             .unwrap()
         });

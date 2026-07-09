@@ -1,11 +1,11 @@
 // @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   getOutboundPreferences,
   listOutboundDeliveryTargets,
   setOutboundPreferences,
-} from "../../../lib/api.js";
+} from "../../../lib/api";
 
 const PREFERENCES_QUERY_KEY = ["outbound-delivery", "preferences"];
 const TARGETS_QUERY_KEY = ["outbound-delivery", "targets"];

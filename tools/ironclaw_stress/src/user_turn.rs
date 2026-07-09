@@ -1150,6 +1150,12 @@ where
             };
 
             if matches!(args.scenario, Scenario::MixedUserSession) {
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "load_context:start",
+                );
                 time_stage(
                     &mut stages.load_context,
                     self.thread_service
@@ -1161,7 +1167,19 @@ where
                 )
                 .await
                 .map_err(|error| thread_failure("load_context", error))?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "load_context:done",
+                );
 
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reserve:start",
+                );
                 let reservation = time_stage(
                     &mut stages.resource_reserve,
                     reserve_resources(
@@ -1170,14 +1188,38 @@ where
                     ),
                 )
                 .await?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reserve:done",
+                );
 
                 let execution = async {
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "model_wait:start",
+                    );
                     time_stage(
                         &mut stages.model_wait,
                         self.model_latency.run(args, worker_index, operation_index),
                     )
                     .await?;
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "model_wait:done",
+                    );
 
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "write_assistant:start",
+                    );
                     self.write_assistant_turn(
                         &context,
                         &thread.thread_id,
@@ -1187,6 +1229,12 @@ where
                         stages,
                     )
                     .await?;
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "write_assistant:done",
+                    );
 
                     Ok::<(), OperationFailure>(())
                 }
@@ -1201,11 +1249,23 @@ where
                     return Err(error);
                 }
 
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reconcile:start",
+                );
                 time_stage(
                     &mut stages.resource_reconcile,
                     reconcile_resources(Arc::clone(&self.governor), reservation.id),
                 )
                 .await?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reconcile:done",
+                );
             } else if matches!(args.scenario, Scenario::ToolSession) {
                 time_stage(
                     &mut stages.load_context,
@@ -1778,6 +1838,14 @@ async fn time_stage<T>(slot: &mut Option<Duration>, future: impl Future<Output =
     output
 }
 
+fn stage_trace(worker_index: usize, operation_index: usize, operation_ref: &str, stage: &str) {
+    if std::env::var_os("IRONCLAW_STRESS_STAGE_TRACE").is_some() {
+        eprintln!(
+            "[ironclaw-stress-stage] worker={worker_index} op={operation_index} ref={operation_ref} {stage}"
+        );
+    }
+}
+
 async fn reserve_resources(
     governor: Arc<dyn ResourceGovernor>,
     scope: ResourceScope,
@@ -2284,6 +2352,7 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
         SessionThreadError::Serialization(_) | SessionThreadError::Deserialization(_) => {
             "thread_serialization"
         }
+        SessionThreadError::InvalidMessageTimestamp { .. } => "thread_timestamp_invalid",
         SessionThreadError::Backend(_) => "thread_backend",
     };
     OperationFailure::new(bucket, stage, error)

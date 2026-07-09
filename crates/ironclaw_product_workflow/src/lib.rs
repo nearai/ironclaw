@@ -31,7 +31,6 @@ mod auth_interaction;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
-mod channel_connection_resume;
 mod command_dispatch;
 mod commands;
 mod conversation_binding;
@@ -89,11 +88,6 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
-pub use channel_connection_resume::{
-    ChannelConnectionResumeReadModel, ChannelConnectionResumeScope, ChannelConnectionResumeService,
-    ChannelPairingBlockedRun, DefaultChannelConnectionResumeService,
-    ResumeChannelConnectionRequest, ResumeChannelConnectionResponse,
-};
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
     ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
@@ -125,6 +119,7 @@ pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
+pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleCommandKind,
@@ -235,8 +230,8 @@ pub use webui_inbound::{
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelReason,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundAttachment,
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 pub use workflow::DefaultProductWorkflow;

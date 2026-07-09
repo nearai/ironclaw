@@ -63,8 +63,9 @@ use ironclaw_product_workflow::{
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
     UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -257,12 +258,14 @@ struct StubServices {
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
+    rename_automation_calls: Mutex<Vec<(String, WebUiRenameAutomationRequest)>>,
     delete_automation_calls: Mutex<Vec<String>>,
     /// Captures the authenticated caller's user id for each
     /// `trace_account_traces` call, so the contract test can assert the handler
     /// forwards the caller (the route is caller-scoped).
     trace_account_traces_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_rename_automation_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
@@ -334,6 +337,10 @@ impl StubServices {
 
     fn fail_delete_automation(&self, error: RebornServicesError) {
         *self.next_delete_automation_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_rename_automation(&self, error: RebornServicesError) {
+        *self.next_rename_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
@@ -833,6 +840,34 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn rename_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.rename_automation_calls
+            .lock()
+            .expect("lock")
+            .push((automation_id, request));
+        if let Some(error) = self
+            .next_rename_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-renamed",
+                "Renamed status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
     async fn delete_automation(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -948,18 +983,18 @@ impl RebornServicesApi for StubServices {
         }
         Ok(RebornConnectableChannelListResponse {
             channels: vec![RebornConnectableChannelInfo {
-                channel: "slack".to_string(),
-                display_name: "Slack".to_string(),
+                channel: "telegram".to_string(),
+                display_name: "Telegram".to_string(),
                 strategy: RebornChannelConnectStrategy::InboundProofCode,
                 action: RebornChannelConnectAction {
-                    title: "Slack account connection".to_string(),
-                    instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                    input_placeholder: "Enter Slack pairing code...".to_string(),
+                    title: "Telegram account connection".to_string(),
+                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
+                    input_placeholder: "Enter Telegram pairing code...".to_string(),
                     submit_label: "Connect".to_string(),
-                    success_message: "Slack account connected.".to_string(),
-                    error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
+                    success_message: "Telegram account connected.".to_string(),
+                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
                 },
-                command_aliases: vec!["slack".to_string()],
+                command_aliases: vec!["telegram".to_string()],
             }],
         })
     }
@@ -2314,6 +2349,108 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
 }
 
 #[tokio::test]
+async fn rename_automation_dispatches_path_id_and_body_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Renamed status"}"#))
+                .expect("rename request"),
+        )
+        .await
+        .expect("rename oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert_eq!(body["automation"]["automation_id"], "automation-renamed");
+    assert_eq!(body["automation"]["name"], "Renamed status");
+
+    let calls = services
+        .rename_automation_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "automation-alpha");
+    assert_eq!(calls[0].1.name.as_deref(), Some("Renamed status"));
+}
+
+#[tokio::test]
+async fn rename_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("name".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::Blank),
+            },
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "validation",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_rename_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Renamed status"}"#))
+                    .expect("rename request"),
+            )
+            .await
+            .expect("rename oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .rename_automation_calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(automation_id, request)| { (automation_id.clone(), request.name.clone()) })
+                .collect::<Vec<_>>(),
+            vec![(
+                "automation-alpha".to_string(),
+                Some("Renamed status".to_string())
+            )]
+        );
+    }
+}
+
+#[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
     // The facade's default `trace_credits` body reads contributor-local
     // Trace Commons state scoped by the authenticated caller's user id.
@@ -2877,15 +3014,15 @@ async fn list_connectable_channels_dispatches_through_facade() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "slack");
+    assert_eq!(body["channels"][0]["channel"], "telegram");
     assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
     assert_eq!(
         body["channels"][0]["action"]["instructions"],
-        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         body["channels"][0]["action"]["error_message"],
-        "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
     );
     assert_eq!(
         *services

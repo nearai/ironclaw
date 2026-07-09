@@ -1,6 +1,9 @@
-import { React } from "../../../lib/html.js";
-import { openEventStream } from "../../../lib/api.js";
-import { CONNECTION_STATUS } from "../lib/connection-status.js";
+import React from "react";
+import { openEventStream } from "../../../lib/api";
+import {
+  CONNECTION_STATUS,
+  type ConnectionStatus,
+} from "../lib/connection-status";
 
 // v2 SSE emits `WebChatV2EventFrame` JSON, tagged with a typed
 // event name (`event: accepted`, `event: final_reply`, etc.) so
@@ -27,7 +30,9 @@ const V2_EVENT_NAMES = [
   "error",
 ];
 export function useSSE({ threadId, onEvent, enabled }) {
-  const [status, setStatus] = React.useState(CONNECTION_STATUS.IDLE);
+  const [status, setStatus] = React.useState<ConnectionStatus>(
+    CONNECTION_STATUS.IDLE,
+  );
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
   // Last cursor we successfully received. EventSource sends
