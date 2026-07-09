@@ -898,12 +898,8 @@ impl InMemoryState {
         let removed_binding_keys: Vec<_> = self
             .bindings
             .iter()
-            .filter_map(|(binding_key, binding)| {
-                binding
-                    .route_access
-                    .is_direct_owner(actor_key)
-                    .then(|| binding_key.clone())
-            })
+            .filter(|(_, binding)| binding.route_access.is_direct_owner(actor_key))
+            .map(|(binding_key, _)| binding_key.clone())
             .collect();
         let mut removed_conversations = std::collections::HashSet::new();
         for binding_key in removed_binding_keys {
