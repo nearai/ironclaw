@@ -39,6 +39,7 @@ use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator,
     WebuiServeConfig, webui_v2_app,
 };
+use ironclaw_reborn_webui_ingress::CompositeAuthenticator;
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use serde_json::json;
@@ -47,6 +48,8 @@ use tower::ServiceExt;
 const TENANT: &str = "tenant-alpha";
 const USER: &str = "user-alpha";
 const VALID_TOKEN: &str = "valid-bearer-token";
+const SESSION_TOKEN: &str = "valid-session-token";
+const OPERATOR_TOKEN: &str = "valid-operator-token";
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
     RebornServicesError {
@@ -93,6 +96,27 @@ impl WebuiAuthenticator for MultiUserToken {
         } else {
             None
         }
+    }
+}
+
+struct FixedToken {
+    token: &'static str,
+    auth: WebuiAuthentication,
+    mount_operator_routes: bool,
+}
+
+#[async_trait]
+impl WebuiAuthenticator for FixedToken {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        if token == self.token {
+            Some(self.auth.clone())
+        } else {
+            None
+        }
+    }
+
+    fn mounts_operator_webui_config_routes(&self) -> bool {
+        self.mount_operator_routes
     }
 }
 
@@ -1149,6 +1173,10 @@ async fn session_endpoint_reports_operator_capability_for_operator_authenticator
     assert_eq!(body["tenant_id"], TENANT);
     assert_eq!(body["user_id"], USER);
     assert_eq!(body["capabilities"]["operator_webui_config"], true);
+    assert_eq!(
+        body["features"]["workspace_requires_scoped_projection"], false,
+        "single-user/operator local WebUI keeps raw workspace fallback unless explicitly enabled"
+    );
 }
 
 #[tokio::test]
@@ -1211,6 +1239,73 @@ async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenti
     assert_eq!(body["tenant_id"], TENANT);
     assert_eq!(body["user_id"], USER);
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
+    assert_eq!(
+        body["features"]["workspace_requires_scoped_projection"], true,
+        "multi-user WebUI must fail closed instead of exposing a raw shared workspace root"
+    );
+}
+
+#[tokio::test]
+async fn session_endpoint_scopes_composite_signed_session_even_when_operator_routes_mount() {
+    let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(FixedToken {
+        token: SESSION_TOKEN,
+        auth: WebuiAuthentication::user(UserId::new("signed-user").expect("user id")),
+        mount_operator_routes: false,
+    });
+    let operator_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(FixedToken {
+        token: OPERATOR_TOKEN,
+        auth: WebuiAuthentication::operator(UserId::new(USER).expect("user id")),
+        mount_operator_routes: true,
+    });
+    let (app, _services) = build_app_with_authenticator(Arc::new(CompositeAuthenticator::new(
+        session_authenticator,
+        operator_authenticator,
+    )));
+
+    let session_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {SESSION_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(session_response.status(), StatusCode::OK);
+    let session_body: serde_json::Value =
+        serde_json::from_str(&read_body_string(session_response).await).expect("session json");
+    assert_eq!(session_body["user_id"], "signed-user");
+    assert_eq!(
+        session_body["capabilities"]["operator_webui_config"], false,
+        "signed session tokens must not inherit the env operator capability"
+    );
+    assert_eq!(
+        session_body["features"]["workspace_requires_scoped_projection"], true,
+        "signed sessions must not fall back to a raw shared workspace root just because operator routes are mounted"
+    );
+
+    let operator_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {OPERATOR_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(operator_response.status(), StatusCode::OK);
+    let operator_body: serde_json::Value =
+        serde_json::from_str(&read_body_string(operator_response).await).expect("session json");
+    assert_eq!(operator_body["capabilities"]["operator_webui_config"], true);
+    assert_eq!(
+        operator_body["features"]["workspace_requires_scoped_projection"], false,
+        "local operator bearer keeps raw workspace fallback unless the deployment explicitly disables it"
+    );
 }
 
 #[tokio::test]

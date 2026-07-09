@@ -3280,15 +3280,22 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
 }
 
 #[tokio::test]
-async fn get_session_reports_workspace_scoped_projection_feature_from_state_flag() {
-    for enabled in [false, true] {
+async fn get_session_reports_effective_workspace_scoped_projection_feature() {
+    for (state_enabled, operator_capability, expected) in [
+        (false, false, true),
+        (false, true, false),
+        (true, false, true),
+        (true, true, true),
+    ] {
         let services = Arc::new(StubServices::default());
         let router = webui_v2_router(
             WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-                .with_workspace_requires_scoped_projection(enabled),
+                .with_workspace_requires_scoped_projection(state_enabled),
         )
         .layer(axum::Extension(caller()))
-        .layer(axum::Extension(WebUiV2Capabilities::default()));
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: operator_capability,
+        }));
 
         let response = router
             .oneshot(
@@ -3304,8 +3311,9 @@ async fn get_session_reports_workspace_scoped_projection_feature_from_state_flag
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
         assert_eq!(
-            body["features"]["workspace_requires_scoped_projection"], enabled,
-            "features.workspace_requires_scoped_projection must mirror the state flag (enabled={enabled})"
+            body["features"]["workspace_requires_scoped_projection"], expected,
+            "features.workspace_requires_scoped_projection must be state flag OR non-operator token \
+             (state_enabled={state_enabled}, operator_capability={operator_capability})"
         );
     }
 }

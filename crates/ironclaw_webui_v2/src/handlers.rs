@@ -97,10 +97,11 @@ pub struct WebUiV2SessionResponse {
     pub attachments: WebUiAttachmentCapabilities,
 }
 
-/// Deployment-wide WebUI feature gates surfaced to the browser on
-/// `GET /session`. These are global "is this surface ready to show"
-/// toggles, not per-caller authorization — keep authorization in
-/// [`WebUiV2Capabilities`].
+/// Effective WebUI feature gates surfaced to the browser on `GET /session`.
+/// Most are deployment-level "is this surface ready to show" toggles. Keep
+/// authorization in [`WebUiV2Capabilities`]; feature values may still be
+/// derived from capabilities when they describe effective browser behavior for
+/// the authenticated bearer.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct WebUiV2Features {
     /// Reborn Projects surface (the conversations-panel entry + the
@@ -129,13 +130,15 @@ pub async fn get_session(
     let tenant_id = caller.tenant_id.to_string();
     let user_id = caller.user_id.to_string();
     let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
+    let workspace_requires_scoped_projection =
+        state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config;
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
-            workspace_requires_scoped_projection: state.workspace_requires_scoped_projection(),
+            workspace_requires_scoped_projection,
             global_auto_approve,
         },
         attachments: webui_attachment_capabilities(),
