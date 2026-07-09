@@ -2,14 +2,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_loop_support::{
-    HostIdentityContextSource, HostManagedModelGateway, HostSkillContextSource,
-    LoopAttachmentReadPort, ThreadBackedLoopModelPort, ThreadContextWindowCache,
+    HostIdentityContextSource, HostManagedModelGateway, HostManagedModelStreamSink,
+    HostSkillContextSource, LoopAttachmentReadPort, ThreadBackedLoopModelPort,
+    ThreadContextWindowCache,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway,
-    LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelResponse,
-    LoopPromptBundleAuthority, LoopSafeSummary,
+    LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
+    LoopModelResponse, LoopPromptBundleAuthority, LoopSafeSummary,
 };
 
 pub(super) struct ThreadResolvingLoopModelGateway<S, G>
@@ -40,6 +41,28 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, None).await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, Some(progress_sink)).await
+    }
+}
+
+impl<S, G> ThreadResolvingLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn stream_model_inner(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let mut model_port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -66,10 +89,26 @@ where
         if let Some(port) = self.attachment_read_port.as_ref() {
             model_port = model_port.with_attachment_read_port(Arc::clone(port));
         }
+        if let Some(progress_sink) = progress_sink {
+            model_port = model_port.with_stream_sink(Arc::new(LoopProgressHostStreamSink {
+                inner: progress_sink,
+            }));
+        }
         model_port
             .stream_model(request.request)
             .await
             .map_err(host_error_to_model_gateway_error)
+    }
+}
+
+struct LoopProgressHostStreamSink {
+    inner: Arc<dyn LoopModelProgressSink>,
+}
+
+#[async_trait]
+impl HostManagedModelStreamSink for LoopProgressHostStreamSink {
+    async fn safe_text_update(&self, safe_text: String) {
+        self.inner.model_text_update(safe_text).await;
     }
 }
 

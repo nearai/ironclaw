@@ -8,15 +8,11 @@ import { groupMessages } from "../lib/message-groups";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
 const TOP_LOAD_THRESHOLD_PX = 100;
-// Keep transcript-floating controls above the composer. The spacer mirrors the
-// offset plus the icon control size so the final message can scroll above them.
-// FLOATING_CONTROL_SIZE_PX must stay in sync with the logs button's `size-9`.
-const FLOATING_CONTROL_BOTTOM_OFFSET_PX = 128;
-const FLOATING_CONTROL_SIZE_PX = 36;
-const FLOATING_CONTROL_SPACER_HEIGHT_PX =
-  FLOATING_CONTROL_BOTTOM_OFFSET_PX + FLOATING_CONTROL_SIZE_PX;
+// The scroll area already keeps bottom padding for transcript-floating
+// controls. Keep them inside that padding instead of adding an in-flow spacer
+// after the final message.
+const FLOATING_CONTROL_BOTTOM_OFFSET_PX = 16;
 const FLOATING_CONTROL_STYLE = { bottom: FLOATING_CONTROL_BOTTOM_OFFSET_PX };
-const FLOATING_CONTROL_SPACER_STYLE = { height: FLOATING_CONTROL_SPACER_HEIGHT_PX };
 const FLOATING_LOGS_BUTTON_CLASS =
   "group absolute right-5 z-10 hidden size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)] sm:inline-flex";
 const JUMP_TO_BOTTOM_BUTTON_CLASS =
@@ -267,12 +263,6 @@ export function MessageList({
               />)
         )}
         {children}
-        {logsPath &&
-        (<div
-          aria-hidden="true"
-          className="hidden shrink-0 sm:block"
-          style={FLOATING_CONTROL_SPACER_STYLE}
-        />)}
       </div>
     </div>
     {logsPath &&
