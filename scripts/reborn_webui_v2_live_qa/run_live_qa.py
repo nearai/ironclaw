@@ -4346,6 +4346,15 @@ async def case_qa_9b_routine_dm_delivery_exactly_once(ctx: LiveQaContext) -> Pro
             "send me the result in a Slack DM."
         ),
         required_delivery_text=[],
+        # Production parity: users who hit the duplicate-delivery bug had the
+        # Slack tools extension installed, so the fired model had a user-token
+        # send capability available. Without this the duplicate arm is
+        # structurally inert (nothing to self-send with).
+        creation_prompt_extra=(
+            "Before creating the routine, make sure the Slack tools extension "
+            "is installed and activated (the Slack account is already "
+            "connected); install and activate it if it is not."
+        ),
         exactly_once_grace_seconds=60.0,
     )
 
@@ -4429,6 +4438,9 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
         ),
         required_delivery_text=[],
         creation_prompt_extra=(
+            "Before creating the routine, make sure the Slack tools extension "
+            "is installed and activated (the Slack account is already "
+            "connected); install and activate it if it is not. "
             "Route THIS routine's results to my Slack DM by listing my outbound "
             "delivery targets and passing the Slack DM target id as "
             "delivery_target_id when creating the trigger. Do not change my "
