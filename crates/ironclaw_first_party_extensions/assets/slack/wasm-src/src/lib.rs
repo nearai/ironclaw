@@ -20,8 +20,12 @@
 //!
 //! # Example Usage
 //!
+//! The host selects the operation from the capability id (e.g.
+//! `slack.search_messages`); params carry only the operation's fields and
+//! must NOT include an `action` key:
+//!
 //! ```json
-//! {"action": "search_messages", "query": "from:@me project plan", "count": 20}
+//! {"query": "from:me project plan", "count": 20}
 //! ```
 
 mod api;

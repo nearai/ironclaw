@@ -22,8 +22,9 @@ pub enum SlackUserAction {
     /// Search across all messages you can see (DMs, group DMs, and
     /// channels you are a member of). Requires the `search:read` user scope.
     SearchMessages {
-        /// Search query. Supports Slack search operators such as
-        /// `from:@me`, `in:#channel`, `after:2024-01-01`, `has:link`.
+        /// Search query. Supports Slack search operators: `from:me` for your
+        /// own messages (NOT `from:@me` — there is no user named "me"), plus
+        /// `from:@username`, `in:#channel`, `after:2024-01-01`, `has:link`.
         query: String,
         /// Maximum number of matches to return (default: 20, max: 100).
         #[serde(default = "default_search_count")]
@@ -151,6 +152,11 @@ pub struct Conversation {
     /// For DMs (`im`), the user ID on the other side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Human-readable name for `user`, resolved via `users.info` (best-effort:
+    /// absent when the lookup fails). DMs have no `name`, so without this the
+    /// only handle on the conversation is the raw user ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
 }
 
 /// Result from list_conversations.
@@ -167,6 +173,11 @@ pub struct HistoryMessage {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Human-readable name for `user`, resolved via `users.info` (one lookup
+    /// per distinct author, best-effort: absent when the lookup fails). Use
+    /// this in user-facing output instead of the raw user ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
     #[serde(rename = "type")]
     pub msg_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]

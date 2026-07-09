@@ -35,7 +35,7 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs; when the task is to message someone or post somewhere, say so in the prompt and pin the exact recipient conversation ids, resolved while the user is present \u{2014} never leave a recipient as a name to look up at fire time. Do not tell the prompt to send results back to the requesting user; each fire's final reply is delivered automatically \u{2014} to this trigger's delivery_target_id when set, otherwise to the user's default outbound delivery target at fire time. When the user asks for this trigger's results on a specific product or channel, pass delivery_target_id with an id from builtin__outbound_delivery_targets_list; builtin__outbound_delivery_target_set changes only the user-wide default shared by everything else.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -152,6 +152,25 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    /// Validate a model-supplied per-trigger delivery target id before the
+    /// record is persisted (ownership, existence, product availability).
+    ///
+    /// The default fails closed: hosts that can resolve outbound delivery
+    /// targets override this to accept caller-owned targets. Rejections must
+    /// use `TriggerRecordValidationKind::DeliveryTargetInvalid` so the tool
+    /// layer maps them to a `delivery_target_id` input issue.
+    async fn validate_delivery_target(
+        &self,
+        scope: &ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        let _ = (scope, target);
+        Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+            reason: "per-trigger delivery targets are not supported by this host".to_string(),
+        })
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
 
@@ -281,6 +300,10 @@ struct TriggerCreateInput {
     name: String,
     prompt: String,
     schedule: TriggerScheduleInput,
+    /// Optional per-trigger outbound delivery target id (from the outbound
+    /// delivery target capabilities). Host-validated before persistence.
+    #[serde(default)]
+    delivery_target_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -315,6 +338,18 @@ async fn create_trigger(
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
+    let delivery_target = match input.delivery_target_id {
+        Some(raw) => {
+            let target = ironclaw_triggers::TriggerDeliveryTargetId::new(raw)
+                .map_err(trigger_record_error)?;
+            create_hook
+                .validate_delivery_target(scope, &target)
+                .await
+                .map_err(trigger_record_error)?;
+            Some(target)
+        }
+        None => None,
+    };
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -325,6 +360,7 @@ async fn create_trigger(
         source: TriggerSourceKind::Schedule,
         schedule,
         prompt: input.prompt,
+        delivery_target,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -463,6 +499,7 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
+        "delivery_target_id": record.delivery_target.as_ref().map(|target| target.as_str()),
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -522,9 +559,15 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
     let mut issues = Vec::new();
     required_string(root, "name", "name", "string", &mut issues);
     required_string(root, "prompt", "prompt", "string", &mut issues);
+    if let Some(value) = root.get("delivery_target_id")
+        && !value.is_null()
+        && !value.is_string()
+    {
+        issues.push(type_mismatch("delivery_target_id", "string"));
+    }
     unexpected_fields(
         root,
-        &["name", "prompt", "schedule"],
+        &["name", "prompt", "schedule", "delivery_target_id"],
         "unexpected_field",
         &mut issues,
     );
@@ -699,6 +742,13 @@ fn trigger_record_error(error: TriggerError) -> FirstPartyCapabilityError {
         } => invalid_trigger_input(vec![
             invalid_value("prompt").expected("trigger prompt within the allowed byte limit"),
         ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+            ..
+        } => invalid_trigger_input(vec![invalid_value("delivery_target_id").expected(
+            "an outbound delivery target id available to this caller (from \
+             builtin__outbound_delivery_targets_list)",
+        )]),
         other => invalid_trigger_input(vec![
             invalid_value("trigger").expected(trigger_error_kind(&other)),
         ]),
@@ -798,6 +848,39 @@ mod tests {
     use chrono::{Datelike, TimeZone};
 
     use super::*;
+
+    /// Duplicate-delivery contract: the stored trigger prompt is replayed to a
+    /// fresh model at fire time, so the description must teach that each
+    /// fire's final reply is delivered by the host (otherwise the fired model
+    /// both calls a messaging capability and emits a final reply, delivering
+    /// the result twice), while messaging-as-task automations ("send Firat a
+    /// joke every morning") stay expressible with recipients pinned at
+    /// creation time instead of guessed at fire time.
+    #[test]
+    fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery() {
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("delivered automatically"),
+            "trigger_create description must state host-owned result delivery: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
+            "trigger_create description must say the prompt is the task, not routing: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION
+                .contains("Do not tell the prompt to send results back to the requesting user"),
+            "trigger_create description must forbid result self-delivery phrasing in the stored prompt: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("resolved while the user is present"),
+            "trigger_create description must require creation-time recipient pinning: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("pass delivery_target_id with an id from")
+                && TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list"),
+            "trigger_create description must teach per-trigger delivery routing: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+    }
 
     #[test]
     fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {

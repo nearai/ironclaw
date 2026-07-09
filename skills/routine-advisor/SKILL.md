@@ -74,19 +74,23 @@ Wait for the user to confirm before creating.
 
 ## Creating Routines
 
-Use the `routine_create` tool. Before creating, check `routine_list` to avoid duplicates.
+Use the `builtin__trigger_create` capability. Before creating, check `builtin__trigger_list` to avoid duplicates.
 
 Parameters:
-- `trigger_type`: Usually "cron" for scheduled tasks
-- `schedule`: Standard cron format. Common schedules:
+- `name`: Short human-readable routine name
+- `prompt`: Clear, specific instruction for the full task each fire performs. Never tell the prompt to send results back to the requesting user — each fire's final reply is delivered automatically to the user's outbound delivery target. When the task itself is to message someone or post somewhere (for example "send Firat a joke every morning"), that belongs in the prompt: resolve the exact recipient conversation ID while creating the routine (while the user is present to confirm) and pin that ID in the prompt, so a fire never has to look a recipient up by name.
+- `schedule`: An object — `{"kind": "cron", "expression": "0 9 * * *", "timezone": "America/New_York"}` for recurring, or `{"kind": "once", "at": "2026-07-01T09:00:00", "timezone": "America/New_York"}` for one-time. The timezone is required (IANA name). Common cron schedules:
   - Daily 9am: `0 9 * * *`
   - Weekday mornings: `0 9 * * MON-FRI`
   - Weekly Monday: `0 9 * * MON`
   - Every 2 hours during work: `0 9-17/2 * * MON-FRI`
   - Sunday evening: `0 18 * * SUN`
-- `action_type`: "lightweight" for simple checks, "full_job" for multi-step tasks
-- `prompt`: Clear, specific instruction for what the routine should do
-- `context_paths`: Workspace files to load as context (e.g., `["context/profile.json", "MEMORY.md"]`)
+
+## Delivering Results
+
+Routine results are delivered automatically to the user's outbound delivery target — never re-send a routine result to the requesting user with a messaging capability (it would arrive twice: once from the host, once from you). Messaging a third party is different: when that is the routine's task, the fire performs it with the messaging capability as instructed by the pinned prompt.
+
+If the user asks for results through a specific product or channel (a Slack DM, a Slack channel, ...), select the delivery target BEFORE creating the routine: call `builtin__outbound_delivery_targets_list` to see the available targets, then `builtin__outbound_delivery_target_set` to choose one. If no target is set, routine results are not delivered anywhere.
 
 ## Routine Ideas by User Type
 

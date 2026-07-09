@@ -1929,10 +1929,14 @@ mod tests {
             .find(|definition| definition.name.as_str() == "builtin__outbound_delivery_target_set")
             .expect("set tool definition should exist");
         assert!(
+            set_tool.description.contains("DEFAULT"),
+            "set tool description should frame the preference as the user-wide default"
+        );
+        assert!(
             set_tool
                 .description
-                .contains("before creating the routine or trigger"),
-            "set tool description should steer delivery requests before trigger creation"
+                .contains("pass delivery_target_id to builtin__trigger_create"),
+            "set tool description should steer per-trigger routing to trigger_create"
         );
 
         let malformed_list = port

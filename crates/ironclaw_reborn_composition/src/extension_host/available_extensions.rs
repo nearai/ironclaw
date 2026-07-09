@@ -2321,6 +2321,40 @@ mod tests {
         }
     }
 
+    /// Duplicate-delivery contract: `slack.send_message` acts as the user via
+    /// their own token, while the host separately delivers every run's final
+    /// reply via the bot token. The model-visible description must say the
+    /// final reply is delivered automatically so the model never uses this
+    /// capability to hand the requesting user their own answer (which arrives
+    /// twice: once bot-identity, once user-identity).
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_send_message_description_states_host_owned_final_reply_delivery() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let send_message = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.send_message")
+            .expect("slack manifest declares slack.send_message");
+        assert!(
+            send_message.description.contains("delivered automatically"),
+            "send_message description must state host-owned final-reply delivery: {}",
+            send_message.description
+        );
+        assert!(
+            send_message
+                .description
+                .contains("Do not use this to deliver your reply"),
+            "send_message description must forbid self-delivery of the run's own answer: {}",
+            send_message.description
+        );
+    }
+
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_read_only_tools_do_not_request_chat_write() {

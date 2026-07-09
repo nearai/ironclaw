@@ -664,6 +664,39 @@ fn build_triggered_run_delivery_hook_from_parts(
         approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
             as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
     };
+    // Per-trigger delivery target resolution runs over the same durable Slack
+    // host state (channel routes + personal DM targets) the outbound target
+    // surface publishes ids from, so an id selected at trigger_create time
+    // resolves at fire time or fails closed.
+    let host_state = Arc::new(FilesystemSlackHostState::new(
+        Arc::clone(&parts.local_runtime.host_state_filesystem),
+        config.tenant_id.clone(),
+        config.user_id.clone(),
+        config.agent_id.clone(),
+        config.project_id.clone(),
+    ));
+    let outbound_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+        Arc::new(SlackHostBetaOutboundTargetProvider::new(
+            SlackOutboundTargetProviderConfig {
+                tenant_id: config.tenant_id.clone(),
+                agent_id: config.agent_id.clone(),
+                project_id: config.project_id.clone(),
+                installation_id: config.installation_id.clone(),
+                team_id: config.team_id.clone(),
+                configured_channel_routes: config
+                    .channel_routes
+                    .iter()
+                    .map(|route| {
+                        SlackConfiguredChannelRoute::new(
+                            route.channel_id.clone(),
+                            route.subject_user_id.clone(),
+                        )
+                    })
+                    .collect(),
+            },
+            host_state.clone(),
+            host_state,
+        ));
     // Pass config.agent_id as the fallback so the ThreadScope key matches the
     // value ConversationContentRefMaterializer uses (same runtime default_agent_id).
     let driver = TriggeredRunDeliveryDriver::new(
@@ -671,7 +704,8 @@ fn build_triggered_run_delivery_hook_from_parts(
         delivery_store,
         route_store,
         config.agent_id.clone(),
-    );
+    )
+    .with_outbound_target_provider(outbound_target_provider);
     Ok(Arc::new(driver))
 }
 
@@ -4718,6 +4752,7 @@ mod tests {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("* * * * *").expect("valid cron"),
             prompt: format!("{trigger_name}-prompt-marker"),
+            delivery_target: None,
             state: TriggerState::Scheduled,
             next_run_at: Utc::now() - chrono::Duration::seconds(120),
             last_run_at: None,

@@ -32,7 +32,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.list_conversations"
-description = "List channels, private channels, DMs (im), and group DMs (mpim) you belong to. Use this to discover DM conversation IDs."
+description = "List channels, private channels, DMs (im), and group DMs (mpim) you belong to. Use this to discover DM conversation IDs; DM entries include the counterpart's resolved user_display_name."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -40,13 +40,13 @@ runtime_credentials = [
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/list_conversations.input.v1.json"
-output_schema_ref = "schemas/slack/raw_output.v1.json"
+output_schema_ref = "schemas/slack/list_conversations.output.v1.json"
 prompt_doc_ref = "prompts/slack/list_conversations.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.get_conversation_history"
-description = "Read message history from any channel or DM you can see, identified by its conversation ID."
+description = "Read message history from any channel or DM you can see, identified by its conversation ID. Messages include the author's raw user id plus a resolved user_display_name \u2014 use the display name in user-facing output, never the raw id."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -54,13 +54,13 @@ runtime_credentials = [
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/get_conversation_history.input.v1.json"
-output_schema_ref = "schemas/slack/raw_output.v1.json"
+output_schema_ref = "schemas/slack/get_conversation_history.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_conversation_history.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.get_user_info"
-description = "Get information about a Slack user (name, real name)."
+description = "Get information about a Slack user (name, real name, email when visible). History and DM-list outputs already carry resolved display names; use this only for extra fields on a specific user."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -68,13 +68,13 @@ runtime_credentials = [
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/get_user_info.input.v1.json"
-output_schema_ref = "schemas/slack/raw_output.v1.json"
+output_schema_ref = "schemas/slack/get_user_info.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_user_info.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.send_message"
-description = "Send a message as you to a channel or DM. Requires the chat:write user scope; the message appears to come from your account."
+description = "Send a message as you to a channel or DM; it appears to come from your account and requires the chat:write user scope. Use it when messaging someone or posting somewhere is the task the user asked for. The run's final reply (including routine/trigger results) is delivered automatically to the requesting user. Do not use this to deliver your reply or a routine/trigger result back to them — it would arrive twice."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },

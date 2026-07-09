@@ -117,6 +117,38 @@ pub fn search_messages(
     })
 }
 
+/// Resolve a set of Slack user IDs to human-readable names via `users.info`,
+/// one lookup per distinct ID. Best-effort by contract: a failing lookup
+/// (missing scope, deactivated user, outage) is skipped so read operations
+/// never fail because a name could not be resolved.
+fn resolve_user_display_names(
+    user_ids: std::collections::BTreeSet<String>,
+) -> std::collections::HashMap<String, String> {
+    let mut names = std::collections::HashMap::new();
+    for user_id in user_ids {
+        match get_user_info(&user_id) {
+            Ok(info) => {
+                let display = info
+                    .user
+                    .display_name
+                    .filter(|name| !name.is_empty())
+                    .or(info.user.real_name.filter(|name| !name.is_empty()))
+                    .unwrap_or(info.user.name);
+                if !display.is_empty() {
+                    names.insert(user_id, display);
+                }
+            }
+            Err(error) => {
+                crate::near::agent::host::log(
+                    crate::near::agent::host::LogLevel::Debug,
+                    &format!("users.info lookup skipped: {error}"),
+                );
+            }
+        }
+    }
+    names
+}
+
 /// List conversations the user belongs to (channels, DMs, group DMs).
 pub fn list_conversations(types: &str, limit: u32) -> Result<ListConversationsResult, String> {
     let url = format!(
@@ -127,7 +159,7 @@ pub fn list_conversations(types: &str, limit: u32) -> Result<ListConversationsRe
 
     let parsed = slack_api_call("GET", &url, None)?;
 
-    let conversations = parsed["channels"]
+    let mut conversations: Vec<Conversation> = parsed["channels"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -139,10 +171,25 @@ pub fn list_conversations(types: &str, limit: u32) -> Result<ListConversationsRe
                     is_im: c["is_im"].as_bool().unwrap_or(false),
                     is_mpim: c["is_mpim"].as_bool().unwrap_or(false),
                     user: c["user"].as_str().map(|s| s.to_string()),
+                    user_display_name: None,
                 })
                 .collect()
         })
         .unwrap_or_default();
+
+    // DMs carry no `name`; resolve the counterpart's display name so output
+    // is human-readable without a follow-up lookup per conversation.
+    let counterpart_ids = conversations
+        .iter()
+        .filter(|conversation| conversation.is_im)
+        .filter_map(|conversation| conversation.user.clone())
+        .collect();
+    let names = resolve_user_display_names(counterpart_ids);
+    for conversation in &mut conversations {
+        if let Some(user_id) = &conversation.user {
+            conversation.user_display_name = names.get(user_id).cloned();
+        }
+    }
 
     Ok(ListConversationsResult {
         ok: true,
@@ -172,7 +219,7 @@ pub fn get_conversation_history(
     let parsed = slack_api_call("GET", &url, None)?;
 
     let has_more = parsed["has_more"].as_bool().unwrap_or(false);
-    let messages = parsed["messages"]
+    let mut messages: Vec<HistoryMessage> = parsed["messages"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -180,12 +227,26 @@ pub fn get_conversation_history(
                     ts: m["ts"].as_str().unwrap_or("").to_string(),
                     text: m["text"].as_str().unwrap_or("").to_string(),
                     user: m["user"].as_str().map(|s| s.to_string()),
+                    user_display_name: None,
                     msg_type: m["type"].as_str().unwrap_or("message").to_string(),
                     thread_ts: m["thread_ts"].as_str().map(|s| s.to_string()),
                 })
                 .collect()
         })
         .unwrap_or_default();
+
+    // Resolve authors to display names (one users.info per distinct author)
+    // so user-facing output never has to echo raw `U…` ids.
+    let author_ids = messages
+        .iter()
+        .filter_map(|message| message.user.clone())
+        .collect();
+    let names = resolve_user_display_names(author_ids);
+    for message in &mut messages {
+        if let Some(user_id) = &message.user {
+            message.user_display_name = names.get(user_id).cloned();
+        }
+    }
 
     Ok(ConversationHistoryResult {
         ok: true,

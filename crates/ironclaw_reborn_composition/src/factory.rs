@@ -796,6 +796,14 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// modules wire the access-controlled service, never the substrate repo.
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// The one mutable outbound delivery target registry for this runtime.
+    /// Runtime composition wraps it into the outbound preferences facade and
+    /// product hosts (Slack host beta) register their providers into it; the
+    /// trigger-create hook validates per-trigger `delivery_target_id`s against
+    /// the same instance, so an id accepted at creation is one the delivery
+    /// layer can resolve at fire time.
+    pub(crate) outbound_delivery_targets:
+        Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     /// Global default criteria-based skill auto-activation master switch,
     /// shared by reference between the skill activation selector (reads it per
     /// turn) and the WebUI skills facade (toggles it). Defaults to `true`; a
@@ -2210,6 +2218,9 @@ async fn build_local_dev_store_graph(
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
+        outbound_delivery_targets: Arc::new(
+            crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
+        ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
@@ -2363,6 +2374,9 @@ async fn build_local_dev_store_graph(
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
+        outbound_delivery_targets: Arc::new(
+            crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
+        ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
@@ -2468,18 +2482,69 @@ fn local_dev_trigger_create_hook(
     {
         Arc::new(InMemoryTriggerCreatorPairingHook {
             conversations: local_runtime.trigger_conversation_services.clone(),
+            outbound_delivery_targets: Arc::clone(&local_runtime.outbound_delivery_targets),
         })
+    }
+}
+
+/// Validate a per-trigger delivery target against the runtime's outbound
+/// delivery target registry: the id must resolve for the trigger creator (the
+/// same ownership check the delivery layer applies at fire time). Fails
+/// closed when no provider is registered or the id is unknown/foreign.
+async fn validate_trigger_delivery_target_against_registry(
+    registry: &crate::outbound::MutableOutboundDeliveryTargetRegistry,
+    scope: &ironclaw_host_api::ResourceScope,
+    target: &ironclaw_triggers::TriggerDeliveryTargetId,
+) -> Result<(), TriggerError> {
+    let invalid = |reason: String| TriggerError::InvalidRecord {
+        kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
+        reason,
+    };
+    let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
+        .map_err(|_| invalid("delivery target id is not a valid outbound target id".to_string()))?;
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+    );
+    use crate::outbound::OutboundDeliveryTargetProvider as _;
+    match registry
+        .resolve_outbound_delivery_target(&caller, &target_id)
+        .await
+    {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(invalid(
+            "delivery target is not available to this caller".to_string(),
+        )),
+        Err(_) => Err(TriggerError::Backend {
+            reason: "outbound delivery target lookup unavailable".to_string(),
+        }),
     }
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 struct InMemoryTriggerCreatorPairingHook {
     conversations: InMemoryConversationServices,
+    outbound_delivery_targets: Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 #[async_trait::async_trait]
 impl TriggerCreateHook for InMemoryTriggerCreatorPairingHook {
+    async fn validate_delivery_target(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        validate_trigger_delivery_target_against_registry(
+            &self.outbound_delivery_targets,
+            scope,
+            target,
+        )
+        .await
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         pair_trigger_creator(&self.conversations, record).await
     }
@@ -2493,6 +2558,19 @@ struct LocalRuntimeTriggerCreatorPairingHook {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
 impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
+    async fn validate_delivery_target(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        validate_trigger_delivery_target_against_registry(
+            &self.runtime.outbound_delivery_targets,
+            scope,
+            target,
+        )
+        .await
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let conversations = self
             .runtime
@@ -5077,6 +5155,99 @@ mod tests {
         }
     }
 
+    /// Per-trigger delivery targets validate against the SAME registry the
+    /// outbound target surface publishes from: an id a provider resolves for
+    /// the caller is accepted; an unknown id (or an empty registry) fails
+    /// closed as `DeliveryTargetInvalid`.
+    #[tokio::test]
+    async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
+        use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+        use crate::outbound::{
+            MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
+        };
+        use ironclaw_product_workflow::{
+            RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+            RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
+        };
+
+        struct OneTargetProvider {
+            entry: OutboundDeliveryTargetEntry,
+        }
+
+        #[async_trait::async_trait]
+        impl OutboundDeliveryTargetProvider for OneTargetProvider {
+            async fn list_outbound_delivery_targets(
+                &self,
+                _caller: &WebUiAuthenticatedCaller,
+            ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+                Ok(vec![OutboundDeliveryTargetEntry {
+                    summary: self.entry.summary.clone(),
+                    capabilities: self.entry.capabilities.clone(),
+                    reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
+                }])
+            }
+        }
+
+        let scope = ironclaw_host_api::ResourceScope {
+            tenant_id: TenantId::new("registry-validation-tenant").expect("tenant"),
+            user_id: UserId::new("registry-validation-user").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        let target = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:me")
+            .expect("target id");
+
+        let registry = MutableOutboundDeliveryTargetRegistry::default();
+        // Empty registry → fail closed.
+        let rejected =
+            validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
+                .await
+                .expect_err("empty registry must reject");
+        assert!(matches!(
+            rejected,
+            TriggerError::InvalidRecord {
+                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
+                ..
+            }
+        ));
+
+        // Registered provider that resolves the id for the caller → accept.
+        let entry = OutboundDeliveryTargetEntry {
+            summary: RebornOutboundDeliveryTargetSummary::new(
+                RebornOutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
+                "slack",
+                "Slack DM".to_string(),
+                None,
+            )
+            .expect("summary"),
+            capabilities: RebornOutboundDeliveryTargetCapabilities {
+                final_replies: true,
+                gate_prompts: true,
+                auth_prompts: true,
+            },
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:registry-validation",
+            )
+            .expect("binding ref"),
+        };
+        registry
+            .register_provider("test", Arc::new(OneTargetProvider { entry }))
+            .expect("register");
+        validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
+            .await
+            .expect("registered target must validate");
+
+        // A different id still fails closed.
+        let other = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:other")
+            .expect("target id");
+        validate_trigger_delivery_target_against_registry(&registry, &scope, &other)
+            .await
+            .expect_err("unknown target must reject");
+    }
+
     fn trigger_record_for_pairing_test() -> TriggerRecord {
         TriggerRecord {
             trigger_id: ironclaw_triggers::TriggerId::new(),
@@ -5089,6 +5260,7 @@ mod tests {
             schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")
                 .expect("valid cron expression"),
             prompt: "pairing test prompt".to_string(),
+            delivery_target: None,
             state: ironclaw_triggers::TriggerState::Scheduled,
             next_run_at: chrono::Utc::now(),
             last_run_at: None,
@@ -5154,6 +5326,7 @@ mod tests {
             capability_policy: Arc::clone(&base_runtime.capability_policy),
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
+            outbound_delivery_targets: Arc::clone(&base_runtime.outbound_delivery_targets),
             auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),

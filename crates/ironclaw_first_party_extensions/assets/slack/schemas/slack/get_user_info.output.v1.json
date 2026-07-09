@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack get_user_info output",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "user": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Raw Slack user ID." },
+        "name": { "type": "string", "description": "Slack handle (legacy username)." },
+        "real_name": { "type": "string" },
+        "display_name": { "type": "string" },
+        "email": { "type": "string", "description": "The user's email when visible to your token. Treat as personal data; include in output only when the user asked for it." },
+        "is_bot": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
