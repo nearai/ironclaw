@@ -35,7 +35,7 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs; when the task is to message someone or post somewhere, say so in the prompt and pin the exact recipient conversation ids, resolved while the user is present \u{2014} never leave a recipient as a name to look up at fire time. Do not tell the prompt to send results back to the requesting user; each fire's final reply is delivered automatically \u{2014} to this trigger's delivery_target_id when set, otherwise to the user's default outbound delivery target at fire time. When the user asks for this trigger's results on a specific product or channel, pass delivery_target_id with an id from builtin__outbound_delivery_targets_list; builtin__outbound_delivery_target_set changes only the user-wide default shared by everything else.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs; when the task is to message someone or post somewhere, say so in the prompt and pin the exact recipient conversation ids, resolved while the user is present \u{2014} never leave a recipient as a name to look up at fire time. Do not tell the prompt to send results back to the requesting user; each fire's final reply is delivered automatically \u{2014} to this trigger's delivery_target_id when set, otherwise to the user's default outbound delivery target at fire time. Asks like 'send me the result' are delivery routing, not a task step: satisfy them with delivery_target_id alone and keep every send-to-requester step \u{2014} even one with a pinned conversation id \u{2014} out of the prompt. When the user asks for this trigger's results on a specific product or channel, pass delivery_target_id with an id from builtin__outbound_delivery_targets_list; builtin__outbound_delivery_target_set changes only the user-wide default shared by everything else.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -874,6 +874,19 @@ mod tests {
         assert!(
             TRIGGER_CREATE_DESCRIPTION.contains("resolved while the user is present"),
             "trigger_create description must require creation-time recipient pinning: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        // Laundering guard: a live QA fire executed a duplicate user-identity
+        // send because the creating model set delivery_target_id AND pinned
+        // the requester's own DM into the prompt as if it were a third-party
+        // recipient. The description must say receiving results is routing,
+        // never a prompt step — pinned conversation id or not.
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("delivery routing, not a task step"),
+            "trigger_create description must frame 'send me the result' as routing: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("even one with a pinned conversation id"),
+            "trigger_create description must forbid laundering a self-send behind a pinned id: {TRIGGER_CREATE_DESCRIPTION}"
         );
         assert!(
             TRIGGER_CREATE_DESCRIPTION.contains("pass delivery_target_id with an id from")

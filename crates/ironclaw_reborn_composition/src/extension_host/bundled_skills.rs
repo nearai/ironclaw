@@ -493,6 +493,11 @@ mod tests {
             skill_md.contains("delivery_target_id"),
             "routine-advisor must teach per-trigger routing, not only the user-wide default"
         );
+        assert!(
+            skill_md.contains("delivery routing, not a task step"),
+            "routine-advisor must frame send-me asks as routing so prompts never carry a \
+             send-to-requester step"
+        );
     }
 
     #[tokio::test]

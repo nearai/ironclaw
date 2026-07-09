@@ -333,7 +333,9 @@ fn render_origin_line(ctx: &ProductTurnContext) -> String {
             "Run origin: scheduled trigger fire. The final reply is delivered automatically to \
              the outbound delivery target \u{2014} never re-send this run's result to the \
              requesting user with messaging capabilities; use them only when the task itself is \
-             to message someone else."
+             to message someone else. If a task step sends the run's result to the trigger \
+             creator's own conversation (their DM with you, or wherever they asked to receive \
+             results), it is already covered by that automatic delivery \u{2014} skip the send."
                 .to_string()
         }
     }
@@ -1080,6 +1082,17 @@ mod tests {
         assert!(
             text.contains("only when the task itself is to message someone else"),
             "scheduled-trigger origin line must keep messaging-as-task automations working: {text}"
+        );
+        // Laundering guard: creation can pin the requester's own DM into the
+        // task prompt as if it were a third-party recipient; the fire must
+        // treat a send-result-to-creator step as covered by host delivery.
+        assert!(
+            text.contains("already covered by that automatic delivery"),
+            "scheduled-trigger origin line must mark send-to-creator steps as covered: {text}"
+        );
+        assert!(
+            text.contains("skip the send"),
+            "scheduled-trigger origin line must instruct skipping laundered self-sends: {text}"
         );
     }
 

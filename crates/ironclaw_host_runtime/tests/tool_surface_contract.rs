@@ -707,6 +707,10 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .contains("Never tell the prompt to send results back to the requesting user"),
         "trigger_create prompt schema should forbid result self-delivery phrasing"
     );
+    assert!(
+        trigger_prompt_description.contains("receiving results is routing"),
+        "trigger_create prompt schema should frame send-me asks as routing, not a prompt step"
+    );
     let trigger_delivery_target_description = trigger_create
         .descriptor
         .parameters_schema
