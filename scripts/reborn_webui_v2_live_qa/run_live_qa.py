@@ -1449,12 +1449,14 @@ async def _wait_for_assistant_reply(
             except Exception:
                 text = ""
             try:
-                last_final_reply_state = await assistant.get_attribute(
+                observed_final_reply_state = await assistant.get_attribute(
                     "data-final-reply",
                     timeout=1000,
                 )
             except Exception:
-                last_final_reply_state = None
+                observed_final_reply_state = last_final_reply_state
+            else:
+                last_final_reply_state = observed_final_reply_state
             try:
                 block_texts = [
                     block.strip()
