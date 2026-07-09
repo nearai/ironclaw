@@ -99,8 +99,6 @@ jobs:
           ref: ${{ steps.target.outputs.checkout_ref }}
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -117,12 +115,6 @@ jobs:
           cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-
-      - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
-
-      - name: Build WASM channels once
-        run: ./scripts/build-wasm-extensions.sh --channels
 
       - name: Build ironclaw-reborn once
         env:
