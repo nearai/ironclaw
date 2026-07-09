@@ -104,7 +104,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: live-canary-reborn-webui-v2-build-artifact-experiment
+          key: live-canary-reborn-webui-v2-live-qa
 
       - name: Setup OVH sccache
         uses: ./.github/actions/setup-sccache-dist
