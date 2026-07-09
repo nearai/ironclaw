@@ -42,7 +42,9 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
+use ironclaw_turns::run_profile::{
+    CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
+};
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
     GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -582,6 +584,10 @@ pub struct RebornIntegrationHarness {
     /// `recorded_turn_events` slices `[baseline_turn_event_count..]` like the
     /// other `baseline_*_count` fields (R2).
     pub(crate) baseline_turn_event_count: usize,
+    /// Loop milestone count at harness construction. Milestones share one group
+    /// sink, so assertions slice from this baseline just like capability and
+    /// turn-event recordings.
+    pub(crate) baseline_milestone_count: usize,
 }
 
 impl RebornIntegrationHarness {
@@ -622,6 +628,16 @@ impl RebornIntegrationHarness {
     /// `tests/integration/wiring_parity.rs`.
     pub fn planned_runtime_parts_shape(&self) -> DefaultPlannedRuntimePartsShape {
         self._shared.planned_runtime_parts_shape
+    }
+
+    /// Loop host milestones emitted after this harness was built.
+    pub fn loop_milestones(&self) -> Vec<LoopHostMilestone> {
+        self._shared
+            .milestone_sink
+            .milestones()
+            .into_iter()
+            .skip(self.baseline_milestone_count)
+            .collect()
     }
 
     /// Submit a user turn and wait for it to complete.

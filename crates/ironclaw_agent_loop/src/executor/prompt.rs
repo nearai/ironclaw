@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopExit, LoopFailureKind, SanitizedFailure,
+    LoopExit,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
@@ -21,10 +21,10 @@ use crate::strategies::{
 };
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
-    HostStage, PendingInputAck, StageContext, apply_capability_filter, attach_failure_explanation,
-    cancelled_exit, debug_host_unavailable, failed_exit, pending_approval_resume_candidate,
-    pending_auth_resume_candidate, pending_external_tool_resume_candidate,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
+    PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
+    pending_approval_resume_candidate, pending_auth_resume_candidate,
+    pending_external_tool_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -534,11 +534,12 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                 return compaction_cancelled_exit(self.ctx, state, self.pending_input_ack).await;
             }
             CompactionCallOutcome::Completed(Err(error)) => {
-                return compaction_failed_exit(
+                return compaction_failed_continue(
                     self.ctx,
                     state,
                     self.pending_input_ack,
                     task_id,
+                    drop_through_seq,
                     &error,
                 )
                 .await;
@@ -547,11 +548,12 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                 let error = LoopCompactionError::InferenceFailed {
                     safe_summary: safe("compaction deadline exceeded"),
                 };
-                return compaction_failed_exit(
+                return compaction_failed_continue(
                     self.ctx,
                     state,
                     self.pending_input_ack,
                     task_id,
+                    drop_through_seq,
                     &error,
                 )
                 .await;
@@ -634,11 +636,12 @@ async fn compaction_cancelled_exit(
     Ok(PromptCompactionOutcome::Exited(exit))
 }
 
-async fn compaction_failed_exit(
+async fn compaction_failed_continue(
     ctx: StageContext<'_>,
     state: LoopExecutionState,
     pending_input_ack: &mut PendingInputAck,
     task_id: SystemInferenceTaskId,
+    drop_through_seq: u64,
     error: &LoopCompactionError,
 ) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
     CheckpointStage
@@ -651,6 +654,11 @@ async fn compaction_failed_exit(
         )
         .await;
     let mut state = state;
+    state.compaction_state.force_compact_on_next_iteration = false;
+    state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+        through_seq: drop_through_seq,
+        prompt_fingerprint: state.compaction_prompt.fingerprint(),
+    });
     state = match CheckpointStage
         .cancel_if_requested_after_pending_input_ack(ctx, state, pending_input_ack)
         .await?
@@ -658,24 +666,7 @@ async fn compaction_failed_exit(
         CancelCheck::Continue(state) => *state,
         CancelCheck::Exit(exit) => return Ok(PromptCompactionOutcome::Exited(exit)),
     };
-    let explanation_message_ref =
-        attach_failure_explanation(ctx, &mut state, LoopFailureKind::CompactionUnavailable).await?;
-    let checked = CheckpointStage
-        .write(ctx, state, CheckpointKind::Final)
-        .await?;
-    pending_input_ack.ack(ctx.host).await?;
-    let exit = failed_exit(
-        ctx.host,
-        checked.state,
-        LoopFailureKind::CompactionUnavailable,
-        Some(checked.checkpoint_id),
-        FailedExitDetails {
-            diagnostic_ref: None,
-            safe_summary: Some(compaction_failure_category(error)?),
-            explanation_message_ref,
-        },
-    )?;
-    Ok(PromptCompactionOutcome::Exited(exit))
+    Ok(PromptCompactionOutcome::Skipped(state))
 }
 
 pub(super) async fn build_prompt_bundle_for_surface(
@@ -767,23 +758,6 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
-}
-
-fn compaction_failure_category(
-    error: &LoopCompactionError,
-) -> Result<SanitizedFailure, AgentLoopExecutorError> {
-    let category = match error {
-        LoopCompactionError::InvalidCutPoint => "compaction_invalid_cut_point",
-        LoopCompactionError::UnsupportedMode => "compaction_unsupported_mode",
-        LoopCompactionError::InputTooLarge => "compaction_input_too_large",
-        LoopCompactionError::SecurityRejected { .. } => "compaction_security_rejected",
-        LoopCompactionError::InferenceFailed { .. } => "compaction_inference_failed",
-        LoopCompactionError::Cancelled => "compaction_cancelled",
-        LoopCompactionError::PersistenceFailed { .. } => "compaction_persistence_failed",
-    };
-    SanitizedFailure::new(category).map_err(|_| AgentLoopExecutorError::PlannerContract {
-        detail: "static compaction failure category was invalid",
-    })
 }
 
 fn safe(value: &'static str) -> LoopSafeSummary {

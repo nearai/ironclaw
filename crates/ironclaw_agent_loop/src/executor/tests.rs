@@ -646,7 +646,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_timeout_returns_failed_exit() {
+async fn prompt_stage_compaction_timeout_returns_to_normal_prompt_path() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
@@ -680,26 +680,43 @@ async fn prompt_stage_compaction_timeout_returns_failed_exit() {
         .await
         .expect("prompt stage");
 
-    match step {
-        PromptStep::Exit(LoopExit::Failed(failed)) => {
-            assert!(failed.checkpoint_id.is_some());
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
+            panic!("unexpected resume step")
         }
-        _ => panic!("expected failed exit"),
-    }
-    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+    };
+    assert_eq!(
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert!(host.checkpoint_kinds().is_empty());
     assert_eq!(
         host.progress_event_names(),
         vec![
             "prompt_bundle_built",
             "compaction_started",
             "compaction_failed",
-            "checkpoint_written",
         ]
     );
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
+async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_path() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
@@ -731,32 +748,41 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
         .await
         .expect("prompt stage");
 
-    match step {
-        PromptStep::Exit(LoopExit::Failed(failed)) => {
-            assert!(failed.checkpoint_id.is_some());
-        }
-        PromptStep::Prepared(_) => panic!("security rejection should end the run"),
+    let output = match step {
+        PromptStep::Prepared(output) => output,
         PromptStep::ResumeApproval(_)
         | PromptStep::ResumeAuth(_)
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
-    }
+    };
+    assert_eq!(
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
     assert_eq!(
         host.prompt_requests().len(),
-        2,
-        "compaction failure should request a best-effort explanation prompt"
+        1,
+        "compaction failure should continue with the existing prompt candidate"
     );
-    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert!(host.checkpoint_kinds().is_empty());
     assert_eq!(
         host.progress_event_names(),
         vec![
             "prompt_bundle_built",
             "compaction_started",
             "compaction_failed",
-            "checkpoint_written",
         ]
     );
 }
@@ -4538,6 +4564,58 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         final_state.stop_state.turns_completed, 3,
         "turns_completed must be 3 (D-A: CompactionOnly turns count per \
          observe_completed_turn's unconditional increment)"
+    );
+}
+
+#[tokio::test]
+async fn executor_continues_after_forced_compaction_rejection_from_tool_result_overflow() {
+    let host = MockHost::new(vec![
+        calls_response(),
+        reply_response_with_text("final answer"),
+    ])
+    .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+        outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: LoopResultRef::new("result:big-compaction-rejected").expect("valid"),
+            safe_summary: "large search result".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+            byte_len: 33_001,
+            output_digest: None,
+        })],
+        stopped_on_suspension: false,
+    }])
+    .with_prompt_compaction_indexes(vec![active_task_preserving_compaction_index(), vec![]])
+    .with_compaction_outcome(Err(LoopCompactionError::SecurityRejected {
+        safe_summary: LoopSafeSummary::new("injection detected").unwrap(),
+    }));
+
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "compaction rejection after successful tool execution must not fail the run: {exit:?}"
+    );
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "the loop should continue to the post-tool reply model turn"
+    );
+    let progress_events = host.progress_event_names();
+    assert!(
+        progress_events.contains(&"compaction_failed"),
+        "the failed compaction should still be reported: {progress_events:?}"
+    );
+    assert!(
+        host.finalized_assistant_messages()
+            .iter()
+            .any(|message| message.contains("final answer")),
+        "the post-tool assistant reply should still finalize"
     );
 }
 
