@@ -943,13 +943,41 @@ impl RebornLocalExtensionManagementPort {
         owner: &UserId,
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let available = resolve_with_owner_overlay(
+        let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        let available = match resolve_with_owner_overlay(
             &self.catalog,
             self.filesystem.as_ref(),
             Some(owner),
             &package_ref,
         )
-        .await?;
+        .await
+        {
+            Ok(available) => available,
+            Err(error) => {
+                if self
+                    .installation_store
+                    .get_installation(&installation_id)
+                    .await
+                    .map_err(map_extension_installation_error)?
+                    .is_none()
+                    && self
+                        .installation_store
+                        .get_manifest(&extension_id)
+                        .await
+                        .map_err(map_extension_installation_error)?
+                        .is_none()
+                {
+                    RegisteredExtensionStore::delete_descriptor(
+                        self.filesystem.as_ref(),
+                        owner,
+                        &extension_id,
+                    )
+                    .await?;
+                    return Ok(registered_remove_response(package_ref));
+                }
+                return Err(error);
+            }
+        };
         if !is_owner_registered(&available.package.manifest.source) {
             return Err(ProductWorkflowError::InvalidBindingRequest {
                 reason: format!(
@@ -958,7 +986,6 @@ impl RebornLocalExtensionManagementPort {
                 ),
             });
         }
-        let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         if self
             .installation_store
             .get_installation(&installation_id)
@@ -999,11 +1026,7 @@ impl RebornLocalExtensionManagementPort {
         }
         RegisteredExtensionStore::delete_descriptor(self.filesystem.as_ref(), owner, &extension_id)
             .await?;
-        Ok(response_with_payload(
-            Some(package_ref),
-            LifecyclePhase::Removed,
-            LifecycleProductPayload::ExtensionRemove { removed: true },
-        ))
+        Ok(registered_remove_response(package_ref))
     }
 
     /// Credential providers the extension declares, captured before removal (its
@@ -1632,6 +1655,14 @@ fn registered_install_response(
             next_step: "Activate the registered MCP extension to discover and publish its tools."
                 .to_string(),
         },
+    )
+}
+
+fn registered_remove_response(package_ref: LifecyclePackageRef) -> LifecycleProductResponse {
+    response_with_payload(
+        Some(package_ref),
+        LifecyclePhase::Removed,
+        LifecycleProductPayload::ExtensionRemove { removed: true },
     )
 }
 
@@ -4325,6 +4356,54 @@ output_schema_ref = "schemas/search.output.json"
         ));
     }
 
+    #[tokio::test]
+    async fn extension_register_rejects_private_url_without_partial_descriptor() {
+        let owner = UserId::new("lifecycle-owner").expect("valid user");
+        let private_url = "https://127.0.0.1/mcp";
+        let extension_id =
+            RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, private_url)
+                .expect("extension id");
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(Vec::new()),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Local MCP".to_string(),
+                    url: private_url.to_string(),
+                },
+            )
+            .await
+            .expect_err("private registered MCP URL is rejected");
+
+        assert!(
+            error.to_string().contains("private"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/registered/lifecycle-owner")
+                .join(extension_id.as_str())
+                .exists(),
+            "private URL rejection must not leave an owner descriptor"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new(extension_id.as_str().to_string())
+                        .expect("installation id")
+                )
+                .await
+                .expect("read installation")
+                .is_none(),
+            "private URL rejection must not create lifecycle installation state"
+        );
+    }
+
     #[test]
     fn registered_mcp_public_target_validation_rejects_private_literal() {
         let error = validate_registered_mcp_public_target_with_resolver(
@@ -4488,6 +4567,76 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
+    async fn extension_register_same_name_and_url_is_isolated_across_owners() {
+        let owner_a = UserId::new("lifecycle-owner-a").expect("valid user");
+        let owner_b = UserId::new("lifecycle-owner-b").expect("valid user");
+        let url = "https://93.184.216.34/mcp";
+        let (dir, _storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(Vec::new()),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let storage_root = dir.path().join("local-dev");
+
+        let first = port
+            .register_hosted_mcp(
+                &owner_a,
+                "Acme MCP".to_string(),
+                url.to_string(),
+                &hosted_mcp_scope(owner_a.as_str()),
+            )
+            .await
+            .expect("register owner A");
+        let second = port
+            .register_hosted_mcp(
+                &owner_b,
+                "Acme MCP".to_string(),
+                url.to_string(),
+                &hosted_mcp_scope(owner_b.as_str()),
+            )
+            .await
+            .expect("register owner B");
+        let first_ref = first.package_ref.expect("first package ref");
+        let second_ref = second.package_ref.expect("second package ref");
+
+        assert_ne!(
+            first_ref, second_ref,
+            "owner participates in the minted id, so shared URL/name never overwrite"
+        );
+        for (owner, package_ref) in [(&owner_a, &first_ref), (&owner_b, &second_ref)] {
+            assert!(
+                storage_root
+                    .join("system/extensions/registered")
+                    .join(owner.as_str())
+                    .join(package_ref.id.as_str())
+                    .join("manifest.toml")
+                    .exists(),
+                "owner {} keeps its own descriptor",
+                owner.as_str()
+            );
+            let extension_id =
+                ExtensionId::new(package_ref.id.as_str().to_string()).expect("extension id");
+            let installation_id = ExtensionInstallationId::new(package_ref.id.as_str().to_string())
+                .expect("installation id");
+            assert!(
+                installation_store
+                    .get_installation(&installation_id)
+                    .await
+                    .expect("read installation")
+                    .is_some(),
+                "owner {} keeps an installation record",
+                owner.as_str()
+            );
+            let manifest = installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("read manifest")
+                .expect("manifest record");
+            assert_registered_manifest_owner_and_url(&manifest, owner, url);
+        }
+    }
+
+    #[tokio::test]
     async fn extension_register_same_name_update_rolls_back_replacement_when_prior_remove_fails() {
         let owner = UserId::new("lifecycle-owner").expect("valid user");
         let old_url = "https://1.1.1.1/mcp";
@@ -4616,6 +4765,44 @@ output_schema_ref = "schemas/search.output.json"
                 .is_none(),
             "unregister removes lifecycle installation"
         );
+    }
+
+    #[tokio::test]
+    async fn extension_unregister_is_idempotent_after_descriptor_and_installation_removed() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(Vec::new()),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let register = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://93.184.216.34/mcp".to_string(),
+                },
+            )
+            .await
+            .expect("register");
+        let package_ref = register.package_ref.expect("package ref");
+
+        for attempt in 0..2 {
+            let unregister = facade
+                .execute(
+                    lifecycle_surface_context(),
+                    LifecycleProductAction::ExtensionUnregister {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("unregister attempt {attempt} failed: {error}"));
+            assert_eq!(unregister.phase, LifecyclePhase::Removed);
+            assert_eq!(
+                unregister.package_ref.as_ref(),
+                Some(&package_ref),
+                "idempotent unregister preserves the requested package ref"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5917,6 +6104,30 @@ output_schema_ref = "schemas/search.output.json"
                 .get_extension(&extension_id)
                 .is_some()
         );
+    }
+
+    fn assert_registered_manifest_owner_and_url(
+        manifest: &ExtensionManifestRecord,
+        owner: &UserId,
+        expected_url: &str,
+    ) {
+        assert!(matches!(
+            manifest.manifest().source,
+            ManifestSource::UserRegistered {
+                owner: ref manifest_owner
+            }
+                if manifest_owner == owner
+        ));
+        let ironclaw_extensions::ExtensionRuntimeV2::Mcp {
+            transport,
+            url: Some(url),
+            ..
+        } = &manifest.manifest().runtime
+        else {
+            panic!("registered manifest should keep MCP runtime with URL");
+        };
+        assert_eq!(transport, "http");
+        assert_eq!(url, expected_url);
     }
 
     fn hosted_mcp_scope(user_id: &str) -> ResourceScope {

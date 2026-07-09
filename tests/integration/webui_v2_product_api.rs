@@ -16,12 +16,17 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use ironclaw_events::InMemoryDurableEventLog;
+use ironclaw_extensions::{
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionRuntimeV2, ManifestSource,
+};
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
-use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, PermissionMode};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, TenantId, UserId,
+};
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornServicesApi,
-    RebornStreamEventsRequest,
+    RebornStreamEventsRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
@@ -146,6 +151,102 @@ async fn thread_history_cold_get_after_in_memory_reopen() {
                 .is_some_and(|content| content.contains("pong"))),
         "expected the finalized reply after an in-memory service re-instantiation: {body}"
     );
+}
+
+#[tokio::test]
+async fn register_extension_via_webui_api_persists_descriptor_and_installation() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let owner_id = "webui-register-owner";
+    let tenant_id = "webui-register-tenant";
+    let agent_id = "webui-register-agent";
+    let storage_root = root.path().join("local-dev");
+    let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
+        .expect("local-dev runtime policy resolves");
+    let input = ironclaw_reborn_composition::RebornRuntimeInput::from_services(
+        ironclaw_reborn_composition::RebornBuildInput::local_dev(owner_id, storage_root.clone())
+            .with_runtime_policy(policy),
+    )
+    .with_identity(ironclaw_reborn_composition::RebornRuntimeIdentity {
+        tenant_id: tenant_id.to_string(),
+        agent_id: agent_id.to_string(),
+        source_binding_id: "webui-register-source".to_string(),
+        reply_target_binding_id: "webui-register-reply".to_string(),
+    });
+    let runtime = ironclaw_reborn_composition::build_reborn_runtime(input)
+        .await
+        .expect("runtime builds");
+    let bundle = ironclaw_reborn_composition::build_webui_services(&runtime, None)
+        .expect("webui services build");
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new(tenant_id).expect("tenant id"),
+        UserId::new(owner_id).expect("user id"),
+        Some(AgentId::new(agent_id).expect("agent id")),
+        None,
+    );
+
+    let (status, body) = post_json(
+        mount_webui_v2_router(bundle.api.clone(), caller),
+        "/api/webchat/v2/extensions/register",
+        serde_json::json!({
+            "name": "Acme MCP",
+            "url": "https://93.184.216.34/mcp"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "register response body: {body}");
+    let extension_id = body["extension_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("register response missing extension_id: {body}"));
+    assert_eq!(body["package_ref"]["id"], extension_id);
+    assert_eq!(body["package_ref"]["kind"], "extension");
+
+    assert!(
+        storage_root
+            .join("system/extensions/registered")
+            .join(owner_id)
+            .join(extension_id)
+            .join("manifest.toml")
+            .exists(),
+        "WebUI register route must persist the owner-scoped descriptor"
+    );
+    let store =
+        ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open extension installation store");
+    let extension_id = ExtensionId::new(extension_id.to_string()).expect("extension id");
+    let installation_id =
+        ExtensionInstallationId::new(extension_id.as_str().to_string()).expect("installation id");
+    assert!(
+        store
+            .get_installation(&installation_id)
+            .await
+            .expect("read installation")
+            .is_some(),
+        "WebUI register route must persist lifecycle installation state"
+    );
+    let manifest = store
+        .get_manifest(&extension_id)
+        .await
+        .expect("read manifest")
+        .expect("manifest record");
+    assert!(matches!(
+        manifest.manifest().source,
+        ManifestSource::UserRegistered { ref owner } if owner.as_str() == owner_id
+    ));
+    let ExtensionRuntimeV2::Mcp {
+        transport,
+        url: Some(url),
+        ..
+    } = &manifest.manifest().runtime
+    else {
+        panic!("registered manifest should keep MCP runtime with URL");
+    };
+    assert_eq!(transport, "http");
+    assert_eq!(url, "https://93.184.216.34/mcp");
+
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 /// Hand-rolled double: single read-only method, no logic worth exercising
