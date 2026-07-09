@@ -2761,3 +2761,67 @@ async fn slack_history_read_survives_users_info_failure_without_names() {
         "no display name should be fabricated when users.info fails: {output}"
     );
 }
+
+/// Review follow-up (PR #5898): name resolution is capped so a busy channel
+/// cannot turn one history read into dozens of sequential `users.info`
+/// round-trips (the WASM tool is synchronous). First-seen authors win the
+/// budget; authors past the cap keep raw ids only — the same degraded shape
+/// as a failed lookup, which the model already tolerates.
+#[tokio::test]
+async fn slack_history_name_resolution_is_capped_per_call() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let mut messages = Vec::new();
+    for index in 0..30 {
+        messages.push(format!(
+            r#"{{"type":"message","user":"U{index:04}","text":"m{index}","ts":"1751970{index:03}.000100"}}"#
+        ));
+    }
+    let history_body = Box::leak(
+        format!(
+            r#"{{"ok":true,"has_more":false,"messages":[{}]}}"#,
+            messages.join(",")
+        )
+        .into_boxed_str(),
+    );
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.history", 200, history_body),
+        ("users.info", 200, SLACK_USER_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "C0BUSY"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let lookups = network
+        .requests()
+        .iter()
+        .filter(|request| request.url.contains("users.info"))
+        .count();
+    assert_eq!(
+        lookups, 25,
+        "users.info lookups must be capped at 25 per call, first-seen order"
+    );
+    let messages = output["messages"].as_array().expect("messages array");
+    assert!(
+        messages[24].get("user_display_name").is_some(),
+        "authors inside the lookup budget must be named: {output}"
+    );
+    assert!(
+        messages[25].get("user_display_name").is_none(),
+        "authors past the lookup budget keep raw ids only: {output}"
+    );
+}

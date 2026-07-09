@@ -117,15 +117,43 @@ pub fn search_messages(
     })
 }
 
-/// Resolve a set of Slack user IDs to human-readable names via `users.info`,
-/// one lookup per distinct ID. Best-effort by contract: a failing lookup
+/// The synchronous WASM tool resolves names with sequential `users.info`
+/// round-trips, so one read is allowed at most this many lookups; first-seen
+/// ids win the budget and the rest keep raw ids (the same degraded shape as a
+/// failed lookup).
+const MAX_USER_NAME_LOOKUPS: usize = 25;
+
+/// Resolve Slack user IDs to human-readable names via `users.info`, one
+/// lookup per distinct ID in first-seen order, capped at
+/// [`MAX_USER_NAME_LOOKUPS`]. Best-effort by contract: a failing lookup
 /// (missing scope, deactivated user, outage) is skipped so read operations
 /// never fail because a name could not be resolved.
 fn resolve_user_display_names(
-    user_ids: std::collections::BTreeSet<String>,
+    user_ids: impl IntoIterator<Item = String>,
 ) -> std::collections::HashMap<String, String> {
-    let mut names = std::collections::HashMap::new();
+    let mut distinct = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut skipped_over_budget = 0usize;
     for user_id in user_ids {
+        if !seen.insert(user_id.clone()) {
+            continue;
+        }
+        if distinct.len() < MAX_USER_NAME_LOOKUPS {
+            distinct.push(user_id);
+        } else {
+            skipped_over_budget += 1;
+        }
+    }
+    if skipped_over_budget > 0 {
+        crate::near::agent::host::log(
+            crate::near::agent::host::LogLevel::Debug,
+            &format!(
+                "users.info budget reached: {skipped_over_budget} distinct users left unresolved"
+            ),
+        );
+    }
+    let mut names = std::collections::HashMap::new();
+    for user_id in distinct {
         match get_user_info(&user_id) {
             Ok(info) => {
                 let display = info
@@ -179,7 +207,7 @@ pub fn list_conversations(types: &str, limit: u32) -> Result<ListConversationsRe
 
     // DMs carry no `name`; resolve the counterpart's display name so output
     // is human-readable without a follow-up lookup per conversation.
-    let counterpart_ids = conversations
+    let counterpart_ids: Vec<String> = conversations
         .iter()
         .filter(|conversation| conversation.is_im)
         .filter_map(|conversation| conversation.user.clone())
@@ -237,7 +265,7 @@ pub fn get_conversation_history(
 
     // Resolve authors to display names (one users.info per distinct author)
     // so user-facing output never has to echo raw `U…` ids.
-    let author_ids = messages
+    let author_ids: Vec<String> = messages
         .iter()
         .filter_map(|message| message.user.clone())
         .collect();
