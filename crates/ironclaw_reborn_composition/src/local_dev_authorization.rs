@@ -349,7 +349,7 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
                     if let Some(state) = overrides.get(capability_id).copied() {
                         return Some(state);
                     }
-                    break;
+                    return None;
                 }
                 match begin_inflight_settings_load(&self.override_inflight, &cache_key) {
                     InflightSettingsLoad::Follower(wait_for_leader) => {
@@ -465,14 +465,13 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
                 grantee: grantee.clone(),
             };
             loop {
-                if self
+                if let Some(policies) = self
                     .always_allow_cache
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .get(&cache_key)
-                    .is_some()
                 {
-                    break;
+                    return policies.contains(&policy_key);
                 }
                 match begin_inflight_settings_load(&self.always_allow_inflight, &cache_key) {
                     InflightSettingsLoad::Follower(wait_for_leader) => {

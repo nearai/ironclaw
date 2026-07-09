@@ -357,6 +357,20 @@ async fn turn_state_factory_seeds_claimed_cancel_requested_run_without_store_rea
 }
 
 #[tokio::test]
+async fn turn_state_factory_claimed_running_run_skips_store_read_and_registers() {
+    let state = test_run_state(TurnStatus::Running);
+    let store = Arc::new(CountingTurnStateStore::new(state.clone()));
+    let factory = TurnStateRunCancellationFactory::new(store.clone())
+        .with_poll_interval(Duration::from_secs(60));
+
+    let handle = factory.handle_for_claimed_run(&state).await.unwrap();
+
+    assert!(!handle.is_requested());
+    assert_eq!(store.get_run_state_calls(), 0);
+    assert_eq!(factory.registered_run_count(), 1);
+}
+
+#[tokio::test]
 async fn turn_state_factory_flips_registered_handle_from_cancel_wake() {
     let state = test_run_state(TurnStatus::Running);
     let factory =

@@ -36,12 +36,14 @@ struct CountingAutoApproveSettingStore {
 
 struct CountingToolPermissionOverrideStore {
     inner: InMemoryToolPermissionOverrideStore,
+    gets: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
 }
 
 struct CountingPersistentApprovalPolicyStore {
     inner: InMemoryPersistentApprovalPolicyStore,
+    lookups: AtomicUsize,
     lists: AtomicUsize,
     delay: Duration,
 }
@@ -72,9 +74,14 @@ impl CountingToolPermissionOverrideStore {
     fn with_delay(delay: Duration) -> Self {
         Self {
             inner: InMemoryToolPermissionOverrideStore::new(),
+            gets: AtomicUsize::new(0),
             lists: AtomicUsize::new(0),
             delay,
         }
+    }
+
+    fn get_count(&self) -> usize {
+        self.gets.load(Ordering::SeqCst)
     }
 
     fn list_count(&self) -> usize {
@@ -86,9 +93,14 @@ impl CountingPersistentApprovalPolicyStore {
     fn with_delay(delay: Duration) -> Self {
         Self {
             inner: InMemoryPersistentApprovalPolicyStore::new(),
+            lookups: AtomicUsize::new(0),
             lists: AtomicUsize::new(0),
             delay,
         }
+    }
+
+    fn lookup_count(&self) -> usize {
+        self.lookups.load(Ordering::SeqCst)
     }
 
     fn list_count(&self) -> usize {
@@ -145,6 +157,7 @@ impl CapabilityPermissionOverrideStore for CountingToolPermissionOverrideStore {
         &self,
         key: &CapabilityPermissionOverrideKey,
     ) -> Result<Option<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
         self.inner.get(key).await
     }
 
@@ -184,6 +197,7 @@ impl ironclaw_approvals::PersistentApprovalPolicyStore for CountingPersistentApp
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
         self.inner.lookup(key).await
     }
 
@@ -768,6 +782,17 @@ async fn local_dev_authorizer_coalesces_concurrent_scope_listing_settings_misses
         1,
         "concurrent tool_override cold misses should share one scope-list read"
     );
+    assert_eq!(
+        overrides.get_count(),
+        0,
+        "an authoritative scope-list miss must not fall through to an exact read"
+    );
+    assert_eq!(settings.tool_override(&scope, &capability_id).await, None);
+    assert_eq!(
+        overrides.get_count(),
+        0,
+        "a warm cached miss must not fall through to an exact read"
+    );
 
     let mut always_allow_handles = Vec::new();
     for _ in 0..32 {
@@ -789,6 +814,21 @@ async fn local_dev_authorizer_coalesces_concurrent_scope_listing_settings_misses
         persistent_policies.list_count(),
         1,
         "concurrent tool_always_allow cold misses should share one scope-list read"
+    );
+    assert_eq!(
+        persistent_policies.lookup_count(),
+        0,
+        "an authoritative scope-list miss must not fall through to an exact lookup"
+    );
+    assert!(
+        !settings
+            .tool_always_allow(&scope, &capability_id, &grantee)
+            .await
+    );
+    assert_eq!(
+        persistent_policies.lookup_count(),
+        0,
+        "a warm cached miss must not fall through to an exact lookup"
     );
 }
 

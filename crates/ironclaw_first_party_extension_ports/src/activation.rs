@@ -1,7 +1,8 @@
-// arch-exempt: large_file, skill activation still owns descriptor loading,
+// arch-exempt: large_file, activation owns coupled descriptor/cache selection tests, plan #5897
+// Skill activation still owns descriptor loading,
 // setup-marker suppression, selection cache, and regression fixtures together;
 // decomposition into activation/{candidate_cache,setup_markers,selection}.rs is
-// tracked with the Reborn perf stack follow-up after PR #5857 lands.
+// tracked by the plan above.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;

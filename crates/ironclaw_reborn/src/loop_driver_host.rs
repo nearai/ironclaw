@@ -1,3 +1,4 @@
+// arch-exempt: large_file, loop host integration awaits dependency decomposition, plan #4088
 use std::{
     collections::HashMap,
     fmt,
@@ -88,6 +89,8 @@ fn trace_host_factory_latency_error<E: ?Sized>(
     started_at: Option<Instant>,
     _error: &E,
 ) {
+    // Host errors can include backend-provided details. Keep latency traces
+    // cardinality-bounded and non-sensitive; `operation` identifies the stage.
     ironclaw_observability::live_latency_trace_error!(
         "reborn_loop_host_factory",
         operation,
