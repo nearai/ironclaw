@@ -612,6 +612,17 @@ impl Agent {
             // dispatcher (#3243 HIGH iteration-2 gap).
             scheduler.set_runtime_policy(policy.clone());
         }
+        // Wire MCP background jobs: the caller resolves per-user MCP clients via
+        // the extension manager's shared store, and finished jobs resume the
+        // originating thread through the channels' inject channel. Both are
+        // available here, before the scheduler is shared as an `Arc`.
+        if let Some(ref em) = deps.extension_manager {
+            let caller: Arc<dyn crate::worker::mcp_job::McpCaller> =
+                Arc::new(crate::worker::mcp_job::StoreMcpCaller {
+                    client_store: em.mcp_client_store(),
+                });
+            scheduler.set_mcp_deps(caller, channels.inject_sender());
+        }
         let scheduler = Arc::new(scheduler);
 
         Self {

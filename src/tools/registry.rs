@@ -720,6 +720,38 @@ impl ToolRegistry {
         tracing::debug!("Registered {} job management tools", job_tool_count);
     }
 
+    /// Register the generic "run an MCP tool as a background job" tools
+    /// (`tool_job_start`, `tool_job_status`).
+    ///
+    /// `tool_job_status` only needs the context manager, so it is always
+    /// registered. `tool_job_start` additionally needs the scheduler slot (to
+    /// dispatch) and the MCP client store (to check per-server
+    /// `allow_background`); if either is absent it is skipped and only status
+    /// polling is available.
+    pub fn register_mcp_job_tools(
+        &self,
+        context_manager: Arc<ContextManager>,
+        scheduler_slot: Option<crate::tools::builtin::SchedulerSlot>,
+        mcp_client_store: Option<Arc<crate::tools::mcp::McpClientStore>>,
+    ) {
+        self.register_sync(Arc::new(crate::tools::builtin::McpJobStatusTool::new(
+            Arc::clone(&context_manager),
+        )));
+        if let (Some(slot), Some(store)) = (scheduler_slot, mcp_client_store) {
+            let policy = Arc::new(crate::tools::builtin::StoreBackgroundPolicy {
+                client_store: store,
+            });
+            self.register_sync(Arc::new(crate::tools::builtin::CreateMcpJobTool::new(
+                slot, policy,
+            )));
+            tracing::debug!("Registered MCP background-job tools (start + status)");
+        } else {
+            tracing::debug!(
+                "Registered tool_job_status only (no scheduler slot / MCP client store)"
+            );
+        }
+    }
+
     /// Register secret management tools (list, delete).
     ///
     /// These allow the LLM to persist API keys and tokens encrypted in the database.

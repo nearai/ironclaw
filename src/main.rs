@@ -879,6 +879,18 @@ async fn async_main() -> anyhow::Result<()> {
         components.secrets_store.clone(),
     );
 
+    // Generic MCP-as-background-job tools. `tool_job_start` needs the shared
+    // MCP client store (owned by the extension manager) for the per-server
+    // `allow_background` check; falls back to status-only without it.
+    components.tools.register_mcp_job_tools(
+        Arc::clone(&components.context_manager),
+        Some(scheduler_slot.clone()),
+        components
+            .extension_manager
+            .as_ref()
+            .map(|em| em.mcp_client_store()),
+    );
+
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;

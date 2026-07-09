@@ -1477,7 +1477,7 @@ impl ExtensionManager {
     /// the global `ToolRegistry` hold an `Arc<McpClientStore>` and resolve
     /// the caller's client at dispatch time via
     /// `store.get(ctx.user_id, server_name)`.
-    pub(crate) fn mcp_client_store(&self) -> Arc<crate::tools::mcp::McpClientStore> {
+    pub fn mcp_client_store(&self) -> Arc<crate::tools::mcp::McpClientStore> {
         Arc::clone(&self.mcp_clients)
     }
 
