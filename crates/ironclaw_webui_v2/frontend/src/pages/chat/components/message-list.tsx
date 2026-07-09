@@ -7,6 +7,10 @@ import { Icon } from "../../../design-system/icons";
 import { groupMessages } from "../lib/message-groups";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
+// Show the jump pill only after scrollback is clearly intentional: 240px is
+// about 2.4x the auto-follow threshold, so small near-bottom drift pauses
+// following without adding a floating control. The paired 8px bottom offset
+// keeps that rare pill tucked into the transcript padding near the composer.
 export const JUMP_TO_LATEST_THRESHOLD_PX = 240;
 const TOP_LOAD_THRESHOLD_PX = 100;
 // The scroll area already keeps bottom padding for transcript-floating
