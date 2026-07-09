@@ -57,7 +57,7 @@ function ThinkingDisclosure({ content }) {
   );
 }
 
-function MessageBubbleImpl({ message, onRetry, threadId, dimContent = false }) {
+function MessageBubbleImpl({ message, onRetry, threadId }) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
@@ -126,7 +126,7 @@ function MessageBubbleImpl({ message, onRetry, threadId, dimContent = false }) {
   const contentWidthClass = isUser ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
-  const contentOpacityClass = isOptimistic || dimContent ? "opacity-70" : "";
+  const contentOpacityClass = isOptimistic ? "opacity-70" : "";
 
   return (
     <div

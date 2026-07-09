@@ -141,8 +141,8 @@ test("message timestamp and actions share a hover-only meta row", () => {
 test("optimistic message opacity does not fade attached image previews", () => {
   assert.match(
     messageBubbleSource,
-    /const contentOpacityClass = isOptimistic \|\| dimContent \? "opacity-70" : "";/,
-    "pending state should dim only textual message content",
+    /const contentOpacityClass = isOptimistic \? "opacity-70" : "";/,
+    "optimistic pending state should dim only textual message content",
   );
 
   const contentBubbleClassArrayStart = messageBubbleSource.indexOf('"text-base leading-7"');
