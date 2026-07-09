@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { gatewayStatus } from "../../../lib/api.js";
-import { fetchExtensions, fetchExtensionRegistry } from "../lib/settings-api.js";
+import { gatewayStatus } from "../../../lib/api";
+import { fetchExtensions, fetchExtensionRegistry } from "../lib/settings-api";
 
 export function useChannels() {
   const statusQuery = useQuery({

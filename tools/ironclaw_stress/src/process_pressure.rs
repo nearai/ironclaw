@@ -105,6 +105,7 @@ fn run_one_operation(args: &Args, worker_index: usize, operation_index: usize) -
         | Scenario::MixedUserSession
         | Scenario::ContextGrowth
         | Scenario::ToolSession
+        | Scenario::ApiUserCapacity
         | Scenario::SecretConsume => {
             unreachable!("process pressure only handles process-local scenarios")
         }

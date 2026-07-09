@@ -1,4 +1,4 @@
-import { interpolateParams } from "../../../lib/i18n-format.js";
+import { interpolateParams } from "../../../lib/i18n-format";
 
 const FALLBACK_TRANSLATIONS = {
   "activity.title": "Activity",

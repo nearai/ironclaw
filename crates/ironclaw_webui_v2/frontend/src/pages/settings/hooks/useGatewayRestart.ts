@@ -1,5 +1,5 @@
-import { React } from "../../../lib/html.js";
-import { useT } from "../../../lib/i18n.js";
+import React from "react";
+import { useT } from "../../../lib/i18n";
 
 // TODO: gateway restart is a v1 capability (POSTs `/restart` as a
 // chat command via `/api/chat/events`). v2 has no equivalent. Until a

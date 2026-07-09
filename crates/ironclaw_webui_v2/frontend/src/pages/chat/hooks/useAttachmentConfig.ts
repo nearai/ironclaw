@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchSession, readStoredToken } from "../../../lib/api.js";
-import { FALLBACK_ATTACHMENT_LIMITS } from "../lib/attachments.js";
+import { fetchSession, readStoredToken } from "../../../lib/api";
+import { FALLBACK_ATTACHMENT_LIMITS } from "../lib/attachments";
 
 // Map the server's `session.attachments` contract (snake_case wire shape from
 // `WebUiAttachmentCapabilities`) into the camelCase limits `stageFiles`

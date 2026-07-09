@@ -3990,7 +3990,8 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
-    slack_personal_oauth_lazy_slot: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
+    slack_personal_oauth_lazy_slot:
+        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
@@ -4192,6 +4193,7 @@ where
 enum FilesystemProductionEventStoresInput {
     #[cfg(feature = "libsql")]
     Config(ironclaw_reborn_event_store::RebornEventStoreConfig),
+    #[cfg(feature = "postgres")]
     Prebuilt(ironclaw_reborn_event_store::RebornEventStores),
 }
 
@@ -4284,6 +4286,7 @@ where
                 )
                 .await?
         }
+        #[cfg(feature = "postgres")]
         FilesystemProductionEventStoresInput::Prebuilt(stores) => {
             services.with_production_reborn_event_stores(stores)
         }

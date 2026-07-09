@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   fetchRoutineDetail,
   toggleRoutine as toggleRoutineRequest,
   triggerRoutine as triggerRoutineRequest,
-} from "../lib/routines-api.js";
+} from "../lib/routines-api";
 
 export function useRoutineDetail(routineId) {
   const queryClient = useQueryClient();

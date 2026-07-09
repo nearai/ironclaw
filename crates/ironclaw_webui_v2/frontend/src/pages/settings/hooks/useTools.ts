@@ -1,8 +1,8 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchTools, updateToolPermission } from "../lib/settings-api.js";
-import { throwIfApiFailed } from "../lib/api-result.js";
+import { fetchTools, updateToolPermission } from "../lib/settings-api";
+import { throwIfApiFailed } from "../lib/api-result";
 
 export function useTools() {
   const queryClient = useQueryClient();

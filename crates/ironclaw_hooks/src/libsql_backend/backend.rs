@@ -92,20 +92,20 @@ const CONNECT_ATTEMPTS: u32 = 3;
 ///
 /// 1. **In-process write serialisation (`write_lock`).** Every mutating op
 ///    (`record_invocation`, `record_value`, `evict_older_than`,
-///    `run_migrations`) acquires a per-backend `Arc<Mutex<()>>` and holds it
-///    for the whole `BEGIN IMMEDIATE` … `COMMIT` transaction. This is the
-///    primary admission control: it serialises all writers from THIS process
-///    before they ever contend at the SQLite layer. Without it, an unbounded
-///    fan-out (e.g. a heartbeat tick evaluating thousands of hooks at once)
-///    races on the single SQLite write lock; in libSQL's replication-enabled
-///    build a raw `BEGIN IMMEDIATE` statement can return `SQLITE_BUSY`
-///    *immediately* instead of honouring `busy_timeout`, surfacing as
-///    `Unavailable("database is locked")` — which **fail-closes** predicate
-///    evaluation (a hook that should pass gets denied under load). Serialising
-///    in-process keeps each process to one writer at a time, so the file-handle
+///    `run_migrations`) acquires a per-backend `Arc<Mutex<()>>` before opening
+///    its write connection, and holds it for the whole `BEGIN IMMEDIATE` …
+///    `COMMIT` transaction. This is the primary admission control: it
+///    serialises all writers from THIS backend before they ever contend at the
+///    SQLite layer or fan out connection opens. Without it, an unbounded fan-out
+///    (e.g. a heartbeat tick evaluating thousands of hooks at once) can race on
+///    libSQL connection setup and the single SQLite write lock; in libSQL's
+///    replication-enabled build that can surface as `SQLITE_BUSY`, `SQLITE_MISUSE`,
+///    or even transient readonly/CANTOPEN errors, which become
+///    `Unavailable(...)` and **fail-close** predicate evaluation. Serialising
+///    in-process keeps each backend to one writer at a time, so the file-handle
 ///    footprint stays flat and the SQLite write lock is never contended from
-///    within the process. This is exactly the `write_lock: Arc<Mutex<()>>`
-///    pattern `LibSqlWorkspaceStore` uses for the same reason.
+///    within a backend. This is exactly the `write_lock: Arc<Mutex<()>>` pattern
+///    `LibSqlWorkspaceStore` uses for the same reason.
 ///
 /// 2. **Cross-process serialisation (`PRAGMA busy_timeout = 5000`).** Two
 ///    separate processes (or two backend instances over different `Database`

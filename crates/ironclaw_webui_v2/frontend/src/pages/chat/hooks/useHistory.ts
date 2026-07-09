@@ -1,8 +1,8 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
-import { fetchTimeline } from "../../../lib/api.js";
-import { authScope } from "../../../lib/auth-scope.js";
-import { messagesFromTimeline } from "../lib/history-messages.js";
+import React from "react";
+import { fetchTimeline } from "../../../lib/api";
+import { authScope } from "../../../lib/auth-scope";
+import { messagesFromTimeline } from "../lib/history-messages";
 
 const PAGE_SIZE = 50;
 

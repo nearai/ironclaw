@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { React } from "./html.js";
+import React from "react";
 
 // `ironclaw:v2-*` is the WebUI v2 browser-local preference namespace.
 export const CHAT_LOGS_SHORTCUT_STORAGE_KEY = "ironclaw:v2-chat-logs-shortcut";
