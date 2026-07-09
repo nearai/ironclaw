@@ -119,14 +119,15 @@ fn resolver() -> InMemoryRunProfileResolver {
 fn make_trigger_capped_store(cap: u32) -> InMemoryTurnStateStore {
     InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits::default()
-            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(cap)),
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(cap).expect("nonzero cap")),
     )
 }
 
 fn make_conversation_capped_store(cap: u32) -> InMemoryTurnStateStore {
     InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default()
-            .set_max_concurrent_conversation_runs(std::num::NonZeroU32::new(cap)),
+        InMemoryTurnStateStoreLimits::default().set_max_concurrent_conversation_runs(
+            std::num::NonZeroU32::new(cap).expect("nonzero cap"),
+        ),
     )
 }
 
@@ -873,7 +874,7 @@ async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         snapshot,
         InMemoryTurnStateStoreLimits::default()
-            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(10)),
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     )
     .unwrap();
     assert_eq!(

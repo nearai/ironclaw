@@ -333,6 +333,13 @@ pub struct RebornTimelineRequest {
 }
 
 impl RebornTimelineRequest {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            ..Self::default()
+        }
+    }
+
     pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
         self.thread_id = thread_id.into();
         self

@@ -317,6 +317,13 @@ mod tests {
         assert_eq!(d.warn_at, 0.6);
         assert_eq!(d.pause_at, 0.8);
         assert_eq!(d.overestimate_factor, 1.5);
+
+        let sparse_section = BudgetSection::default().set_user_daily_usd(12.0);
+        let sparse = BudgetDefaults::compiled_defaults().with_section(&sparse_section);
+        assert_eq!(sparse.user_daily_usd, 12.0);
+        assert_eq!(sparse.heartbeat_per_tick_usd, 0.05);
+        assert_eq!(sparse.default_tz, "UTC");
+        assert_eq!(sparse.overestimate_factor, 1.20);
     }
 
     // Process env is global state; serialize env-mutating tests behind a

@@ -134,6 +134,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
     any(feature = "libsql", feature = "postgres")
 ))]
 use ironclaw_turns::FilesystemTurnStateBlockPersistence;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStoreKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;

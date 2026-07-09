@@ -2473,10 +2473,7 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(coordinator.submission_count(), 1);
 
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha"),
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -2651,10 +2648,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     assert_eq!(err.code, RebornServicesErrorCode::Internal);
     assert_eq!(coordinator.submission_count(), 0);
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha"),
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -2680,7 +2674,7 @@ async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_sc
     let timeline = services
         .get_timeline(
             web_caller.clone(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha"),
+            RebornTimelineRequest::new("thread-alpha"),
         )
         .await
         .expect("timeline is served by fake M2 thread port");
@@ -3004,7 +2998,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
     let timeline = services
         .get_timeline(
             caller,
-            RebornTimelineRequest::default().set_thread_id(thread_id.as_str().to_string()),
+            RebornTimelineRequest::new(thread_id.as_str().to_string()),
         )
         .await
         .expect("timeline");
@@ -3055,7 +3049,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let alpha_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("alpha timeline");
@@ -3064,7 +3058,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let beta_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-beta".to_string()),
+            RebornTimelineRequest::new("thread-beta".to_string()),
         )
         .await
         .expect("beta timeline");
@@ -3124,7 +3118,7 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("timeline");
@@ -3143,14 +3137,14 @@ async fn refresh_reresolves_thread_to_same_canonical_scope() {
     let first = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("first resolve");
     let refreshed = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("refresh resolve");
@@ -3181,7 +3175,7 @@ async fn get_timeline_rejects_cross_user_access() {
     let err = services
         .get_timeline(
             caller_for_user("user-beta"),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("cross-user timeline read must be rejected");
@@ -3214,7 +3208,7 @@ async fn delete_thread_removes_owned_thread() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("deleted thread must no longer be readable");
@@ -3247,7 +3241,7 @@ async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread()
     services
         .get_timeline(
             alice,
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("owner thread must remain after rejected cross-user delete");
@@ -3289,7 +3283,7 @@ async fn delete_thread_rejects_thread_with_active_run() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -3353,7 +3347,7 @@ async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -3850,7 +3844,7 @@ async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("timeline backend failure is stable unavailable taxonomy");
@@ -6735,7 +6729,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
     let response = services
         .get_timeline(
             caller,
-            RebornTimelineRequest::default().set_thread_id(trigger_thread_id.as_str().to_string()),
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect("owner should be able to read their automation trigger thread timeline");
@@ -6910,7 +6904,7 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
     let err = services
         .get_timeline(
             bob,
-            RebornTimelineRequest::default().set_thread_id(trigger_thread_id.as_str().to_string()),
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("non-owner must not read another user's trigger thread");
@@ -6957,7 +6951,7 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest::default().set_thread_id(trigger_thread_id.as_str().to_string()),
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("backend error from facade must propagate, not become 404");
@@ -7171,7 +7165,7 @@ async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reloa
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest::default().set_thread_id(trigger_thread_id.as_str().to_string()),
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("backend error on trigger-owned reload must surface as 503, not 404");
@@ -7247,7 +7241,7 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
     let response = services
         .get_timeline(
             caller,
-            RebornTimelineRequest::default().set_thread_id(trigger_thread_id.as_str().to_string()),
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect("timeline must resolve when agent_id is None via caller fallback");
@@ -7783,8 +7777,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest::default()
-                .set_thread_id("thread-absent-from-automations".to_string()),
+            RebornTimelineRequest::new("thread-absent-from-automations".to_string()),
         )
         .await
         .expect_err("unknown thread_id must return 404");
@@ -9976,9 +9969,7 @@ async fn get_timeline_pages_messages_with_cursor() {
     let first = services
         .get_timeline(
             alice.clone(),
-            RebornTimelineRequest::default()
-                .set_thread_id("thread-paginate".to_string())
-                .set_limit(10),
+            RebornTimelineRequest::new("thread-paginate".to_string()).set_limit(10),
         )
         .await
         .expect("first page");
@@ -10063,9 +10054,7 @@ async fn get_timeline_clamps_oversize_limit_to_hard_ceiling() {
     let response = services
         .get_timeline(
             alice,
-            RebornTimelineRequest::default()
-                .set_thread_id("thread-cap".to_string())
-                .set_limit(u32::MAX),
+            RebornTimelineRequest::new("thread-cap".to_string()).set_limit(u32::MAX),
         )
         .await
         .expect("clamped timeline");
@@ -11316,7 +11305,7 @@ async fn get_timeline_returns_attachment_refs_on_the_user_message() {
     let timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest::default().set_thread_id("thread-alpha".to_string()),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("timeline");

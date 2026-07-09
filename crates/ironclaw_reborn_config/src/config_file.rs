@@ -393,8 +393,11 @@ impl SlackSection {
         self
     }
 
-    pub fn set_channel_routes(mut self, channel_routes: Vec<SlackChannelRouteSection>) -> Self {
-        self.channel_routes = channel_routes;
+    pub fn set_channel_routes(
+        mut self,
+        channel_routes: impl IntoIterator<Item = SlackChannelRouteSection>,
+    ) -> Self {
+        self.channel_routes = channel_routes.into_iter().collect();
         self
     }
 

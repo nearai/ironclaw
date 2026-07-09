@@ -482,8 +482,8 @@ pub struct MemoryAuditProjectionMetadata {
 }
 
 impl MemoryAuditProjectionMetadata {
-    pub fn set_byte_count(mut self, byte_count: Option<u64>) -> Self {
-        self.byte_count = byte_count;
+    pub fn set_byte_count(mut self, byte_count: impl Into<Option<u64>>) -> Self {
+        self.byte_count = byte_count.into();
         self
     }
 }

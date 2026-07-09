@@ -168,25 +168,40 @@ impl InMemoryTurnStateStoreLimits {
 
     pub fn set_max_concurrent_runs_per_user(
         mut self,
-        max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
     ) -> Self {
-        self.max_concurrent_runs_per_user = max_concurrent_runs_per_user;
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
+    }
+
+    pub fn clear_max_concurrent_runs_per_user(mut self) -> Self {
+        self.max_concurrent_runs_per_user = None;
         self
     }
 
     pub fn set_max_concurrent_trigger_runs(
         mut self,
-        max_concurrent_trigger_runs: Option<std::num::NonZeroU32>,
+        max_concurrent_trigger_runs: std::num::NonZeroU32,
     ) -> Self {
-        self.max_concurrent_trigger_runs = max_concurrent_trigger_runs;
+        self.max_concurrent_trigger_runs = Some(max_concurrent_trigger_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_trigger_runs(mut self) -> Self {
+        self.max_concurrent_trigger_runs = None;
         self
     }
 
     pub fn set_max_concurrent_conversation_runs(
         mut self,
-        max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
+        max_concurrent_conversation_runs: std::num::NonZeroU32,
     ) -> Self {
-        self.max_concurrent_conversation_runs = max_concurrent_conversation_runs;
+        self.max_concurrent_conversation_runs = Some(max_concurrent_conversation_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_conversation_runs(mut self) -> Self {
+        self.max_concurrent_conversation_runs = None;
         self
     }
 }
