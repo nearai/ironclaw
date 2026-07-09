@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::channels::IncomingMessage;
 use crate::channels::web::sse::SseManager;
 use crate::context::{ContextManager, JobState};
+use crate::error::DatabaseError;
 use crate::tenant::SystemScope;
 use crate::tools::mcp::McpClientStore;
 
@@ -296,6 +297,34 @@ pub async fn run_mcp_job(job_id: Uuid, spec: McpJobSpec, deps: McpJobDeps) {
     }
 }
 
+/// Title prefix `dispatch_mcp_job` gives every MCP background job
+/// (`mcp:<server>/<tool>`). Used as the durable discriminator for the startup
+/// reconcile: unlike `JobContext.metadata` (which the libSQL backend neither
+/// persists nor hydrates), the title round-trips through both backends.
+pub(crate) const MCP_JOB_TITLE_PREFIX: &str = "mcp:";
+
+/// On startup, transition any MCP-tool jobs left `InProgress` by a previous run
+/// to `Stuck`. Their in-memory runner died with the process, so they can never
+/// complete on their own; `Stuck` lets self-repair surface them. Non-MCP jobs
+/// are left to their own recovery paths. Returns how many were reconciled.
+///
+/// MCP jobs are identified by their `mcp:` title prefix rather than
+/// `metadata.mode`, because job metadata is not durably persisted across all
+/// DB backends whereas the title is.
+pub async fn reconcile_orphaned_mcp_jobs(store: &SystemScope) -> Result<usize, DatabaseError> {
+    let records = store.list_agent_jobs().await?;
+    let mut reconciled = 0;
+    for rec in records {
+        if rec.status == "in_progress" && rec.title.starts_with(MCP_JOB_TITLE_PREFIX) {
+            store
+                .update_job_status(rec.id, JobState::Stuck, Some("orphaned by restart"))
+                .await?;
+            reconciled += 1;
+        }
+    }
+    Ok(reconciled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +429,48 @@ mod tests {
             "injected message must bypass user pipeline"
         );
         assert_eq!(msg.thread_id.as_ref().map(|t| t.as_str()), Some("t1"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn reconcile_marks_orphaned_mcp_jobs_stuck() {
+        use crate::context::JobContext;
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+
+        // A file-backed libSQL DB (not `:memory:`, whose per-connection isolation
+        // would put migrations and writes in separate empty databases).
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LibSqlBackend::new_local(&dir.path().join("t.db"))
+            .await
+            .expect("open db");
+        backend.run_migrations().await.expect("migrate");
+        let store = SystemScope::new(Arc::new(backend) as Arc<dyn Database>);
+
+        // An orphaned in-flight MCP job — identified by its `mcp:` title prefix
+        // (the durable discriminator `dispatch_mcp_job` sets).
+        let mut mcp = JobContext::with_user("u1", "mcp:msbsandbox/run_python", "bg");
+        mcp.transition_to(JobState::InProgress, None).unwrap();
+        store.save_job(&mcp).await.expect("save mcp job");
+
+        // A non-MCP in-flight job that must be left alone.
+        let mut other = JobContext::with_user("u1", "chat turn", "job");
+        other.transition_to(JobState::InProgress, None).unwrap();
+        store.save_job(&other).await.expect("save other job");
+
+        let n = reconcile_orphaned_mcp_jobs(&store)
+            .await
+            .expect("reconcile");
+        assert_eq!(n, 1, "only the mcp job should be reconciled");
+
+        let mcp_after = store.get_job(mcp.job_id).await.unwrap().unwrap();
+        assert_eq!(mcp_after.state, JobState::Stuck);
+        let other_after = store.get_job(other.job_id).await.unwrap().unwrap();
+        assert_eq!(
+            other_after.state,
+            JobState::InProgress,
+            "non-mcp job untouched"
+        );
     }
 
     #[tokio::test]

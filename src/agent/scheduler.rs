@@ -286,7 +286,12 @@ impl Scheduler {
             reason: "MCP background jobs are not configured".to_string(),
         })?;
 
-        let title = format!("mcp:{}/{}", spec.server, spec.tool);
+        let title = format!(
+            "{}{}/{}",
+            crate::worker::mcp_job::MCP_JOB_TITLE_PREFIX,
+            spec.server,
+            spec.tool
+        );
         let description = format!("Background MCP tool call: {}", spec.tool);
         let job_id = self
             .context_manager

@@ -891,6 +891,17 @@ async fn async_main() -> anyhow::Result<()> {
             .map(|em| em.mcp_client_store()),
     );
 
+    // Reconcile MCP jobs left in-flight by a previous run: their in-memory
+    // runner died with the process, so mark them Stuck for self-repair.
+    if let Some(ref db) = components.db {
+        let store = ironclaw::tenant::SystemScope::new(Arc::clone(db));
+        match ironclaw::worker::mcp_job::reconcile_orphaned_mcp_jobs(&store).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Reconciled {n} orphaned in-flight MCP job(s) to Stuck"),
+            Err(e) => tracing::warn!("MCP job startup reconcile failed: {e}"),
+        }
+    }
+
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
