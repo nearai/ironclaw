@@ -35,6 +35,11 @@ import {
   upsertConnectionLostRunFailure,
 } from "../lib/failureMessages";
 import {
+  CHAT_MESSAGE_ROLES,
+  createErrorChatMessage,
+  requestFailureIdForMessage,
+} from "../lib/message-types";
+import {
   CONNECTION_STATUS,
   isConnectionLostStatus,
 } from "../lib/connection-status";
@@ -549,7 +554,7 @@ export function useChat(threadId) {
       const pendingKey = sendThreadId;
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
-        role: "user",
+        role: CHAT_MESSAGE_ROLES.USER,
         content: renderContent,
         attachments: renderAttachments,
         retryContent: content,
@@ -560,7 +565,7 @@ export function useChat(threadId) {
       };
       const pendingRenderMessage = {
         id: pendingRecord.id,
-        role: "user",
+        role: CHAT_MESSAGE_ROLES.USER,
         content: renderContent,
         attachments: renderAttachments,
         retryContent: content,
@@ -696,7 +701,7 @@ export function useChat(threadId) {
             const appendSystemNotice = (renderCurrent = shouldRenderInCurrentThread) => {
               const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,
-                role: "system",
+                role: CHAT_MESSAGE_ROLES.SYSTEM,
                 content: response.notice,
                 timestamp: new Date().toISOString(),
                 isOptimistic: false,
@@ -742,6 +747,10 @@ export function useChat(threadId) {
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
+        const failureContent = failureMessageForRequestError(err);
+        // Mark the optimistic user bubble as retryable and append a separate
+        // assistant-side error bubble. Apply each updater to both stores because
+        // the rendered current thread and seeded target thread are distinct caches.
         const markFailed = (prev) =>
           prev.map((m) =>
             m.id === optimisticId
@@ -749,7 +758,7 @@ export function useChat(threadId) {
                   ...m,
                   isOptimistic: false,
                   status: "error",
-                  error: err.message,
+                  error: failureContent,
                 }
               : m,
           );
@@ -757,7 +766,7 @@ export function useChat(threadId) {
         updateSeededTarget(markFailed);
         const appendFailure = (prev) => [
           ...prev,
-          requestFailureMessageForError(optimisticId, err),
+          requestFailureMessageForContent(optimisticId, failureContent),
         ];
         updateCurrentThread(appendFailure);
         updateSeededTarget(appendFailure);
@@ -1001,7 +1010,7 @@ export function useChat(threadId) {
         const hasReplacement = prev.some(
           (item) =>
             item.id !== message.id &&
-            item.role === "user" &&
+            item.role === CHAT_MESSAGE_ROLES.USER &&
             item.status === "error" &&
             item.retryContent === content,
         );
@@ -1078,28 +1087,29 @@ function retryAfterMs(err) {
   return 2000;
 }
 
-function requestFailureIdForMessage(messageId) {
-  const safeId = String(messageId || "unknown").replace(/[^a-z0-9_-]+/gi, "-");
-  return `err-request-${safeId}`;
+function requestFailureMessageForError(messageId, error) {
+  return requestFailureMessageForContent(
+    messageId,
+    failureMessageForRequestError(error),
+  );
 }
 
-function requestFailureMessageForError(messageId, error) {
-  return {
+function requestFailureMessageForContent(messageId, content) {
+  return createErrorChatMessage({
     id: requestFailureIdForMessage(messageId),
-    role: "error",
-    content: failureMessageForRequestError(error),
+    content,
     timestamp: new Date().toISOString(),
-  };
+  });
 }
 
 function appendRequestFailureMessage(setMessages, { id, error }) {
+  const content = failureMessageForRequestError(error);
   setMessages((prev) => [
     ...prev,
-    {
+    createErrorChatMessage({
       id,
-      role: "error",
-      content: failureMessageForRequestError(error),
+      content,
       timestamp: new Date().toISOString(),
-    },
+    }),
   ]);
 }

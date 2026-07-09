@@ -18,9 +18,18 @@ import {
   isFinalAssistantForRun,
   replaceAssistantReplyForRun,
 } from "./stream-order-memory";
+import {
+  createErrorChatMessage,
+  isErrorChatMessage,
+  isRunFailureMessageId,
+  RUN_FAILURE_ID_PREFIX,
+  STREAM_FAILURE_ID_PREFIX,
+  UNKNOWN_RUN_FAILURE_ID,
+} from "./message-types";
 
 const noop = () => {};
 const emptyConnectionContext = () => ({});
+const STREAM_FAILURE_COLLISION_SCAN_LIMIT = 32;
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -698,7 +707,9 @@ function appendRunFailureMessage(
   // Dedup by `err-<runId>` so replays of the same projection
   // (SSE reconnect with `last-event-id`, or repeated updates carrying
   // the same terminal status) collapse to one bubble instead of stacking.
-  const messageId = `err-${runId || "unknown"}`;
+  const messageId = runId
+    ? `${RUN_FAILURE_ID_PREFIX}${runId}`
+    : UNKNOWN_RUN_FAILURE_ID;
   const connectionContext =
     typeof connectionContextForRunFailure === "function"
       ? connectionContextForRunFailure(runId) || {}
@@ -734,32 +745,32 @@ function appendRunFailureMessage(
     }
     return [
       ...prev,
-      {
+      createErrorChatMessage({
         id: messageId,
-        role: "error",
         content,
         timestamp: new Date().toISOString(),
         failureStatus: status,
         failureCategory,
         failureSummary,
-      },
+      }),
     ];
   });
 }
 
+// A projection can report an unknown run failure before the send response maps
+// the optimistic message to a concrete run id. Keep adjacent run failures
+// deduped, and promote `err-unknown` to `err-<runId>` once the id arrives.
 function isAdjacentDuplicateRunFailure(message, content) {
-  const id = typeof message?.id === "string" ? message.id : "";
   return (
-    message?.role === "error" &&
-    id.startsWith("err-") &&
-    !id.startsWith("err-request-") &&
-    !id.startsWith("err-stream-") &&
+    isErrorChatMessage(message) &&
+    isRunFailureMessageId(message.id) &&
     message.content === content
   );
 }
 
 function promotedRunFailureMessage(message, messageId) {
-  return message?.id === "err-unknown" && messageId !== "err-unknown"
+  return message?.id === UNKNOWN_RUN_FAILURE_ID &&
+    messageId !== UNKNOWN_RUN_FAILURE_ID
     ? { ...message, id: messageId }
     : message;
 }
@@ -772,12 +783,11 @@ function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
     const messageId = uniqueStreamFailureMessageId(baseMessageId, prev);
     return [
       ...prev,
-      {
+      createErrorChatMessage({
         id: messageId,
-        role: "error",
         content: failureMessageForStreamError({ error, kind, retryable }),
         timestamp: new Date().toISOString(),
-      },
+      }),
     ];
   });
 }
@@ -789,22 +799,39 @@ function isSameStreamFailureMessage(message, baseMessageId) {
 
 function uniqueStreamFailureMessageId(baseMessageId, messages) {
   const timestamp = Date.now();
+  const existingIds = new Set(
+    messages
+      .map((message) => message?.id)
+      .filter((id) => typeof id === "string"),
+  );
   let messageId = `${baseMessageId}-${timestamp}`;
+  if (!existingIds.has(messageId)) return messageId;
   for (
     let suffix = 1;
-    messages.some((message) => message.id === messageId);
+    suffix <= STREAM_FAILURE_COLLISION_SCAN_LIMIT;
     suffix += 1
   ) {
     messageId = `${baseMessageId}-${timestamp}-${suffix}`;
+    if (!existingIds.has(messageId)) return messageId;
   }
-  return messageId;
+  return `${baseMessageId}-${timestamp}-${randomIdSegment()}`;
+}
+
+function randomIdSegment() {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID === "function") {
+    return randomUUID.call(globalThis.crypto);
+  }
+  return Math.random().toString(36).slice(2, 10);
 }
 
 function streamFailureMessageId({ error, kind, retryable }) {
   const token = `${error || "unknown"}-${kind || "unknown"}-${
     retryable ? "retryable" : "terminal"
   }`;
-  return `err-stream-${token.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 96)}`;
+  return `${STREAM_FAILURE_ID_PREFIX}${token
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .slice(0, 96)}`;
 }
 
 function locallyResolvedStateForRun(locallyResolvedGatesRef, runId) {

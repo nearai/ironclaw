@@ -24,6 +24,14 @@ import {
   isFinalAssistantForRun,
   replaceAssistantReplyForRun,
 } from "./stream-order-memory";
+import {
+  createErrorChatMessage,
+  isErrorChatMessage,
+  isRunFailureMessageId,
+  RUN_FAILURE_ID_PREFIX,
+  STREAM_FAILURE_ID_PREFIX,
+  UNKNOWN_RUN_FAILURE_ID,
+} from "./message-types";
 
 function useChatEventsSourceForTest() {
   const source = readFileSync(
@@ -49,6 +57,7 @@ function useChatEventsSourceForTest() {
 }
 
 function createUseChatEventsHarness({
+  DateImpl = Date,
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
   failureMessageForStreamError = ({ error, kind, retryable }) =>
@@ -66,7 +75,8 @@ function createUseChatEventsHarness({
   // [{ runId, success }] in fire order; one entry per settled run.
   const settledRuns = [];
   const context = {
-    Date,
+    Date: DateImpl,
+    createErrorChatMessage,
     React: {
       useCallback: (fn) => fn,
       useEffect: (fn) => fn(),
@@ -78,11 +88,16 @@ function createUseChatEventsHarness({
     gateFromProjectionGate,
     globalThis: {},
     ensureGateToolActivity,
+    isErrorChatMessage,
+    isRunFailureMessageId,
     isTerminalToolStatus,
     isFinalAssistantForRun,
     replaceAssistantReplyForRun,
+    RUN_FAILURE_ID_PREFIX,
+    STREAM_FAILURE_ID_PREFIX,
     toolCardFromActivity,
     toolCardFromPreview,
+    UNKNOWN_RUN_FAILURE_ID,
     upsertToolActivityMessage,
   };
 
@@ -2279,4 +2294,35 @@ test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () =
   assert.notEqual(secondError.id, firstError.id);
   assert.equal(secondError.content, "stream:service_unavailable");
   assert.equal(seenStreamErrors.length, 2);
+});
+
+test("useChatEvents: stream error ids avoid timestamp collisions", () => {
+  class FixedDate extends Date {
+    constructor(...args) {
+      super(args.length > 0 ? args[0] : 1_788_259_200_000);
+    }
+
+    static now() {
+      return 1_788_259_200_000;
+    }
+  }
+
+  const harness = createUseChatEventsHarness({ DateImpl: FixedDate });
+  const baseId = `${STREAM_FAILURE_ID_PREFIX}unavailable-service_unavailable-retryable`;
+  harness.replaceMessages([
+    { id: `${baseId}-1788259200000`, role: "error", content: "first" },
+    { id: "assistant-between-errors", role: "assistant", content: "between" },
+  ]);
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.messages.length, 3);
+  assert.equal(harness.messages[2].id, `${baseId}-1788259200000-1`);
 });

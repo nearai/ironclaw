@@ -55,12 +55,27 @@ test("failureMessageForRunStatus handles whitespace-only summary", () => {
   );
 });
 
-test("failureMessageForRequestError prefers the throwable message", () => {
+test("failureMessageForRequestError prefers a safe throwable message", () => {
   assert.equal(
     failureMessageForRequestError(
       new Error("  AI provider account is out of credits.  "),
     ),
     "AI provider account is out of credits.",
+  );
+});
+
+test("failureMessageForRequestError suppresses credential-bearing messages", () => {
+  assert.equal(
+    failureMessageForRequestError(
+      new Error("Authorization: Bearer sk-proj-1234567890abcdef"),
+    ),
+    "The request failed before it could be sent.",
+  );
+  assert.equal(
+    failureMessageForRequestError({
+      message: "Provider rejected API key abcdef1234567890abcdef1234567890.",
+    }),
+    "The request failed before it could be sent.",
   );
 });
 

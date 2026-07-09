@@ -27,6 +27,11 @@ import {
   isConnectionLostStatus,
 } from "./connection-status";
 import {
+  CHAT_MESSAGE_ROLES,
+  createErrorChatMessage,
+  requestFailureIdForMessage,
+} from "./message-types";
+import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
   forgetChannelConnectionWaiter,
@@ -93,10 +98,13 @@ function runUseChatSource(context) {
     CONNECTION_STATUS,
     isConnectionLostStatus,
     channelConnectionContinuationMessage,
+    CHAT_MESSAGE_ROLES,
     connectionEventMatchesOnboarding,
+    createErrorChatMessage,
     forgetChannelConnectionWaiter,
     normalizeConnectionChannel,
     rememberChannelConnectionWaiter,
+    requestFailureIdForMessage,
   });
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
@@ -1062,6 +1070,10 @@ test("useChat.send: request failure appends inline error in the active thread", 
   assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].role, "user");
   assert.equal(renderedMessages[0].status, "error");
+  assert.equal(
+    renderedMessages[0].error,
+    "inline:AI provider account is out of credits",
+  );
   assert.equal(renderedMessages[1].role, "error");
   assert.equal(
     renderedMessages[1].content,

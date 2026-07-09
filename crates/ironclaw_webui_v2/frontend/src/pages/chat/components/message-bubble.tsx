@@ -7,16 +7,20 @@ import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
+import { CHAT_MESSAGE_ROLES } from "../lib/message-types";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system stays as a centered notice, and error renders as an inline
    assistant-side alert. Reasoning ("thinking") renders as a collapsible
    disclosure (see ThinkingDisclosure). */
 const ROLE_STYLES = {
-  user: "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
-  assistant: "mr-auto px-1 text-iron-100",
-  system: "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
-  error: "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
+  [CHAT_MESSAGE_ROLES.USER]:
+    "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
+  [CHAT_MESSAGE_ROLES.ASSISTANT]: "mr-auto px-1 text-iron-100",
+  [CHAT_MESSAGE_ROLES.SYSTEM]:
+    "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
+  [CHAT_MESSAGE_ROLES.ERROR]:
+    "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
 };
 
 function formatTimestamp(value) {
@@ -61,7 +65,7 @@ function ThinkingDisclosure({ content }) {
 function MessageBubbleImpl({ message, onRetry, threadId }) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
-  const isUser = role === "user";
+  const isUser = role === CHAT_MESSAGE_ROLES.USER;
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] = React.useState(null);
@@ -82,7 +86,10 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
     }
   }, [content, t]);
 
-  if (role === "tool_activity" || (toolCalls && toolCalls.length > 0)) {
+  if (
+    role === CHAT_MESSAGE_ROLES.TOOL_ACTIVITY ||
+    (toolCalls && toolCalls.length > 0)
+  ) {
     const activity = (toolCalls && toolCalls.length > 0)
       ? {
           id: message.id,
@@ -92,11 +99,11 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
     return (<ToolActivity activity={activity} />);
   }
 
-  if (role === "thinking") {
+  if (role === CHAT_MESSAGE_ROLES.THINKING) {
     return (<ThinkingDisclosure content={content} />);
   }
 
-  if (role === "image") {
+  if (role === CHAT_MESSAGE_ROLES.IMAGE) {
     const imgs = generatedImages || [];
     return (
       <div className="flex">
@@ -117,9 +124,11 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   }
 
   const timeLabel = formatTimestamp(timestamp);
-  const showActions = role === "user" || (role === "assistant" && !isOptimistic);
-  const isNotice = role === "system";
-  const isError = role === "error";
+  const showActions =
+    role === CHAT_MESSAGE_ROLES.USER ||
+    (role === CHAT_MESSAGE_ROLES.ASSISTANT && !isOptimistic);
+  const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
+  const isError = role === CHAT_MESSAGE_ROLES.ERROR;
   const bubbleWidthClass = isUser
     ? "v2-chat-readable-width"
     : isNotice
@@ -146,7 +155,9 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}
         >
-          {role === "assistant" || role === "system" || role === "error"
+          {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
+          role === CHAT_MESSAGE_ROLES.SYSTEM ||
+          role === CHAT_MESSAGE_ROLES.ERROR
             ? (<MarkdownRenderer content={content} />)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words">{content}</div>)}
 
@@ -178,7 +189,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             </>
           )}
 
-          {role === "assistant" &&
+          {role === CHAT_MESSAGE_ROLES.ASSISTANT &&
           (<ProjectFileChips
             threadId={threadId}
             content={typeof content === "string" ? content : ""}
