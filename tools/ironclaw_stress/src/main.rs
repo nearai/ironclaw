@@ -1727,13 +1727,22 @@ async fn run_api_capacity_in_process(
         OperationTarget::Fixed { .. } => Some(args.users.saturating_mul(args.operations)),
         OperationTarget::Duration { .. } => None,
     };
+    let workload_label = match operation_target {
+        OperationTarget::Fixed { .. } => {
+            format!(
+                "total_operations={}",
+                args.users.saturating_mul(args.operations)
+            )
+        }
+        OperationTarget::Duration { .. } => operation_target.label(),
+    };
     eprintln!(
         "{} running target={} virtual_users={} operations_per_user={} {} warmup_seconds={} read_qps_per_user={:.2} progress_interval_seconds={}",
         log_prefix(args),
         target,
         args.users,
         args.operations,
-        operation_target.label(),
+        workload_label,
         args.warmup_seconds,
         args.api_read_qps_per_user,
         args.progress_interval_seconds

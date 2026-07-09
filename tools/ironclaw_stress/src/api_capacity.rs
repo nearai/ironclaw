@@ -436,15 +436,21 @@ async fn run_window(
     read_mix: &ReadMix,
     progress: Arc<ProgressCounters>,
 ) -> Result<WindowResult, String> {
-    let mut tasks = JoinSet::new();
+    let mut writer_tasks = JoinSet::new();
+    let mut read_tasks = JoinSet::new();
     let stop_reads = Arc::new(ReadShutdown::new());
 
-    for user in users.iter().cloned() {
+    let writer_limit = writer_concurrency_limit(args, users.len());
+    let writer_user_count = writer_user_count_for_window(args, users.len(), writer_limit);
+    let mut next_writer_index = 0usize;
+    while next_writer_index < writer_user_count && writer_tasks.len() < writer_limit {
+        let user = users[next_writer_index].clone();
+        next_writer_index += 1;
         let harness = harness.clone();
         let progress = Arc::clone(&progress);
         let args = args.clone();
         let operation_namespace = operation_namespace.to_string();
-        tasks.spawn(async move {
+        writer_tasks.spawn(async move {
             run_virtual_user(&args, &operation_namespace, harness, user, progress).await
         });
     }
@@ -457,23 +463,35 @@ async fn run_window(
             let read_mix = read_mix.clone();
             let stop_reads = Arc::clone(&stop_reads);
             let args = args.clone();
-            tasks.spawn(async move {
+            read_tasks.spawn(async move {
                 run_read_worker(&args, harness, users, read_mix, worker_index, stop_reads).await
             });
         }
     }
 
-    let mut writer_remaining = users.len();
     let mut flow_samples = Vec::new();
     let mut api_samples = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
+    while let Some(joined) = writer_tasks.join_next().await {
         let result = joined.map_err(|error| format!("api task join failed: {error}"))??;
-        if result.writer_done {
-            writer_remaining = writer_remaining.saturating_sub(1);
-            if writer_remaining == 0 {
-                stop_reads.stop();
-            }
+        flow_samples.extend(result.flow_samples);
+        api_samples.extend(result.api_samples);
+
+        if next_writer_index < writer_user_count {
+            let user = users[next_writer_index].clone();
+            next_writer_index += 1;
+            let harness = harness.clone();
+            let progress = Arc::clone(&progress);
+            let args = args.clone();
+            let operation_namespace = operation_namespace.to_string();
+            writer_tasks.spawn(async move {
+                run_virtual_user(&args, &operation_namespace, harness, user, progress).await
+            });
         }
+    }
+
+    stop_reads.stop();
+    while let Some(joined) = read_tasks.join_next().await {
+        let result = joined.map_err(|error| format!("api read task join failed: {error}"))??;
         flow_samples.extend(result.flow_samples);
         api_samples.extend(result.api_samples);
     }
@@ -484,8 +502,19 @@ async fn run_window(
     })
 }
 
+fn writer_concurrency_limit(args: &Args, user_count: usize) -> usize {
+    args.concurrency.max(1).min(user_count.max(1))
+}
+
+fn writer_user_count_for_window(args: &Args, user_count: usize, writer_limit: usize) -> usize {
+    if args.uses_duration_mode() {
+        writer_limit
+    } else {
+        user_count
+    }
+}
+
 struct TaskResult {
-    writer_done: bool,
     flow_samples: Vec<Sample>,
     api_samples: Vec<ApiRequestSample>,
 }
@@ -531,7 +560,6 @@ async fn run_virtual_user(
     }
 
     Ok(TaskResult {
-        writer_done: true,
         flow_samples,
         api_samples,
     })
@@ -726,7 +754,6 @@ async fn run_read_worker(
     }
 
     Ok(TaskResult {
-        writer_done: false,
         flow_samples: Vec::new(),
         api_samples,
     })
@@ -1784,6 +1811,21 @@ async fn write_mock_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    fn parsed_api_args(extra: &[&str]) -> Args {
+        let mut args = vec![
+            "ironclaw_stress",
+            "--backend",
+            "libsql",
+            "--scenario",
+            "api-user-capacity",
+            "--api-base-url",
+            "http://127.0.0.1:4216",
+        ];
+        args.extend_from_slice(extra);
+        Args::parse_from(args)
+    }
 
     #[test]
     fn read_mix_parses_aliases_and_weights() {
@@ -1882,6 +1924,37 @@ mod tests {
         assert_eq!(
             read_worker_interval_for(f64::INFINITY, 10, 4),
             MAX_READ_WORKER_SLEEP
+        );
+    }
+
+    #[test]
+    fn fixed_api_window_processes_all_users_but_caps_active_writers() {
+        let args = parsed_api_args(&["--users", "100", "--concurrency", "1", "--operations", "1"]);
+        let writer_limit = writer_concurrency_limit(&args, args.users);
+
+        assert_eq!(writer_limit, 1);
+        assert_eq!(
+            writer_user_count_for_window(&args, args.users, writer_limit),
+            100
+        );
+    }
+
+    #[test]
+    fn duration_api_window_uses_active_writer_set_only() {
+        let args = parsed_api_args(&[
+            "--users",
+            "100",
+            "--concurrency",
+            "10",
+            "--duration-seconds",
+            "60",
+        ]);
+        let writer_limit = writer_concurrency_limit(&args, args.users);
+
+        assert_eq!(writer_limit, 10);
+        assert_eq!(
+            writer_user_count_for_window(&args, args.users, writer_limit),
+            10
         );
     }
 }
