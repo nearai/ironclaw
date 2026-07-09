@@ -3505,6 +3505,56 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 self.assertNotIn(rejected, config)
 
+    def test_marker_match_stats_counts_and_classifies_marker_authors(self):
+        marker = "QA_MARKER_123"
+        messages = [
+            {"text": f"bot copy {marker}", "ts": "100.1", "bot_id": "B01", "user": "UBOT"},
+            {"text": "unrelated", "ts": "100.2", "user": "U0HUMAN1"},
+            {"text": f"human copy {marker}", "ts": "100.3", "user": "U0HUMAN1"},
+            {"text": f"second bot copy {marker}", "ts": "160.5", "bot_id": "B01"},
+        ]
+        stats = run_live_qa._marker_match_stats(messages, marker=marker)
+        self.assertTrue(stats["found"])
+        self.assertEqual(stats["marker_matches"], 3)
+        self.assertEqual(stats["bot_authored_marker_matches"], 2)
+        self.assertEqual(stats["human_authored_marker_matches"], 1)
+        authors = stats["marker_match_authors"]
+        self.assertEqual([entry["bot"] for entry in authors], [True, False, True])
+        self.assertEqual([entry["human"] for entry in authors], [False, True, False])
+
+    def test_marker_match_stats_requires_required_text_on_first_match(self):
+        marker = "QA_MARKER_456"
+        messages = [{"text": f"{marker} without the word", "ts": "1.0", "bot_id": "B01"}]
+        stats = run_live_qa._marker_match_stats(
+            messages, marker=marker, required_text=["status"]
+        )
+        self.assertFalse(stats["found"])
+        self.assertTrue(stats["marker_found"])
+        self.assertEqual(stats["missing_required_text"], ["status"])
+
+    def test_marker_match_stats_reports_not_found_without_matches(self):
+        stats = run_live_qa._marker_match_stats(
+            [{"text": "nothing here", "ts": "1.0", "user": "U0X"}], marker="QA_MARKER_789"
+        )
+        self.assertFalse(stats["found"])
+        self.assertEqual(stats["message_count"], 1)
+
+    def test_exactly_once_delivery_cases_use_one_shot_schedules(self):
+        import inspect
+
+        for case_fn in (
+            run_live_qa.case_qa_9b_routine_dm_delivery_exactly_once,
+            run_live_qa.case_qa_9d_routine_per_trigger_delivery_target,
+        ):
+            source = inspect.getsource(case_fn)
+            self.assertIn(
+                "one-time routine",
+                source,
+                "exactly-once probes must use one-shot schedules; a recurring "
+                "schedule re-posts the marker on the next fire and false-fails",
+            )
+            self.assertIn("exactly_once_grace_seconds", source)
+
     def test_default_suite_includes_github_connect_after_generated_auth_seed(self):
         self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
         self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].requires_github_auth)
