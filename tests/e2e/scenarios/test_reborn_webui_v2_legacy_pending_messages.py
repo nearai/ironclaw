@@ -275,7 +275,7 @@ async def test_reborn_legacy_empty_landing_hidden_when_message_pending(
 async def test_reborn_legacy_send_failure_renders_inline_error_not_toast(
     reborn_v2_server, reborn_v2_browser
 ):
-    async def handle_failed_send(route, _payload, _fulfill_json):
+    async def handle_failed_send(route, _payload, _fulfill_json) -> None:
         await route.fulfill(
             status=503,
             content_type="text/plain",
