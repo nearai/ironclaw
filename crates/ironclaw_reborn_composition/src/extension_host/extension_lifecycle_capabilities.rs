@@ -665,6 +665,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingChannelConnectionFacade {
         connections: Mutex<HashMap<String, bool>>,
+        connection_status_calls: Mutex<usize>,
         disconnects: Mutex<Vec<(WebUiAuthenticatedCaller, String)>>,
         watched_package_path: Option<PathBuf>,
         package_present_during_disconnect: Mutex<Vec<bool>>,
@@ -675,6 +676,7 @@ mod tests {
         fn with_connection(channel: &str, connected: bool) -> Self {
             Self {
                 connections: Mutex::new(HashMap::from([(channel.to_string(), connected)])),
+                connection_status_calls: Mutex::new(0),
                 disconnects: Mutex::new(Vec::new()),
                 watched_package_path: None,
                 package_present_during_disconnect: Mutex::new(Vec::new()),
@@ -688,6 +690,13 @@ mod tests {
 
         fn disconnects(&self) -> Vec<(WebUiAuthenticatedCaller, String)> {
             self.disconnects.lock().expect("disconnects lock").clone()
+        }
+
+        fn connection_status_calls(&self) -> usize {
+            *self
+                .connection_status_calls
+                .lock()
+                .expect("connection status calls lock")
         }
 
         fn package_present_during_disconnect(&self) -> Vec<bool> {
@@ -705,6 +714,10 @@ mod tests {
             &self,
             _caller: WebUiAuthenticatedCaller,
         ) -> Result<HashMap<String, bool>, RebornServicesError> {
+            *self
+                .connection_status_calls
+                .lock()
+                .expect("connection status calls lock") += 1;
             Ok(self.connections.lock().expect("connections lock").clone())
         }
 
@@ -850,6 +863,11 @@ mod tests {
             channel_connection.package_present_during_disconnect(),
             vec![true, true, false],
             "cleanup must also run after the package is already absent"
+        );
+        assert_eq!(
+            channel_connection.connection_status_calls(),
+            0,
+            "declared Slack cleanup must disconnect directly without status discovery"
         );
         runtime.shutdown().await.expect("runtime shutdown");
     }

@@ -3106,8 +3106,8 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn extension_remove_fails_required_cleanup_when_channel_facade_is_unset() {
-        let (_dir, storage_root, facade, _active_registry, _installation_store) =
+    async fn generic_external_channel_remove_succeeds_without_cleanup_facade() {
+        let (_dir, storage_root, facade, _active_registry, installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
                     "telegram", "Telegram",
@@ -3126,20 +3126,102 @@ output_schema_ref = "schemas/run.output.json"
             .await
             .expect("install external channel");
 
-        let error = facade
+        facade
             .execute(
                 lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionRemove { package_ref },
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
             )
             .await
-            .expect_err("required channel cleanup without a facade must fail closed");
+            .expect("generic external channel removes without host-owned cleanup");
 
-        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
         assert!(
-            storage_root
-                .join("system/extensions/telegram/manifest.toml")
-                .exists(),
-            "package removal must not run when required cleanup is unavailable"
+            !storage_root.join("system/extensions/telegram").exists(),
+            "package files must be deleted"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&ExtensionId::new("telegram").expect("valid extension id"))
+                .await
+                .expect("read manifest")
+                .is_none(),
+            "manifest record must be deleted"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new("telegram").expect("valid installation id")
+                )
+                .await
+                .expect("read installation")
+                .is_none(),
+            "installation record must be deleted"
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingSlackChannelConnectionFacade {
+        disconnect_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChannelConnectionFacade for RecordingSlackChannelConnectionFacade {
+        async fn caller_channel_connections(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+            Ok(std::collections::HashMap::from([(
+                "slack".to_string(),
+                true,
+            )]))
+        }
+
+        async fn disconnect_channel_for_caller(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _channel: &str,
+        ) -> Result<(), RebornServicesError> {
+            self.disconnect_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_external_channel_remove_does_not_disconnect_registered_slack_facade() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
+                    "telegram", "Telegram",
+                )]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let channel_connection = Arc::new(RecordingSlackChannelConnectionFacade::default());
+        let channel_connection_facade: Arc<dyn ChannelConnectionFacade> =
+            channel_connection.clone();
+        assert!(
+            port.channel_connection
+                .set(channel_connection_facade)
+                .is_ok(),
+            "channel connection facade slot must be unset in the fixture"
+        );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install generic external channel");
+        let removal_scope = hosted_mcp_scope("generic-channel-remove");
+
+        let remove = port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("remove generic external channel");
+
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+        assert_eq!(
+            channel_connection.disconnect_calls.load(Ordering::SeqCst),
+            0,
+            "removing Telegram must not disconnect the registered Slack facade"
         );
     }
 
