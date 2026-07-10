@@ -356,8 +356,15 @@ async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
             Ok(_) => panic!("canonical rewrite failure must fail closed"),
             Err(error) => error,
         };
+    assert_eq!(
+        error,
+        ExtensionInstallationError::InvalidInstallation {
+            reason: "failed to load extension installation state".to_string(),
+        }
+    );
+    assert!(!error.to_string().contains("/tenants/acme"));
     assert!(
-        error
+        !error
             .to_string()
             .contains("injected extension installation write failure")
     );

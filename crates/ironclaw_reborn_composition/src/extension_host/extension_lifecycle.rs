@@ -4859,7 +4859,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install credentialed extension");
         let extension_id = ExtensionId::new("github").expect("valid extension id");

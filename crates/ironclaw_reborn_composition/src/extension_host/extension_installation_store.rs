@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
+const INSTALLATION_STATE_IO_ERROR: &str = "failed to load extension installation state";
 
 pub(crate) struct FilesystemExtensionInstallationStore {
     filesystem: std::sync::Arc<dyn RootFilesystem>,
@@ -56,9 +57,7 @@ impl FilesystemExtensionInstallationStore {
                     state_path = %state_path.as_str(),
                     "extension installation state load failed"
                 );
-                return Err(invalid_installation_error(
-                    "failed to load extension installation state",
-                ));
+                return Err(invalid_installation_error(INSTALLATION_STATE_IO_ERROR));
             }
         }
         Ok(Self {
@@ -88,7 +87,7 @@ async fn write_snapshot(
     filesystem
         .write_file(state_path, &bytes)
         .await
-        .map_err(invalid_installation_error)
+        .map_err(|_| invalid_installation_error(INSTALLATION_STATE_IO_ERROR))
 }
 
 fn default_installation_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
