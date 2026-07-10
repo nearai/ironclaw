@@ -19,10 +19,10 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
-    TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionSource, TurnEventReducerService,
-    TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
+    TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
+    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -33,8 +33,7 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
 use crate::failure_summary::{
-    InvalidModelOutputFailureDetail, pinned_failure_summary_for_category,
-    reborn_failure_summary_for_category_and_detail,
+    pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
 use crate::product_auth::api::auth_prompt::{
     BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
@@ -892,7 +891,7 @@ async fn failure_details_for_turn_event(
     // cause instead of only the bounded category.
     let detail = detail_for_turn_event(event, &category);
     let invalid_output_detail =
-        InvalidModelOutputFailureDetail::from_failure_category_and_projection_detail(
+        ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
             &category,
             detail.as_deref(),
         );

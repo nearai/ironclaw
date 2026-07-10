@@ -1,6 +1,7 @@
 use ironclaw_runner::failure_categories::{
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
+use ironclaw_turns::ModelInvalidOutputDetailReason;
 
 pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static str {
     let Some(category) = category else {
@@ -160,7 +161,7 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
 
 pub(crate) fn reborn_failure_summary_for_category_and_detail(
     category: Option<&str>,
-    detail: Option<InvalidModelOutputFailureDetail>,
+    detail: Option<ModelInvalidOutputDetailReason>,
 ) -> &'static str {
     let Some(category) = category else {
         return unknown_failure_summary();
@@ -179,66 +180,11 @@ pub(crate) fn reborn_failure_summary_for_category_and_detail(
     reborn_failure_summary_for_category(Some(category))
 }
 
-const INVALID_MODEL_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InvalidModelOutputFailureDetail {
-    EmptyAssistantResponse,
-    TextualToolCallSyntax,
-    OutsideCapabilitySurface,
-    ToolUseFinishWithoutToolCalls,
-    UnsupportedToolCallsForTextOnlyLoop,
-    InvalidReturnedToolName,
-    InvalidToolCallArguments,
-    MalformedToolCallArguments,
+trait ModelInvalidOutputFailureSummary {
+    fn failure_summary(self) -> &'static str;
 }
 
-impl InvalidModelOutputFailureDetail {
-    /// Classify the host-authored model-gateway safe summaries emitted for
-    /// invalid model output by `ironclaw_runner::model_gateway`.
-    ///
-    /// This list intentionally mirrors the runner's fixed `InvalidOutput`
-    /// summaries without making those wording details part of `ironclaw_runner`
-    /// public API. Keep `invalid_model_output_detail_whitelist_covers_known_runner_summaries`
-    /// in sync when adding or renaming one of those upstream safe summaries.
-    pub(crate) fn from_failure_category_and_projection_detail(
-        category: &str,
-        detail: Option<&str>,
-    ) -> Option<Self> {
-        if !matches!(category, "model_invalid_output" | "invalid_model_output") {
-            return None;
-        }
-        Self::from_projection_detail(detail)
-    }
-
-    pub(crate) fn from_projection_detail(detail: Option<&str>) -> Option<Self> {
-        let detail = detail?;
-        if !is_invalid_model_output_projection_detail_shape(detail) {
-            return None;
-        }
-        match detail {
-            "model returned an empty assistant response" => Some(Self::EmptyAssistantResponse),
-            "model returned textual tool-call syntax instead of structured tool calls" => {
-                Some(Self::TextualToolCallSyntax)
-            }
-            "model returned a tool call outside the advertised capability surface" => {
-                Some(Self::OutsideCapabilitySurface)
-            }
-            "model returned tool-use finish without tool calls" => {
-                Some(Self::ToolUseFinishWithoutToolCalls)
-            }
-            "model returned unsupported tool calls for a text-only loop" => {
-                Some(Self::UnsupportedToolCallsForTextOnlyLoop)
-            }
-            "model returned an invalid provider tool name" => Some(Self::InvalidReturnedToolName),
-            "model returned invalid tool-call arguments" => Some(Self::InvalidToolCallArguments),
-            _ if detail.starts_with("failed to parse tool-call arguments JSON:") => {
-                Some(Self::MalformedToolCallArguments)
-            }
-            _ => None,
-        }
-    }
-
+impl ModelInvalidOutputFailureSummary for ModelInvalidOutputDetailReason {
     fn failure_summary(self) -> &'static str {
         match self {
             Self::EmptyAssistantResponse => {
@@ -269,19 +215,6 @@ impl InvalidModelOutputFailureDetail {
     }
 }
 
-fn is_invalid_model_output_projection_detail_shape(detail: &str) -> bool {
-    if detail.is_empty() || detail.len() > INVALID_MODEL_OUTPUT_DETAIL_MAX_BYTES {
-        return false;
-    }
-    if !detail.is_ascii() {
-        return false;
-    }
-    let bytes = detail.as_bytes();
-    !bytes[0].is_ascii_whitespace()
-        && !bytes[bytes.len() - 1].is_ascii_whitespace()
-        && !bytes.iter().any(u8::is_ascii_control)
-}
-
 pub(crate) fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
     match category {
         MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(
@@ -301,9 +234,9 @@ fn unknown_failure_summary() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        InvalidModelOutputFailureDetail, reborn_failure_summary_for_category,
-        reborn_failure_summary_for_category_and_detail,
+        reborn_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
     };
+    use ironclaw_turns::ModelInvalidOutputDetailReason;
 
     #[test]
     fn reborn_failure_summary_describes_known_category() {
@@ -330,104 +263,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_model_output_detail_summary_uses_typed_whitelist() {
-        let detail = InvalidModelOutputFailureDetail::from_projection_detail(Some(
-            "model returned an empty assistant response",
-        ));
-
+    fn invalid_model_output_detail_summary_uses_shared_reason() {
         assert_eq!(
-            detail,
-            Some(InvalidModelOutputFailureDetail::EmptyAssistantResponse)
-        );
-        assert_eq!(
-            reborn_failure_summary_for_category_and_detail(Some("model_invalid_output"), detail),
+            reborn_failure_summary_for_category_and_detail(
+                Some("model_invalid_output"),
+                Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse),
+            ),
             "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
-        );
-    }
-
-    #[test]
-    fn invalid_model_output_detail_whitelist_covers_known_runner_summaries() {
-        use InvalidModelOutputFailureDetail as Detail;
-
-        for (safe_summary, expected) in [
-            (
-                "model returned an empty assistant response",
-                Detail::EmptyAssistantResponse,
-            ),
-            (
-                "model returned textual tool-call syntax instead of structured tool calls",
-                Detail::TextualToolCallSyntax,
-            ),
-            (
-                "model returned a tool call outside the advertised capability surface",
-                Detail::OutsideCapabilitySurface,
-            ),
-            (
-                "model returned tool-use finish without tool calls",
-                Detail::ToolUseFinishWithoutToolCalls,
-            ),
-            (
-                "model returned unsupported tool calls for a text-only loop",
-                Detail::UnsupportedToolCallsForTextOnlyLoop,
-            ),
-            (
-                "model returned an invalid provider tool name",
-                Detail::InvalidReturnedToolName,
-            ),
-            (
-                "model returned invalid tool-call arguments",
-                Detail::InvalidToolCallArguments,
-            ),
-            (
-                "failed to parse tool-call arguments JSON: expected value at line 1 column 1",
-                Detail::MalformedToolCallArguments,
-            ),
-        ] {
-            assert_eq!(
-                InvalidModelOutputFailureDetail::from_failure_category_and_projection_detail(
-                    "model_invalid_output",
-                    Some(safe_summary),
-                ),
-                Some(expected),
-                "{safe_summary:?} should remain mapped to a specific summary"
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_model_output_detail_matching_is_category_gated() {
-        assert_eq!(
-            InvalidModelOutputFailureDetail::from_failure_category_and_projection_detail(
-                "model_unavailable",
-                Some("model returned an empty assistant response"),
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn invalid_model_output_detail_matching_rejects_unvalidated_detail() {
-        let oversized = format!(
-            "failed to parse tool-call arguments JSON: {}",
-            "x".repeat(512)
-        );
-
-        for detail in [
-            " model returned an empty assistant response",
-            "model returned an empty assistant response\n",
-            "model returned an empty assistant response\0",
-            oversized.as_str(),
-        ] {
-            assert_eq!(
-                InvalidModelOutputFailureDetail::from_projection_detail(Some(detail)),
-                None,
-                "{detail:?} should not be accepted for projection matching"
-            );
-        }
-
-        assert_eq!(
-            reborn_failure_summary_for_category_and_detail(Some("model_invalid_output"), None),
-            reborn_failure_summary_for_category(Some("model_invalid_output"))
         );
     }
 
