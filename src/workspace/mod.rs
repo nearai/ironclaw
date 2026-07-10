@@ -1807,6 +1807,18 @@ impl Workspace {
             parts.push(format!("## Long-Term Memory\n\n{}", doc.content));
         }
 
+        // Episodic recall: inject the recent-conversations digest (memory/recent.md).
+        // This is personal continuity context, so it is excluded in group chats the
+        // same way MEMORY.md is. Missing/empty is graceful — the section is omitted.
+        if !is_group_chat
+            && let Ok(doc) = self.read("memory/recent.md").await
+        {
+            let recent = doc.content.trim();
+            if !recent.is_empty() {
+                parts.push(recent.to_string());
+            }
+        }
+
         // Add today's memory context (last 2 days of daily logs)
         let today = match tz {
             Some(t) => crate::timezone::today_in_tz(t),
@@ -2887,6 +2899,31 @@ mod seed_tests {
 
         // Multi scope: is multi
         assert!(multi_count > 1);
+    }
+
+    /// Episodic recall: the recent-conversations digest is injected into the
+    /// system prompt when `memory/recent.md` exists and is non-empty.
+    #[tokio::test]
+    async fn system_prompt_includes_recent_when_present() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write(
+            "memory/recent.md",
+            "# Recent conversations\n\n### 2026-07-09 — Voice\nwired STT\n",
+        )
+        .await
+        .expect("write recent.md");
+        let sp = ws.system_prompt().await.expect("system_prompt");
+        assert!(sp.contains("Recent conversations"));
+        assert!(sp.contains("Voice"));
+    }
+
+    /// Episodic recall: the section is omitted gracefully when
+    /// `memory/recent.md` is absent.
+    #[tokio::test]
+    async fn system_prompt_omits_recent_when_absent() {
+        let (ws, _dir) = create_test_workspace().await;
+        let sp = ws.system_prompt().await.expect("system_prompt");
+        assert!(!sp.contains("Recent conversations"));
     }
 }
 
