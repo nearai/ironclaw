@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("validate_reborn_binary_artifact.py")
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/live-canary/validate_reborn_binary_artifact.py"
 SPEC = importlib.util.spec_from_file_location("validate_reborn_binary_artifact", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 VALIDATOR = importlib.util.module_from_spec(SPEC)
