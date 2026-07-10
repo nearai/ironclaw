@@ -6323,7 +6323,13 @@ mod tests {
         extension_management
             .install(
                 gmail_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &ResourceScope::local_default(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                    InvocationId::new(),
+                )
+                .expect("valid local scope"),
             )
             .await
             .expect("install Gmail");
@@ -6337,7 +6343,13 @@ mod tests {
         extension_management
             .install(
                 calendar_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &ResourceScope::local_default(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                    InvocationId::new(),
+                )
+                .expect("valid local scope"),
             )
             .await
             .expect("install Google Calendar");
@@ -6467,7 +6479,13 @@ mod tests {
         extension_management
             .install(
                 notion_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &ResourceScope::local_default(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                    InvocationId::new(),
+                )
+                .expect("valid local scope"),
             )
             .await
             .expect("install Notion MCP");
@@ -6526,7 +6544,13 @@ mod tests {
         extension_management
             .install(
                 web_access_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
+                &ResourceScope::local_default(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                    InvocationId::new(),
+                )
+                .expect("valid local scope"),
             )
             .await
             .expect("install Web Access");
@@ -6961,7 +6985,13 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &ResourceScope::local_default(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                    InvocationId::new(),
+                )
+                .expect("valid local scope"),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -7079,7 +7109,13 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &ResourceScope::local_default(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                    InvocationId::new(),
+                )
+                .expect("valid local scope"),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -7249,7 +7285,13 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
+                &ResourceScope::local_default(
+                    extension_management
+                        .tenant_operator_user_id_for_test()
+                        .clone(),
+                    InvocationId::new(),
+                )
+                .expect("valid local scope"),
             )
             .await
             .expect("NEAR AI MCP projected");

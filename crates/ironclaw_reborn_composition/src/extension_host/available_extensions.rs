@@ -210,7 +210,7 @@ impl AvailableExtensionPackage {
             name: self.package.manifest.name.clone(),
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
-            source: LifecycleExtensionSource::HostBundled,
+            source: lifecycle_extension_source(&self.package.manifest.source),
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
             visible_capability_ids,
@@ -218,6 +218,19 @@ impl AvailableExtensionPackage {
             credential_requirements: credential_requirements(self),
             onboarding: onboarding(&self.package_ref),
         }
+    }
+}
+
+/// Wire source label for a resolved manifest's [`ManifestSource`]. Only
+/// `UserRegistered` is distinguished on the wire; the bundled/imported tiers
+/// (`HostBundled`/`InstalledLocal`/`RegistryInstalled`) all present as
+/// `HostBundled`, the pre-existing single label for host-side packages.
+fn lifecycle_extension_source(source: &ManifestSource) -> LifecycleExtensionSource {
+    match source {
+        ManifestSource::UserRegistered { .. } => LifecycleExtensionSource::UserRegistered,
+        ManifestSource::HostBundled
+        | ManifestSource::InstalledLocal
+        | ManifestSource::RegistryInstalled => LifecycleExtensionSource::HostBundled,
     }
 }
 

@@ -226,7 +226,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
             }
         })?;
     let phase = extension_management
-        .project(package_ref.clone(), &owner_scope.user_id)
+        .project(package_ref.clone(), &owner_scope)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP extension projection failed: {error}"),
@@ -328,7 +328,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
     let bootstrap_caller = resource_scope.user_id.clone();
     if phase == LifecyclePhase::Discovered {
         extension_management
-            .install(package_ref.clone(), &bootstrap_caller)
+            .install(package_ref.clone(), &resource_scope)
             .await
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("NEAR AI MCP extension install failed: {error}"),

@@ -335,36 +335,36 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                let caller = lifecycle_caller(&context)?;
+                let scope = lifecycle_resource_scope(&context)?;
                 let credential_gate = if matches!(&context, LifecycleProductContext::Surface(_)) {
-                    if let Some(credential_accounts) = &self.credential_accounts {
-                        Some(RuntimeExtensionActivationCredentialGate::new(
-                            lifecycle_resource_scope(&context)?,
-                            credential_accounts.clone(),
-                        ))
-                    } else {
-                        None
-                    }
+                    self.credential_accounts
+                        .as_ref()
+                        .map(|credential_accounts| {
+                            RuntimeExtensionActivationCredentialGate::new(
+                                scope.clone(),
+                                credential_accounts.clone(),
+                            )
+                        })
                 } else {
                     None
                 };
                 extension_management
-                    .search(&query, credential_gate.as_ref(), &caller)
+                    .search(&query, credential_gate.as_ref(), &scope)
                     .await
             }
             LifecycleProductAction::ExtensionList => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                let caller = lifecycle_caller(&context)?;
-                extension_management.list_installed(&caller).await
+                let scope = lifecycle_resource_scope(&context)?;
+                extension_management.list_installed(&scope).await
             }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                let caller = lifecycle_caller(&context)?;
-                extension_management.install(package_ref, &caller).await
+                let scope = lifecycle_resource_scope(&context)?;
+                extension_management.install(package_ref, &scope).await
             }
             LifecycleProductAction::ExtensionActivate { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -503,8 +503,8 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
             let Some(extension_management) = &self.extension_management else {
                 return unsupported_projection(Some(package_ref));
             };
-            let caller = lifecycle_caller(&context)?;
-            return extension_management.project(package_ref, &caller).await;
+            let scope = lifecycle_resource_scope(&context)?;
+            return extension_management.project(package_ref, &scope).await;
         }
         unsupported_projection(Some(package_ref))
     }

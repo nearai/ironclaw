@@ -433,6 +433,10 @@ pub enum LifecycleExtensionCredentialSetup {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSource {
     HostBundled,
+    /// Registered by a specific user through the MCP-registration store
+    /// (mirrors `ironclaw_extensions::ManifestSource::UserRegistered`). Never
+    /// first-party — the wire counterpart of that trust boundary.
+    UserRegistered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

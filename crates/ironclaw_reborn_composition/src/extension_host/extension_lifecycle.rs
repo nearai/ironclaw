@@ -16,7 +16,7 @@ use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
     PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    RuntimeHttpEgress, TenantId, UserId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -90,6 +90,7 @@ use crate::extension_host::mcp_discovery::{
 };
 use crate::extension_host::registered_extension_store::{
     is_owner_registered, migrate_legacy_owner_layout, resolve_any_owner_for_restore,
+    resolve_registered_for_scope, search_with_owner_overlay_for_scope,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -393,8 +394,9 @@ impl RebornLocalExtensionManagementPort {
         &self,
         query: &str,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let caller = &scope.user_id;
         let extensions = {
             let catalog = self.catalog.read().await;
             catalog.search(query).collect::<Vec<_>>()
@@ -403,6 +405,17 @@ impl RebornLocalExtensionManagementPort {
         for extension in extensions {
             summaries.push(
                 self.search_summary(&extension, credential_gate, caller)
+                    .await?,
+            );
+        }
+        // Owner-registered packages never enter the shared catalog (boot-leak
+        // invariant), so they are searched separately and overlaid here —
+        // path sharding scopes the overlay to the calling tenant-owner.
+        let owner_overlay =
+            search_with_owner_overlay_for_scope(self.filesystem.as_ref(), scope, query).await?;
+        for extension in &owner_overlay {
+            summaries.push(
+                self.search_summary(extension, credential_gate, caller)
                     .await?,
             );
         }
@@ -431,9 +444,9 @@ impl RebornLocalExtensionManagementPort {
 
     pub(crate) async fn list_installed(
         &self,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let summaries = self.installed_summaries(caller).await?;
+        let summaries = self.installed_summaries(scope).await?;
         let count = summaries.len();
         Ok(response_with_payload(
             None,
@@ -448,8 +461,9 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn project(
         &self,
         package_ref: LifecyclePackageRef,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let caller = &scope.user_id;
         let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
             .installation_store
@@ -466,10 +480,10 @@ impl RebornLocalExtensionManagementPort {
         let install_scope = installation
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
-        let summary = {
-            let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref)?.summary()
-        };
+        let summary = self
+            .resolve_available_for_scope(&package_ref, scope)
+            .await?
+            .summary();
         Ok(response_with_payload(
             Some(package_ref),
             phase,
@@ -551,8 +565,9 @@ impl RebornLocalExtensionManagementPort {
 
     async fn installed_summaries(
         &self,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductWorkflowError> {
+        let caller = &scope.user_id;
         let installations = self
             .installation_store
             .list_installations()
@@ -575,12 +590,8 @@ impl RebornLocalExtensionManagementPort {
             if is_internal_extension_package_ref(&package_ref) {
                 continue;
             }
-            let available = {
-                let catalog = self.catalog.read().await;
-                let Ok(available) = catalog.resolve(&package_ref) else {
-                    continue;
-                };
-                available
+            let Ok(available) = self.resolve_available_for_scope(&package_ref, scope).await else {
+                continue;
             };
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
@@ -589,6 +600,28 @@ impl RebornLocalExtensionManagementPort {
             });
         }
         Ok(summaries)
+    }
+
+    /// Resolve a package the way every live (non-boot) path must: the shared
+    /// first-party catalog first — its read lock held only for the synchronous
+    /// lookup, never across an await — then the CALLER's registered set, since
+    /// registered packages never enter the shared catalog (boot-leak
+    /// invariant). A foreign owner's registered package resolves as not-found.
+    async fn resolve_available_for_scope(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        scope: &ResourceScope,
+    ) -> Result<Arc<AvailableExtensionPackage>, ProductWorkflowError> {
+        let catalog_hit = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(package_ref).ok()
+        };
+        if let Some(available) = catalog_hit {
+            return Ok(available);
+        }
+        resolve_registered_for_scope(self.filesystem.as_ref(), scope, package_ref)
+            .await
+            .map(Arc::new)
     }
 
     async fn search_summary(
@@ -723,17 +756,20 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn install(
         &self,
         package_ref: LifecyclePackageRef,
-        caller: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let caller = &scope.user_id;
         // Snapshot the package before taking `operation_lock`. The catalog
         // lock must not be held across installation-store, filesystem, or
-        // credential awaits. Acquiring the read lock first preserves the
-        // catalog-before-operation ordering used by `import_bundle` without
-        // retaining a borrow into the catalog.
-        let available = {
-            let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref)?
-        };
+        // credential awaits — `resolve_available_for_scope` holds the read
+        // lock only for the synchronous catalog lookup, preserving the
+        // catalog-before-operation ordering used by `import_bundle`. The
+        // registered-set fallback is caller-scoped, so a foreign owner's
+        // registered package is not-found here — which is what makes the
+        // operator-eviction arm below unreachable for registered ids.
+        let available = self
+            .resolve_available_for_scope(&package_ref, scope)
+            .await?;
         let _operation_guard = self.operation_lock.lock().await;
         let installation_id =
             ExtensionInstallationId::new(available.package.id.as_str().to_string())
@@ -750,12 +786,21 @@ impl RebornLocalExtensionManagementPort {
             // already registered, materialized, and (if enabled) published,
             // so there is nothing to compensate.
             Some(existing) => {
-                let new_owner = decide_install_on_existing(
-                    &available.package.id,
-                    existing.owner(),
-                    caller,
-                    &self.tenant_operator_user_id,
-                )?;
+                // A registered package's row is ALWAYS the singleton
+                // registration owner — never `decide_install_on_existing`,
+                // whose operator arm would evict the row to `Tenant` and leak
+                // the private tool tenant-wide when the registering owner IS
+                // the operator (design point 5: no membership for registered
+                // packages).
+                let new_owner = match registration_owner(&available.package.manifest.source) {
+                    Some(owner) => owner,
+                    None => decide_install_on_existing(
+                        &available.package.id,
+                        existing.owner(),
+                        caller,
+                        &self.tenant_operator_user_id,
+                    )?,
+                };
                 self.installation_store
                     .upsert_installation(existing.with_owner(new_owner))
                     .await
@@ -807,7 +852,13 @@ impl RebornLocalExtensionManagementPort {
                 ),
             });
         }
-        let owner = derive_owner(caller, &self.tenant_operator_user_id);
+        // A user-registered package's row carries the MANIFEST owner — never
+        // `derive_owner`, whose operator arm would produce `Tenant` and leak
+        // the registration tenant-wide. With the row owner set, every
+        // ownership-aware reader (list/search/grants/operator-tool catalog/
+        // approval gate) filters registered installs with zero extra code.
+        let owner = registration_owner(&available.package.manifest.source)
+            .unwrap_or_else(|| derive_owner(caller, &self.tenant_operator_user_id));
         let plan = prepare_install(available, owner)?;
         self.register_lifecycle_package(&available.package).await?;
 
@@ -2246,6 +2297,56 @@ fn extension_ids_from_package_ref(
     let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
         .map_err(map_extension_installation_error)?;
     Ok((extension_id, installation_id))
+}
+
+/// The remove path resolves its acting caller as actor-or-scope-user; the
+/// list/summaries reads it delegates to are scoped by `scope.user_id`, so
+/// re-point the scope at that caller before delegating.
+fn scope_for_caller(scope: &ResourceScope, caller: &UserId) -> ResourceScope {
+    let mut caller_scope = scope.clone();
+    caller_scope.user_id = caller.clone();
+    caller_scope
+}
+
+/// The installation-row owner a user-registered package must carry: the
+/// singleton MANIFEST owner (design point 2). `None` for every other source —
+/// those derive ownership from the caller via `derive_owner` /
+/// `decide_install_on_existing`.
+fn registration_owner(source: &ManifestSource) -> Option<InstallationOwner> {
+    match source {
+        ManifestSource::UserRegistered { owner, .. } => {
+            Some(InstallationOwner::user(owner.clone()))
+        }
+        ManifestSource::HostBundled
+        | ManifestSource::InstalledLocal
+        | ManifestSource::RegistryInstalled => None,
+    }
+}
+
+/// Effective owner scope (tenant + user) of a registered installation,
+/// ROW-AUTHORITATIVE on the user axis: the installation row's
+/// `InstallationOwner` singleton member wins over the manifest's
+/// `UserRegistered.owner` when the two disagree (a stale re-registered
+/// manifest must not re-point the install at a different user). The tenant
+/// axis has no row counterpart, so it still comes from the manifest
+/// provenance. `None` for non-registered sources and for rows whose owner is
+/// not a singleton member set (registered rows are always singletons —
+/// design point 5).
+#[allow(dead_code)] // consumed by T2 egress gating; asserted by unit tests here until then
+fn effective_owner_scope(
+    installation: &ExtensionInstallation,
+    source: &ManifestSource,
+) -> Option<(TenantId, UserId)> {
+    let ManifestSource::UserRegistered { tenant_id, .. } = source else {
+        return None;
+    };
+    let members = installation.owner().members()?;
+    let mut members = members.iter();
+    let row_owner = members.next()?;
+    if members.next().is_some() {
+        return None;
+    }
+    Some((tenant_id.clone(), row_owner.clone()))
 }
 
 /// Project an installation owner into the wire-facing install scope (#5459
@@ -3911,7 +4012,7 @@ output_schema_ref = "schemas/run.output.json"
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone(), &lifecycle_owner())
+        port.install(slack_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install Slack tools extension");
 
@@ -3932,7 +4033,7 @@ output_schema_ref = "schemas/run.output.json"
         );
 
         let list = port
-            .list_installed(&lifecycle_owner())
+            .list_installed(&lifecycle_owner_scope())
             .await
             .expect("list installed");
         let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = list.payload
@@ -3943,7 +4044,7 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(extensions[0].summary.package_ref.id.as_str(), "slack");
 
         let search = port
-            .search("slack", None, &lifecycle_owner())
+            .search("slack", None, &lifecycle_owner_scope())
             .await
             .expect("search slack");
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload
@@ -3994,7 +4095,7 @@ output_schema_ref = "schemas/run.output.json"
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone(), &lifecycle_owner())
+        port.install(slack_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install public Slack extension");
 
@@ -4050,7 +4151,7 @@ output_schema_ref = "schemas/run.output.json"
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone(), &lifecycle_owner())
+        port.install(slack_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install public Slack extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4104,7 +4205,7 @@ output_schema_ref = "schemas/run.output.json"
             .expect("seed builtin package");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4199,7 +4300,7 @@ output_schema_ref = "schemas/run.output.json"
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
         let egress = Arc::new(HostedMcpDiscoveryEgress::default());
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install Notion MCP");
         port.activate_with_prechecked_credentials_for_test(
@@ -4257,7 +4358,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install Notion MCP");
         let activate = port
@@ -4297,7 +4398,7 @@ output_schema_ref = "schemas/run.output.json"
         };
         let calls = Arc::clone(&credential_gate.calls);
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install Notion MCP");
         let error = port
@@ -4345,7 +4446,7 @@ output_schema_ref = "schemas/run.output.json"
         let (egress, tools_list_started, release_tools_list) =
             BlockingToolsListHostedMcpEgress::new();
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install Notion MCP");
         let activation = tokio::spawn({
@@ -4402,7 +4503,7 @@ output_schema_ref = "schemas/run.output.json"
             TrustClass::Sandbox
         );
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4455,7 +4556,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
         let error = port
@@ -4499,7 +4600,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
         let error = port
@@ -4580,7 +4681,7 @@ output_schema_ref = "schemas/run.output.json"
         let extension_id = ExtensionId::new("fixture").expect("valid extension id");
         let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
         installation_store
@@ -4621,7 +4722,7 @@ output_schema_ref = "schemas/run.output.json"
             );
 
         let error = port
-            .search("fixture", None, &lifecycle_owner())
+            .search("fixture", None, &lifecycle_owner_scope())
             .await
             .expect_err("search reports installation-store read failure");
 
@@ -4641,7 +4742,7 @@ output_schema_ref = "schemas/run.output.json"
             );
 
         let error = port
-            .search("fixture", None, &lifecycle_owner())
+            .search("fixture", None, &lifecycle_owner_scope())
             .await
             .expect_err("search reports mismatched installation row");
 
@@ -4661,7 +4762,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4699,7 +4800,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4845,7 +4946,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4939,7 +5040,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4989,7 +5090,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -5893,7 +5994,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install credentialed extension");
         let extension_id = ExtensionId::new("github").expect("valid extension id");
@@ -6012,7 +6113,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -6075,7 +6176,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -6140,7 +6241,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone(), &lifecycle_owner())
+        port.install(package_ref.clone(), &lifecycle_owner_scope())
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -7991,6 +8092,10 @@ output_schema_ref = "schemas/run.output.json"
         UserId::new("lifecycle-owner").expect("valid user")
     }
 
+    fn lifecycle_owner_scope() -> ResourceScope {
+        hosted_mcp_scope("lifecycle-owner")
+    }
+
     fn test_extension_trust_policy() -> Arc<HostTrustPolicy> {
         Arc::new(
             HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
@@ -8333,6 +8438,43 @@ output_schema_ref = "schemas/search.output.json"
             &contracts,
         )
         .expect("fixture manifest record")
+    }
+
+    /// The effective owner scope is ROW-authoritative on the user axis: a
+    /// stale manifest whose `UserRegistered.owner` disagrees with the
+    /// installation row's singleton member must not re-point the install at
+    /// the manifest's user. Tenant still comes from the manifest provenance.
+    #[test]
+    fn effective_owner_scope_prefers_row_owner_over_stale_manifest_owner() {
+        let row_owner = UserId::new("row-owner").expect("valid user");
+        let stale_manifest_owner = UserId::new("stale-manifest-owner").expect("valid user");
+        let tenant = TenantId::new("tenant-a").expect("valid tenant");
+        let source = ManifestSource::UserRegistered {
+            tenant_id: tenant.clone(),
+            owner: stale_manifest_owner,
+        };
+        let extension_id = ExtensionId::new("fixture").expect("valid extension id");
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new("fixture").expect("valid installation"),
+            extension_id.clone(),
+            ExtensionActivationState::Installed,
+            ExtensionManifestRef::new(extension_id, None),
+            Vec::new(),
+            chrono::Utc::now(),
+            InstallationOwner::user(row_owner.clone()),
+        )
+        .expect("registered installation");
+
+        assert_eq!(
+            effective_owner_scope(&installation, &source),
+            Some((tenant, row_owner)),
+            "row owner must win over the stale manifest owner"
+        );
+        assert_eq!(
+            effective_owner_scope(&installation, &ManifestSource::HostBundled),
+            None,
+            "non-registered sources have no effective owner scope"
+        );
     }
 
     fn fixture_installation(
