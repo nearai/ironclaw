@@ -48,7 +48,7 @@ use ironclaw_turns::{
         ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
     },
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
@@ -67,7 +67,45 @@ const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid to
 const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
+const MODEL_USAGE_TARGET: &str = "ironclaw_runner::model_usage";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
+
+fn trace_model_usage<P: LlmProvider + ?Sized>(
+    provider: &P,
+    operation: &'static str,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+) {
+    if !tracing::enabled!(target: MODEL_USAGE_TARGET, tracing::Level::INFO) {
+        return;
+    }
+    let (input_rate, output_rate) = provider.cost_per_token();
+    let estimated_usd = provider.calculate_cost(input_tokens, output_tokens);
+    info!(
+        target: MODEL_USAGE_TARGET,
+        "REBORN_INFERENCE_USAGE operation={} model={} usage_available=true input_tokens={} output_tokens={} cache_read_input_tokens={} cache_creation_input_tokens={} input_usd_per_token={} output_usd_per_token={} estimated_usd={}",
+        operation,
+        provider.active_model_name(),
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+        input_rate,
+        output_rate,
+        estimated_usd,
+    );
+}
+
+fn trace_unpriced_model_call<P: LlmProvider + ?Sized>(provider: &P, operation: &'static str) {
+    info!(
+        target: MODEL_USAGE_TARGET,
+        "REBORN_INFERENCE_USAGE operation={} model={} usage_available=false",
+        operation,
+        provider.active_model_name(),
+    );
+}
 
 fn trace_model_latency_ok(
     operation: &'static str,
@@ -1159,6 +1197,7 @@ where
                     response
                 }
                 Err(error) => {
+                    trace_unpriced_model_call(provider, "provider_complete_with_tools");
                     trace_model_latency_error(
                         "provider_complete_with_tools",
                         &replay_identity,
@@ -1169,6 +1208,14 @@ where
                     return Err(map_provider_error(error));
                 }
             };
+            trace_model_usage(
+                provider,
+                "provider_complete_with_tools",
+                response.input_tokens,
+                response.output_tokens,
+                response.cache_read_input_tokens,
+                response.cache_creation_input_tokens,
+            );
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             let host_response_started_at = live_latency_started_at();
@@ -1224,6 +1271,10 @@ where
                             response
                         }
                         Err(error) => {
+                            trace_unpriced_model_call(
+                                provider,
+                                "provider_complete_with_tools_repair",
+                            );
                             trace_model_latency_error(
                                 "provider_complete_with_tools_repair",
                                 &replay_identity,
@@ -1234,6 +1285,14 @@ where
                             return Err(map_provider_error(error));
                         }
                     };
+                    trace_model_usage(
+                        provider,
+                        "provider_complete_with_tools_repair",
+                        response.input_tokens,
+                        response.output_tokens,
+                        response.cache_read_input_tokens,
+                        response.cache_creation_input_tokens,
+                    );
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
@@ -1309,6 +1368,7 @@ where
             response
         }
         Err(error) => {
+            trace_unpriced_model_call(provider, "provider_complete");
             trace_model_latency_error(
                 "provider_complete",
                 &replay_identity,
@@ -1319,6 +1379,14 @@ where
             return Err(map_provider_error(error));
         }
     };
+    trace_model_usage(
+        provider,
+        "provider_complete",
+        response.input_tokens,
+        response.output_tokens,
+        0,
+        0,
+    );
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),

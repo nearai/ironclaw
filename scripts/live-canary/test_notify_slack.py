@@ -193,6 +193,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
             (lane_dir / "results.json").write_text(
                 json.dumps(
                     {
+                        "inference_usage": {
+                            "call_count": 2,
+                            "input_tokens": 150,
+                            "output_tokens": 30,
+                            "estimated_usd": "0.000210",
+                            "unpriced_call_count": 0,
+                        },
                         "results": [
                             {
                                 "provider": "reborn-webui-v2",
@@ -202,6 +209,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
                                 "details": {
                                     "case": "qa_2a_gmail_connect",
                                     "gate": "requires live Google browser consent state",
+                                    "inference_usage": {
+                                        "call_count": 2,
+                                        "input_tokens": 150,
+                                        "output_tokens": 30,
+                                        "estimated_usd": "0.000210",
+                                        "unpriced_call_count": 0,
+                                    },
                                 },
                             },
                             {
@@ -260,10 +274,19 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(report.tests, 2)
         self.assertEqual(report.passed, 1)
         self.assertEqual(report.failed, 1)
+        self.assertEqual(report.inference_call_count, 2)
+        self.assertEqual(report.inference_input_tokens, 150)
+        self.assertEqual(report.inference_output_tokens, 30)
+        self.assertEqual(report.inference_estimated_usd, notify.Decimal("0.000210"))
         self.assertEqual(len(report.reborn_qa_cases), 2)
         self.assertEqual(report.reborn_qa_cases[0].rows, ("2A",))
         self.assertEqual(report.reborn_qa_cases[0].feature, "Gmail connection flow")
         self.assertEqual(report.reborn_qa_cases[0].message, "")
+        self.assertEqual(report.reborn_qa_cases[0].inference_call_count, 2)
+        self.assertEqual(
+            report.reborn_qa_cases[0].inference_estimated_usd,
+            notify.Decimal("0.000210"),
+        )
         self.assertEqual(len(report.reborn_qa_cases[0].tool_calls), 1)
         self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].name, "gmail.list_messages")
         self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].args_hash, "1234567890123")
@@ -293,6 +316,10 @@ class RebornQaSlackReportTests(unittest.TestCase):
             tests=3,
             duration_s=1.2,
             status="fail",
+            inference_call_count=2,
+            inference_input_tokens=150,
+            inference_output_tokens=30,
+            inference_estimated_usd=notify.Decimal("0.000210"),
             reborn_qa_cases=[
                 notify.RebornQaCaseReport(
                     rows=("2A",),
@@ -300,6 +327,10 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     feature="Gmail connection flow",
                     success=True,
                     latency_ms=1200,
+                    inference_call_count=2,
+                    inference_input_tokens=150,
+                    inference_output_tokens=30,
+                    inference_estimated_usd=notify.Decimal("0.000210"),
                     tool_calls=[
                         notify.RebornQaToolCall(
                             name="gmail.list_messages",
@@ -356,6 +387,17 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
         qa_sections = [text for text in section_texts if "*QA 2*" in text]
         self.assertEqual(len(qa_sections), 1)
+        self.assertIn("*Inference:* 2 calls", qa_sections[0])
+        self.assertIn("estimated `$0.000210`", qa_sections[0])
+        context_texts = [
+            element["text"]
+            for block in payload["blocks"]
+            if block.get("type") == "context"
+            for element in block.get("elements", [])
+        ]
+        self.assertTrue(
+            any("*Reborn inference estimate:* `$0.000210`" in text for text in context_texts)
+        )
         self.assertTrue(
             any(
                 "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/3 passed"

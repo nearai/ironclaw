@@ -58,6 +58,13 @@ They must pass the `reborn-live-canary-pr` GitHub environment gate and have an
 approving review for the exact PR head commit from a collaborator with write
 access. Scheduled and manual default-branch runs do not require this PR gate.
 
+The lane records provider-reported input/output token counts and an estimated
+USD cost for each Reborn and semantic-judge inference. `results.json` contains
+per-case and lane totals, and the final Slack report aggregates the full run.
+The estimate uses the provider's active per-token rates. Calls that fail before
+the provider returns usage are reported as unpriced rather than counted as
+zero cost.
+
 ## Local Commands
 
 Run the public live smoke lane:

@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 MODEL = "claude-haiku-4-5-20251001"
@@ -78,6 +79,11 @@ class RebornQaCaseReport:
     message: str = ""
     tool_calls: list["RebornQaToolCall"] = field(default_factory=list)
     debug_paths: list[str] = field(default_factory=list)
+    inference_call_count: int = 0
+    inference_input_tokens: int = 0
+    inference_output_tokens: int = 0
+    inference_estimated_usd: Decimal = Decimal(0)
+    inference_unpriced_call_count: int = 0
 
 
 @dataclass
@@ -110,6 +116,11 @@ class LaneReport:
     root_cause: str = ""
     fix: str = ""
     reborn_qa_cases: list[RebornQaCaseReport] = field(default_factory=list)
+    inference_call_count: int = 0
+    inference_input_tokens: int = 0
+    inference_output_tokens: int = 0
+    inference_estimated_usd: Decimal = Decimal(0)
+    inference_unpriced_call_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -180,6 +191,17 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
     results = data.get("results") or []
     if not isinstance(results, list):
         return
+    usage = data.get("inference_usage")
+    if isinstance(usage, dict):
+        report.inference_call_count = _non_negative_int(usage.get("call_count"))
+        report.inference_input_tokens = _non_negative_int(usage.get("input_tokens"))
+        report.inference_output_tokens = _non_negative_int(usage.get("output_tokens"))
+        report.inference_estimated_usd = _non_negative_decimal(
+            usage.get("estimated_usd")
+        )
+        report.inference_unpriced_call_count = _non_negative_int(
+            usage.get("unpriced_call_count")
+        )
     for entry in results:
         if not isinstance(entry, dict):
             continue
@@ -219,6 +241,22 @@ def _trim_slack_text(value: object, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
+def _non_negative_decimal(value: object) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(0)
+    return parsed if parsed >= 0 else Decimal(0)
 
 
 def _trim_slack_block_text(value: object, limit: int = 2900) -> str:
@@ -391,6 +429,9 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
             or case.replace("_", " ")
         )
         latency = entry.get("latency_ms")
+        inference_usage = details.get("inference_usage")
+        if not isinstance(inference_usage, dict):
+            inference_usage = {}
         tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
         debug_paths = []
         if not entry.get("success"):
@@ -410,6 +451,21 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 message=_reborn_failure_message(entry),
                 tool_calls=tool_calls,
                 debug_paths=debug_paths,
+                inference_call_count=_non_negative_int(
+                    inference_usage.get("call_count")
+                ),
+                inference_input_tokens=_non_negative_int(
+                    inference_usage.get("input_tokens")
+                ),
+                inference_output_tokens=_non_negative_int(
+                    inference_usage.get("output_tokens")
+                ),
+                inference_estimated_usd=_non_negative_decimal(
+                    inference_usage.get("estimated_usd")
+                ),
+                inference_unpriced_call_count=_non_negative_int(
+                    inference_usage.get("unpriced_call_count")
+                ),
             )
         )
     report.reborn_qa_cases = cases
@@ -671,6 +727,20 @@ def _format_reborn_qa_group(
         f"{status} *QA {group}* — {passed}/{len(cases)} passed{duration}",
         f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
     ]
+    inference_calls = sum(case.inference_call_count for case in cases)
+    if inference_calls:
+        inference_usd = sum(
+            (case.inference_estimated_usd for case in cases),
+            Decimal(0),
+        )
+        input_tokens = sum(case.inference_input_tokens for case in cases)
+        output_tokens = sum(case.inference_output_tokens for case in cases)
+        unpriced = sum(case.inference_unpriced_call_count for case in cases)
+        unpriced_text = f"; {unpriced} unpriced" if unpriced else ""
+        lines.append(
+            f"*Inference:* {inference_calls} calls; {input_tokens:,} input + "
+            f"{output_tokens:,} output tokens; estimated `${inference_usd:.6f}`{unpriced_text}"
+        )
     lines.extend(_format_reborn_failure_lines(cases, run_url))
     lines.extend(_format_reborn_tool_summary(cases))
     blocks: list[dict] = []
@@ -775,6 +845,31 @@ def slack_payload(
     if context_text:
         blocks.append(
             {"type": "context", "elements": [{"type": "mrkdwn", "text": context_text}]}
+        )
+    inference_calls = sum(r.inference_call_count for r in reports)
+    if inference_calls:
+        inference_usd = sum(
+            (r.inference_estimated_usd for r in reports),
+            Decimal(0),
+        )
+        input_tokens = sum(r.inference_input_tokens for r in reports)
+        output_tokens = sum(r.inference_output_tokens for r in reports)
+        unpriced = sum(r.inference_unpriced_call_count for r in reports)
+        unpriced_text = f" • {unpriced} calls unpriced" if unpriced else ""
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Reborn inference estimate:* `${inference_usd:.6f}` • "
+                            f"{inference_calls} calls • {input_tokens:,} input + "
+                            f"{output_tokens:,} output tokens{unpriced_text}"
+                        ),
+                    }
+                ],
+            }
         )
     for r in reports:
         renders_reborn_qa_groups = bool(r.reborn_qa_cases)

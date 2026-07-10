@@ -45,7 +45,11 @@ async def _judge_assistant_reply_completion(
             body = response.json()
             content = _completion_content(body)
     except Exception as exc:
-        return {"enabled": True, "error": str(exc)}
+        return {
+            "enabled": True,
+            "error": str(exc),
+            "inference_usage": _unpriced_completion_usage(),
+        }
 
     parsed = _parse_json_object(content)
     if not isinstance(parsed, dict):
@@ -53,8 +57,11 @@ async def _judge_assistant_reply_completion(
             "enabled": True,
             "error": "judge response was not a JSON object",
             "response_excerpt": str(content)[-500:],
+            "inference_usage": _completion_usage(body)
+            or _unpriced_completion_usage(),
         }
     parsed["enabled"] = True
+    parsed["inference_usage"] = _completion_usage(body) or _unpriced_completion_usage()
     return parsed
 
 
@@ -179,6 +186,46 @@ def _completion_content(body: object) -> object:
     if not isinstance(message, dict):
         return ""
     return message.get("content") or ""
+
+
+def _completion_usage(body: object) -> dict[str, object] | None:
+    if not isinstance(body, dict):
+        return None
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    def token_count(name: str) -> int:
+        value = usage.get(name)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    prompt_details = usage.get("prompt_tokens_details")
+    cached_tokens = 0
+    if isinstance(prompt_details, dict):
+        value = prompt_details.get("cached_tokens")
+        if isinstance(value, int) and value >= 0:
+            cached_tokens = value
+    return {
+        "source": "semantic_judge",
+        "model": str(body.get("model") or _judge_model()),
+        "input_tokens": token_count("prompt_tokens"),
+        "output_tokens": token_count("completion_tokens"),
+        "cache_read_input_tokens": cached_tokens,
+        "cache_creation_input_tokens": 0,
+        "pricing_source": "pending_product_rate_match",
+    }
+
+
+def _unpriced_completion_usage() -> dict[str, object]:
+    return {
+        "source": "semantic_judge",
+        "model": _judge_model(),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "pricing_source": "provider_usage_unavailable",
+    }
 
 
 def _parse_json_object(text: object) -> object:

@@ -24,6 +24,7 @@ import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -739,6 +740,18 @@ def server_env(
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    rust_log = _log_filter_with_model_usage(
+        os.environ.get(
+            "RUST_LOG",
+            "ironclaw=warn,ironclaw_reborn=warn,ironclaw_reborn_webui_ingress=info",
+        )
+    )
+    reborn_log = _log_filter_with_model_usage(
+        os.environ.get(
+            "IRONCLAW_REBORN_LOG",
+            "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
+        )
+    )
     env.update(
         {
             "HOME": str(process_home),
@@ -749,15 +762,19 @@ def server_env(
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
             "RUST_BACKTRACE": "1",
-            "RUST_LOG": os.environ.get(
-                "RUST_LOG",
-                "ironclaw=warn,ironclaw_runner=warn,ironclaw_reborn_webui_ingress=info",
-            ),
+            "RUST_LOG": rust_log,
+            "IRONCLAW_REBORN_LOG": reborn_log,
         }
     )
     env.setdefault("IRONCLAW_TRIGGER_POLLER_ENABLED", "true")
     env.setdefault("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "1")
     return env
+
+
+def _log_filter_with_model_usage(value: str) -> str:
+    if "ironclaw_runner::model_usage" in value:
+        return value
+    return f"{value},ironclaw_runner::model_usage=info"
 
 
 async def start_reborn_server(
@@ -1339,18 +1356,22 @@ async def _live_chat_case(
             },
         )
     except Exception as exc:
+        failure_details: dict[str, object] = {
+            "error": _exc_text(exc),
+            "prompt": prompt,
+            "marker": marker,
+            "required_text": required_text,
+            **(extra_details or {}),
+            **observed,
+        }
+        semantic_judge = getattr(exc, "semantic_judge", None)
+        if isinstance(semantic_judge, dict):
+            failure_details["semantic_judge"] = semantic_judge
         return _result(
             case_name,
             False,
             started,
-            {
-                "error": _exc_text(exc),
-                "prompt": prompt,
-                "marker": marker,
-                "required_text": required_text,
-                **(extra_details or {}),
-                **observed,
-            },
+            failure_details,
         )
 
 
@@ -1568,13 +1589,16 @@ async def _wait_for_assistant_reply(
                 ),
                 semantic_judge=semantic_judge,
             )
-    raise AssertionError(
+    error = AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
         f"latest_final_reply_state={last_final_reply_state!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
     )
+    if semantic_judge is not None:
+        setattr(error, "semantic_judge", semantic_judge)
+    raise error
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
@@ -6850,6 +6874,187 @@ def write_trace_index(output_dir: Path, traces: list[dict[str, object]]) -> Path
     return path
 
 
+INFERENCE_USAGE_MARKER = "REBORN_INFERENCE_USAGE "
+SERVER_START_MARKER = "--- ironclaw-reborn serve start "
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
+def _decimal(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _product_inference_usage(output_dir: Path) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for name in ("ironclaw-reborn-serve.stdout.log", "ironclaw-reborn-serve.stderr.log"):
+        path = output_dir / name
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        segment = text.rsplit(SERVER_START_MARKER, 1)[-1]
+        for line in segment.splitlines():
+            if INFERENCE_USAGE_MARKER not in line:
+                continue
+            fields = dict(
+                token.split("=", 1)
+                for token in line.split(INFERENCE_USAGE_MARKER, 1)[1].split()
+                if "=" in token
+            )
+            if fields.get("usage_available") == "false":
+                events.append(
+                    {
+                        "source": "product",
+                        "operation": str(fields.get("operation") or "unknown"),
+                        "model": str(fields.get("model") or "unknown"),
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "pricing_source": "provider_usage_unavailable",
+                    }
+                )
+                continue
+            input_rate = _decimal(fields.get("input_usd_per_token"))
+            output_rate = _decimal(fields.get("output_usd_per_token"))
+            estimated_usd = _decimal(fields.get("estimated_usd"))
+            if input_rate is None or output_rate is None or estimated_usd is None:
+                continue
+            events.append(
+                {
+                    "source": "product",
+                    "operation": str(fields.get("operation") or "unknown"),
+                    "model": str(fields.get("model") or "unknown"),
+                    "input_tokens": _non_negative_int(fields.get("input_tokens")),
+                    "output_tokens": _non_negative_int(fields.get("output_tokens")),
+                    "cache_read_input_tokens": _non_negative_int(
+                        fields.get("cache_read_input_tokens")
+                    ),
+                    "cache_creation_input_tokens": _non_negative_int(
+                        fields.get("cache_creation_input_tokens")
+                    ),
+                    "input_usd_per_token": str(input_rate),
+                    "output_usd_per_token": str(output_rate),
+                    "estimated_usd": str(estimated_usd),
+                    "pricing_source": "provider_active_rate",
+                }
+            )
+    return events
+
+
+def _semantic_judge_usage(value: object) -> list[dict[str, object]]:
+    found: list[dict[str, object]] = []
+    if isinstance(value, dict):
+        if value.get("source") == "semantic_judge":
+            found.append(dict(value))
+        else:
+            for child in value.values():
+                found.extend(_semantic_judge_usage(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_semantic_judge_usage(child))
+    return found
+
+
+def _summarize_inference_usage(events: list[dict[str, object]]) -> dict[str, object]:
+    rates_by_model: dict[str, tuple[Decimal, Decimal]] = {}
+    for event in events:
+        input_rate = _decimal(event.get("input_usd_per_token"))
+        output_rate = _decimal(event.get("output_usd_per_token"))
+        if event.get("source") == "product" and input_rate is not None and output_rate is not None:
+            rates_by_model[str(event.get("model") or "unknown")] = (input_rate, output_rate)
+
+    priced_events: list[dict[str, object]] = []
+    unpriced_calls = 0
+    total_usd = Decimal(0)
+    for event in events:
+        event = dict(event)
+        cost = _decimal(event.get("estimated_usd"))
+        if (
+            cost is None
+            and event.get("source") == "semantic_judge"
+            and event.get("pricing_source") != "provider_usage_unavailable"
+        ):
+            rates = rates_by_model.get(str(event.get("model") or "unknown"))
+            if rates is not None:
+                cost = (
+                    Decimal(_non_negative_int(event.get("input_tokens"))) * rates[0]
+                    + Decimal(_non_negative_int(event.get("output_tokens"))) * rates[1]
+                )
+                event["input_usd_per_token"] = str(rates[0])
+                event["output_usd_per_token"] = str(rates[1])
+                event["estimated_usd"] = str(cost)
+                event["pricing_source"] = "matched_product_rate"
+        if cost is None:
+            unpriced_calls += 1
+        else:
+            total_usd += cost
+        priced_events.append(event)
+
+    return {
+        "call_count": len(priced_events),
+        "input_tokens": sum(_non_negative_int(e.get("input_tokens")) for e in priced_events),
+        "output_tokens": sum(_non_negative_int(e.get("output_tokens")) for e in priced_events),
+        "cache_read_input_tokens": sum(
+            _non_negative_int(e.get("cache_read_input_tokens")) for e in priced_events
+        ),
+        "cache_creation_input_tokens": sum(
+            _non_negative_int(e.get("cache_creation_input_tokens")) for e in priced_events
+        ),
+        "estimated_usd": str(total_usd),
+        "unpriced_call_count": unpriced_calls,
+        "cost_kind": "estimated_from_provider_reported_tokens_and_active_rates",
+        "events": priced_events,
+    }
+
+
+def _case_inference_usage(output_dir: Path, result: ProbeResult) -> dict[str, object]:
+    events = _product_inference_usage(output_dir)
+    events.extend(_semantic_judge_usage(result.details))
+    return _summarize_inference_usage(events)
+
+
+def _write_results_inference_summary(path: Path, results: list[ProbeResult]) -> None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    case_summaries = [
+        result.details.get("inference_usage")
+        for result in results
+        if isinstance(result.details.get("inference_usage"), dict)
+    ]
+    payload["inference_usage"] = {
+        "call_count": sum(_non_negative_int(item.get("call_count")) for item in case_summaries),
+        "input_tokens": sum(_non_negative_int(item.get("input_tokens")) for item in case_summaries),
+        "output_tokens": sum(_non_negative_int(item.get("output_tokens")) for item in case_summaries),
+        "estimated_usd": str(
+            sum(
+                (
+                    _decimal(item.get("estimated_usd")) or Decimal(0)
+                    for item in case_summaries
+                ),
+                Decimal(0),
+            )
+        ),
+        "unpriced_call_count": sum(
+            _non_negative_int(item.get("unpriced_call_count")) for item in case_summaries
+        ),
+        "cost_kind": "estimated_from_provider_reported_tokens_and_active_rates",
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def write_preflight(output_dir: Path, prepared_home: PreparedRebornHome) -> Path:
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -7163,6 +7368,7 @@ async def run_cases(args: argparse.Namespace) -> int:
         )
         if not first_base_url:
             first_base_url = base_url
+        case_result: ProbeResult | None = None
         try:
             ctx = LiveQaContext(
                 base_url=base_url,
@@ -7207,6 +7413,7 @@ async def run_cases(args: argparse.Namespace) -> int:
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
             result = await CASES[name].fn(ctx)
             result = _attach_browser_diagnostics(args.output_dir, result)
+            case_result = result
             results.append(result)
             print(
                 f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
@@ -7215,6 +7422,11 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
         finally:
             stop_process(proc)
+            if case_result is not None:
+                case_result.details["inference_usage"] = _case_inference_usage(
+                    args.output_dir,
+                    case_result,
+                )
             trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
             trace_exports.append(trace_export)
             print(
@@ -7223,6 +7435,7 @@ async def run_cases(args: argparse.Namespace) -> int:
                 flush=True,
             )
     results_path = write_results(args.output_dir, results, first_base_url)
+    _write_results_inference_summary(results_path, results)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
     green_explanation_path = write_green_run_explanation(args.output_dir, results)
     print(f"[reborn-webui-v2-live-qa] results={results_path}", flush=True)

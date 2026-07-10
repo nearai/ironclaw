@@ -1071,7 +1071,7 @@ impl LlmProvider for NearAiChatProvider {
         {
             return rates;
         }
-        costs::model_cost(&model).unwrap_or_else(costs::default_cost)
+        remote_model_fallback_cost(&model)
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -1202,6 +1202,18 @@ struct ChatCompletionMessage {
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatCompletionToolCall>>,
+}
+
+fn remote_model_fallback_cost(model: &str) -> (Decimal, Decimal) {
+    let rates = costs::model_cost(model).unwrap_or_else(costs::default_cost);
+    if rates == (Decimal::ZERO, Decimal::ZERO) && !is_explicit_free_model(model) {
+        return costs::default_cost();
+    }
+    rates
+}
+
+fn is_explicit_free_model(model: &str) -> bool {
+    model.ends_with(":free") || model == "openrouter/free" || model == "free"
 }
 
 // -- Pricing fetch types and logic -----------------------------------------
@@ -2907,6 +2919,36 @@ data: [DONE]
         let (default_in, default_out) = costs::default_cost();
         assert_eq!(input, default_in);
         assert_eq!(output, default_out);
+    }
+
+    #[test]
+    fn test_cost_per_token_does_not_treat_remote_nearai_models_as_local_free() {
+        let mut cfg = test_nearai_config("http://127.0.0.1:8318");
+        cfg.model = DEFAULT_MODEL.to_string();
+        let provider = NearAiChatProvider::new(cfg, test_session()).expect("provider");
+
+        let (input, output) = provider.cost_per_token();
+        let (default_in, default_out) = costs::default_cost();
+        assert_eq!(input, default_in);
+        assert_eq!(output, default_out);
+
+        provider
+            .set_model("Qwen/Qwen3-32B")
+            .expect("set active model");
+        let (input, output) = provider.cost_per_token();
+        assert_eq!(input, default_in);
+        assert_eq!(output, default_out);
+    }
+
+    #[test]
+    fn test_cost_per_token_preserves_explicit_free_model_fallback() {
+        let mut cfg = test_nearai_config("http://127.0.0.1:8318");
+        cfg.model = "stepfun/step-3.5-flash:free".to_string();
+        let provider = NearAiChatProvider::new(cfg, test_session()).expect("provider");
+
+        let (input, output) = provider.cost_per_token();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
     }
 
     /// Regression: reasoning fallbacks must NOT leak into tool-call responses.

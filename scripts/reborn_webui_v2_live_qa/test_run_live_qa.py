@@ -1254,6 +1254,49 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     )
                 )
 
+    def test_wait_for_assistant_reply_attaches_failed_semantic_judge_to_error(self):
+        response_text = "I found something adjacent but did not complete the requested task."
+        judge_payload = {
+            "completed": False,
+            "confidence": 0.85,
+            "reason": "The response does not complete the task.",
+            "inference_usage": {
+                "source": "semantic_judge",
+                "model": "deepseek-ai/DeepSeek-V4-Flash",
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        }
+
+        async def fake_judge(**_kwargs):
+            return judge_payload
+
+        async def fake_sleep(_seconds):
+            return None
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_judge_assistant_reply_completion",
+                side_effect=fake_judge,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep),
+        ):
+            with self.assertRaisesRegex(AssertionError, "semantic_judge=") as raised:
+                asyncio.run(
+                    run_live_qa._wait_for_assistant_reply(
+                        self._fake_assistant_reply_page(response_text),
+                        marker=None,
+                        required_text=["completed"],
+                        timeout=0.001,
+                        semantic_goal="Complete the requested task.",
+                    )
+                )
+
+        self.assertEqual(getattr(raised.exception, "semantic_judge"), judge_payload)
+
     def test_semantic_judge_passed_respects_confidence_threshold(self):
         with patch.dict(
             os.environ,
@@ -1289,6 +1332,57 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             '{"completed": true}',
         )
+
+    def test_semantic_judge_completion_usage_extracts_provider_counts(self):
+        usage = semantic_judge._completion_usage(
+            {
+                "model": "deepseek-ai/DeepSeek-V4-Flash",
+                "usage": {
+                    "prompt_tokens": 123,
+                    "completion_tokens": 45,
+                    "total_tokens": 168,
+                    "prompt_tokens_details": {"cached_tokens": 12},
+                },
+            }
+        )
+
+        self.assertEqual(
+            usage,
+            {
+                "source": "semantic_judge",
+                "model": "deepseek-ai/DeepSeek-V4-Flash",
+                "input_tokens": 123,
+                "output_tokens": 45,
+                "cache_read_input_tokens": 12,
+                "cache_creation_input_tokens": 0,
+                "pricing_source": "pending_product_rate_match",
+            },
+        )
+
+    def test_semantic_judge_unpriced_usage_is_explicit(self):
+        usage = semantic_judge._unpriced_completion_usage()
+
+        self.assertEqual(usage["source"], "semantic_judge")
+        self.assertEqual(usage["pricing_source"], "provider_usage_unavailable")
+        self.assertEqual(usage["input_tokens"], 0)
+        self.assertEqual(usage["output_tokens"], 0)
+
+    def test_server_env_enables_usage_telemetry_with_custom_log_filters(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict(
+                os.environ,
+                {
+                    "RUST_LOG": "custom_crate=debug",
+                    "IRONCLAW_REBORN_LOG": "ironclaw_reborn=warn",
+                },
+            ):
+                env = run_live_qa.server_env(root / "reborn", root / "process")
+
+        self.assertIn("custom_crate=debug", env["RUST_LOG"])
+        self.assertIn("ironclaw_runner::model_usage=info", env["RUST_LOG"])
+        self.assertIn("ironclaw_reborn=warn", env["IRONCLAW_REBORN_LOG"])
+        self.assertIn("ironclaw_runner::model_usage=info", env["IRONCLAW_REBORN_LOG"])
 
     def test_semantic_judge_json_parser_handles_non_string_inputs(self):
         self.assertIsNone(semantic_judge._parse_json_object(None))
@@ -4715,6 +4809,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
         self.assertIn(
+            "always() &&\n      needs.prepare-reborn-webui-v2-live-qa.result == 'success'",
+            match.group("body"),
+        )
+        self.assertIn(
             "ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}",
             match.group("body"),
         )
@@ -5238,6 +5336,52 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(paths, [tool_index_path, message_path])
             self.assertNotIn(secret_path, paths)
             self.assertEqual(payload["entries"][1]["contents"]["content"], "hello live trace")
+
+    def test_case_inference_usage_aggregates_product_and_judge_calls(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            (output_dir / "ironclaw-reborn-serve.stderr.log").write_text(
+                "old log\n"
+                "--- ironclaw-reborn serve start 2026-07-10T12:00:00Z ---\n"
+                "INFO REBORN_INFERENCE_USAGE operation=provider_complete_with_tools "
+                "model=deepseek-ai/DeepSeek-V4-Flash input_tokens=100 "
+                "output_tokens=20 cache_read_input_tokens=0 "
+                "cache_creation_input_tokens=0 input_usd_per_token=0.000001 "
+                "output_usd_per_token=0.000002 estimated_usd=0.000140\n"
+                "INFO REBORN_INFERENCE_USAGE operation=provider_complete "
+                "model=deepseek-ai/DeepSeek-V4-Flash usage_available=false\n",
+                encoding="utf-8",
+            )
+            result = run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:test",
+                success=True,
+                latency_ms=1,
+                details={
+                    "semantic_judge": {
+                        "inference_usage": {
+                            "source": "semantic_judge",
+                            "model": "deepseek-ai/DeepSeek-V4-Flash",
+                            "input_tokens": 50,
+                            "output_tokens": 10,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                        }
+                    }
+                },
+            )
+
+            summary = run_live_qa._case_inference_usage(output_dir, result)
+
+            self.assertEqual(summary["call_count"], 3)
+            self.assertEqual(summary["input_tokens"], 150)
+            self.assertEqual(summary["output_tokens"], 30)
+            self.assertEqual(summary["estimated_usd"], "0.000210")
+            self.assertEqual(summary["unpriced_call_count"], 1)
+            self.assertEqual(
+                summary["events"][2]["pricing_source"],
+                "matched_product_rate",
+            )
 
     def test_run_cases_isolates_reborn_home_and_preflight_per_selected_case(self):
         async def fake_case(ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
