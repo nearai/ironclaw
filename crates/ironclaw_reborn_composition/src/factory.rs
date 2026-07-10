@@ -2,8 +2,8 @@
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
-    sync::Arc,
     sync::atomic::AtomicBool,
+    sync::{Arc, OnceLock},
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -156,7 +156,7 @@ use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
 };
 use crate::extension_host::lifecycle::{
-    RebornLocalSkillManagementPort, build_local_skill_management_port,
+    RebornLocalLifecycleFacade, RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
@@ -178,6 +178,9 @@ use crate::extension_host::{
     },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::lifecycle_auth_continuation::{
+    LifecycleAuthContinuationDispatcher, LifecycleProductFacadeSlot,
+};
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
@@ -1247,11 +1250,12 @@ fn auth_continuation_dispatcher(
     blocked_auth_snapshot_source: Option<
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
     >,
+    lifecycle: LifecycleProductFacadeSlot,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
     let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
     );
-    match blocked_auth_snapshot_source {
+    let turn_dispatcher = match blocked_auth_snapshot_source {
         // Local paths fan a completed flow out to the caller's other
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
@@ -1264,7 +1268,11 @@ fn auth_continuation_dispatcher(
             ))
         }
         None => single_run,
-    }
+    };
+    Arc::new(LifecycleAuthContinuationDispatcher::new(
+        turn_dispatcher,
+        lifecycle,
+    ))
 }
 
 fn compose_product_auth_services(
@@ -1273,6 +1281,7 @@ fn compose_product_auth_services(
     blocked_auth_snapshot_source: Option<
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
     >,
+    lifecycle: LifecycleProductFacadeSlot,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
@@ -1283,7 +1292,7 @@ fn compose_product_auth_services(
         None => ports,
     };
     let mut services = ports.into_services(
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
+        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source, lifecycle),
         secret_store,
     );
     if let Some(sink) = security_audit_sink {
@@ -1681,6 +1690,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
         AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
+    let lifecycle_auth_continuation_slot: LifecycleProductFacadeSlot = Arc::new(OnceLock::new());
     let product_auth = match product_auth_ports {
         Some(ports) => compose_product_auth_services(
             ports,
@@ -1689,6 +1699,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 as Arc<
                     dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                 >),
+            Arc::clone(&lifecycle_auth_continuation_slot),
             provider_composition,
             security_audit_sink.clone(),
             Arc::clone(&secret_store),
@@ -1726,6 +1737,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
+                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ),
                     Arc::clone(&secret_store),
                 )
@@ -1756,6 +1768,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                             as Arc<
                                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
                             >),
+                        Arc::clone(&lifecycle_auth_continuation_slot),
                     ));
                 let services = match provider_composition.client.clone() {
                     Some(provider_client) => services.with_provider_client(provider_client),
@@ -1854,6 +1867,20 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             &store_graph.local_runtime.channel_connection_facade_slot,
         )),
     );
+    let lifecycle_facade =
+        RebornLocalLifecycleFacade::new(store_graph.local_runtime.skill_management.clone())
+            .with_extension_management(Arc::clone(&extension_management))
+            .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
+            .with_runtime_credential_accounts(
+                product_auth.runtime_credential_account_selection_service(),
+            );
+    let lifecycle_facade: Arc<dyn ironclaw_product_workflow::LifecycleProductFacade> =
+        Arc::new(lifecycle_facade);
+    lifecycle_auth_continuation_slot
+        .set(lifecycle_facade)
+        .map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "extension lifecycle auth continuation facade was already attached".to_string(),
+        })?;
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
@@ -4959,6 +4986,7 @@ where
             as Arc<
                 dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
             >),
+        Arc::new(OnceLock::new()),
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),

@@ -59,7 +59,9 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_product_workflow::{
+    LifecyclePackageKind, RebornServicesApi, WebUiAuthenticatedCaller,
+};
 use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -169,6 +171,7 @@ const RAW_OAUTH_VALUE_MAX_BYTES: usize = 4 * 1024;
 #[derive(Clone)]
 pub(crate) struct ProductAuthRouteState {
     product_auth: Arc<RebornProductAuthServices>,
+    webui_api: Option<Arc<dyn RebornServicesApi>>,
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
@@ -193,6 +196,7 @@ impl ProductAuthRouteState {
     ) -> Self {
         Self {
             product_auth,
+            webui_api: None,
             tenant_id,
             default_agent_id,
             default_project_id,
@@ -206,6 +210,39 @@ impl ProductAuthRouteState {
                 StoredPkceVerifier::expires_at,
             ),
         }
+    }
+
+    pub(crate) fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
+        self.webui_api = Some(webui_api);
+        self
+    }
+
+    async fn require_installed_extension(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        requester_extension: &ExtensionId,
+    ) -> Result<(), ProductAuthRouteFailure> {
+        let Some(webui_api) = self.webui_api.as_ref() else {
+            #[cfg(test)]
+            return Ok(());
+            #[cfg(not(test))]
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        };
+        let inventory = tokio::time::timeout(
+            PRODUCT_AUTH_BACKEND_TIMEOUT,
+            webui_api.list_extensions(caller.clone()),
+        )
+        .await
+        .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+        .map_err(|_| ProductAuthRouteFailure::backend_unavailable())?;
+        let is_installed = inventory.extensions.iter().any(|extension| {
+            extension.package_ref.kind == LifecyclePackageKind::Extension
+                && extension.package_ref.id.as_str() == requester_extension.as_str()
+        });
+        if !is_installed {
+            return Err(ProductAuthRouteFailure::extension_not_installed());
+        }
+        Ok(())
     }
 
     pub(crate) fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
@@ -312,6 +349,7 @@ impl std::fmt::Debug for ProductAuthRouteState {
         let mut builder = formatter.debug_struct("ProductAuthRouteState");
         builder
             .field("product_auth", &"Arc<RebornProductAuthServices>")
+            .field("webui_api", &self.webui_api.is_some())
             .field("tenant_id", &self.tenant_id)
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
@@ -465,6 +503,9 @@ async fn extension_oauth_start_handler(
 ) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let requester_extension =
         ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    state
+        .require_installed_extension(&caller, &requester_extension)
+        .await?;
     if request.provider == SLACK_PERSONAL_PROVIDER_ID {
         #[cfg(feature = "slack-v2-host-beta")]
         return crate::slack::slack_personal_oauth::start_extension_oauth_flow(
@@ -956,6 +997,10 @@ impl ProductAuthRouteFailure {
 
     pub(crate) fn invalid_request() -> Self {
         Self::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
+    }
+
+    pub(crate) fn extension_not_installed() -> Self {
+        Self::new(StatusCode::CONFLICT, AuthErrorCode::InvalidRequest)
     }
 
     pub(crate) fn malformed_callback() -> Self {
@@ -1828,7 +1873,8 @@ mod tests {
             .expect("response body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
         assert_eq!(json["provider"], "notion");
-        assert_eq!(json["continuation"]["type"], "setup_only");
+        assert_eq!(json["continuation"]["type"], "lifecycle_activation");
+        assert_eq!(json["continuation"]["package_ref"], "notion");
         let authorization_url = json["authorization_url"]
             .as_str()
             .expect("authorization url");

@@ -48,6 +48,7 @@ pub(super) async fn oauth_start_handler(
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
                 pkce_verifier_hash,
+                continuation: AuthContinuationRef::SetupOnly,
                 update_binding: None,
                 expires_at: request.expires_at,
             }),
@@ -135,6 +136,17 @@ pub(crate) async fn start_extension_oauth_flow(
     .await
 }
 
+fn extension_lifecycle_continuation(
+    requester_extension: &ExtensionId,
+) -> Result<AuthContinuationRef, ProductAuthRouteFailure> {
+    let package_ref = ironclaw_auth::LifecyclePackageRef::new(requester_extension.as_str())
+        .map_err(|error| {
+            tracing::error!(%error, extension_id = %requester_extension, "validated extension id could not form an auth lifecycle package ref");
+            ProductAuthRouteFailure::backend_unavailable()
+        })?;
+    Ok(AuthContinuationRef::LifecycleActivation { package_ref })
+}
+
 async fn start_dcr_extension_oauth_flow(
     state: ProductAuthRouteState,
     caller: WebUiAuthenticatedCaller,
@@ -177,6 +189,7 @@ async fn start_dcr_extension_oauth_flow(
             provider: provider.clone(),
             account_label,
             provider_scopes: requested_scopes,
+            continuation: extension_lifecycle_continuation(&requester_extension)?,
             update_binding,
             expires_at: request.expires_at,
         },
@@ -266,18 +279,25 @@ async fn start_google_oauth_flow(
     )
     .map_err(ProductAuthRouteFailure::from)?;
 
-    let flow = run_with_backend_timeout(state.product_auth.start_setup_oauth_flow(
-        RebornOAuthStartFlowRequest {
-            flow_id: Some(flow_id),
-            scope: scope.clone(),
-            provider: provider.clone(),
-            authorization_url: authorization_url.clone(),
-            opaque_state_hash: opaque_state_hash.clone(),
-            pkce_verifier_hash,
-            update_binding,
-            expires_at: request.expires_at,
-        },
-    ))
+    let flow = run_with_backend_timeout(
+        state
+            .product_auth
+            .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+                flow_id: Some(flow_id),
+                scope: scope.clone(),
+                provider: provider.clone(),
+                authorization_url: authorization_url.clone(),
+                opaque_state_hash: opaque_state_hash.clone(),
+                pkce_verifier_hash,
+                continuation: requester_extension
+                    .as_ref()
+                    .map(extension_lifecycle_continuation)
+                    .transpose()?
+                    .unwrap_or(AuthContinuationRef::SetupOnly),
+                update_binding,
+                expires_at: request.expires_at,
+            }),
+    )
     .await?;
     state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at)?;
 
@@ -1862,6 +1882,13 @@ mod tests {
         )
         .await
         .expect("start slack oauth flow");
+        assert_eq!(
+            start_response.continuation,
+            AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("slack")
+                    .expect("lifecycle package ref"),
+            }
+        );
 
         let parsed =
             Url::parse(start_response.authorization_url.as_str()).expect("authorization url");
@@ -2806,6 +2833,20 @@ mod tests {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
+    struct RejectingContinuationDispatcher;
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for RejectingContinuationDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Err(AuthProductError::BackendUnavailable)
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Clone)]
     struct SlackIdentityProviderClient {
         provider_identity: OAuthProviderIdentity,
@@ -3635,6 +3676,139 @@ mod tests {
             binding_store.bindings().is_empty(),
             "identity binding written by the hook must be rolled back when completion fails"
         );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_personal_oauth_callback_compensates_when_lifecycle_activation_fails() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let provider_identity = OAuthProviderIdentity::new(
+            "U123",
+            Some("T123".to_string()),
+            Some("E123".to_string()),
+            Some("A123".to_string()),
+        )
+        .expect("provider identity");
+        let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(
+                shared.clone(),
+                Arc::new(RejectingContinuationDispatcher),
+            )
+            .with_flow_record_source(shared.clone())
+            .with_provider_client(provider_client.clone()),
+        );
+        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
+        let user_id = UserId::new("user-alpha").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let owner =
+            SlackConnectionOwner::new(tenant_id.clone(), user_id.clone(), installation_id.clone());
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            Arc::new(ActivatingBindingStore {
+                inner: binding_store.clone(),
+                lifecycle_store: lifecycle_store.clone(),
+                owner: owner.clone(),
+            }),
+        ));
+        let state = ProductAuthRouteState::new(product_auth, tenant_id.clone(), None, None)
+            .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+                binding_service,
+                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                    SlackPersonalConnectionScope {
+                        installation_id: installation_id.clone(),
+                    },
+                ))),
+                binding_store.clone(),
+                lifecycle_store.clone(),
+            ));
+        let invocation_id = InvocationId::new();
+        let Json(start_response) = extension_oauth_start_handler(
+            State(state.clone()),
+            Extension(WebUiAuthenticatedCaller::new(
+                tenant_id, user_id, None, None,
+            )),
+            Path("slack".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: vec!["search:read".to_string()],
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(invocation_id.to_string()),
+            }),
+        )
+        .await
+        .expect("start Slack OAuth");
+        assert!(matches!(
+            start_response.continuation,
+            AuthContinuationRef::LifecycleActivation { .. }
+        ));
+        let state_value = Url::parse(start_response.authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("OAuth state");
+        let callback_state = OAuthCallbackState::decode(
+            OAuthCallbackStateKind::SLACK_PERSONAL,
+            state_value.as_str(),
+        )
+        .expect("callback state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "{SLACK_PERSONAL_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=slack-auth-code"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        let error = slack_personal_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect_err("lifecycle activation failure must surface");
+
+        assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
+        assert_eq!(provider_client.calls(), 1, "credential exchange completed");
+        let completed_flow = shared
+            .flow_records_snapshot()
+            .into_iter()
+            .find(|flow| flow.id == start_response.flow_id)
+            .expect("completed OAuth flow remains durable");
+        assert_eq!(completed_flow.status, AuthFlowStatus::Completed);
+        assert!(completed_flow.credential_account_id.is_some());
+        assert!(
+            binding_store.bindings().is_empty(),
+            "failed lifecycle activation must roll back the Slack identity"
+        );
+        assert_eq!(
+            lifecycle_store
+                .connection_state(&owner)
+                .await
+                .expect("rolled-back connection state"),
+            Some((
+                SlackConnectionEpoch::new(start_response.flow_id),
+                SlackConnectionState::Disconnected,
+            )),
+            "failed lifecycle activation must abandon the Slack connection epoch"
+        );
+        let accounts = shared
+            .accounts_for_owner(&callback_state.scope().to_credential_owner())
+            .await
+            .expect("credential account after lifecycle compensation");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].status, CredentialAccountStatus::Revoked);
+        assert!(accounts[0].access_secret.is_none());
+        assert!(accounts[0].refresh_secret.is_none());
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

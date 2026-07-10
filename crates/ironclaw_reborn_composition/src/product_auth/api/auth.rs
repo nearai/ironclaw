@@ -18,8 +18,9 @@ use ironclaw_auth::{
     OAuthExchangeCleanupRequest, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
     OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
     ProviderBackedCredentialAccountService, ProviderCallbackOutcome, ProviderScope,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretSubmitRequest, SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef,
+    scope_matches,
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
@@ -141,6 +142,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) opaque_state_hash: OpaqueStateHash,
     pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    pub(crate) continuation: AuthContinuationRef,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
@@ -155,6 +157,7 @@ pub(crate) struct RebornDcrOAuthStartFlowRequest {
     pub(crate) provider: AuthProviderId,
     pub(crate) account_label: CredentialAccountLabel,
     pub(crate) provider_scopes: Vec<ProviderScope>,
+    pub(crate) continuation: AuthContinuationRef,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
@@ -1014,6 +1017,7 @@ impl RebornProductAuthServices {
         mut provider_identity_check: Option<OAuthProviderIdentityCheck>,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
         let mut provider_identity = None;
+        let mut identity_binding_rollback: Option<OAuthProviderIdentityBindingRollback> = None;
         let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
@@ -1070,9 +1074,6 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
-                    let mut identity_binding_rollback: Option<
-                        OAuthProviderIdentityBindingRollback,
-                    > = None;
                     if let Some(check) = provider_identity_check.take() {
                         match check(exchange.provider_identity.clone()).await {
                             Ok(rollback) => identity_binding_rollback = rollback,
@@ -1227,10 +1228,46 @@ impl RebornProductAuthServices {
         };
 
         if should_dispatch_continuation {
-            completed = self
-                .dispatch_completed_continuation(completed)
+            match self
+                .dispatch_completed_continuation(completed.clone())
                 .await
-                .map_err(RebornOAuthCallbackError::from)?;
+            {
+                Ok(dispatched) => completed = dispatched,
+                Err(error) => {
+                    if let AuthContinuationRef::LifecycleActivation { package_ref } =
+                        &completed.continuation
+                    {
+                        if let Some(rollback) = identity_binding_rollback.take() {
+                            rollback.await;
+                        }
+                        match ExtensionId::new(package_ref.as_str()) {
+                            Ok(extension_id) => {
+                                if let Err(cleanup_error) = self
+                                    .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
+                                        scope: completed.scope.clone(),
+                                        extension_id,
+                                        provider: Some(completed.provider.clone()),
+                                        action: SecretCleanupAction::Uninstall,
+                                    })
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        flow_id = %completed.id,
+                                        error_code = ?cleanup_error.code,
+                                        "extension activation failed after OAuth and credential compensation failed"
+                                    );
+                                }
+                            }
+                            Err(extension_error) => tracing::error!(
+                                %extension_error,
+                                flow_id = %completed.id,
+                                "auth lifecycle package ref could not form an extension id for compensation"
+                            ),
+                        }
+                    }
+                    return Err(error.into());
+                }
+            }
         }
 
         Ok(RebornOAuthCallbackResponse {
@@ -1280,7 +1317,22 @@ impl RebornProductAuthServices {
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowStatus, RebornOAuthCallbackError> {
         match self.flow_manager.get_flow(scope, flow_id).await {
-            Ok(Some(record)) => Ok(record.status),
+            Ok(Some(record)) => {
+                let status = if record.status == AuthFlowStatus::Completed
+                    && record.continuation_emitted_at.is_none()
+                    && matches!(
+                        record.continuation,
+                        AuthContinuationRef::LifecycleActivation { .. }
+                    ) {
+                    // Credential persistence happens just before lifecycle
+                    // continuation dispatch. Do not let the popup poll project
+                    // success during that window—or after dispatch failed.
+                    AuthFlowStatus::Completing
+                } else {
+                    record.status
+                };
+                Ok(status)
+            }
             Ok(None) => Err(AuthProductError::UnknownOrExpiredFlow.into()),
             // Never distinguish "owned by another scope" from "unknown": both
             // return not-found so a caller cannot probe another owner's flows.
@@ -1333,7 +1385,7 @@ impl RebornProductAuthServices {
                     authorization_url: request.authorization_url,
                     expires_at: request.expires_at,
                 },
-                continuation: AuthContinuationRef::SetupOnly,
+                continuation: request.continuation,
                 update_binding: request.update_binding,
                 opaque_state_hash: Some(request.opaque_state_hash),
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
@@ -1361,6 +1413,7 @@ impl RebornProductAuthServices {
                     provider: request.provider,
                     account_label: request.account_label,
                     provider_scopes: request.provider_scopes,
+                    continuation: request.continuation,
                     update_binding: request.update_binding,
                     expires_at: request.expires_at,
                 },

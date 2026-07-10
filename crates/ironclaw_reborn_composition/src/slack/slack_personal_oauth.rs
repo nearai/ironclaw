@@ -17,8 +17,8 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthErrorCode, AuthFlowId, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
-    AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowRecord, AuthFlowRecordSource,
+    AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
     OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
     OAuthCallbackStateKind, OAuthProviderIdentity, OAuthScopeParam, PkceVerifierSecret,
     ProviderScope, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
@@ -208,18 +208,26 @@ pub(crate) async fn start_extension_oauth_flow(
     );
     let connection_epoch = SlackConnectionEpoch::new(flow_id);
 
-    let flow = match run_with_backend_timeout(state.product_auth_services().start_setup_oauth_flow(
-        RebornOAuthStartFlowRequest {
-            flow_id: Some(flow_id),
-            scope: scope.clone(),
-            provider: provider.clone(),
-            authorization_url: authorization_url.clone(),
-            opaque_state_hash: opaque_state_hash.clone(),
-            pkce_verifier_hash,
-            update_binding,
-            expires_at: request.expires_at,
-        },
-    ))
+    let flow = match run_with_backend_timeout(
+        state
+            .product_auth_services()
+            .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+                flow_id: Some(flow_id),
+                scope: scope.clone(),
+                provider: provider.clone(),
+                authorization_url: authorization_url.clone(),
+                opaque_state_hash: opaque_state_hash.clone(),
+                pkce_verifier_hash,
+                continuation: AuthContinuationRef::LifecycleActivation {
+                    package_ref: ironclaw_auth::LifecyclePackageRef::new(
+                        requester_extension.as_str(),
+                    )
+                    .map_err(|_| internal_invariant("lifecycle_package_ref"))?,
+                },
+                update_binding,
+                expires_at: request.expires_at,
+            }),
+    )
     .await
     {
         Ok(flow) => flow,

@@ -41,14 +41,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const isSlackToolsExtension =
     channelId.toLowerCase() === SLACK_TOOLS_EXTENSION_ID;
   const handleOauthConfigured = React.useCallback(async () => {
-    onClose();
-    if (isSlackToolsExtension && packageId) {
-      try {
-        await activateExtension({ id: packageId });
-      } catch {
-        console.error("Slack activation after OAuth failed.");
-      }
-    }
+    // Extension-scoped OAuth completion is atomic on the backend: the callback
+    // is not marked complete until lifecycle activation has published tools.
+    // A second client-side activation races that committed state and used to
+    // surface a misleading Conflict after an otherwise successful popup.
     // invalidateQueries refetches active queries and resolves when they
     // settle (TanStack v5), so no follow-up refetchQueries pass is needed.
     await Promise.all(
@@ -67,7 +63,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       }
     }
     if (onSaved) onSaved();
-  }, [channelId, extension?.kind, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
+    onClose();
+  }, [channelId, extension?.kind, onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });

@@ -288,7 +288,7 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
   assert.doesNotMatch(body, /extensions\.activate/);
 });
 
-test("ConfigureModal activates the Slack extension after OAuth setup completes", async () => {
+test("ConfigureModal does not issue a duplicate Slack activation after atomic OAuth completion", async () => {
   const slackOauthSecret = {
     name: "slack_personal_oauth",
     provider: "slack_personal",
@@ -329,9 +329,7 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
 
   await oauthSetupArgs[0][1].onConfigured();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
-    ["activate", { id: "slack" }],
-  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), []);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
     ["extension-registry"],

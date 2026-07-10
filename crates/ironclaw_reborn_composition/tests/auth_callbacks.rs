@@ -9,11 +9,11 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
     AuthFlowKind, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
     AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
-    InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderIdentity, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope,
+    CredentialAccountRecordSource, CredentialAccountStatus, InMemoryAuthProductServices,
+    LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderIdentity, OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
@@ -443,6 +443,14 @@ async fn oauth_callback_handler_reports_completed_continuation_dispatch_failure_
 
     assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
     assert!(error.retryable);
+    let accounts = shared_auth
+        .accounts_for_owner(&owner)
+        .await
+        .expect("accounts after failed lifecycle activation");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].status, CredentialAccountStatus::Revoked);
+    assert!(accounts[0].access_secret.is_none());
+    assert!(accounts[0].refresh_secret.is_none());
 
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
     let provider_client = Arc::new(SuccessfulCountingProviderClient::default());

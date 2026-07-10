@@ -226,6 +226,7 @@ impl OAuthDcrProvider {
         scope: AuthProductScope,
         account_label: CredentialAccountLabel,
         provider_scopes: &[ProviderScope],
+        continuation: AuthContinuationRef,
         update_binding: Option<CredentialAccountUpdateBinding>,
         expires_at: ironclaw_auth::Timestamp,
     ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
@@ -251,7 +252,7 @@ impl OAuthDcrProvider {
                 authorization_url: material.authorization_url,
                 expires_at,
             },
-            continuation: AuthContinuationRef::SetupOnly,
+            continuation,
             update_binding,
             opaque_state_hash: Some(material.opaque_state_hash),
             pkce_verifier_hash: Some(material.pkce_verifier_hash),
@@ -932,6 +933,7 @@ impl OAuthDcrProviderRegistry {
             provider,
             account_label,
             provider_scopes,
+            continuation,
             update_binding,
             expires_at,
         } = request;
@@ -944,6 +946,7 @@ impl OAuthDcrProviderRegistry {
                 scope,
                 account_label,
                 &provider_scopes,
+                continuation,
                 update_binding,
                 expires_at,
             )
@@ -1006,6 +1009,7 @@ pub(crate) struct DcrSetupFlowRequest {
     pub(crate) provider: AuthProviderId,
     pub(crate) account_label: CredentialAccountLabel,
     pub(crate) provider_scopes: Vec<ProviderScope>,
+    pub(crate) continuation: AuthContinuationRef,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
@@ -1263,6 +1267,7 @@ mod tests {
                 sample_auth_scope(),
                 CredentialAccountLabel::new("work notion").unwrap(),
                 &[],
+                AuthContinuationRef::SetupOnly,
                 None,
                 Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS),
             )
@@ -1314,6 +1319,7 @@ mod tests {
                 sample_auth_scope(),
                 CredentialAccountLabel::new("work notion").unwrap(),
                 &[ProviderScope::new("read").unwrap()],
+                AuthContinuationRef::SetupOnly,
                 None,
                 Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS),
             )
@@ -1518,6 +1524,7 @@ mod tests {
                 scope.clone(),
                 CredentialAccountLabel::new("work notion").unwrap(),
                 &[],
+                AuthContinuationRef::SetupOnly,
                 None,
                 Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS),
             )
