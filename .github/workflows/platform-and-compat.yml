@@ -243,9 +243,10 @@ jobs:
   wasm-wit-compat:
     name: WASM WIT Compatibility
     needs: changes
+    # WIT and registry paths are outside the shared legacy-test classifier;
+    # the event-specific WASM risk outputs are authoritative for this job.
     if: >
       needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' ||
        inputs.deep == true ||
        (github.event_name == 'merge_group' && needs.changes.outputs.has_wasm_abi_risk == 'true') ||
