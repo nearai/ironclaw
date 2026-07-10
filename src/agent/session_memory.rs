@@ -2,6 +2,7 @@
 //! rides the system prompt. See docs/superpowers/specs/2026-07-09-episodic-memory-design.md
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 
 /// A structured summary of one conversation (thread).
 #[derive(Debug, Clone)]
@@ -135,6 +136,116 @@ pub fn build_recent(
     out
 }
 
+/// Tolerant view of the model's JSON reply.
+#[derive(Deserialize, Default)]
+struct RawSummary {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    gist: String,
+    #[serde(default)]
+    decisions: Vec<String>,
+    #[serde(default)]
+    open_threads: Vec<String>,
+    #[serde(default)]
+    user_notes: Vec<String>,
+}
+
+/// Parse the model's (possibly fenced) JSON into a `SessionSummary`. A malformed
+/// reply never fails the pipeline — it falls back to a minimal summary.
+pub(crate) fn parse_summary_json(
+    raw: &str,
+    conversation_id: &str,
+    channel: &str,
+    timestamp: DateTime<Utc>,
+) -> SessionSummary {
+    let cleaned = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    match serde_json::from_str::<RawSummary>(cleaned) {
+        Ok(r) if !r.title.is_empty() || !r.gist.is_empty() => SessionSummary {
+            conversation_id: conversation_id.to_string(),
+            channel: channel.to_string(),
+            timestamp,
+            title: if r.title.is_empty() {
+                "Conversation".to_string()
+            } else {
+                r.title
+            },
+            gist: r.gist,
+            decisions: r.decisions,
+            open_threads: r.open_threads,
+            user_notes: r.user_notes,
+        },
+        _ => SessionSummary {
+            conversation_id: conversation_id.to_string(),
+            channel: channel.to_string(),
+            timestamp,
+            title: "Conversation".to_string(),
+            gist: raw.chars().take(280).collect(),
+            decisions: vec![],
+            open_threads: vec![],
+            user_notes: vec![],
+        },
+    }
+}
+
+/// Distills a conversation's turns into a structured [`SessionSummary`] via the LLM.
+pub struct SessionSummarizer {
+    llm: std::sync::Arc<dyn ironclaw_llm::LlmProvider>,
+}
+
+impl SessionSummarizer {
+    pub fn new(llm: std::sync::Arc<dyn ironclaw_llm::LlmProvider>) -> Self {
+        Self { llm }
+    }
+
+    /// Summarize a conversation. `turns` is `(user_input, assistant_response?)`.
+    pub async fn summarize(
+        &self,
+        conversation_id: &str,
+        channel: &str,
+        timestamp: DateTime<Utc>,
+        turns: &[(String, Option<String>)],
+    ) -> Result<SessionSummary, crate::error::Error> {
+        use ironclaw_llm::ChatMessage;
+        let mut convo = String::new();
+        for (u, a) in turns {
+            convo.push_str(&format!("User: {u}\n"));
+            if let Some(a) = a {
+                convo.push_str(&format!("Assistant: {a}\n"));
+            }
+        }
+        let sys = ChatMessage::system(
+            "Summarize this conversation as STRICT JSON with keys: title (short), \
+             gist (1-3 sentences), decisions (string[]), open_threads (string[] of \
+             unfinished items or next steps), user_notes (string[] of notable user \
+             context). Output ONLY the JSON object, no prose.",
+        );
+        let user = ChatMessage::user(convo);
+        let raw = self.complete(vec![sys, user]).await?;
+        Ok(parse_summary_json(&raw, conversation_id, channel, timestamp))
+    }
+
+    /// Run the messages through the LLM (mirrors `ContextCompactor::generate_summary`).
+    async fn complete(
+        &self,
+        messages: Vec<ironclaw_llm::ChatMessage>,
+    ) -> Result<String, crate::error::Error> {
+        use ironclaw_llm::{CompletionRequest, Reasoning};
+        let request = CompletionRequest::new(messages)
+            .with_max_tokens(1024)
+            .with_temperature(0.3);
+        let reasoning =
+            Reasoning::new(self.llm.clone()).with_model_name(self.llm.active_model_name());
+        let (text, _) = reasoning.complete(request).await?;
+        Ok(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +318,38 @@ mod tests {
             acc.contains("— Open"),
             "open-thread entry retained under size pressure"
         );
+    }
+
+    #[tokio::test]
+    async fn summarize_parses_structured_fields() {
+        use std::sync::Arc;
+        let json = r#"```json
+        {"title":"Gateway fix","gist":"Fixed the profile bug.","decisions":["ship one-liner"],
+         "open_threads":["watch reinstall"],"user_notes":["values durability"]}
+        ```"#;
+        let llm = Arc::new(crate::testing::StubLlm::new(json));
+        let s = SessionSummarizer::new(llm);
+        let ts = chrono::Utc::now();
+        let out = s
+            .summarize(
+                "c1",
+                "gateway",
+                ts,
+                &[("what broke?".into(), Some("the profile".into()))],
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.title, "Gateway fix");
+        assert_eq!(out.decisions, vec!["ship one-liner".to_string()]);
+        assert_eq!(out.open_threads, vec!["watch reinstall".to_string()]);
+        assert_eq!(out.conversation_id, "c1");
+    }
+
+    #[test]
+    fn parse_summary_json_falls_back_on_garbage() {
+        let ts = chrono::Utc::now();
+        let out = parse_summary_json("not json at all", "c2", "cli", ts);
+        assert_eq!(out.title, "Conversation");
+        assert!(out.gist.contains("not json"));
     }
 }
