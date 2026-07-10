@@ -164,7 +164,7 @@ function renderIntegrations(extensions, registryEntries) {
       + '</div>';
     availableGrid.querySelector('[data-action="integrations-ask"]')?.addEventListener('click', () => {
       switchTab('chat');
-      prefillChatPrompt('Connect a new tool for me — ');
+      prefillChatPrompt(I18n.t('integrations.askAgentGenericPrompt'));
     });
   }
 }
@@ -272,7 +272,7 @@ function renderIntegrationCard(item) {
     btn.textContent = I18n.t('integrations.askAgent');
     btn.addEventListener('click', () => {
       switchTab('chat');
-      prefillChatPrompt('Connect ' + item.label + ' for me');
+      prefillChatPrompt(I18n.t('integrations.askAgentPrompt', { label: item.label }));
     });
     action.appendChild(btn);
   }

@@ -333,12 +333,14 @@ function formatTimeAgo(epochMs) {
   return Math.floor(months / 12) + 'y ago';
 }
 
+// Returns the install promise (settles after the toast/refresh handling)
+// so callers can chain their own refresh instead of guessing with timers.
 function installSkill(name, url, btn, slug) {
   var body = { name: name };
   if (slug) body.slug = slug;
   if (url) body.url = url;
 
-  apiFetch('/api/skills/install', {
+  return apiFetch('/api/skills/install', {
     method: 'POST',
     headers: { 'X-Confirm-Action': 'true' },
     body: body,

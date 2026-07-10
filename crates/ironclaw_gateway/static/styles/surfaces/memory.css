@@ -153,7 +153,7 @@
   font-size: var(--v2-font-size-caption);
   color: var(--text-secondary);
   line-height: 1.45;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .search-result .snippet mark {
@@ -276,7 +276,7 @@
   font-size: var(--text-sm);
   line-height: 1.6;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   color: var(--text);
 }
 

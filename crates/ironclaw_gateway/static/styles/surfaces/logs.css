@@ -167,7 +167,7 @@
 
 .log-entry.expanded .log-msg {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 /* ── Null state ── */

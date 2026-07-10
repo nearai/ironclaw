@@ -13,6 +13,12 @@
 // js/core/mock-backend.js (`window.NUX_BILLING`) — the single mock-data file.
 // This module is only the rendering/state logic.
 
+// Demo-only surface: everything here is client-side mock state. Outside
+// the demo build (window.__IRONCLAW_DEMO__ injected by demo/build.mjs) the
+// Billing nav entry and the sidebar credits ring are hidden and the usage
+// burn is a no-op, so real deployments never show fabricated account state.
+const BILLING_DEMO = window.__IRONCLAW_DEMO__ === true;
+
 const BILLING_CREDITS_KEY = 'ironclaw_nux_credits';
 const BILLING_REMINDER_SHOWN_KEY = 'ironclaw_nux_billing_reminder_shown';
 const BILLING_SESSION_MSGS_KEY = 'ironclaw_nux_billing_session_msgs';
@@ -56,6 +62,7 @@ function billingFormatUsd(value) {
 // Called from sendMessage (chat.js) on every agent message. MOCK: burns a
 // small pseudo-random amount so the ring moves at human-visible speed.
 function billingRecordUsage() {
+  if (!BILLING_DEMO) return;
   const state = billingGetState();
   const cost = 0.05 + Math.random() * 0.09;
   state.used = Math.min(state.total, state.used + cost);
@@ -94,6 +101,7 @@ function billingRingSvg(fraction, size, stroke) {
 }
 
 function renderSidebarCredits() {
+  if (!BILLING_DEMO) return;
   const btn = document.getElementById('sidebar-credits');
   if (!btn) return;
   const state = billingGetState();
@@ -113,6 +121,14 @@ function renderSidebarCredits() {
 document.getElementById('sidebar-credits')?.addEventListener('click', () => {
   switchTab('billing');
 });
+
+// Hide the demo-only entry points in real deployments.
+if (!BILLING_DEMO) {
+  const billingNav = document.querySelector('.sidebar-nav-item[data-tab="billing"]');
+  if (billingNav) billingNav.style.display = 'none';
+  const creditsBtn = document.getElementById('sidebar-credits');
+  if (creditsBtn) creditsBtn.style.display = 'none';
+}
 
 // --- Billing surface ---
 

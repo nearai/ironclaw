@@ -331,6 +331,11 @@
   gap: var(--space-2);
 }
 
+/* The class's display:flex would beat the UA [hidden] rule otherwise. */
+.auth-social-btn[hidden] {
+  display: none;
+}
+
 .auth-social-btn {
   width: 100%;
   display: flex;

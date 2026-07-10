@@ -320,9 +320,10 @@ function renderDiscoverCatalogSkillCard(entry) {
   installBtn.addEventListener('click', () => {
     installBtn.disabled = true;
     installBtn.textContent = I18n.t('extensions.installing');
-    // Reuses the skills surface installer (toast + installed-state handling).
-    installSkill(entry.name || slug, null, installBtn, slug);
-    setTimeout(() => loadDiscover(true), 1500);
+    // Reuses the skills surface installer (toast + installed-state handling);
+    // refresh once the install request actually settles.
+    installSkill(entry.name || slug, null, installBtn, slug)
+      .then(() => loadDiscover(true));
   });
   action.appendChild(installBtn);
   header.appendChild(action);
@@ -366,8 +367,8 @@ function renderDiscoverBuildCard(query) {
   card.addEventListener('click', () => {
     switchTab('chat');
     prefillChatPrompt(query
-      ? 'Build me a tool that connects to ' + query
-      : 'Build me a new tool that ');
+      ? I18n.t('discover.buildPrompt', { query: query })
+      : I18n.t('discover.buildPromptBlank'));
   });
 
   return card;

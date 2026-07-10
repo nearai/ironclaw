@@ -77,9 +77,13 @@ I18n.register('en', {
   'discover.noResults': 'No matches for "{query}" in the catalog.',
   'discover.needsSetup': 'Needs setup',
   'askAgent.discover': 'Prefer to just ask? Try: "Connect Gmail for me"',
+  'askAgent.discoverPrompt': 'Connect Gmail for me',
   'askAgent.settings': 'Skip the menus — your agent can change any of this. Just ask.',
+  'askAgent.settingsPrompt': 'What settings can I change by just asking you?',
   'discover.buildTitle': "Can't find it? Ask your agent to build it",
   'discover.buildDesc': 'Your agent can create new connectors and tools on the fly — describe what you need in chat and it will build, test, and install it.',
+  'discover.buildPrompt': 'Build me a tool that connects to {query}',
+  'discover.buildPromptBlank': 'Build me a new tool that ',
   // Chat
   'chat.inputPlaceholder': 'Message or / for commands...',
   
@@ -187,10 +191,12 @@ I18n.register('en', {
   'integrations.emptyTitle': 'Everything is connected',
   'integrations.emptyHint': 'Need something that isn\u2019t listed? The agent can wire up custom tools, MCP servers, and webhooks from chat.',
   'integrations.askAgentGeneric': 'Ask the agent to connect something',
+  'integrations.askAgentGenericPrompt': 'Connect a new tool for me \u2014 ',
   'integrations.connectedBadge': 'Connected',
   'integrations.mockConnectedHint': 'Connected during onboarding (prototype)',
   'integrations.connect': 'Connect',
   'integrations.askAgent': 'Ask agent to connect',
+  'integrations.askAgentPrompt': 'Connect {label} for me',
   'integrations.disconnect': 'Disconnect',
   'integrations.disconnected': '{name} disconnected',
 

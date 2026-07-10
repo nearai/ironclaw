@@ -199,7 +199,7 @@ function renderLandingUseCases() {
       renderPendingIntentBanner();
       // Nudge the user toward sign-in now that they've picked a starting point.
       const tokenInput = document.getElementById('token-input');
-      const firstSocialBtn = document.querySelector('.auth-social-btn:not([style*="none"])');
+      const firstSocialBtn = document.querySelector('.auth-social-btn:not([hidden])');
       if (firstSocialBtn) {
         firstSocialBtn.focus();
       } else if (tokenInput && tokenInput.offsetParent !== null) {

@@ -155,11 +155,12 @@ function readMemoryFile(path) {
   apiFetch('/api/memory/read?path=' + encodeURIComponent(path)).then((data) => {
     currentMemoryContent = data.content;
     renderMemoryViewer(path, data.content);
-    document.getElementById('memory-edit-btn').style.display = '';
+    syncMemoryFilebar();
     renderTree(); // refresh active-row highlight
   }).catch((err) => {
     currentMemoryContent = null;
     document.getElementById('memory-viewer').innerHTML = '<div class="memory-welcome"><div class="memory-welcome-title">' + escapeHtml(err.message) + '</div></div>';
+    syncMemoryFilebar();
   });
 }
 
@@ -184,8 +185,10 @@ let _memoryPreviewingDraft = false;
 
 function syncMemoryFilebar() {
   const isMd = !!currentMemoryPath && currentMemoryPath.endsWith('.md');
+  // Content is null when the read failed — no Edit button for a file we
+  // couldn't load (startMemoryEdit would be a dead click).
   document.getElementById('memory-edit-btn').style.display =
-    !_memoryEditing && currentMemoryPath ? '' : 'none';
+    !_memoryEditing && currentMemoryPath && currentMemoryContent != null ? '' : 'none';
   document.getElementById('memory-save-btn').style.display = _memoryEditing ? '' : 'none';
   document.getElementById('memory-cancel-btn').style.display = _memoryEditing ? '' : 'none';
   const toggle = document.getElementById('memory-mode-toggle');

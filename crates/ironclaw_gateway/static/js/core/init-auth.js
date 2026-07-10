@@ -204,7 +204,9 @@ fetch('/auth/providers', { credentials: 'include' })
     providers.forEach(function(p) {
       var btn = document.getElementById('auth-' + p + '-btn');
       if (!btn) return;
-      btn.style.display = '';
+      // Buttons ship with the `hidden` attribute so visibility checks
+      // (e.g. landing.js's :not([hidden]) selector) stay reliable.
+      btn.hidden = false;
       if (window.__IRONCLAW_DEMO__) {
         btn.addEventListener('click', function() { demoOAuthSignIn(p, btn); });
       } else if (p === 'near') {

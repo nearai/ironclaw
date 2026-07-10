@@ -21,14 +21,15 @@
 //   3. DEMO MOCK BACKEND — an in-browser implementation of the gateway API
 //      surface (fetch + SSE interception) so the whole SPA runs end-to-end
 //      with NO server. Only active when `window.__IRONCLAW_DEMO__` is truthy
-//      (set by the Vercel demo build, see demo/) or `?demo=1` is in the URL.
+//      — a build-time flag injected into index.html by the static demo
+//      build (see demo/build.mjs). It can NOT be enabled from a URL param
+//      or storage: a real gateway deployment must never swap its transport
+//      for the mock one.
 //      In a real gateway deployment this section is inert dead code; it
 //      documents — endpoint by endpoint — the API contract the frontend
 //      expects. Real backend home: each handler maps 1:1 onto an existing
 //      gateway route (see `implied API surface` notes inline).
 //
-// Sources: "IronClaw — Use Cases to test" doc + Achal/Sergey product
-// direction call (2026-06-05).
 // ============================================================================
 
 // ============================================================================
@@ -257,19 +258,11 @@ window.NUX_BILLING = {
 (function initIronclawDemoBackend() {
   'use strict';
 
-  var demoRequested = false;
-  try {
-    var search = new URLSearchParams(window.location.search);
-    if (search.get('demo') === '1') {
-      sessionStorage.setItem('ironclaw_demo_mode', '1');
-    }
-    demoRequested = window.__IRONCLAW_DEMO__ === true
-      || sessionStorage.getItem('ironclaw_demo_mode') === '1';
-  } catch (e) {
-    demoRequested = window.__IRONCLAW_DEMO__ === true;
-  }
-  if (!demoRequested) return;
-  window.__IRONCLAW_DEMO__ = true;
+  // Build-time flag only (injected by demo/build.mjs into index.html).
+  // Deliberately NOT readable from the URL or session storage — the
+  // production bundle includes this file, and a user-controlled query
+  // string must never be able to swap the real transport for the mock.
+  if (window.__IRONCLAW_DEMO__ !== true) return;
 
   // --------------------------------------------------------------------
   // Demo state (in-memory; reset on reload)
@@ -1629,7 +1622,19 @@ window.NUX_BILLING = {
   var realFetch = window.fetch.bind(window);
   window.fetch = function(input, options) {
     var url = typeof input === 'string' ? input : (input && input.url) || '';
-    var isApiPath = url.indexOf('/api/') === 0 || url.indexOf('/auth/') === 0;
+    // Resolve to a pathname so Request objects / absolute same-origin URLs
+    // are intercepted too; cross-origin requests always pass through.
+    var path;
+    var sameOrigin = true;
+    try {
+      var parsed = new URL(url, window.location.origin);
+      path = parsed.pathname + parsed.search;
+      sameOrigin = parsed.origin === window.location.origin;
+    } catch (e) {
+      path = url;
+    }
+    var isApiPath = sameOrigin
+      && (path.indexOf('/api/') === 0 || path.indexOf('/auth/') === 0);
     if (!isApiPath) return realFetch(input, options);
 
     var opts = options || {};
@@ -1644,7 +1649,6 @@ window.NUX_BILLING = {
       authed = !!(headers.Authorization || headers.authorization
         || sessionStorage.getItem('ironclaw_token'));
     } catch (e) { authed = !!(headers.Authorization || headers.authorization); }
-    var path = url;
     return new Promise(function(resolve) {
       // Small latency so spinners/skeletons render like a real deployment.
       setTimeout(function() {

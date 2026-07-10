@@ -181,8 +181,8 @@
   --radius: var(--v2-radius-sm);
   --radius-lg: var(--v2-radius-lg);
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'Geist Mono', 'SF Mono', Consolas, monospace;
+  --font-sans: 'Geist', -apple-system, 'BlinkMacSystemFont', 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', 'SF Mono', 'Consolas', monospace;
   --font-pixel: var(--v2-font-pixel);
   --bg-overlay: var(--v2-scrim);
   --bg-modal: #1a1a1a;

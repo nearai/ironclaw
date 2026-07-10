@@ -172,7 +172,7 @@
 }
 
 .skill-trust {
-  font-size: 10px;
+  font-size: var(--v2-font-size-label);
   padding: 2px 7px;
   border-radius: var(--v2-radius-full);
   font-weight: 600;

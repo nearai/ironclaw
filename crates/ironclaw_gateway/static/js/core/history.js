@@ -611,18 +611,37 @@ function toggleSidebarCollapsed() {
   try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch (e) {}
 }
 
+// Element that had focus before the drawer opened, restored on close so
+// keyboard/screen-reader users don't lose their place.
+let _sidebarReturnFocus = null;
+
 function openMobileSidebar() {
   const sidebar = document.getElementById('app-sidebar');
   const scrim = document.getElementById('sidebar-scrim');
-  if (sidebar) sidebar.classList.add('mobile-open');
+  if (sidebar) {
+    sidebar.classList.add('mobile-open');
+    sidebar.setAttribute('role', 'dialog');
+    sidebar.setAttribute('aria-modal', 'true');
+    _sidebarReturnFocus = document.activeElement;
+    const firstControl = sidebar.querySelector('button, a, input, [tabindex]');
+    if (firstControl) firstControl.focus();
+  }
   if (scrim) scrim.classList.add('visible');
 }
 
 function closeMobileSidebar() {
   const sidebar = document.getElementById('app-sidebar');
   const scrim = document.getElementById('sidebar-scrim');
-  if (sidebar) sidebar.classList.remove('mobile-open');
+  if (sidebar) {
+    sidebar.classList.remove('mobile-open');
+    sidebar.removeAttribute('role');
+    sidebar.removeAttribute('aria-modal');
+  }
   if (scrim) scrim.classList.remove('visible');
+  if (_sidebarReturnFocus && typeof _sidebarReturnFocus.focus === 'function') {
+    _sidebarReturnFocus.focus();
+  }
+  _sidebarReturnFocus = null;
 }
 
 // Restore persisted collapse state on load (desktop only).
@@ -816,8 +835,13 @@ function updateTopbarTitle(tab) {
   // everywhere else it's the page name.
   if (currentTab === 'chat' && currentThreadId) {
     el.textContent = _threadTitles.get(currentThreadId) || I18n.t('thread.untitled');
-    el.classList.add('editable');
-    el.title = I18n.t('thread.renameHint');
+    // Rename is demo-only for now: the gateway router has no
+    // PATCH /api/chat/threads/{id} handler yet, so outside the demo the
+    // affordance would always 404 on save.
+    if (window.__IRONCLAW_DEMO__ === true) {
+      el.classList.add('editable');
+      el.title = I18n.t('thread.renameHint');
+    }
     return;
   }
   el.classList.remove('editable');
@@ -875,6 +899,7 @@ function startThreadTitleEdit() {
   const save = () => {
     const value = input.value.trim().slice(0, 80);
     const threadId = currentThreadId;
+    const previous = _threadTitles.get(threadId);
     close();
     if (!value || !threadId) return;
     _threadTitles.set(threadId, value);
@@ -885,6 +910,10 @@ function startThreadTitleEdit() {
     }).then(() => {
       loadThreads();
     }).catch((err) => {
+      // Roll back the optimistic rename so the UI matches server state.
+      if (previous !== undefined) _threadTitles.set(threadId, previous);
+      else _threadTitles.delete(threadId);
+      updateTopbarTitle();
       showToast(I18n.t('thread.renameFailed', { message: err.message }), 'error');
     });
   };

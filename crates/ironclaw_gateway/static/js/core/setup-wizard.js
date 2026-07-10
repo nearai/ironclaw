@@ -248,11 +248,21 @@ function renderNuxWizardConnectStep(body, footer) {
   list.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
   body.appendChild(list);
 
+  const hasConnected = () =>
+    _nuxWizardState && _nuxWizardState.channels.some((ch) => ch.status === 'connected');
   const refresh = () => {
     loadNuxWizardChannels().then((channels) => {
       if (!_nuxWizardState || _nuxWizardState.step !== 1) return;
       _nuxWizardState.channels = channels;
       renderNuxWizardChannelList(list, channels);
+      // Relabel the footer button: a channel may have connected via the
+      // poll (e.g. OAuth completed in another tab) after first render.
+      const btn = document.getElementById('nux-wizard-continue');
+      if (btn) {
+        btn.textContent = hasConnected()
+          ? I18n.t('common.continue')
+          : I18n.t('nux.skipStep');
+      }
     });
   };
   refresh();
@@ -264,8 +274,6 @@ function renderNuxWizardConnectStep(body, footer) {
   footer.appendChild(nuxWizardFooterButton(
     I18n.t('common.back'), 'btn-secondary', () => nuxWizardGoTo(0)
   ));
-  const hasConnected = () =>
-    _nuxWizardState && _nuxWizardState.channels.some((ch) => ch.status === 'connected');
   const continueBtn = nuxWizardFooterButton(
     hasConnected() ? I18n.t('common.continue') : I18n.t('nux.skipStep'),
     'btn-primary',

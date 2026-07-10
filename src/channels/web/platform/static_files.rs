@@ -59,7 +59,7 @@ use crate::workspace::Workspace;
 const SCRIPT_SRC_EXTRAS: &str =
     "https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh";
 const STYLE_SRC: &str = "'self' 'unsafe-inline' https://fonts.googleapis.com";
-// 'self' serves the embedded FK Grotesk brand fonts under /fonts/*;
+// 'self' serves the embedded Geist brand fonts under /fonts/*;
 // fonts.gstatic.com remains for any workspace-customized Google Fonts.
 const FONT_SRC: &str = "'self' https://fonts.gstatic.com data:";
 const CONNECT_SRC: &str =

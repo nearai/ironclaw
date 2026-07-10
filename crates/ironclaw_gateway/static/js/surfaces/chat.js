@@ -155,6 +155,8 @@ function showFlowConsentModal(card, onAllowed) {
     }, 900);
   });
   document.body.appendChild(overlay);
+  // Move focus into the dialog so keyboard/screen-reader users land on it.
+  overlay.querySelector('.flow-consent-cancel').focus();
 }
 
 // Proposal detail modal — what would actually run: trigger, steps, and a

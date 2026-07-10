@@ -124,7 +124,7 @@ function restoreFromHash() {
         openJobDetail(state.detail);
         break;
       case 'tasks': {
-        var taskParts = state.detail.split('/');
+        var taskParts = state.detail ? state.detail.split('/') : [];
         // Skip the list load when deep-linking straight to a detail view —
         // the async list render would race the detail render otherwise.
         switchTasksSegment(taskParts[0], taskParts[1] ? { load: false } : undefined);

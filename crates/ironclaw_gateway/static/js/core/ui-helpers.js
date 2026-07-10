@@ -582,13 +582,13 @@ function createAskAgentHint(labelKey, prompt) {
   const discoverHeader = document.querySelector('#tab-discover .discover-header');
   if (discoverHeader) {
     discoverHeader.appendChild(
-      createAskAgentHint('askAgent.discover', 'Connect Gmail for me')
+      createAskAgentHint('askAgent.discover', I18n.t('askAgent.discoverPrompt'))
     );
   }
   const settingsToolbar = document.querySelector('#tab-settings .settings-toolbar');
   if (settingsToolbar) {
     settingsToolbar.parentNode.insertBefore(
-      createAskAgentHint('askAgent.settings', 'What settings can I change by just asking you?'),
+      createAskAgentHint('askAgent.settings', I18n.t('askAgent.settingsPrompt')),
       settingsToolbar
     );
   }
