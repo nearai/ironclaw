@@ -1,7 +1,8 @@
+// @ts-nocheck
+import React from "react";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
-import { Badge, Panel } from "../../../design-system/primitives";
-import React from "react";
+import { Badge } from "../../../design-system/primitives";
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
 
@@ -23,13 +24,17 @@ function targetTone(status) {
  */
 function interpolateTemplate(template, slots) {
   const parts = template.split(/(\{[^}]+\})/);
-  return parts.map((part, i) => {
+  return parts.map((part) => {
     const key = part.match(/^\{(.+)\}$/)?.[1];
     return key && slots[key] != null ? slots[key] : part;
   });
 }
 
-export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
+// The delivery-defaults form body, rendered inside the delivery modal (opened
+// from the list header). It carries no panel/card chrome of its own — the modal
+// supplies the surface and the title — so the page itself stays free of a flat,
+// always-present settings card.
+export function DeliveryDefaultsContent({ deliveryState }) {
   const t = useT();
   const currentTargetId = deliveryState.currentTarget?.target_id || "";
   const [draftTargetId, setDraftTargetId] = React.useState(currentTargetId);
@@ -46,7 +51,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
         clearTimeout(savedTimerRef.current);
       }
     },
-    [],
+    []
   );
 
   const isDirty = draftTargetId !== currentTargetId;
@@ -57,16 +62,16 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
   const canClear = Boolean(currentTargetId) && !isBusy;
 
   const hasTargets = deliveryState.finalReplyTargets.length > 0;
-  // Whether we have at least one external target that is not yet available.
-  const hasUnavailableTargets = deliveryState.targets.some(
+  // Whether we have at least one Slack-style (external) pairable target that is
+  // NOT yet available — used to render the "not paired" notice row.
+  const hasUnpairedTargets = deliveryState.targets.some(
     (opt) =>
-      opt?.capabilities?.final_replies &&
-      opt?.target?.status === "unavailable",
+      opt?.capabilities?.final_replies && opt?.target?.status === "unavailable"
   );
-  // The Slack approval footnote only makes sense when an external target exists
-  // at all. Web-only deployments shouldn't see a
+  // The Slack approval footnote only makes sense when an external (Slack-style)
+  // target exists at all — paired or not. Web-only deployments shouldn't see a
   // "reply in Slack" hint.
-  const hasExternalTargets = hasTargets || hasUnavailableTargets;
+  const hasExternalTargets = hasTargets || hasUnpairedTargets;
 
   // Flash the "Saved" confirmation; the mutation's rejection is reflected
   // through `deliveryState.saveError` (rendered below), so the catch here only
@@ -128,229 +133,228 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
   const footnoteSegments = interpolateTemplate(
     t("automations.delivery.footnote"),
     {
-      command: (<code
-        key="cmd"
-        className="rounded px-1.5 py-0.5 font-mono text-[0.6875rem] bg-[var(--v2-surface-muted)] text-[var(--v2-accent-text)]"
-      >
-        approve &lt;code&gt;
-      </code>),
-    },
+      command: (
+        <code
+          key="cmd"
+          className="rounded px-1.5 py-0.5 font-mono text-[0.6875rem] bg-[var(--v2-surface-muted)] text-[var(--v2-accent-text)]"
+        >
+          {"approve <code>"}
+        </code>
+      ),
+    }
   );
 
   return (
-    <Panel className="p-5 sm:p-6">
-      <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-5">
+      <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+        {t("automations.delivery.explainer")}
+      </p>
 
-        {/* ── Header ──────────────────────────────────────────────── */}
-        <div className="flex flex-col gap-1">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
-            {t("automations.delivery.eyebrow")}
-          </div>
-          <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-[var(--v2-text-strong)]">
-            {t("automations.delivery.title")}
-          </h2>
-          <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
-            {t("automations.delivery.explainer")}
-          </p>
-        </div>
-
-        <hr className="border-t border-[var(--v2-panel-border)]" />
-
-        {/* ── Current default row (only when a target is configured) ── */}
-        {hasCurrentTarget &&
-        (
-          <div>
-            <span className="mb-1.5 block font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
-              {t("automations.delivery.currentDefault")}
-            </span>
-            <div
-              className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-[var(--v2-positive-soft)] border-[color-mix(in_srgb,var(--v2-positive-text)_25%,var(--v2-panel-border))]"
-            >
-              <span className="flex-1 min-w-0 text-sm font-semibold text-[var(--v2-text-strong)] truncate">
-                {currentDisplayName}
-              </span>
-              <Badge tone={currentTone} label={currentPillLabel} />
-            </div>
-          </div>
-        )}
-
-        {/* ── Radio option rows ────────────────────────────────────── */}
+      {/* ── Current default row (only when a target is configured) ── */}
+      {hasCurrentTarget && (
         <div>
           <span className="mb-1.5 block font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
-            {radioSectionLabel}
+            {t("automations.delivery.currentDefault")}
           </span>
-          <div
-            className="flex flex-col gap-3"
-            role="radiogroup"
-            aria-label={t("automations.delivery.title")}
-          >
+          <div className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-[var(--v2-positive-soft)] border-[color-mix(in_srgb,var(--v2-positive-text)_25%,var(--v2-panel-border))]">
+            <span className="flex-1 min-w-0 text-sm font-semibold text-[var(--v2-text-strong)] truncate">
+              {currentDisplayName}
+            </span>
+            <Badge tone={currentTone} label={currentPillLabel} />
+          </div>
+        </div>
+      )}
 
-            {/* Available external targets */}
-            {deliveryState.finalReplyTargets.map((option) => {
-              const tid = option?.target?.target_id ?? "";
-              const label =
-                option?.target?.display_name || option?.target?.target_id || "";
-              const desc = option?.target?.description || "";
-              const optStatus = option?.target?.status ?? "available";
-              const isSelected = draftTargetId === tid;
-              return (
-                <label
-                  key={tid}
+      {/* ── Radio option rows ────────────────────────────────────── */}
+      <div>
+        <span className="mb-1.5 block font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+          {radioSectionLabel}
+        </span>
+        <div
+          className="flex flex-col gap-3"
+          role="radiogroup"
+          aria-label={t("automations.delivery.title")}
+        >
+          {/* Available external targets */}
+          {(deliveryState.finalReplyTargets || []).map((option) => {
+            const tid = option?.target?.target_id ?? "";
+            const label =
+              option?.target?.display_name || option?.target?.target_id || "";
+            const desc = option?.target?.description || "";
+            const optStatus = option?.target?.status ?? "available";
+            const isSelected = draftTargetId === tid;
+            return (
+              <label
+                key={tid}
+                className={cn(
+                  "flex items-center gap-4 rounded-xl border px-4 py-3.5 cursor-pointer",
+                  "transition-colors duration-100",
+                  "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
+                  "hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+                  isSelected &&
+                    "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]"
+                )}
+              >
+                <span
                   className={cn(
-                    "flex items-start gap-3.5 rounded-xl border px-4 py-3.5 cursor-pointer",
-                    "transition-colors duration-100",
-                    "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
-                    "hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
-                    isSelected &&
-                      "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
+                    "mr-1 grid h-10 w-10 shrink-0 place-items-center rounded-lg border",
+                    isSelected
+                      ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+                      : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]"
                   )}
                 >
-                  <input
-                    type="radio"
-                    name="delivery-target"
-                    value={tid}
-                    checked={isSelected}
-                    disabled={isBusy}
-                    onChange={() => setDraftTargetId(tid)}
-                    className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
-                      {label}
-                    </div>
-                    {desc &&
-                    (<div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-muted)]">
-                      {desc}
-                    </div>)}
-                  </div>
-                  <Badge
-                    tone={targetTone(optStatus)}
-                    label={optStatus === "unavailable"
-                      ? t("automations.delivery.pill.unavailable")
-                      : t("automations.delivery.pill.ready")}
-                    className="self-center shrink-0"
-                  />
-                </label>
-              );
-            })}
-
-            {/* Unavailable notice rows (targets present but status=unavailable
-                 and NOT already shown above because they lack final_replies) */}
-            {hasUnavailableTargets &&
-            (
-              <div
-                className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]"
-              >
-                <span className="text-base shrink-0 opacity-70">📎</span>
+                  <Icon name="chat" className="h-5 w-5" />
+                </span>
                 <div className="flex-1 min-w-0">
-                  <span className="text-sm font-semibold text-[var(--v2-text-muted)]">
-                    {t("automations.delivery.unavailableNotice")}
-                  </span>
-                  <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-faint)]">
-                    {t("automations.delivery.unavailableDesc")}
+                  <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
+                    {label}
                   </div>
+                  {desc && (
+                    <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-muted)]">
+                      {desc}
+                    </div>
+                  )}
                 </div>
                 <Badge
-                  tone="warning"
-                  label={t("automations.delivery.pill.notPaired")}
+                  tone={targetTone(optStatus)}
+                  label={
+                    optStatus === "unavailable"
+                      ? t("automations.delivery.pill.unavailable")
+                      : t("automations.delivery.pill.ready")
+                  }
                   className="shrink-0"
                 />
-              </div>
-            )}
+                <input
+                  type="radio"
+                  name="delivery-target"
+                  value={tid}
+                  checked={isSelected}
+                  disabled={isBusy}
+                  onChange={() => setDraftTargetId(tid)}
+                  className="h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
+                />
+              </label>
+            );
+          })}
 
-            {/* Web app only / fallback row */}
-            <label
-              className={cn(
-                "flex items-start gap-3.5 rounded-xl border px-4 py-3.5",
-                "transition-colors duration-100",
-                "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
-                hasTargets
-                  ? "cursor-pointer hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]"
-                  : "cursor-default",
-                draftTargetId === "" &&
-                  "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
-              )}
-            >
-              <input
-                type="radio"
-                name="delivery-target"
-                value=""
-                checked={draftTargetId === ""}
-                disabled={isBusy || !hasTargets}
-                onChange={() => setDraftTargetId("")}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
-              />
+          {/* Unpaired notice rows (targets present but status=unavailable
+              and NOT already shown above because they lack final_replies) */}
+          {hasUnpairedTargets && (
+            <div className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]">
+              <span className="text-base shrink-0 opacity-70">📎</span>
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
-                  {t("automations.delivery.webOption")}
-                </div>
-                <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-muted)]">
-                  {t("automations.delivery.webOptionDesc")}
+                <span className="text-sm font-semibold text-[var(--v2-text-muted)]">
+                  {t("automations.delivery.unpairedNotice")}
+                </span>
+                <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-faint)]">
+                  {t("automations.delivery.unpairedDesc")}
                 </div>
               </div>
               <Badge
-                tone="muted"
-                label={t("automations.delivery.pill.fallback")}
-                className="self-center shrink-0"
+                tone="warning"
+                label={t("automations.delivery.pill.notPaired")}
+                className="shrink-0"
               />
-            </label>
+            </div>
+          )}
 
-          </div>
+          {/* Web app only / fallback row */}
+          <label
+            className={cn(
+              "flex items-center gap-4 rounded-xl border px-4 py-3.5",
+              "transition-colors duration-100",
+              "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
+              hasTargets
+                ? "cursor-pointer hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]"
+                : "cursor-default",
+              draftTargetId === "" &&
+                "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]"
+            )}
+          >
+            <span
+              className={cn(
+                "mr-1 grid h-10 w-10 shrink-0 place-items-center rounded-lg border",
+                draftTargetId === ""
+                  ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+                  : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]"
+              )}
+            >
+              <Icon name="file" className="h-5 w-5" />
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
+                {t("automations.delivery.webOption")}
+              </div>
+              <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-muted)]">
+                {t("automations.delivery.webOptionDesc")}
+              </div>
+            </div>
+            <Badge
+              tone="muted"
+              label={t("automations.delivery.pill.fallback")}
+              className="shrink-0"
+            />
+            <input
+              type="radio"
+              name="delivery-target"
+              value=""
+              checked={draftTargetId === ""}
+              disabled={isBusy || !hasTargets}
+              onChange={() => setDraftTargetId("")}
+              className="h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
+            />
+          </label>
         </div>
+      </div>
 
-        {/* ── Save row ─────────────────────────────────────────────── */}
-        <div className="flex flex-wrap items-center gap-3">
+      {/* ── Save / Clear — full-width, centered ──────────────────── */}
+      <div className="flex flex-col gap-2">
+        <div className="flex gap-3">
           <Button
             variant="primary"
             size="sm"
+            fullWidth
             disabled={!canSave}
             onClick={handleSave}
           >
-            <Icon name="check" className="h-3.5 w-3.5" />
             {t("automations.delivery.save")}
           </Button>
           <Button
             variant="secondary"
             size="sm"
+            fullWidth
             disabled={!canClear}
             onClick={handleClear}
           >
             {t("automations.delivery.clear")}
           </Button>
-          {showSaved &&
-          (
-            <span
-              role="status"
-              className="flex items-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
-            >
-              <Icon name="check" className="h-3 w-3" />
-              {t("automations.delivery.saved")}
-            </span>
-          )}
-          {deliveryState.saveError &&
-          !showSaved &&
-          (
-            <span
-              role="alert"
-              className="flex items-center gap-1.5 text-xs font-semibold text-red-300"
-            >
-              <Icon name="close" className="h-3 w-3" />
-              {t("automations.delivery.saveFailed")}
-            </span>
-          )}
         </div>
-
-        {/* ── Footnote (only when an external Slack-style target exists) ── */}
-        {hasExternalTargets &&
-        (
-          <div
-            className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"
+        {showSaved && (
+          <span
+            role="status"
+            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
           >
-            {footnoteSegments}
-          </div>
+            <Icon name="check" className="h-3 w-3" />
+            {t("automations.delivery.saved")}
+          </span>
         )}
-
+        {deliveryState.saveError && !showSaved && (
+          <span
+            role="alert"
+            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-[var(--v2-danger-text)]"
+          >
+            <Icon name="close" className="h-3 w-3" />
+            {t("automations.delivery.saveFailed")}
+          </span>
+        )}
       </div>
-    </Panel>
+
+      {/* ── Footnote — centered, beneath Save/Clear (Slack targets only) ── */}
+      {hasExternalTargets && (
+        <div className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-center text-xs leading-relaxed text-[var(--v2-text-faint)]">
+          {footnoteSegments}
+        </div>
+      )}
+    </div>
   );
 }

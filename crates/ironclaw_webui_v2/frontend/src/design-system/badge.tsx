@@ -8,7 +8,8 @@
  *   tone     "success" | "warning" | "danger" | "muted" | "signal" | "info"
  *   label    string
  *   dot      boolean (default true)
- *   size     "sm" (default) | "md"
+ *   size     "sm" | "md" (default) — use "sm" inside dense rows/tables so
+ *            the chip does not outweigh the row typography
  *   className string
  */
 import { cn } from "../utils/cn";

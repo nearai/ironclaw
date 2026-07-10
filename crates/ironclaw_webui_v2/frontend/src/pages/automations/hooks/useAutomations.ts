@@ -12,6 +12,7 @@ import { useI18n } from "../../../lib/i18n";
 import {
   automationSummary,
   normalizeAutomations,
+  soonestNextRunAt,
 } from "../lib/automations-presenters";
 import {
   AUTOMATIONS_BASE_REFETCH_MS,
@@ -49,6 +50,12 @@ export function useAutomations(includeCompleted = false) {
   );
   const summary = React.useMemo(
     () => automationSummary(automations),
+    [automations]
+  );
+  // Raw epoch-ms of the soonest active run so the summary strip can render a
+  // live countdown; automationSummary keeps only the formatted label.
+  const nextRunAt = React.useMemo(
+    () => soonestNextRunAt(automations),
     [automations]
   );
   const nextRefreshDelay = React.useMemo(
@@ -94,6 +101,7 @@ export function useAutomations(includeCompleted = false) {
   return {
     automations,
     summary,
+    nextRunAt,
     schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,

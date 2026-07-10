@@ -18,16 +18,18 @@ const STATE_PRESENTATION = {
   unknown: { labelKey: "automations.state.unknown", tone: "muted" },
 };
 
+// "Running" reads as live/healthy activity, so it uses the green "signal"
+// tone (whose dot pulses in Badge) rather than informational blue.
 const LAST_STATUS_PRESENTATION = {
   ok: { labelKey: "automations.lastStatus.done", tone: "success" },
   error: { labelKey: "automations.lastStatus.error", tone: "danger" },
-  running: { labelKey: "automations.lastStatus.running", tone: "info" },
+  running: { labelKey: "automations.lastStatus.running", tone: "signal" },
 };
 
 const RUN_STATUS_PRESENTATION = {
   ok: { labelKey: "automations.runStatus.ok", tone: "success" },
   error: { labelKey: "automations.runStatus.error", tone: "danger" },
-  running: { labelKey: "automations.runStatus.running", tone: "info" },
+  running: { labelKey: "automations.runStatus.running", tone: "signal" },
   unknown: { labelKey: "automations.runStatus.unknown", tone: "muted" },
 };
 
@@ -357,7 +359,7 @@ export function primaryStatusLabel(automation, t) {
 }
 
 export function primaryStatusTone(automation) {
-  if (isBrowserActive(automation) && automation?.has_running_run) return "info";
+  if (isBrowserActive(automation) && automation?.has_running_run) return "signal";
   if (isBrowserActive(automation) && automation?.has_failed_runs) return "danger";
   return stateTone(automation?.state);
 }
@@ -525,7 +527,9 @@ export function summarizeRuns(runs) {
 const RUN_BAR_TONE = {
   ok: "bg-[var(--v2-positive-text)]",
   error: "bg-[var(--v2-danger-text)]",
-  running: "bg-[var(--v2-info-text)]",
+  // Running is green like ok (live activity), but translucent so an
+  // in-flight segment stays distinguishable from completed successes.
+  running: "bg-[color-mix(in_srgb,var(--v2-positive-text)_55%,transparent)]",
   unknown: "bg-[var(--v2-text-faint)]",
 };
 
@@ -551,7 +555,7 @@ export function runStatusBreakdown(runs) {
     },
     {
       key: "running",
-      tone: "text-[var(--v2-info-text)]",
+      tone: "text-[var(--v2-positive-text)]",
       barClass: RUN_BAR_TONE.running,
       count: counts.running,
     },

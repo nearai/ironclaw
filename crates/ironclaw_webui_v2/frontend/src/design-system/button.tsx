@@ -37,13 +37,26 @@ const BASE =
   "focus-visible:ring-offset-[var(--v2-canvas)]";
 
 /* ── Size classes ──────────────────────────────────────────────────── */
+/* Compact control-density scale (design system PR #5563): heights and
+   paddings come from the --v2-control-* tokens (app.css) so buttons,
+   inputs, selects, and tab rows align in mixed toolbar rows, and every
+   corner comes from the shared --v2-radius-* ramp — no per-size magic
+   radii. sm 28px / md 32px / lg 36px. */
 
 const SIZES = {
-  sm:      "h-9 rounded-[10px] px-3 text-xs",
-  md:      "min-h-[44px] rounded-[14px] px-3.5 text-[13px] md:min-h-[50px] md:rounded-[16px] md:px-4 md:text-sm",
-  lg:      "min-h-[54px] rounded-[18px] px-6 text-base",
-  icon:    "h-[44px] w-[44px] rounded-[14px] md:h-[50px] md:w-[50px] md:rounded-[16px]",
-  "icon-sm": "h-9 w-9 rounded-[10px]",
+  sm:
+    "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] " +
+    "px-[var(--v2-control-px-sm)] text-xs",
+  md:
+    "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] " +
+    "px-[var(--v2-control-px-md)] text-[13px]",
+  lg:
+    "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] " +
+    "px-[var(--v2-control-px-lg)] text-sm",
+  icon:
+    "h-[var(--v2-control-h-md)] w-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)]",
+  "icon-sm":
+    "h-[var(--v2-control-h-sm)] w-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)]",
 };
 
 /* ── Variant classes ───────────────────────────────────────────────── */

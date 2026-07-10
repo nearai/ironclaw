@@ -390,7 +390,8 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.equal(automations[0].last_status_label, "Error");
   assert.equal(automations[0].last_status_tone, "danger");
   assert.equal(automations[0].primary_status_label, "Running");
-  assert.equal(automations[0].primary_status_tone, "info");
+  // Running is presented as live/healthy green (signal), not info blue.
+  assert.equal(automations[0].primary_status_tone, "signal");
   // Post-acceptance statuses (running/ok/error) must produce a chat_path.
   assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
   assert.equal(automations[0].recent_runs[1].chat_path, "/chat/thread-error");

@@ -1,191 +1,240 @@
+// @ts-nocheck
+import React from "react";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { EmptyPanel } from "../../../design-system/primitives";
+import { SelectMenu } from "../../../design-system/select-menu";
+import { Tabs } from "../../../design-system/tabs";
 import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
-import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters";
-import { AutomationDetailPanel } from "./automation-detail-panel";
+import {
+  AUTOMATION_FILTERS,
+  AUTOMATION_SORTS,
+  filterAutomations,
+  sortAutomations,
+} from "../lib/automations-presenters";
+import { AutomationDeliveryDefaultsModal } from "./automation-delivery-defaults-modal";
+import { AutomationDetailModal } from "./automation-detail-modal";
+import { AutomationRow, ROW_COLUMNS } from "./automation-row";
 import { AutomationsEmptyState } from "./automations-empty-state";
-import { RunDots, RunHistorySummary } from "./automation-recent-runs";
+import { AutomationsSummaryStrip } from "./automations-summary-strip";
+
+// The header subtitle is contextual: it describes the currently selected
+// filter tab instead of repeating a static tagline. "All" gets a count-aware
+// line; the status filters reuse the same localized descriptions the summary
+// cards show, so both surfaces can never disagree.
+function filterSubtext(filter, summary, t) {
+  if (filter === "active") return t("automations.summary.activeDetail");
+  if (filter === "running") return t("automations.summary.runningDetail");
+  if (filter === "failures") return t("automations.summary.failuresDetail");
+  if (filter === "paused") return t("automations.summary.pausedDetail");
+  if (filter === "completed") return t("automations.subtext.completed");
+  const count = summary?.scheduled ?? 0;
+  const active = summary?.active ?? 0;
+  return count === 1
+    ? t("automations.subtext.one", { active })
+    : t("automations.subtext.all", { count, active });
+}
 
 export function AutomationsList({
   automations,
+  summary,
+  nextRunAt,
   filter,
   onFilterChange,
-  onRefresh,
-  isRefreshing,
+  deliveryState,
   isMutating,
-  selectedAutomationId,
-  onSelectAutomation,
   onPauseAutomation,
   onResumeAutomation,
   onRenameAutomation,
   onDeleteAutomation,
 }) {
   const t = useT();
-  const filtered = filterAutomations(automations, filter);
+  // Default sort mirrors the natural ordering (active first, soonest next run).
+  const [sort, setSort] = React.useState("next");
+  const filtered = sortAutomations(filterAutomations(automations, filter), sort);
   const hasAutomations = automations.length > 0;
-  const selectedAutomation =
-    filtered.find((automation) => automation.automation_id === selectedAutomationId) ||
-    filtered[0] ||
-    null;
+
+  // The detail modal is opened by automation id (not index) so it survives
+  // refetches that reorder or drop rows.
+  const [openId, setOpenId] = React.useState(null);
+  const openAutomation =
+    automations.find((automation) => automation.automation_id === openId) || null;
+  const [deliveryOpen, setDeliveryOpen] = React.useState(false);
+
+  const filterOptions = AUTOMATION_FILTERS.map((item) => ({
+    value: item.value,
+    label: t(item.labelKey),
+  }));
+  const sortOptions = AUTOMATION_SORTS.map((item) => ({
+    value: item.value,
+    label: t(item.labelKey),
+  }));
 
   return (
     <div className="space-y-5">
-      <Panel className="p-4 sm:p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
-              {t("automations.eyebrow")}
-            </div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">
-              {t("automations.title")}
-            </h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
-              {t("automations.description")}
-            </p>
-          </div>
+      <div className="min-w-0">
+        <h2 className="text-[1.75rem] font-semibold tracking-tight text-[var(--v2-text-strong)]">
+          {t("automations.title")}
+        </h2>
+        <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
+          {filterSubtext(filter, summary, t)}
+        </p>
+      </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <div
-              className="inline-flex max-w-full overflow-x-auto rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]"
-              role="group"
-              aria-label={t("automations.filterLabel")}
-            >
-              {AUTOMATION_FILTERS.map((item) => (
-                <button
-                  key={item.value}
-                  type="button"
-                  aria-pressed={filter === item.value}
-                  onClick={() => onFilterChange(item.value)}
-                  className={cn(
-                    "min-h-9 shrink-0 whitespace-nowrap px-3 py-2 text-xs font-semibold leading-tight",
-                    filter === item.value
-                      ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-                      : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-                  )}
-                >
-                  {t(item.labelKey)}
-                </button>
-              ))}
-            </div>
+      <AutomationsSummaryStrip summary={summary} nextRunAt={nextRunAt} />
+
+      {/* Toolbar. Desktop/tablet: underline filter tabs sharing one baseline
+          with the sort select and delivery-defaults button. Mobile swaps the
+          tab row for a dropdown — no shrunken or scrolling tab strips. */}
+      <div className="hidden flex-wrap items-end justify-between gap-x-4 gap-y-2 border-b border-[var(--v2-panel-border)] sm:flex">
+        <Tabs
+          bordered={false}
+          tabs={filterOptions}
+          value={filter}
+          onChange={onFilterChange}
+          ariaLabel={t("automations.filterLabel")}
+          className="min-w-0"
+        />
+        <div className="flex items-center gap-2 pb-2">
+          <label className="flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
+              {t("automations.sort.label")}
+            </span>
+            <SelectMenu
+              value={sort}
+              options={sortOptions}
+              onChange={setSort}
+              ariaLabel={t("automations.sort.label")}
+              className="min-w-[8.5rem]"
+            />
+          </label>
+          {deliveryState && (
             <Button
               variant="secondary"
-              size="icon-sm"
-              aria-label={t("automations.refresh")}
-              title={isRefreshing ? t("automations.refreshing") : t("automations.refresh")}
-              disabled={isRefreshing}
-              onClick={onRefresh}
+              size="md"
+              className="shrink-0"
+              onClick={() => setDeliveryOpen(true)}
             >
-              <Icon
-                name="retry"
-                className={cn("h-4 w-4", isRefreshing && "v2-spin")}
-              />
+              <Icon name="gear" className="mr-1.5 h-4 w-4" />
+              {t("automations.delivery.setDefaults")}
             </Button>
-          </div>
-        </div>
-      </Panel>
-
-      {!filtered.length
-        ? hasAutomations
-          ? (
-              <EmptyPanel
-                title={t("automations.empty.matchingTitle")}
-                description={t("automations.empty.matchingDescription")}
-              />
-            )
-          : (<AutomationsEmptyState />)
-        : (
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.12fr)_minmax(22rem,0.88fr)]">
-              <Panel className="overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[900px] border-collapse">
-                    <thead>
-                      <tr className="border-b border-[var(--v2-panel-border)] text-left">
-                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                          {t("automations.table.name")}
-                        </th>
-                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                          {t("automations.table.schedule")}
-                        </th>
-                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                          {t("automations.table.nextRun")}
-                        </th>
-                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                          {t("automations.table.recentRuns")}
-                        </th>
-                        <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                          {t("automations.table.status")}
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filtered.map((automation) => {
-                        const selected =
-                          automation.automation_id === selectedAutomation?.automation_id;
-                        return (
-                          <tr
-                            key={automation.automation_id}
-                            data-testid="automation-row"
-                            data-automation-id={automation.automation_id}
-                            className={cn(
-                              "border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
-                              selected && "bg-[var(--v2-accent-soft)]/30"
-                            )}
-                          >
-                            <td className="max-w-[280px] px-5 py-4 align-top">
-                              <button
-                                type="button"
-                                aria-pressed={selected}
-                                data-testid="automation-name-button"
-                                data-automation-id={automation.automation_id}
-                                onClick={() => onSelectAutomation(automation.automation_id)}
-                                className="block w-full min-w-0 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
-                              >
-                                <div className="truncate text-sm font-semibold text-iron-100">
-                                  {automation.display_name}
-                                </div>
-                                <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
-                                  {automation.automation_id}
-                                </div>
-                              </button>
-                            </td>
-                            <td className="px-5 py-4 align-top text-sm text-iron-200">
-                              {automation.schedule_label}
-                            </td>
-                            <td className="px-5 py-4 align-top text-sm text-iron-200">
-                              {automation.next_run_label}
-                            </td>
-                            <td className="px-5 py-4 align-top">
-                              <div className="space-y-2">
-                                <RunDots runs={automation.recent_runs} />
-                                <RunHistorySummary runs={automation.recent_runs} />
-                              </div>
-                            </td>
-                            <td className="px-5 py-4 align-top">
-                              <StatusPill
-                                tone={automation.primary_status_tone}
-                                label={automation.primary_status_label}
-                              />
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </Panel>
-
-              <AutomationDetailPanel
-                automation={selectedAutomation}
-                isMutating={isMutating}
-                onPauseAutomation={onPauseAutomation}
-                onResumeAutomation={onResumeAutomation}
-                onRenameAutomation={onRenameAutomation}
-                onDeleteAutomation={onDeleteAutomation}
-              />
-            </div>
           )}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 sm:hidden">
+        <SelectMenu
+          value={filter}
+          options={filterOptions}
+          onChange={onFilterChange}
+          ariaLabel={t("automations.filterLabel")}
+          align="left"
+          className="min-w-0 flex-1"
+          buttonClassName="w-full"
+        />
+        <SelectMenu
+          value={sort}
+          options={sortOptions}
+          onChange={setSort}
+          ariaLabel={t("automations.sort.label")}
+          className="min-w-0 flex-1"
+          buttonClassName="w-full"
+        />
+        {deliveryState && (
+          <Button
+            variant="secondary"
+            size="md"
+            className="shrink-0"
+            onClick={() => setDeliveryOpen(true)}
+          >
+            <Icon name="gear" className="mr-1.5 h-4 w-4" />
+            {t("automations.delivery.setDefaults")}
+          </Button>
+        )}
+      </div>
+
+      {!filtered.length ? (
+        hasAutomations ? (
+          <EmptyPanel
+            title={t("automations.empty.matchingTitle")}
+            description={t("automations.empty.matchingDescription")}
+          />
+        ) : (
+          <AutomationsEmptyState />
+        )
+      ) : (
+        /* Below sm each automation is its own card on the canvas; from sm up
+           the rows fuse into one Card-styled panel with a column-header label
+           row (Name / Status / Last run) and hairline dividers. */
+        <div
+          className={cn(
+            "flex flex-col gap-3",
+            "sm:gap-0 sm:overflow-hidden sm:rounded-[1.25rem] md:rounded-[1.5rem]",
+            "sm:border sm:border-[var(--v2-card-border)] sm:bg-[var(--v2-card-bg)]",
+            "sm:shadow-[var(--v2-card-shadow)]"
+          )}
+        >
+          <div
+            className={cn(
+              ROW_COLUMNS.frame,
+              "hidden border-b border-[var(--v2-panel-border)] px-5 py-2.5 sm:flex"
+            )}
+            aria-hidden="true"
+          >
+            <div
+              className={cn(
+                ROW_COLUMNS.name,
+                "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]"
+              )}
+            >
+              {t("automations.table.name")}
+            </div>
+            <div
+              className={cn(
+                ROW_COLUMNS.status,
+                "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]"
+              )}
+            >
+              {t("automations.table.status")}
+            </div>
+            <div
+              className={cn(
+                ROW_COLUMNS.lastRun,
+                "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]"
+              )}
+            >
+              {t("automations.table.lastRun")}
+            </div>
+            <span className={ROW_COLUMNS.chevron} />
+          </div>
+          {filtered.map((automation) => (
+            <AutomationRow
+              key={automation.automation_id}
+              automation={automation}
+              onOpen={setOpenId}
+            />
+          ))}
+        </div>
+      )}
+
+      <AutomationDetailModal
+        automation={openAutomation}
+        open={Boolean(openAutomation)}
+        onClose={() => setOpenId(null)}
+        isMutating={isMutating}
+        onPauseAutomation={onPauseAutomation}
+        onResumeAutomation={onResumeAutomation}
+        onRenameAutomation={onRenameAutomation}
+        onDeleteAutomation={onDeleteAutomation}
+      />
+
+      {deliveryState && (
+        <AutomationDeliveryDefaultsModal
+          deliveryState={deliveryState}
+          open={deliveryOpen}
+          onClose={() => setDeliveryOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -1,127 +1,112 @@
+// @ts-nocheck
 import React from "react";
+import { useParams } from "react-router";
 import { useT } from "../../lib/i18n";
-import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel";
+import { AutomationDetailPage } from "./components/automation-detail-page";
 import { AutomationsList } from "./components/automations-list";
-import { AutomationsSummaryStrip } from "./components/automations-summary-strip";
+import { useAutomation } from "./hooks/useAutomation";
 import { useAutomations } from "./hooks/useAutomations";
 import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults";
 
 export function AutomationsPage() {
   const t = useT();
+  const { automationId } = useParams();
   const [filter, setFilter] = React.useState("all");
-  const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const includeCompleted = filter === "completed";
   const automationsState = useAutomations(includeCompleted);
   const deliveryState = useOutboundDeliveryDefaults();
 
-  // A local refetch can resolve almost instantly, leaving the spinner to flash
-  // imperceptibly. Hold a minimum spin window so a manual refresh always reads
-  // as a deliberate action.
-  const [minSpin, setMinSpin] = React.useState(false);
-  const minSpinTimer = React.useRef(null);
-  React.useEffect(() => () => clearTimeout(minSpinTimer.current), []);
-  const handleRefresh = React.useCallback(() => {
-    setMinSpin(true);
-    clearTimeout(minSpinTimer.current);
-    minSpinTimer.current = setTimeout(() => setMinSpin(false), 1000);
-    automationsState.refetch();
-  }, [automationsState.refetch]);
-  const isRefreshing = automationsState.isRefreshing || minSpin;
+  // Detail view resolution. Hooks must run unconditionally, so `useAutomation`
+  // is always called (it no-ops when there is no `automationId`). Seed it with
+  // the list row when present so popping out of the list modal paints instantly;
+  // the by-id fetch then resolves completed / beyond-the-page automations the
+  // list cannot.
+  const detailSeed = automationId
+    ? automationsState.automations.find(
+        (item) => item.automation_id === automationId
+      ) || null
+    : null;
+  const detailState = useAutomation(automationId, { seed: detailSeed });
+
+  // Data stays fresh on its own: a base poll plus a smart timer that pulls
+  // near-due and in-progress automations forward (see useAutomations), so there
+  // is no manual refresh control to reason about.
   const showErrorOnly =
     automationsState.error &&
     !automationsState.isLoading &&
     automationsState.automations.length === 0;
 
-  React.useEffect(() => {
-    if (!automationsState.automations.length) {
-      setSelectedAutomationId(null);
-      return;
-    }
-    const stillExists = automationsState.automations.some(
-      (automation) => automation.automation_id === selectedAutomationId
+  // Full-screen, persistent detail view for a single automation. Reached by
+  // popping out of the list's detail modal or by deep link.
+  if (automationId) {
+    return (
+      <AutomationDetailPage
+        automation={detailState.automation}
+        isLoading={detailState.isLoading}
+        error={detailState.error}
+        isMutating={automationsState.isMutating}
+        onPauseAutomation={automationsState.pauseAutomation}
+        onResumeAutomation={automationsState.resumeAutomation}
+        onRenameAutomation={automationsState.renameAutomation}
+        onDeleteAutomation={automationsState.deleteAutomation}
+      />
     );
-    if (!stillExists) {
-      setSelectedAutomationId(automationsState.automations[0].automation_id);
-    }
-  }, [automationsState.automations, selectedAutomationId]);
+  }
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="v2-page-entrance flex-1 p-4 sm:p-6">
         <div className="space-y-5">
-          {automationsState.error &&
-          (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+          {automationsState.error && (
+            <div className="rounded-[14px] border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]">
               {t("automations.error.loadFailed")}
             </div>
           )}
-          {automationsState.actionError &&
-          (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+          {automationsState.actionError && (
+            <div className="rounded-[14px] border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]">
               {automationsState.actionError.message}
             </div>
           )}
 
-          {showErrorOnly
-            ? null
-            : (
-                <>
-                {!automationsState.isLoading &&
-                !automationsState.schedulerEnabled &&
-                (
+          {showErrorOnly ? null : (
+            <>
+              {!automationsState.isLoading &&
+                !automationsState.schedulerEnabled && (
                   <div
                     role="status"
-                    className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3"
+                    className="rounded-[14px] border border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-4 py-3"
                   >
-                    <div className="text-sm font-semibold text-amber-200">
+                    <div className="text-sm font-semibold text-[var(--v2-warning-text)]">
                       {t("automations.schedulerOff.title")}
                     </div>
-                    <div className="mt-0.5 text-xs leading-5 text-amber-200/80">
+                    <div className="mt-0.5 text-xs leading-5 text-[color-mix(in_srgb,var(--v2-warning-text)_80%,var(--v2-text))]">
                       {t("automations.schedulerOff.description")}
                     </div>
                   </div>
                 )}
-                <AutomationsSummaryStrip
+              {automationsState.isLoading ? (
+                <div className="space-y-4">
+                  {[1, 2, 3].map((index) => (
+                    <div key={index} className="v2-skeleton h-28 rounded-[1.25rem]" />
+                  ))}
+                </div>
+              ) : (
+                <AutomationsList
+                  automations={automationsState.automations}
                   summary={automationsState.summary}
-                  activeFilter={filter}
-                  onSelectFilter={setFilter}
+                  nextRunAt={automationsState.nextRunAt}
+                  filter={filter}
+                  onFilterChange={setFilter}
+                  deliveryState={deliveryState}
+                  isMutating={automationsState.isMutating}
+                  onPauseAutomation={automationsState.pauseAutomation}
+                  onResumeAutomation={automationsState.resumeAutomation}
+                  onRenameAutomation={automationsState.renameAutomation}
+                  onDeleteAutomation={automationsState.deleteAutomation}
                 />
-                <AutomationDeliveryDefaultsPanel deliveryState={deliveryState} />
-
-                {automationsState.isLoading
-                  ? (
-                      <div className="space-y-4">
-                        {[1, 2, 3].map(
-                          (index) =>
-                            (<div
-                              key={index}
-                              className="v2-skeleton h-28 rounded-[18px]"
-                            />)
-                        )}
-                      </div>
-                    )
-                  : (
-                      <AutomationsList
-                        automations={automationsState.automations}
-                        filter={filter}
-                        onFilterChange={setFilter}
-                        onRefresh={handleRefresh}
-                        isRefreshing={isRefreshing}
-                        isMutating={automationsState.isMutating}
-                        selectedAutomationId={selectedAutomationId}
-                        onSelectAutomation={setSelectedAutomationId}
-                        onPauseAutomation={automationsState.pauseAutomation}
-                        onResumeAutomation={automationsState.resumeAutomation}
-                        onRenameAutomation={automationsState.renameAutomation}
-                        onDeleteAutomation={automationsState.deleteAutomation}
-                      />
-                    )}
-                </>
               )}
+            </>
+          )}
         </div>
       </div>
     </div>

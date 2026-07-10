@@ -1632,7 +1632,10 @@ fn route_lookup() -> HashMap<String, IngressRouteDescriptor> {
 }
 
 #[test]
-fn automation_resource_descriptor_pattern_is_dual_method_only() {
+fn automation_resource_descriptor_pattern_is_multi_method_only() {
+    // The shared automation resource path deliberately carries exactly three
+    // methods — GET (detail fetch), POST (rename), DELETE (remove) — each with
+    // its own route id so host policy/audit stays action-specific.
     let mut matching_routes = Vec::new();
     for route in webui_v2_routes() {
         if route.route_pattern().as_str() == "/api/webchat/v2/automations/{automation_id}" {
@@ -1647,6 +1650,10 @@ fn automation_resource_descriptor_pattern_is_dual_method_only() {
             (
                 WEBUI_V2_ROUTE_DELETE_AUTOMATION.to_string(),
                 NetworkMethod::Delete,
+            ),
+            (
+                WEBUI_V2_ROUTE_GET_AUTOMATION.to_string(),
+                NetworkMethod::Get,
             ),
             (
                 WEBUI_V2_ROUTE_RENAME_AUTOMATION.to_string(),
