@@ -2619,6 +2619,8 @@ const SLACK_HISTORY_BODY: &str = r#"{"ok":true,"has_more":false,"messages":[
 ]}"#;
 const SLACK_USER_AAA_BODY: &str = r#"{"ok":true,"user":{"id":"U0AAA","name":"firat","is_bot":false,"profile":{"display_name":"Firat","real_name":"Firat Sertgoz"}}}"#;
 const SLACK_USER_BBB_BODY: &str = r#"{"ok":true,"user":{"id":"U0BBB","name":"ada","is_bot":false,"profile":{"display_name":"","real_name":"Ada Lovelace"}}}"#;
+const SLACK_AUTH_TEST_SELF_AAA_BODY: &str =
+    r#"{"ok":true,"user_id":"U0AAA","user":"firat","team_id":"T0TEAM"}"#;
 
 /// Digest bug regression (raw `U0ANBHZUUUR`-style ids in user-facing output):
 /// history messages must carry `user_display_name` resolved INSIDE the tool —
@@ -2632,6 +2634,7 @@ async fn slack_history_output_carries_display_names_alongside_raw_user_ids() {
         ("conversations.history", 200, SLACK_HISTORY_BODY),
         ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
         ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
     ]);
     let secret_store = Arc::new(InMemorySecretStore::new());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
@@ -2676,6 +2679,26 @@ async fn slack_history_output_carries_display_names_alongside_raw_user_ids() {
         lookups, 2,
         "expected exactly one users.info lookup per distinct author"
     );
+
+    // Identity-attribution regression ("says George is off but it's actually
+    // me"): the tool must mark which messages the CONNECTED account authored,
+    // so the model can attribute the requester's own words to the requester.
+    assert_eq!(
+        output["current_user_id"],
+        json!("U0AAA"),
+        "history output must surface the connected account's user id: {output}"
+    );
+    assert_eq!(
+        messages[0]["is_current_user"],
+        json!(true),
+        "messages authored by the connected account must be marked: {output}"
+    );
+    assert_eq!(
+        messages[1]["is_current_user"],
+        json!(false),
+        "other authors must be explicitly not-current-user: {output}"
+    );
+    assert_eq!(messages[2]["is_current_user"], json!(true));
 }
 
 /// DM entries from `list_conversations` carry the counterpart's display name
@@ -2755,6 +2778,58 @@ async fn slack_history_read_survives_users_info_failure_without_names() {
     assert!(
         messages[0].get("user_display_name").is_none(),
         "no display name should be fabricated when users.info fails: {output}"
+    );
+    // auth.test is unscripted here (fixture 404s it): identity marking must
+    // degrade to absent — never a fabricated attribution, never a failed read.
+    assert!(
+        output.get("current_user_id").is_none(),
+        "current_user_id must be absent when auth.test fails: {output}"
+    );
+    assert!(
+        messages[0].get("is_current_user").is_none(),
+        "is_current_user must be absent when the connected identity is unknown: {output}"
+    );
+}
+
+/// Identity-attribution regression, part 2: the model must be able to ask
+/// "who am I on Slack?" directly. `slack.whoami` resolves the CONNECTED
+/// account via `auth.test` + a best-effort `users.info` for the display name.
+#[tokio::test]
+async fn slack_whoami_resolves_connected_identity() {
+    let capability_id = CapabilityId::new("slack.whoami").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_eq!(output["ok"], json!(true));
+    assert_eq!(
+        output["user_id"],
+        json!("U0AAA"),
+        "whoami must return the connected account's user id: {output}"
+    );
+    assert_eq!(
+        output["user_display_name"],
+        json!("Firat"),
+        "whoami must resolve the connected account's display name: {output}"
     );
 }
 
