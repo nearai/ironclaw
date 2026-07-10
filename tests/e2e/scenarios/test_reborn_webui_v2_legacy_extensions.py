@@ -724,7 +724,7 @@ async def test_reborn_legacy_extensions_install_auth_url_requires_https(
         await expect(card).to_be_visible(timeout=5000)
         await card.get_by_role("button", name="Install").click()
 
-        await expect(page.get_by_text("Authentication URL must use HTTPS.")).to_be_visible(
+        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
             timeout=5000
         )
         assert await page.evaluate("() => window.__openedUrls") == []
@@ -735,7 +735,7 @@ async def test_reborn_legacy_extensions_install_auth_url_requires_https(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_install_setup_required_channel_opens_configure_modal(
+async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
     reborn_v2_server, reborn_v2_browser
 ):
     setup_channel = {
@@ -785,9 +785,14 @@ async def test_reborn_legacy_install_setup_required_channel_opens_configure_moda
         await expect(
             page.get_by_role("heading", name="Configure Slack Channel")
         ).to_be_visible(timeout=5000)
-        await expect(page.get_by_text("Enter the Slack channel token.")).to_be_visible()
-        await expect(page.get_by_text("Slack bot token")).to_be_visible()
-        await expect(page.locator('input[type="password"]')).to_have_count(1)
+        modal = page.get_by_label("Configure Slack Channel")
+        await expect(modal.get_by_text("Enter the Slack channel token.")).to_be_visible()
+        await expect(modal.get_by_text("Slack bot token")).to_be_visible()
+        await expect(modal.locator('input[type="password"]')).to_be_visible()
+        await expect(modal.get_by_text("Save to continue pairing.")).to_be_visible()
+        await expect(modal.get_by_role("button", name="Save")).to_be_visible()
+        await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
+        await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
         assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
@@ -1142,7 +1147,7 @@ async def test_reborn_legacy_activate_auth_url_requires_https(
         await expect(card).to_be_visible(timeout=5000)
         await card.get_by_role("button", name="Activate").click()
 
-        await expect(page.get_by_text("Authentication URL must use HTTPS.")).to_be_visible(
+        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
             timeout=5000
         )
         assert await page.evaluate("() => window.__openedUrls") == []
@@ -1196,7 +1201,7 @@ async def test_reborn_legacy_activate_auth_url_accepts_uppercase_https(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_channel_config_label_depends_on_authentication(
+async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -1225,10 +1230,10 @@ async def test_reborn_legacy_channel_config_label_depends_on_authentication(
         await expect(unauthenticated).to_be_visible(timeout=5000)
         await _open_card_menu(unauthenticated)
         await expect(
-            page.get_by_role("menuitem", name="Configure", exact=True)
+            page.get_by_role("menuitem", name="Connect", exact=True)
         ).to_have_count(1)
         await expect(
-            page.get_by_role("menuitem", name="Reconfigure", exact=True)
+            page.get_by_role("menuitem", name="Reconnect", exact=True)
         ).to_have_count(0)
 
         await page.mouse.click(8, 8)
@@ -1236,16 +1241,16 @@ async def test_reborn_legacy_channel_config_label_depends_on_authentication(
         await expect(authenticated).to_be_visible(timeout=5000)
         await _open_card_menu(authenticated)
         await expect(
-            page.get_by_role("menuitem", name="Reconfigure", exact=True)
+            page.get_by_role("menuitem", name="Reconnect", exact=True)
         ).to_have_count(1)
         await expect(
-            page.get_by_role("menuitem", name="Configure", exact=True)
+            page.get_by_role("menuitem", name="Connect", exact=True)
         ).to_have_count(0)
     finally:
         await harness["context"].close()
 
 
-async def test_reborn_legacy_channel_setup_required_has_single_configure_action(
+async def test_reborn_legacy_channel_setup_required_has_single_connect_action(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -1265,7 +1270,7 @@ async def test_reborn_legacy_channel_setup_required_has_single_configure_action(
         card = _card_by_title(page, "Label Channel")
         await expect(card).to_be_visible(timeout=5000)
 
-        await expect(card.get_by_role("button", name="Configure")).to_have_count(1)
+        await expect(card.get_by_role("button", name="Connect")).to_have_count(1)
         await _open_card_menu(card)
         await expect(page.get_by_role("menuitem", name="Setup", exact=True)).to_have_count(
             0
@@ -1273,11 +1278,12 @@ async def test_reborn_legacy_channel_setup_required_has_single_configure_action(
         await expect(
             page.get_by_role("menuitem", name="Configure", exact=True)
         ).to_have_count(0)
+        await expect(page.get_by_role("menuitem", name="Connect", exact=True)).to_have_count(0)
     finally:
         await harness["context"].close()
 
 
-async def test_reborn_legacy_channel_reconfigure_opens_modal_without_activate(
+async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activate(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -1318,11 +1324,19 @@ async def test_reborn_legacy_channel_reconfigure_opens_modal_without_activate(
         await expect(card).to_be_visible(timeout=5000)
 
         await _open_card_menu(card)
-        await page.get_by_role("menuitem", name="Reconfigure", exact=True).click()
+        await page.get_by_role("menuitem", name="Reconnect", exact=True).click()
         await expect(page.get_by_role("heading", name="Configure Label Channel")).to_be_visible(
             timeout=5000
         )
-        await expect(page.get_by_text("Bot token")).to_be_visible()
+        modal = page.get_by_role("dialog", name="Configure Label Channel")
+        await expect(modal).to_contain_text("Bot token")
+        await expect(modal).to_contain_text("configured")
+        await expect(
+            modal.get_by_placeholder("••••••• (leave blank to keep)")
+        ).to_be_visible()
+        await expect(modal.get_by_text("Extension is active.")).to_be_visible()
+        await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
+        await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
         assert harness["activate_requests"] == []
     finally:
         await harness["context"].close()
@@ -2043,7 +2057,7 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_telegram_token_configure_preserves_token_characters(
+async def test_reborn_legacy_telegram_setup_preserves_token_characters(
     reborn_v2_server, reborn_v2_browser
 ):
     token = "123456789:ABCdef_GHI-jkl_mnop-QRSTuvwxyz"
@@ -2072,20 +2086,40 @@ async def test_reborn_legacy_telegram_token_configure_preserves_token_characters
     )
     try:
         page = harness["page"]
+        redeem_requests: list[dict] = []
+
+        async def handle_redeem(route):
+            redeem_requests.append(json.loads(route.request.post_data or "{}"))
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "provider": "telegram",
+                        "provider_user_id": "123456789",
+                    }
+                ),
+            )
+
+        await page.route("**/api/webchat/v2/extensions/pairing/redeem", handle_redeem)
+
         card = _card_by_title(page, "Telegram")
         await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Configure").click()
+        await card.get_by_role("button", name="Connect").click()
 
         await expect(
             page.get_by_role("heading", name="Configure Telegram")
         ).to_be_visible(timeout=5000)
-        await expect(page.get_by_text("Telegram Bot Token")).to_be_visible()
-        await page.locator('input[type="password"]').first.fill(token)
-        await page.get_by_role("button", name="Save").click()
+        modal = page.get_by_label("Configure Telegram")
+        await expect(modal.get_by_text("Telegram Bot Token")).to_be_visible()
+        await modal.locator('input[type="password"]').fill(token)
+        await modal.get_by_role("button", name="Save").click()
 
         await expect(
             page.get_by_role("heading", name="Configure Telegram")
         ).to_have_count(0)
+        assert redeem_requests == []
+        assert harness["activate_requests"] == []
         assert harness["setup_submit_requests"] == [
             {
                 "package_id": "telegram",

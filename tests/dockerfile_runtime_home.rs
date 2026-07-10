@@ -170,6 +170,20 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 }
 
 #[test]
+fn reborn_runtime_image_includes_sql_debug_clients() {
+    let dockerfile = read_repo_file("Dockerfile.reborn");
+
+    assert!(
+        dockerfile.contains("postgresql-client"),
+        "runtime image must include psql for Railway hosted Postgres inspection"
+    );
+    assert!(
+        dockerfile.contains("sqlite3"),
+        "runtime image must include sqlite3 for volume-backed libSQL/SQLite inspection"
+    );
+}
+
+#[test]
 fn reborn_hosted_single_tenant_seed_config_contains_postgres_storage() {
     let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
 
@@ -182,8 +196,12 @@ fn reborn_hosted_single_tenant_seed_config_contains_postgres_storage() {
         "hosted seed config must include Postgres storage"
     );
     assert!(
-        config.contains("pool_max_size = 10"),
+        config.contains("pool_max_size = 32"),
         "hosted seed config must size the shared Postgres pool for runtime concurrency"
+    );
+    assert!(
+        config.contains("worker_count = 0"),
+        "hosted seed config must not globally throttle turn runners below model/storage capacity"
     );
     assert!(
         !config.contains("[policy]"),

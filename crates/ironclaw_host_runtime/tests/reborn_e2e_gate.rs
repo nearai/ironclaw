@@ -116,10 +116,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             script_capability_id(),
-            ResourceEstimate {
-                output_bytes: Some(4096),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_output_bytes(4096),
             input.clone(),
             trust_decision_with_dispatch_authority(),
         ))

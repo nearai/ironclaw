@@ -25,7 +25,7 @@ Root cause chain (all verified against main):
 4. The fresh invocation cannot satisfy `has_matching_approval_grant`
    (`crates/ironclaw_reborn_composition/src/profile_approval_authorization.rs:159-190`):
    the visible-request grants are empty (`CapabilitySet::default()`,
-   `crates/ironclaw_reborn_composition/src/product_live_adapters.rs:446-456`), and the
+   `crates/ironclaw_reborn_composition/src/root/product_live_adapters.rs:446-456`), and the
    prior lease is unusable — `max_invocations = 1` (consumed) and matched by
    `lease.scope == context.resource_scope` where the scope embeds the old `invocation_id`
    (`crates/ironclaw_capabilities/src/helpers.rs:95-99`).
@@ -151,7 +151,7 @@ confirmable the same way.
 
 - Loop-level: integration test driving approve → AuthRequired → auth-resume → dispatch
   completes WITHOUT a second approval request (extends
-  `crates/ironclaw_reborn/tests/loop_driver_host.rs` approval/resume coverage, e.g.
+  `crates/ironclaw_runner/tests/loop_driver_host.rs` approval/resume coverage, e.g.
   `turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_run`).
 - Capability-host contract: auth-resume with original invocation id reuses run record;
   fingerprint mismatch still rejected.

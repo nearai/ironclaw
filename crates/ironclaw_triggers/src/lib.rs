@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
+use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
 const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
 const MAX_TRIGGER_RUN_HISTORY_RETAINED: usize = 500;
-pub const MAX_TRIGGER_NAME_BYTES: usize = 256;
+pub const MAX_TRIGGER_NAME_BYTES: usize = ironclaw_common::MAX_AUTOMATION_NAME_BYTES;
 pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
@@ -81,6 +82,7 @@ pub enum TriggerRecordValidationKind {
     NameTooLong,
     PromptEmpty,
     PromptTooLong,
+    DeliveryTargetInvalid,
     Other,
 }
 
@@ -267,6 +269,65 @@ impl<'de> Deserialize<'de> for TriggerInboundContentRef {
     }
 }
 
+/// Opaque outbound delivery target id pinned to one trigger.
+///
+/// Carries the product-workflow outbound delivery target id (as returned by
+/// the outbound delivery target capabilities) without depending on the
+/// product layer: this crate treats it as an opaque routing token. Resolution
+/// to a concrete conversation/channel happens in composition at creation
+/// (validation) and at fire time (delivery), so a stale target fails closed
+/// there rather than here.
+///
+/// Values must be non-empty, at most 256 bytes, and free of control
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct TriggerDeliveryTargetId(String);
+
+impl TriggerDeliveryTargetId {
+    /// Create a validated per-trigger delivery target id.
+    pub fn new(value: impl Into<String>) -> Result<Self, TriggerError> {
+        let value = value.into();
+        validate_delivery_target_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for TriggerDeliveryTargetId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for TriggerDeliveryTargetId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for TriggerDeliveryTargetId {
+    type Error = TriggerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_delivery_target_id(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl From<TriggerDeliveryTargetId> for String {
+    fn from(id: TriggerDeliveryTargetId) -> Self {
+        id.0
+    }
+}
+
 impl Serialize for TriggerRouteThreadId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -318,6 +379,12 @@ pub struct TriggerRecord {
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
     pub prompt: String,
+    /// Optional per-trigger outbound delivery target. When set, fires deliver
+    /// their results to this target instead of the creator's user-global
+    /// outbound delivery preference, so one automation's routing cannot be
+    /// clobbered by another automation (or a later preference change).
+    #[serde(default)]
+    pub delivery_target: Option<TriggerDeliveryTargetId>,
     pub state: TriggerState,
     pub next_run_at: Timestamp,
     pub last_run_at: Option<Timestamp>,
@@ -330,18 +397,7 @@ pub struct TriggerRecord {
 
 impl TriggerRecord {
     pub fn validate(&self) -> Result<(), TriggerError> {
-        if self.name.trim().is_empty() {
-            return Err(TriggerError::InvalidRecord {
-                kind: TriggerRecordValidationKind::NameEmpty,
-                reason: "trigger name must not be empty".to_string(),
-            });
-        }
-        if self.name.len() > MAX_TRIGGER_NAME_BYTES {
-            return Err(TriggerError::InvalidRecord {
-                kind: TriggerRecordValidationKind::NameTooLong,
-                reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
-            });
-        }
+        validate_trigger_name(&self.name)?;
         if self.prompt.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
                 kind: TriggerRecordValidationKind::PromptEmpty,
@@ -371,6 +427,26 @@ impl TriggerRecord {
     pub fn has_active_fire(&self) -> bool {
         self.active_fire_slot.is_some() || self.active_run_ref.is_some()
     }
+}
+
+pub(crate) fn validate_trigger_name(name: &str) -> Result<(), TriggerError> {
+    AutomationName::new(name.to_string())
+        .map(|_| ())
+        .map_err(trigger_name_error)
+}
+
+fn trigger_name_error(error: AutomationNameError) -> TriggerError {
+    let (kind, reason) = match error {
+        AutomationNameError::Empty => (
+            TriggerRecordValidationKind::NameEmpty,
+            "trigger name must not be empty".to_string(),
+        ),
+        AutomationNameError::TooLong => (
+            TriggerRecordValidationKind::NameTooLong,
+            format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
+        ),
+    };
+    TriggerError::InvalidRecord { kind, reason }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -776,6 +852,10 @@ pub struct TriggerFire {
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub prompt: String,
+    /// Per-trigger outbound delivery target carried from the record so the
+    /// delivery layer can honor it without re-reading the trigger row.
+    #[serde(default)]
+    pub delivery_target: Option<TriggerDeliveryTargetId>,
 }
 
 #[async_trait]
@@ -937,6 +1017,7 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
+            delivery_target: record.delivery_target.clone(),
         }))
     }
 }
@@ -1005,6 +1086,25 @@ pub trait TriggerRepository: Send + Sync {
         trigger_id: TriggerId,
         state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    /// Renames a trigger only when the full caller scope matches the stored record.
+    ///
+    /// This user-facing mutation updates only the human-readable label. It
+    /// must not alter schedule state, active-fire metadata, run history, or
+    /// prompt content.
+    async fn rename_scoped_trigger(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "rename_scoped_trigger not implemented by this repository".to_string(),
+        })
+    }
 
     /// Lists due triggers across all tenants for the trusted poller path.
     ///
@@ -1344,6 +1444,30 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(None);
         }
         record.state = new_state;
+        Ok(Some(record.clone()))
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+        {
+            return Ok(None);
+        }
+        record.name = name.into_inner();
         Ok(Some(record.clone()))
     }
 
@@ -2038,6 +2162,25 @@ fn validate_lower_hex_identifier(label: &str, value: String) -> Result<String, T
     })
 }
 
+fn validate_delivery_target_id(value: &str) -> Result<(), TriggerError> {
+    let invalid = |reason: &str| TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+        reason: reason.to_string(),
+    };
+    if value.is_empty() {
+        return Err(invalid("delivery target id must not be empty"));
+    }
+    if value.len() > 256 {
+        return Err(invalid("delivery target id must be at most 256 bytes"));
+    }
+    if value.chars().any(|ch| ch == '\0' || ch.is_control()) {
+        return Err(invalid(
+            "delivery target id must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_inbound_content_ref(value: &str) -> Result<(), TriggerError> {
     if value.is_empty() {
         return Err(TriggerError::InvalidMaterialization {
@@ -2126,6 +2269,7 @@ mod tests {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
             prompt: "summarize unread mail".to_string(),
+            delivery_target: None,
             state: TriggerState::Scheduled,
             next_run_at,
             last_run_at: None,
@@ -2301,7 +2445,10 @@ mod tests {
     #[tokio::test]
     async fn schedule_provider_emits_due_fire_only() {
         let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
-        let record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        record.delivery_target = Some(
+            TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
+        );
         let provider = ScheduleTriggerSourceProvider;
 
         assert!(
@@ -2319,6 +2466,30 @@ mod tests {
         assert_eq!(fire.identity.trigger_id, trigger_id);
         assert_eq!(fire.identity.fire_slot, record.next_run_at);
         assert_eq!(fire.prompt, record.prompt);
+        // Per-trigger delivery routing must survive record -> fire so the
+        // delivery layer can honor it without re-reading the record.
+        assert_eq!(fire.delivery_target, record.delivery_target);
+    }
+
+    #[test]
+    fn trigger_delivery_target_id_is_opaque_and_validated() {
+        let target = TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a")
+            .expect("valid delivery target id");
+        assert_eq!(target.as_str(), "slack:personal-dm:T123:user-a");
+        assert_eq!(
+            to_value(&target).unwrap(),
+            json!("slack:personal-dm:T123:user-a")
+        );
+        assert_eq!(
+            from_value::<TriggerDeliveryTargetId>(json!("slack:personal-dm:T123:user-a")).unwrap(),
+            target
+        );
+        assert!(TriggerDeliveryTargetId::new("x".repeat(256)).is_ok());
+
+        assert!(TriggerDeliveryTargetId::new("").is_err());
+        assert!(TriggerDeliveryTargetId::new("target\nid").is_err());
+        assert!(TriggerDeliveryTargetId::new("x".repeat(257)).is_err());
+        assert!(from_value::<TriggerDeliveryTargetId>(json!("")).is_err());
     }
 
     #[test]

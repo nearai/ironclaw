@@ -22,6 +22,7 @@ class CaseSpec:
         *,
         requires_slack: bool = False,
         requires_slack_target: bool = False,
+        requires_slack_personal_auth: bool = False,
         requires_google_product_auth: bool = False,
         requires_google_runtime_access: bool = False,
         requires_telegram: bool = False,
@@ -32,6 +33,7 @@ class CaseSpec:
         self.fn = fn
         self.requires_slack = requires_slack
         self.requires_slack_target = requires_slack_target
+        self.requires_slack_personal_auth = requires_slack_personal_auth
         self.requires_google_product_auth = requires_google_product_auth
         self.requires_google_runtime_access = requires_google_runtime_access
         self.requires_telegram = requires_telegram
@@ -100,7 +102,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_3a_slack_connect": {
         "rows": ["3A"],
         "feature": "Slack connection flow",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and a seeded real Slack personal product-auth account",
     },
     "qa_3b_endpoint_status_live_chat": {
         "rows": ["3B"],
@@ -143,7 +145,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_5a_slack_connect": {
         "rows": ["5A"],
         "feature": "Slack connection flow for AMA",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and a seeded real Slack personal product-auth account",
     },
     "qa_5b_drive_connect": {
         "rows": ["5B"],
@@ -222,7 +224,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_8a_slack_connect": {
         "rows": ["8A"],
         "feature": "Slack connection flow for HN monitor",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and a seeded real Slack personal product-auth account",
     },
     "qa_8b_hn_keyword_live_chat": {
         "rows": ["8B"],
@@ -237,5 +239,107 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
         "rows": ["8D"],
         "feature": "Hacker News keyword monitor Slack delivery",
         "gate": "requires live Slack message delivery verification",
+    },
+    "qa_9a_slack_connect": {
+        "rows": ["9A"],
+        "feature": "Slack connect for automation delivery probes",
+        "gate": "requires live Slack host-beta bot/signing-secret env",
+    },
+    "qa_9b_routine_dm_delivery_exactly_once": {
+        "rows": ["9B"],
+        "feature": (
+            "Routine result reaches the requester's Slack DM exactly once, "
+            "bot-identity only (wrong-channel/duplicate-delivery probe)"
+        ),
+        "gate": "requires live Slack message delivery verification",
+    },
+    "qa_9c_slack_digest_names_not_ids": {
+        "rows": ["9C"],
+        "feature": "Slack DM digest names senders instead of raw Slack user ids",
+        "gate": "requires live Slack personal OAuth",
+    },
+    "qa_9d_routine_per_trigger_delivery_target": {
+        "rows": ["9D"],
+        "feature": (
+            "Routine routed through its own delivery_target_id end to end "
+            "(per-trigger routing probe)"
+        ),
+        "gate": "requires live Slack message delivery verification",
+    },
+    "qa_10a_slack_self_attribution": {
+        "rows": ["10A"],
+        "feature": (
+            "Slack self-attribution: agent identifies which DM messages the "
+            "connected user sent (pins the no-self-identity gap)"
+        ),
+        "gate": "requires live Slack personal OAuth and bot/personal DM fixture seeding",
+    },
+    "qa_10b_slack_ooo_status": {
+        "rows": ["10B"],
+        "feature": (
+            "Slack own-status readback: agent reports the user's current "
+            "status text (pins dropped status fields + self-identity)"
+        ),
+        "gate": (
+            "requires live Slack personal OAuth and the manually-set OOO "
+            "canary status fixture on the QA account (read-verify; the "
+            "probe never writes a status)"
+        ),
+    },
+    "qa_10c_slack_thread_replies": {
+        "rows": ["10C"],
+        "feature": (
+            "Slack thread visibility: agent surfaces replies seeded under a "
+            "thread root (pins the missing thread-replies capability)"
+        ),
+        "gate": "requires live Slack personal OAuth and bot/personal DM fixture seeding",
+    },
+    "qa_10d_slack_channel_membership": {
+        "rows": ["10D"],
+        "feature": (
+            "Slack membership honesty: member-channel list matches "
+            "users.conversations ground truth (pins the channel-membership lie)"
+        ),
+        "gate": "requires live Slack personal OAuth",
+    },
+    "qa_10e_slack_error_honesty": {
+        "rows": ["10E"],
+        "feature": (
+            "Slack error honesty: the exact Slack error code "
+            "(channel_not_found) reaches the user (pins host error-code erasure)"
+        ),
+        "gate": "requires live Slack personal OAuth",
+    },
+    "qa_10f_slack_mention_encoding": {
+        "rows": ["10F"],
+        "feature": (
+            "Slack mention encoding: posted @-mention is <@U…>-encoded in raw "
+            "message text so the target is notified (pins literal-@ posting)"
+        ),
+        "gate": "requires live Slack personal OAuth and the seeded personal DM",
+    },
+    "qa_10g_slack_last_message_sent": {
+        "rows": ["10G"],
+        "feature": (
+            "Slack last-sent recall: agent retrieves the user's own most "
+            "recent sent message (pins the search-lag/self-identity class)"
+        ),
+        "gate": "requires live Slack personal OAuth and personal DM fixture seeding",
+    },
+    "qa_10h_slack_email_hallucination_guard": {
+        "rows": ["10H"],
+        "feature": (
+            "Slack email hallucination guard: agent says EMAIL_UNAVAILABLE "
+            "instead of fabricating an address (users:read.email scope absent)"
+        ),
+        "gate": "requires live Slack personal OAuth and the seeded personal DM",
+    },
+    "qa_10i_slack_raw_entity_hygiene": {
+        "rows": ["10I"],
+        "feature": (
+            "Slack raw-entity hygiene: encoded mentions rendered as display "
+            "names — no raw user or conversation ids in user-facing text"
+        ),
+        "gate": "requires live Slack personal OAuth and bot DM fixture seeding",
     },
 }

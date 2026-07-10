@@ -58,10 +58,16 @@ Two rules are non-negotiable for **all** tests:
    stand up a redundant new "extensive" test that overloads the suite.
    Add a new test only for a genuinely distinct scenario, and say why an
    existing one couldn't absorb it.
+3. **Integration-first coverage.** Production-wired Reborn behavior
+   ships with a test in `tests/integration/`, driven through the
+   harness and asserting at a seam — never `wait_for_status(Completed)`
+   alone. Crate-tier is the fallback only when that tier can't reach
+   the path (say why in the PR). Full decision rule:
+   `.claude/rules/testing.md`.
 
 Where to look: hard rules (tiers, test-through-the-caller,
 regression-with-every-fix) in `.claude/rules/testing.md`; **Reborn
-integration tests** authoring guide in `tests/support/reborn/CLAUDE.md`;
+integration tests** authoring guide in `tests/integration/CLAUDE.md`;
 Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 
 ## Code Style
@@ -285,7 +291,8 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/workspace/` | `src/workspace/README.md` |
 | `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
 | `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
-| `tests/support/reborn/` | `tests/support/reborn/CLAUDE.md` |
+| `tests/integration/` | `tests/integration/CLAUDE.md` |
+| `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine

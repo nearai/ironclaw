@@ -1,17 +1,24 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use chrono::{SecondsFormat, TimeZone, Utc};
+use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_triggers::{
-    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
+    TriggerDeliveryTargetId, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
 #[cfg(feature = "libsql")]
 use {
-    ironclaw_triggers::LibSqlTriggerRepository, libsql::params, std::sync::Arc, tempfile::tempdir,
+    ironclaw_triggers::LibSqlTriggerRepository,
+    libsql::params,
+    std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    },
+    tempfile::tempdir,
 };
 
 #[cfg(feature = "postgres")]
@@ -29,6 +36,10 @@ fn user(value: &str) -> UserId {
     UserId::new(value).expect("valid user")
 }
 
+fn automation_name(value: &str) -> AutomationName {
+    AutomationName::new(value).expect("valid automation name")
+}
+
 fn sample_record(
     trigger_id: TriggerId,
     tenant_id: TenantId,
@@ -44,6 +55,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -258,6 +270,9 @@ async fn assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(
     record.last_status = Some(TriggerRunStatus::Error);
     record.active_fire_slot = Some(ts(1_704_067_260));
     record.active_run_ref = Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
+    record.delivery_target = Some(
+        TriggerDeliveryTargetId::new("slack:personal-dm:T123:user-a").expect("delivery target"),
+    );
 
     repo.upsert_trigger(record.clone())
         .await
@@ -1056,6 +1071,60 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
     );
 }
 
+async fn assert_scoped_rename_updates_only_matching_scope(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01J00000000000000000000004").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_200));
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert trigger to rename");
+
+    let wrong_scope = repo
+        .rename_scoped_trigger(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-other").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            automation_name("wrong scope name"),
+        )
+        .await
+        .expect("wrong-scope rename");
+    assert_eq!(wrong_scope, None);
+    assert_eq!(
+        repo.get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get after wrong-scope rename")
+            .expect("record")
+            .name,
+        record.name
+    );
+
+    let renamed = repo
+        .rename_scoped_trigger(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            automation_name("morning inbox summary"),
+        )
+        .await
+        .expect("matching-scope rename")
+        .expect("renamed record");
+    assert_eq!(renamed.name, "morning inbox summary");
+    assert_eq!(renamed.state, TriggerState::Scheduled);
+    assert_eq!(renamed.prompt, record.prompt);
+    assert_eq!(renamed.next_run_at, record.next_run_at);
+
+    let fetched = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get renamed trigger")
+        .expect("renamed record");
+    assert_eq!(fetched.name, "morning inbox summary");
+}
+
 #[cfg(feature = "libsql")]
 async fn build_libsql_repo_with_db() -> (
     tempfile::TempDir,
@@ -1113,6 +1182,9 @@ async fn libsql_repository_contract_parity() {
 
     let (_dir, repo) = build_libsql_repo().await;
     assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_scoped_rename_updates_only_matching_scope(&repo).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1130,6 +1202,49 @@ async fn libsql_repository_run_migrations_is_idempotent() {
 
     repo.run_migrations().await.expect("first run migrations");
     repo.run_migrations().await.expect("second run migrations");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libsql_repository_busy_timeout_waits_for_write_lock() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("triggers.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+    let lock_holder = db.connect().expect("connect raw libsql");
+    lock_holder
+        .execute_batch("BEGIN IMMEDIATE;")
+        .await
+        .expect("hold write lock");
+
+    let repo = LibSqlTriggerRepository::new(db);
+    let started = Instant::now();
+    let migration = tokio::spawn(async move { repo.run_migrations().await });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !migration.is_finished(),
+        "repository migration should wait for the held write lock instead of failing immediately"
+    );
+
+    lock_holder
+        .execute_batch("COMMIT;")
+        .await
+        .expect("release write lock");
+
+    let result = tokio::time::timeout(Duration::from_secs(2), migration)
+        .await
+        .expect("migration should finish after lock release")
+        .expect("migration task should not panic");
+    result.expect("migration should succeed after waiting for the lock");
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "migration should have been blocked by the held write lock"
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -1211,6 +1326,9 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_scoped_rename_updates_only_matching_scope(&repo).await;
 }
 
 #[cfg(feature = "postgres")]

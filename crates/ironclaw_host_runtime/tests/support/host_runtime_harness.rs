@@ -1092,11 +1092,9 @@ where
     let scope = sample_scope(invocation_id);
     let context =
         execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone());
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1);
     secret_store
         .put(
             scope.clone(),
@@ -1702,6 +1700,7 @@ pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
         user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
         mission_id: scope.mission_id.clone(),
@@ -1753,6 +1752,7 @@ pub(crate) fn execution_context_with_effect_grants_for_scope(
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
         user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
         mission_id: scope.mission_id.clone(),
@@ -1953,6 +1953,7 @@ pub(crate) fn process_start(
         parent_process_id: None,
         invocation_id,
         scope,
+        authenticated_actor_user_id: None,
         extension_id: script_extension_id(),
         capability_id: script_capability_id(),
         runtime: RuntimeKind::Script,
@@ -1971,6 +1972,7 @@ pub(crate) fn process_sandbox_start(process_id: ProcessId, scope: ResourceScope)
         parent_process_id: None,
         invocation_id,
         scope,
+        authenticated_actor_user_id: None,
         extension_id: ExtensionId::new("system.process_sandbox").unwrap(),
         capability_id: process_sandbox_capability_id(),
         runtime: RuntimeKind::System,
@@ -1999,11 +2001,9 @@ pub(crate) fn process_sandbox_runtime_request_for_scope(
 }
 
 pub(crate) fn process_sandbox_estimate() -> ResourceEstimate {
-    ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    }
+    ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1)
 }
 
 pub(crate) fn process_sandbox_input() -> serde_json::Value {
@@ -2158,12 +2158,10 @@ pub(crate) fn governor_with_default_limit(account: ResourceAccount) -> InMemoryR
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_network_egress_bytes: Some(10_000),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_network_egress_bytes(10_000)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
@@ -2193,12 +2191,10 @@ pub(crate) fn wasm_runtime_request_for_scope(
 }
 
 pub(crate) fn wasm_http_estimate() -> ResourceEstimate {
-    ResourceEstimate {
-        concurrency_slots: Some(1),
-        network_egress_bytes: Some(10),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    }
+    ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_network_egress_bytes(10)
+        .set_output_bytes(10_000)
 }
 
 pub(crate) fn sample_account() -> ResourceAccount {

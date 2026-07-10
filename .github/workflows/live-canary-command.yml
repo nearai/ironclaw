@@ -87,12 +87,15 @@ jobs:
             exit 0
           fi
 
-          head_sha="$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+          pr_head="$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid)"
+          head_ref="$(printf '%s' "$pr_head" | jq -r .headRefName)"
+          head_sha="$(printf '%s' "$pr_head" | jq -r .headRefOid)"
           short_sha="${head_sha:0:10}"
           trigger_context="/canary PR #${PR} ${short_sha} comment ${COMMENT_ID} by @${COMMENT_AUTHOR}"
 
           {
             echo "cases=$cases"
+            echo "head_ref=$head_ref"
             echo "head_sha=$head_sha"
             echo "short_sha=$short_sha"
             echo "trigger_context=$trigger_context"
@@ -112,6 +115,7 @@ jobs:
         env:
           CASES: ${{ steps.parse.outputs.cases }}
           GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.parse.outputs.head_ref }}
           HEAD_SHA: ${{ steps.parse.outputs.head_sha }}
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
@@ -124,6 +128,7 @@ jobs:
             -f lane=reborn-webui-v2-live-qa \
             -f cases="$CASES" \
             -f target_ref="$HEAD_SHA" \
+            -f target_branch="$HEAD_REF" \
             -f target_pr="$PR" \
             -f trigger_context="$TRIGGER_CONTEXT"
 
@@ -132,6 +137,7 @@ jobs:
         env:
           CASES: ${{ steps.parse.outputs.cases }}
           GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.parse.outputs.head_ref }}
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           SHORT_SHA: ${{ steps.parse.outputs.short_sha }}
@@ -159,4 +165,4 @@ jobs:
           fi
 
           gh pr comment "$PR" --repo "$REPO" --body \
-            "Started Reborn WebUI v2 live canary for \`${SHORT_SHA}\` with cases \`${CASES}\`: ${run_url}"
+            "Started Reborn WebUI v2 live canary for \`${HEAD_REF}\` at \`${SHORT_SHA}\` with cases \`${CASES}\`: ${run_url}"

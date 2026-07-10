@@ -50,7 +50,7 @@
 - Local-dev/WebUI capability result plumbing may stage results in memory, but any
   durable thread append keyed by `LoopRunContext` (for example capability display
   preview timeline messages) must resolve the thread scope through
-  `ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn` before
+  `ironclaw_runner::thread_scope::ThreadScopeResolver::resolve_for_turn` before
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
 
@@ -66,7 +66,7 @@ middleware with v1's `src/channels/web/`.
 
 | Symbol | Role |
 |---|---|
-| `RebornWebuiBundle` (in [`src/webui.rs`](src/webui.rs)) | `{ api: Arc<dyn RebornServicesApi>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 facade, optional product-auth route service, plus readiness snapshot |
+| `RebornWebuiBundle` (in [`src/webui/facade.rs`](src/webui/facade.rs)) | `{ api: Arc<dyn RebornServicesApi>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 facade, optional product-auth route service, plus readiness snapshot |
 | `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
@@ -95,7 +95,8 @@ Inbound order (outer → inner → handler):
    bearer-validation step). Today: `create_thread`, product-auth OAuth
    start, manual-token setup/secret-submit, accounts list/select/recovery/
    refresh, and lifecycle cleanup — all 16 KiB; `send_message` 14 MiB
-   (text + base64 inline attachments); `cancel_run` and `resolve_gate` 4 KiB; `get_timeline`,
+   (text + base64 inline attachments); `cancel_run`, `resolve_gate`, and
+   `rename_automation` 4 KiB; `get_timeline`,
    `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
@@ -135,7 +136,7 @@ Inbound order (outer → inner → handler):
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension, list-automations).
+   cancel-run, resolve-gate, setup-extension, list/rename automations).
 
 ### Product-auth routes
 
@@ -181,15 +182,14 @@ Reborn-native product-auth surface:
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
 
-### Extension pairing routes
+### Slack personal OAuth setup
 
-When Slack host-beta personal binding is configured, `webui_v2_app`
-mounts `POST /api/webchat/v2/extensions/pairing/redeem` inside the same
-bearer-auth layer as the native WebUI v2 extension routes. The request
-body carries `{ channel, code }`; the route validates the channel server-side
-and currently resolves the supported Slack channel aliases to the Slack
-personal-binding pairing service. The browser must not call provider-specific
-pairing paths directly.
+Slack host-beta normal personal setup is extension-card driven: the user
+installs the Slack extension, clicks Configure, and the card starts the
+`slack_personal` product-auth OAuth flow. The successful callback binds the
+Slack `authed_user.id` to the authenticated Reborn user through the host-owned
+identity binding store. Slack personal setup is OAuth-only; the old browser
+manual-code redeem route and Slack command flow are not mounted.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
 `GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` and
@@ -372,6 +372,13 @@ runtime state stores sit behind the composed local-dev root filesystem
 files). Production durable retention/live fanout still belongs in the
 host runtime/event-store follow-up rather than this composition facade.
 
+Live cumulative assistant-text projections are producer-coalesced: the first
+update is published immediately, rapid replacements publish the latest value
+at most once per 75 ms, and any non-text milestone flushes the pending value
+before that milestone is projected. Reasoning, capability, and lifecycle
+milestones remain ordered and uncoalesced. The in-memory source still records
+the latest projection for replay when no browser subscriber is active.
+
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —
 // `reborn_product_api_crates_do_not_bind_http_ingress` forbids
@@ -401,6 +408,13 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   — regression guard that the WebUI projection adapter uses the facade
   request actor when selecting the runtime event stream, rather than a
   hidden runtime owner actor.
+- `src/projection/tests/live_progress_stream.rs::live_assistant_text_coalescer_flushes_latest_update_on_timer`
+  — regression guard that rapid cumulative text still advances while the
+  model continues streaming.
+- `src/projection/tests/live_progress_stream.rs::live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_activity`
+  — caller-level regression guard that a provider-rate text burst does not
+  terminate the bounded WebUI subscription and that the latest text is
+  published before the next capability milestone.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,
@@ -418,18 +432,18 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   `prefers-reduced-motion`). These lock source shape only; behavioral
   JS/`getComputedStyle` coverage needs a browser harness this workspace
   does not own and is deferred to the JS/e2e scaffold.
-- `src/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
+- `src/webui/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
   matcher and query-token extraction.
-- `src/webui_route_match.rs::tests` — unit tests for the pattern
+- `src/webui/webui_route_match.rs::tests` — unit tests for the pattern
   parser and segment matcher shared by both descriptor-driven
   middlewares.
-- `src/webui_rate_limit.rs::tests` — unit tests for the sliding-window
+- `src/webui/webui_rate_limit.rs::tests` — unit tests for the sliding-window
   policy resolver, a regression test that `build_rate_limit_state`
   accepts every descriptor returned by
   `ironclaw_webui_v2::webui_v2_routes()`, and
   `unsupported_scope_is_rejected_at_composition` locking the
   fail-closed branch for non-`PerCaller` scopes.
-- `src/webui_body_limit.rs::tests` — composition-time tests that
+- `src/webui/webui_body_limit.rs::tests` — composition-time tests that
   `build_body_limit_state` accepts every v2 descriptor and preserves
   the per-route caps (regression guard against silently widening the
   `send_message` cap or relaxing a `NoBody` policy).

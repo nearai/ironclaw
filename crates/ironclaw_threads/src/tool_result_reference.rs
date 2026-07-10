@@ -18,25 +18,20 @@ const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
 const RAW_PAYLOAD_OR_PATH_DELIMITERS: [char; 9] = ['{', '}', '[', ']', '`', '<', '>', '/', '\\'];
-const SENSITIVE_SUMMARY_MARKERS: [&str; 18] = [
+// Only credential markers are banned. Descriptive error vocabulary
+// ("provider error", "stack trace", "tool input", "traceback", "host path",
+// "raw runtime") is allowed — the raw cause rides the model-visible detail
+// channel, which redacts secret VALUES rather than banning ordinary words.
+const SENSITIVE_SUMMARY_MARKERS: [&str; 9] = [
     "access token",
     "api key",
     "api_key",
     "apikey",
     "authorization:",
     "bearer ",
-    "host path",
-    "invalid api key",
-    "invalid_api_key",
     "password",
     "passwd",
-    "provider error",
-    "raw runtime",
     "secret",
-    "stack trace",
-    "tool input",
-    "tool_input",
-    "traceback",
 ];
 const SENSITIVE_OBSERVATION_MARKERS: [&str; 20] = [
     "access token",
@@ -538,13 +533,18 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
         "generic_failure" => {
             validate_object_keys(
                 object,
-                &["kind", "failure_kind"],
+                &["kind", "failure_kind", "detail"],
                 "model observation detail",
             )?;
             validate_model_observation_identifier(
                 required_string(object, "failure_kind", "model observation detail")?,
                 "model observation failure kind",
                 128,
+            )?;
+            validate_optional_observation_text_len(
+                optional_string(object, "detail", "model observation detail")?,
+                "model observation failure detail",
+                MAX_MODEL_OBSERVATION_BYTES,
             )
         }
         other => Err(format!(
@@ -804,8 +804,16 @@ fn validate_optional_observation_text(
     value: Option<&str>,
     label: &'static str,
 ) -> Result<(), String> {
+    validate_optional_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)
+}
+
+fn validate_optional_observation_text_len(
+    value: Option<&str>,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<(), String> {
     if let Some(value) = value {
-        validate_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)?;
+        validate_observation_text_len(value, label, max_bytes)?;
     }
     Ok(())
 }
@@ -914,6 +922,47 @@ mod tests {
     }
 
     #[test]
+    fn generic_failure_observation_accepts_diagnostic_detail() {
+        let diagnostic = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let error_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with missing_runtime.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "missing_runtime",
+                "detail": diagnostic,
+            },
+            "recovery": {
+                "same_call_retry": "not_useful",
+                "repairs": [],
+                "recovery_hint": "respect_failure_constraint",
+            },
+            "trust": "untrusted_tool_output",
+        });
+
+        let envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-output_1.4",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            error_obs,
+        )
+        .expect("diagnostic observation envelope");
+
+        envelope
+            .validate()
+            .expect("diagnostic observation validates");
+        assert_eq!(
+            envelope
+                .model_observation
+                .as_ref()
+                .and_then(|observation| observation.get("detail"))
+                .and_then(|detail| detail.get("detail"))
+                .and_then(serde_json::Value::as_str),
+            Some(diagnostic)
+        );
+    }
+
+    #[test]
     fn error_observation_fingerprint_is_none_for_success() {
         let success_obs = serde_json::json!({
             "schema_version": 1,
@@ -955,8 +1004,38 @@ mod tests {
         let summary = ToolResultSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
             .expect("fixed host-authored input encode summary is safe");
         assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
+    }
 
-        assert!(ToolResultSafeSummary::new("tool input contained raw payload").is_err());
+    #[test]
+    fn safe_summary_accepts_ordinary_error_vocabulary() {
+        for accepted in [
+            "provider error occurred during the call",
+            "stack trace was captured for diagnosis",
+            "the tool input was malformed",
+            "a traceback is available for review",
+            "host path resolution did not complete",
+            "raw runtime returned an unexpected status",
+        ] {
+            ToolResultSafeSummary::new(accepted)
+                .unwrap_or_else(|error| panic!("`{accepted}` should be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn safe_summary_still_rejects_credentials_and_delimiters() {
+        for rejected in [
+            "leaked sk-LIVEsecretvalue token",
+            "authorization header bearer abc123",
+            "the api key was exposed",
+            "user password was logged",
+            "a secret slipped into the message",
+            "missing schema at /system/extensions",
+        ] {
+            assert!(
+                ToolResultSafeSummary::new(rejected).is_err(),
+                "`{rejected}` must still be rejected"
+            );
+        }
     }
 
     #[test]

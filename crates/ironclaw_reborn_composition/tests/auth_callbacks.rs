@@ -11,8 +11,9 @@ use ironclaw_auth::{
     AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
     InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    OAuthProviderExchangeContext, OAuthProviderIdentity, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
@@ -106,6 +107,7 @@ impl AuthProviderClient for CountingProviderClient {
 struct SuccessfulCountingProviderClient {
     calls: AtomicUsize,
     last_context: Mutex<Option<OAuthProviderExchangeContext>>,
+    provider_identity: Option<OAuthProviderIdentity>,
 }
 
 impl SuccessfulCountingProviderClient {
@@ -142,6 +144,7 @@ impl AuthProviderClient for SuccessfulCountingProviderClient {
             refresh_secret: Some(SecretHandle::new("oauth-refresh").unwrap()),
             scopes: request.scopes,
             account_id: None,
+            provider_identity: self.provider_identity.clone(),
         })
     }
 
@@ -193,6 +196,7 @@ impl AuthProviderClient for CleanupRecordingProviderClient {
             refresh_secret: Some(SecretHandle::new("orphan-refresh").unwrap()),
             scopes: request.scopes,
             account_id: Some(CredentialAccountId::new()),
+            provider_identity: None,
         })
     }
 
@@ -383,6 +387,40 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
         dispatcher.events().len(),
         1,
         "completed callback replay must not redispatch continuations"
+    );
+}
+
+#[tokio::test]
+async fn oauth_callback_handler_returns_provider_identity_for_host_binding() {
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let provider_identity = OAuthProviderIdentity::new(
+        "U123",
+        Some("T123".to_string()),
+        Some("E123".to_string()),
+        Some("A123".to_string()),
+    )
+    .expect("valid provider identity");
+    let provider_client = Arc::new(SuccessfulCountingProviderClient {
+        provider_identity: Some(provider_identity.clone()),
+        ..SuccessfulCountingProviderClient::default()
+    });
+    let services = auth_services(dispatcher).with_provider_client(provider_client);
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+
+    let response = services
+        .handle_oauth_callback(authorized_request(owner, flow_id))
+        .await
+        .expect("callback completes");
+
+    assert_eq!(response.provider_identity, Some(provider_identity));
+    let serialized = serde_json::to_string(&response).unwrap();
+    assert!(
+        !serialized.contains("U123")
+            && !serialized.contains("T123")
+            && !serialized.contains("E123")
+            && !serialized.contains("A123"),
+        "provider identity is for host-side binding only and must stay out of the generic callback JSON"
     );
 }
 

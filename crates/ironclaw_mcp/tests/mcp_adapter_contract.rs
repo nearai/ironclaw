@@ -20,12 +20,10 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -36,12 +34,10 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    process_count: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_process_count(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation {
                     input: json!({"query": "ironclaw"}),
@@ -415,7 +411,7 @@ async fn concrete_mcp_http_client_rejects_missing_or_unsafe_initialize_protocol_
             .await
             .expect_err("unsafe initialize protocol versions must fail the call");
 
-        assert_eq!(error.stable_reason(), "response_error");
+        assert_eq!(error.stable_reason(), "mcp_invalid_protocol_version");
     }
 }
 
@@ -455,7 +451,7 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         .await
         .expect_err("direct secret-store leases must fail before MCP transport");
 
-    assert_eq!(error.stable_reason(), "request_denied");
+    assert_eq!(error.stable_reason(), "mcp_denied_credential_source");
     assert!(
         egress.requests().is_empty(),
         "direct leases must be rejected before initialize or tools/call transport"
@@ -606,7 +602,7 @@ async fn concrete_mcp_http_client_does_not_reuse_session_from_failed_initialize(
         })
         .await
         .expect_err("failed initialize responses must fail the call");
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_http_status_500");
 
     client
         .call_tool(McpClientRequest {
@@ -658,7 +654,7 @@ async fn concrete_mcp_http_client_rejects_json_rpc_response_without_matching_id(
         .await
         .expect_err("ID-bearing JSON-RPC requests must reject missing response ids");
 
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_jsonrpc_id_mismatch");
 }
 
 #[tokio::test]
@@ -940,7 +936,7 @@ async fn concrete_mcp_http_client_rejects_invalid_session_id_before_reuse() {
         .await
         .expect_err("invalid upstream session ids must not be reused as request headers");
 
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_invalid_session_id");
 }
 
 #[tokio::test]
@@ -1007,10 +1003,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_output_bytes: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_output_bytes(1),
         )
         .unwrap();
 
@@ -1021,10 +1014,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1053,10 +1043,7 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1084,10 +1071,7 @@ async fn mcp_runtime_preserves_adapter_error_when_release_cleanup_fails() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1110,10 +1094,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(0),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(0),
         )
         .unwrap();
 
@@ -1124,10 +1105,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                 package: &non_mcp,
                 capability_id: &CapabilityId::new("script.echo").unwrap(),
                 scope: scope.clone(),
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1149,10 +1127,7 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
                 package: &mcp,
                 capability_id: &CapabilityId::new("github-mcp.missing").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1190,11 +1165,9 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1232,11 +1205,9 @@ async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },
@@ -1277,11 +1248,9 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
                 package: &package,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
-                estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    output_bytes: Some(10_000),
-                    ..ResourceEstimate::default()
-                },
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_output_bytes(10_000),
                 resource_reservation: None,
                 invocation: McpInvocation { input: json!({}) },
             },

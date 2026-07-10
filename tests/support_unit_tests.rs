@@ -4,7 +4,11 @@
 //! and run exactly once, rather than being duplicated across every `e2e_*.rs`
 //! test binary that declares `mod support;`.
 
-#[path = "support/reborn/mod.rs"]
+#[allow(dead_code)]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -399,9 +403,10 @@ mod reborn_support_tests {
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
-        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+        RetryTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        ThreadBusy, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus,
         events::EventCursor,
         run_profile::{
             CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
@@ -410,14 +415,14 @@ mod reborn_support_tests {
     };
     use tokio::sync::Barrier;
 
-    use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
-    use crate::reborn_support::filesystem::local_filesystem;
-    use crate::reborn_support::harness::RecordingTestCapabilityPort;
-    use crate::reborn_support::model_replay::{
+    use crate::parity_qa_support::delivery::RecordingOutboundDeliverySink;
+    use crate::parity_qa_support::model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayError,
         RebornTraceReplayModelGateway, capability_call_from_trace_with_surface,
     };
-    use crate::reborn_support::network::RecordingNetworkHttpTransport;
+    use crate::parity_qa_support::network::RecordingNetworkHttpTransport;
+    use crate::reborn_support::filesystem::local_filesystem;
+    use crate::reborn_support::harness::RecordingTestCapabilityPort;
     use crate::reborn_support::product_workflow::{
         FilesystemIdempotencyLedger, RebornProductWorkflowHarness,
         RebornProductWorkflowHarnessError, resource_scope,
@@ -2416,6 +2421,7 @@ mod reborn_support_tests {
                     thread_id,
                     vec![ProductProjectionItem::Text {
                         id: format!("item:{thread_id}"),
+                        run_id: None,
                         body: body.to_string(),
                     }],
                 )
@@ -2570,6 +2576,13 @@ mod reborn_support_tests {
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
             panic!("resume_turn is not used by reborn support tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            panic!("retry_turn is not used by reborn support tests")
         }
 
         async fn cancel_run(

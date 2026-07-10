@@ -226,6 +226,16 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             },
             "additionalProperties": false
         }),
+        "schemas/builtin/trace_commons-account_login_link.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user explicitly asked to open a Trace Commons account/profile login link in this conversation (default: false)"
+                }
+            },
+            "additionalProperties": false
+        }),
         "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -476,7 +486,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger. Write only the action to perform when the trigger fires — direct imperative steps (e.g. 'Check the calendar for the next meeting, summarize it, email the summary'). Do not describe creating, scheduling, or configuring the trigger itself; rewrite the user's scheduling request into the run-time action."
+                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Write only the action to perform when the trigger fires — direct imperative steps. Never tell the prompt to send results back to the requesting user (each fire's final reply is delivered automatically; use delivery_target_id to route it) — receiving results is routing, never a prompt step, even when phrased as 'send me the result' and even with the requester's own conversation id pinned. When the task itself is to message someone else or post somewhere, that belongs in the prompt with the exact recipient conversation id pinned (resolve it now, while the user is present — e.g. 'Send a joke to the Slack DM D0ABC123 (Firat)'). Do not describe creating, scheduling, or configuring the trigger itself; rewrite the user's scheduling request into the run-time action."
+                },
+                "delivery_target_id": {
+                    "type": "string",
+                    "description": "Optional per-trigger outbound delivery target id from builtin__outbound_delivery_targets_list. When set, this trigger's results are delivered to that target; when omitted, the user's default outbound delivery target at fire time is used. Prefer setting this whenever the user names a destination for this trigger's results."
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",

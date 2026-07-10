@@ -2367,10 +2367,7 @@ mod tests {
         let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
         let capability_id = capability_id();
         let handle = SecretHandle::new("api_token").unwrap();
-        let estimate = ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        };
+        let estimate = ResourceEstimate::default().set_concurrency_slots(1);
         secret_store
             .put(
                 context.resource_scope.clone(),
@@ -2739,6 +2736,7 @@ mod tests {
             parent_process_id: None,
             tenant_id: resource_scope.tenant_id.clone(),
             user_id: resource_scope.user_id.clone(),
+            authenticated_actor_user_id: None,
             agent_id: resource_scope.agent_id.clone(),
             project_id: resource_scope.project_id.clone(),
             mission_id: resource_scope.mission_id.clone(),

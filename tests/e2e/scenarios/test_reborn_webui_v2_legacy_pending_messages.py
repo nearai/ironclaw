@@ -272,6 +272,61 @@ async def test_reborn_legacy_empty_landing_hidden_when_message_pending(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_send_failure_renders_inline_error_not_toast(
+    reborn_v2_server, reborn_v2_browser
+):
+    async def handle_failed_send(route, _payload, _fulfill_json) -> None:
+        await route.fulfill(
+            status=503,
+            content_type="text/plain",
+            body="AI provider account is out of credits",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        send_handler=handle_failed_send,
+    )
+    try:
+        page = harness["page"]
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("trigger provider failure")
+        await composer.press("Enter")
+
+        await expect(page.locator(SEL_V2["msg_user"]).last).to_contain_text(
+            "trigger provider failure", timeout=5000
+        )
+        await expect(page.locator(SEL_V2["msg_error"]).last).to_contain_text(
+            "AI provider account is out of credits", timeout=5000
+        )
+        error_layout = await page.locator(SEL_V2["msg_error"]).last.evaluate(
+            """node => {
+                const frame = node.firstElementChild;
+                const bubble = frame?.firstElementChild;
+                const nodeBox = node.getBoundingClientRect();
+                const frameBox = frame?.getBoundingClientRect();
+                const bubbleBox = bubble?.getBoundingClientRect();
+                const style = bubble ? getComputedStyle(bubble) : null;
+                return {
+                    textAlign: style?.textAlign || "",
+                    nodeLeft: nodeBox.left,
+                    frameLeft: frameBox?.left || 0,
+                    bubbleWidth: bubbleBox?.width || 0,
+                    nodeWidth: nodeBox.width,
+                };
+            }"""
+        )
+        assert error_layout["textAlign"] == "left"
+        assert error_layout["frameLeft"] - error_layout["nodeLeft"] < 8
+        assert error_layout["bubbleWidth"] < error_layout["nodeWidth"] * 0.9
+        await expect(page.locator("div.fixed.bottom-4.right-4")).to_have_count(
+            0, timeout=1000
+        )
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_pending_message_reconciles_with_confirmed_timeline(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -470,7 +525,7 @@ async def test_reborn_legacy_pending_attachment_message_survives_thread_reload(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary_window(
+async def test_reborn_legacy_sidebar_cache_keeps_active_thread_outside_summary_window(
     reborn_v2_server, reborn_v2_browser
 ):
     async def handle_successful_send(route, _payload, fulfill_json):
@@ -519,10 +574,6 @@ async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary
                 has_text="Summary refresh should keep this Reborn thread"
             )
         ).to_have_count(1, timeout=5000)
-        await _wait_for_request_count(
-            harness["thread_requests"],
-            before_refresh_requests,
-        )
 
         assert len(harness["send_requests"]) == 1
         assert (
@@ -533,9 +584,16 @@ async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary
         await expect(composer).to_be_visible(timeout=5000)
         await expect(
             page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
+                has_text="Summary refresh should keep this Reborn thread"
+            )
+        ).to_be_visible(timeout=5000)
+        await expect(
+            page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
                 has_text="Newest summary thread"
             )
         ).to_be_visible(timeout=5000)
+        await page.wait_for_timeout(250)
+        assert len(harness["thread_requests"]) == before_refresh_requests
     finally:
         await harness["context"].close()
 

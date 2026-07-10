@@ -6,7 +6,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::{
+    AgentId, MountAlias, MountGrant, MountPermissions, MountView, TenantId, ThreadId, UserId,
+    VirtualPath,
+};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
@@ -27,18 +31,22 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
     InboundTurnService, ProductWorkflowError,
 };
-use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
-use ironclaw_reborn::model_routes::{
+use ironclaw_reborn_composition::ProductLiveCapabilityIo;
+use ironclaw_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_runner::model_routes::{
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
-use ironclaw_reborn::planned_driver_factory::{
+use ironclaw_runner::planned_driver_factory::{
     PLANNED_DEFAULT_PROFILE_ID, default_planned_run_profile_resolver,
 };
-use ironclaw_reborn::runtime::{
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
-    build_product_live_planned_runtime,
+use ironclaw_runner::runtime::{
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeSubagentGoalStore,
+    RuntimeTurnStateStore, build_product_live_planned_runtime,
 };
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
+use ironclaw_runner::subagent::await_edge::{
+    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+    store::FilesystemAwaitEdgeStore,
+};
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
@@ -100,6 +108,13 @@ impl TurnCoordinator for CapturingTurnCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("resume_turn is not used by inbound turn contract tests")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by inbound turn contract tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -170,6 +185,13 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("resume_turn is not used by inbound turn contract tests")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by inbound turn contract tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -401,6 +423,52 @@ impl RunCancellationFactory for UnretainedRunCancellationFactory {
 
 fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
+}
+
+/// Test-only in-memory await-edge trio (writer/settler/evidence trait
+/// objects, plus the goal store the resolver and `subagent_goal_store`
+/// share) — these harness tests don't exercise real subagent spawn/settle
+/// flows, so an in-memory `ScopedFilesystem` fixture is behavior-equivalent
+/// to the deleted `BoundedSubagentGateResolutionStore` for their purposes.
+#[allow(clippy::type_complexity)]
+fn test_await_edge_trio(
+    turn_store: &Arc<InMemoryTurnStateStore>,
+    capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    thread_service: Arc<InMemorySessionThreadService>,
+) -> (
+    Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+    Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+    Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+    Arc<dyn RuntimeSubagentGoalStore>,
+) {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )));
+    let goal_store =
+        Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+    let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&store),
+        goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        Arc::clone(turn_store) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+        capability_result_writer,
+        thread_service,
+    ));
+    let driver = Arc::new(ScopeRecoveryDriver::new(
+        Arc::clone(&resolver),
+        Arc::clone(&store),
+    ));
+    (
+        driver as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+        resolver as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+        store as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+        goal_store as Arc<dyn RuntimeSubagentGoalStore>,
+    )
 }
 
 fn test_safety_context() -> InstructionSafetyContext {
@@ -653,6 +721,18 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
     let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let unused_capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
+        Arc::new(UnusedCapabilityResultWriter);
+    let (
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence,
+        subagent_goal_store,
+    ) = test_await_edge_trio(
+        &turn_store,
+        Arc::clone(&unused_capability_result_writer),
+        Arc::new(thread_service.clone()),
+    );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_state_for_runtime,
@@ -664,15 +744,13 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
-        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
-        subagent_goal_store: Arc::new(
-            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
-        ),
-        subagent_gate_store: Arc::new(
-            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
-        ),
+        capability_result_writer: Arc::clone(&unused_capability_result_writer),
+        subagent_goal_store,
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence: Arc::clone(&subagent_await_edge_evidence),
         subagent_definition_resolver: Arc::new(
-            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+            ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
@@ -683,6 +761,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
                 Arc::new(thread_service.clone()),
                 turn_state_store_dyn(&turn_store),
                 checkpoint_store,
+                subagent_await_edge_evidence,
                 thread_scope.clone(),
             )
             .with_cancellation_factory(cancellation_factory.clone()),
@@ -822,6 +901,18 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
     let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let unused_capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
+        Arc::new(UnusedCapabilityResultWriter);
+    let (
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence,
+        subagent_goal_store,
+    ) = test_await_edge_trio(
+        &turn_store,
+        Arc::clone(&unused_capability_result_writer),
+        Arc::new(thread_service.clone()),
+    );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_state_for_runtime,
@@ -833,15 +924,13 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
-        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
-        subagent_goal_store: Arc::new(
-            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
-        ),
-        subagent_gate_store: Arc::new(
-            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
-        ),
+        capability_result_writer: Arc::clone(&unused_capability_result_writer),
+        subagent_goal_store,
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence: Arc::clone(&subagent_await_edge_evidence),
         subagent_definition_resolver: Arc::new(
-            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+            ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
@@ -853,6 +942,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
             Arc::new(thread_service.clone()),
             turn_state_store_dyn(&turn_store),
             checkpoint_store,
+            subagent_await_edge_evidence,
             thread_scope.clone(),
         )),
         config: DefaultPlannedRuntimeConfig::default(),
@@ -1004,6 +1094,18 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
     );
 
     let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let unused_capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
+        Arc::new(UnusedCapabilityResultWriter);
+    let (
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence,
+        subagent_goal_store,
+    ) = test_await_edge_trio(
+        &turn_store,
+        Arc::clone(&unused_capability_result_writer),
+        Arc::new(thread_service.clone()),
+    );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_state_for_runtime,
@@ -1015,15 +1117,13 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
-        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
-        subagent_goal_store: Arc::new(
-            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
-        ),
-        subagent_gate_store: Arc::new(
-            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
-        ),
+        capability_result_writer: Arc::clone(&unused_capability_result_writer),
+        subagent_goal_store,
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence: Arc::clone(&subagent_await_edge_evidence),
         subagent_definition_resolver: Arc::new(
-            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+            ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
@@ -1033,6 +1133,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
             checkpoint_store,
+            subagent_await_edge_evidence,
             thread_scope,
         )),
         config: DefaultPlannedRuntimeConfig::default(),

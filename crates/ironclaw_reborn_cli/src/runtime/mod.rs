@@ -8,6 +8,10 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+use ironclaw_reborn_composition::OAuthRedirectUri;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
@@ -48,7 +52,7 @@ pub(crate) fn init_tracing() {
     // guarded from third-party debug floods unless those targets are explicit.
     let stderr_filter = reborn_env_filter(
         "IRONCLAW_REBORN_LOG",
-        "info,ironclaw_reborn=info,ironclaw_reborn_composition=info",
+        "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
     );
     // Operator Logs buffer: captures run diagnostics at `debug` for the
     // ironclaw run-path crates so the scoped (thread/run) Logs panel is
@@ -58,7 +62,7 @@ pub(crate) fn init_tracing() {
     // so the browser log buffer is not filled by low-level protocol crates.
     let operator_filter = reborn_env_filter(
         "IRONCLAW_REBORN_OPERATOR_LOG",
-        "info,ironclaw_reborn=debug,ironclaw_host_runtime=debug",
+        "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",
     );
     let _ = tracing_subscriber::registry()
         .with(
@@ -180,7 +184,8 @@ pub(crate) fn execute(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<()> {
     let runtime_input =
-        build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?;
+        build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?
+            .inner;
     seed_default_config_file_if_missing(&context.boot_config().home().config_file_path())
         .map_err(anyhow::Error::from)?;
     let boot_config = context.boot_config().clone();
@@ -486,6 +491,7 @@ pub(crate) fn build_runtime_input(
     caller: RuntimeInputCaller,
 ) -> anyhow::Result<RebornRuntimeInput> {
     build_runtime_input_with_options(config, caller, RuntimeInputOptions::default())
+        .map(|b| b.inner)
 }
 
 /// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
@@ -536,8 +542,10 @@ pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
     options: RuntimeInputOptions,
-) -> anyhow::Result<RebornRuntimeInput> {
+) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
 
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
@@ -581,12 +589,24 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
-    Ok(runtime_input)
+    Ok(BuiltRuntimeInput {
+        inner: runtime_input,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_lazy_slot,
+    })
 }
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornBuildInput,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
+}
+
+pub(crate) struct BuiltRuntimeInput {
+    pub(crate) inner: RebornRuntimeInput,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
 }
 
 #[derive(Clone, Debug)]
@@ -636,6 +656,15 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_personal_lazy_slot =
+        if let Some(redirect_uri) = resolve_slack_personal_oauth_redirect_uri_from_env()? {
+            let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
+            services_input = services_input.with_slack_personal_oauth_lazy(slot.clone());
+            Some(slot)
+        } else {
+            None
+        };
     let identity = runtime_identity(config_file.as_ref());
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
@@ -643,6 +672,8 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_lazy_slot,
         config_file,
     })
 }
@@ -745,6 +776,24 @@ fn build_production_services_input(
 pub(crate) fn resolve_google_oauth_config_from_env()
 -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
     resolve_google_oauth_config(optional_nonempty_env)
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
+-> anyhow::Result<Option<OAuthRedirectUri>> {
+    resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
+}
+
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+fn resolve_slack_personal_oauth_redirect_uri(
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> anyhow::Result<Option<OAuthRedirectUri>> {
+    let Some(raw) = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI") else {
+        return Ok(None);
+    };
+    let uri = OAuthRedirectUri::new(raw)
+        .context("invalid IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI")?;
+    Ok(Some(uri))
 }
 
 fn resolve_google_oauth_config(
@@ -1055,7 +1104,7 @@ fn resolve_worker_count(
 /// path resolves to `None` (sized to exactly `MAX_PERMITS`, which tokio
 /// accepts), so the unlimited sentinel stays the way to ask for "no bound".
 ///
-/// `ironclaw_reborn`'s `scheduler_permit_count` additionally saturates at the
+/// `ironclaw_runner`'s `scheduler_permit_count` additionally saturates at the
 /// ceiling as an infallible backstop for direct composition callers; this gate
 /// is the operator-facing fail-loud half of that defense.
 fn ensure_worker_count_within_ceiling(
@@ -1191,7 +1240,8 @@ mod tests {
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
         build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        protect_reborn_log_filter, resolve_google_oauth_config, runner_settings,
+        protect_reborn_log_filter, resolve_google_oauth_config,
+        resolve_slack_personal_oauth_redirect_uri, runner_settings,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
@@ -1837,7 +1887,8 @@ regex_activation_enabled = false
                 confirm_host_access: true,
             },
         )
-        .expect("runtime input");
+        .expect("runtime input")
+        .inner;
         assert!(runtime_input.grants_trusted_laptop_access());
         let services = runtime_input.services.expect("services input");
         let policy = services.runtime_policy().expect("runtime policy");
@@ -3172,6 +3223,28 @@ poll_interval_secs = 15
             resolve_google_oauth_config(|_| None).expect("empty env should not fail setup");
 
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_redirect_uri_returns_none_when_unset() {
+        let uri = resolve_slack_personal_oauth_redirect_uri(|_| None)
+            .expect("empty env should not fail setup");
+        assert!(uri.is_none());
+    }
+
+    #[test]
+    fn resolve_slack_personal_oauth_redirect_uri_returns_uri_when_set() {
+        const REDIRECT_URI: &str =
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback";
+        let vars = HashMap::from([(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+            REDIRECT_URI,
+        )]);
+        let uri =
+            resolve_slack_personal_oauth_redirect_uri(|name| vars.get(name).map(|v| v.to_string()))
+                .expect("valid redirect URI resolves")
+                .expect("URI present when var is set");
+        assert_eq!(uri.as_str(), REDIRECT_URI);
     }
 
     #[test]

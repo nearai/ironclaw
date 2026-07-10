@@ -7,14 +7,10 @@ use ironclaw_host_runtime::{
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_trust::TrustDecision;
 
-use crate::{
-    RebornServices,
-    factory::RebornLocalRuntimeServices,
-    local_dev_capability_policy::{
-        LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
-        local_dev_one_shot_lease_approval,
-    },
+use crate::local_dev_capability_policy::{
+    LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError, local_dev_one_shot_lease_approval,
 };
+use crate::{RebornServices, factory::RebornLocalRuntimeServices};
 
 /// Turn the global auto-approve switch off for `context`'s actor scope.
 /// Global auto-approve defaults ON, so any test exercising the per-tool approval

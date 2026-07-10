@@ -71,7 +71,7 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 
 triggers (19), secrets (19), auth (19), extractors (19), prompt_envelope (15),
 dispatcher (15), attachments (15), outbound (15), product_context (15), reborn_config (14),
-network (14), runtime_policy (14), first_party_extensions (14), ironclaw_reborn (14 —
+network (14), runtime_policy (14), first_party_extensions (14), ironclaw_runner (14 —
 internal OK: 21 mods, biggest 4.7k), mcp (13), memory_native (10), conversations (10),
 capabilities (10), reborn_openai_compat (10), process_sandbox (10), scripts (10),
 product_adapter_registry (10), wasm_limiter (10), wasm (9).
@@ -98,7 +98,7 @@ Optional; schedule when loop work next opens both crates anyway.
 | ironclaw_skill_learning | 356 | ironclaw_skills (or consumer) |
 | ironclaw_wasm_sandbox_core | 357 | ironclaw_wasm |
 | ironclaw_reborn_openai_compat_storage | 673 | ironclaw_reborn_openai_compat |
-| ironclaw_projects | 842 | consumer |
+| ironclaw_projects | 842 | **KEEP in W2**; substrate entity/repository. If revisited later, the only acceptable consumer-side target is `ironclaw_product_workflow`, never composition. |
 | ironclaw_product_workflow_storage | 946 | ironclaw_product_workflow |
 
 ### 2.5 Zero fan-in — KEEP all (correction: none are dead)

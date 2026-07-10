@@ -2,17 +2,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 #[cfg(feature = "libsql")]
-use async_trait::async_trait;
-#[cfg(feature = "libsql")]
-use chrono::{DateTime, SecondsFormat, Utc};
-#[cfg(feature = "libsql")]
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-#[cfg(feature = "libsql")]
-use ironclaw_turns::TurnRunId;
-#[cfg(feature = "libsql")]
-use libsql::params;
-
-#[cfg(feature = "libsql")]
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -21,6 +10,18 @@ use crate::{
     TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
+#[cfg(feature = "libsql")]
+use async_trait::async_trait;
+#[cfg(feature = "libsql")]
+use chrono::{DateTime, SecondsFormat, Utc};
+#[cfg(feature = "libsql")]
+use ironclaw_common::AutomationName;
+#[cfg(feature = "libsql")]
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+#[cfg(feature = "libsql")]
+use ironclaw_turns::TurnRunId;
+#[cfg(feature = "libsql")]
+use libsql::params;
 
 #[cfg(feature = "libsql")]
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -32,7 +33,20 @@ const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    active_fire_slot, active_run_ref, created_at, schedule_at";
+    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
+#[cfg(feature = "libsql")]
+const RENAME_SCOPED_TRIGGER_SQL: &str = "\
+    UPDATE trigger_records
+       SET name = ?6
+     WHERE tenant_id = ?1
+       AND creator_user_id = ?2
+       AND (CASE WHEN ?3 IS NULL THEN agent_id IS NULL ELSE agent_id = ?3 END)
+       AND (CASE WHEN ?4 IS NULL THEN project_id IS NULL ELSE project_id = ?4 END)
+       AND trigger_id = ?5
+     RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+       name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
+       state, next_run_at, last_run_at, last_fired_slot, last_status,
+       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
 
 #[cfg(feature = "libsql")]
 const TRIGGER_ID_COL: usize = 0;
@@ -74,6 +88,8 @@ const ACTIVE_RUN_REF_COL: usize = 17;
 const CREATED_AT_COL: usize = 18;
 #[cfg(feature = "libsql")]
 const SCHEDULE_AT_COL: usize = 19;
+#[cfg(feature = "libsql")]
+const DELIVERY_TARGET_COL: usize = 20;
 
 #[cfg(feature = "libsql")]
 const TRIGGER_RUN_COLUMNS: &str = "\
@@ -270,6 +286,19 @@ impl LibSqlTriggerRepository {
                     return Err(backend_error("add schedule_at column", error));
                 }
             }
+            // Add delivery_target column if it doesn't already exist (idempotent migration).
+            if let Err(error) = conn
+                .execute(
+                    &format!("ALTER TABLE {TRIGGER_TABLE} ADD COLUMN delivery_target TEXT"),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add delivery_target column", error));
+                }
+            }
             // Drop the legacy `completion_policy` column on tables created before the
             // schedule-derived rework. Completion is now derived from the schedule
             // (`Once` / exhausted cron), so the column is no longer written; leaving it
@@ -376,7 +405,7 @@ impl LibSqlTriggerRepository {
             .db
             .connect()
             .map_err(|error| backend_error("connect trigger repository", error))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")
             .await
             .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
         Ok(conn)
@@ -615,6 +644,40 @@ impl TriggerRepository for LibSqlTriggerRepository {
             Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
             Ok(None) => Ok(None),
             Err(error) => Err(backend_error("read scoped trigger state row", error)),
+        }
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let name = name.into_inner();
+        let mut rows = conn
+            .query(
+                RENAME_SCOPED_TRIGGER_SQL,
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    trigger_id.to_string(),
+                    name,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("rename scoped trigger", error))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error("read renamed scoped trigger row", error)),
         }
     }
 
@@ -1341,6 +1404,9 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let active_run_ref = optional_text(row, ACTIVE_RUN_REF_COL, "active_run_ref")?
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
+    let delivery_target = optional_text(row, DELIVERY_TARGET_COL, "delivery_target")?
+        .map(crate::TriggerDeliveryTargetId::new)
+        .transpose()?;
 
     let record = TriggerRecord {
         trigger_id,
@@ -1352,6 +1418,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         source: crate::parse_source_kind_codec(&required_text(row, SOURCE_COL, "source")?)?,
         schedule,
         prompt: required_text(row, PROMPT_COL, "prompt")?,
+        delivery_target,
         state: crate::parse_state_codec(&required_text(row, STATE_COL, "state")?)?,
         next_run_at: parse_timestamp(
             &required_text(row, NEXT_RUN_AT_COL, "next_run_at")?,
@@ -1444,8 +1511,8 @@ async fn write_record(
                 trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                 name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
-                active_fire_slot, active_run_ref, created_at, schedule_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
             ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                 creator_user_id = excluded.creator_user_id,
                 agent_id = excluded.agent_id,
@@ -1463,7 +1530,8 @@ async fn write_record(
                 last_status = excluded.last_status,
                 active_fire_slot = excluded.active_fire_slot,
                 active_run_ref = excluded.active_run_ref,
-                schedule_at = excluded.schedule_at"
+                schedule_at = excluded.schedule_at,
+                delivery_target = excluded.delivery_target"
         ),
         libsql::params_from_iter([
             libsql::Value::Text(record.trigger_id.to_string()),
@@ -1486,6 +1554,7 @@ async fn write_record(
             record.active_run_ref.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
             libsql::Value::Text(fmt_ts(&record.created_at)),
             schedule_at.map_or(libsql::Value::Null, libsql::Value::Text),
+            record.delivery_target.as_ref().map_or(libsql::Value::Null, |v| libsql::Value::Text(v.as_str().to_string())),
         ]),
     )
     .await

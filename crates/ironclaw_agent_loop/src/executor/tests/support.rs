@@ -63,9 +63,12 @@ pub(super) struct MockHost {
     provider_registration_activity_remap: Arc<Mutex<Option<ironclaw_turns::CapabilityActivityId>>>,
     staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
     appended_result_refs: Arc<Mutex<Vec<AppendCapabilityResultRef>>>,
+    finalized_assistant_messages: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<String>>>,
     prompt_surface_version: Option<CapabilitySurfaceVersion>,
     visible_surface_version: CapabilitySurfaceVersion,
+    current_visible_surface: Arc<Mutex<Option<VisibleCapabilitySurface>>>,
+    visible_capability_requests: Arc<Mutex<usize>>,
     progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
     fail_progress_port: bool,
     fail_append_result_ref: bool,
@@ -81,6 +84,7 @@ pub(super) struct MockHost {
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
+    fail_transcript_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     extra_capability_descriptors: Vec<CapabilityDescriptorView>,
 }
 
@@ -105,9 +109,12 @@ impl MockHost {
             provider_registration_activity_remap: Arc::new(Mutex::new(None)),
             staged_payloads: Arc::new(Mutex::new(Vec::new())),
             appended_result_refs: Arc::new(Mutex::new(Vec::new())),
+            finalized_assistant_messages: Arc::new(Mutex::new(Vec::new())),
             events: Arc::new(Mutex::new(Vec::new())),
             prompt_surface_version: Some(surface_version()),
             visible_surface_version: surface_version(),
+            current_visible_surface: Arc::new(Mutex::new(None)),
+            visible_capability_requests: Arc::new(Mutex::new(0)),
             progress_events: Arc::new(Mutex::new(Vec::new())),
             fail_progress_port: false,
             fail_append_result_ref: false,
@@ -123,6 +130,7 @@ impl MockHost {
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
             fail_batch_with: Arc::new(Mutex::new(None)),
+            fail_transcript_with: Arc::new(Mutex::new(None)),
             extra_capability_descriptors: Vec::new(),
         }
     }
@@ -145,6 +153,16 @@ impl MockHost {
     ) -> Self {
         self.prompt_surface_version = version;
         self
+    }
+
+    pub(super) fn with_current_visible_surface(self, surface: VisibleCapabilitySurface) -> Self {
+        *self.current_visible_surface.lock().expect("lock") = Some(surface);
+        self
+    }
+
+    pub(super) fn with_current_default_visible_surface(self) -> Self {
+        let surface = self.default_visible_surface();
+        self.with_current_visible_surface(surface)
     }
 
     pub(super) fn with_batch_outcomes(
@@ -201,6 +219,11 @@ impl MockHost {
         self
     }
 
+    pub(super) fn fail_transcript_with(self, kind: AgentLoopHostErrorKind) -> Self {
+        *self.fail_transcript_with.lock().expect("lock") = Some(kind);
+        self
+    }
+
     pub(super) fn with_provider_registration_errors(self, errors: Vec<AgentLoopHostError>) -> Self {
         *self.provider_registration_errors.lock().expect("lock") = errors.into();
         self
@@ -241,6 +264,10 @@ impl MockHost {
         self.model_requests.lock().expect("lock").clone()
     }
 
+    pub(super) fn visible_capability_request_count(&self) -> usize {
+        *self.visible_capability_requests.lock().expect("lock")
+    }
+
     pub(super) fn prompt_requests(&self) -> Vec<LoopPromptBundleRequest> {
         self.prompt_requests.lock().expect("lock").clone()
     }
@@ -255,6 +282,13 @@ impl MockHost {
 
     pub(super) fn appended_result_refs(&self) -> Vec<AppendCapabilityResultRef> {
         self.appended_result_refs.lock().expect("lock").clone()
+    }
+
+    pub(super) fn finalized_assistant_messages(&self) -> Vec<String> {
+        self.finalized_assistant_messages
+            .lock()
+            .expect("lock")
+            .clone()
     }
 
     pub(super) fn events(&self) -> Vec<String> {
@@ -325,6 +359,24 @@ impl MockHost {
             .checkpoint_policy
             .require_final_checkpoint = require_final_checkpoint;
         self
+    }
+
+    fn default_visible_surface(&self) -> VisibleCapabilitySurface {
+        let mut descriptors = vec![CapabilityDescriptorView {
+            capability_id: capability_id(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: "demo".to_string(),
+            safe_description: "demo capability".to_string(),
+            concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+            parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
+        }];
+        descriptors.extend(self.extra_capability_descriptors.clone());
+        VisibleCapabilitySurface {
+            version: self.visible_surface_version.clone(),
+            descriptors,
+            callable_capability_ids: None,
+        }
     }
 }
 
@@ -695,27 +747,20 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        *self.visible_capability_requests.lock().expect("lock") += 1;
         if self.fail_visible_capabilities {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "visible capabilities unavailable",
             ));
         }
-        let mut descriptors = vec![CapabilityDescriptorView {
-            capability_id: capability_id(),
-            provider: None,
-            runtime: RuntimeKind::FirstParty,
-            safe_name: "demo".to_string(),
-            safe_description: "demo capability".to_string(),
-            concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
-            parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
-        }];
-        descriptors.extend(self.extra_capability_descriptors.clone());
-        Ok(VisibleCapabilitySurface {
-            version: self.visible_surface_version.clone(),
-            descriptors,
-            callable_capability_ids: None,
-        })
+        Ok(self.default_visible_surface())
+    }
+
+    fn current_visible_capabilities(
+        &self,
+    ) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
+        Ok(self.current_visible_surface.lock().expect("lock").clone())
     }
 
     async fn invoke_capability(
@@ -759,8 +804,15 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
 impl ironclaw_turns::run_profile::LoopTranscriptPort for MockHost {
     async fn finalize_assistant_message(
         &self,
-        _request: FinalizeAssistantMessage,
+        request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        if let Some(kind) = *self.fail_transcript_with.lock().expect("lock") {
+            return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));
+        }
+        self.finalized_assistant_messages
+            .lock()
+            .expect("lock")
+            .push(request.reply.content);
         Ok(LoopMessageRef::new("msg:assistant").expect("valid"))
     }
 
@@ -768,6 +820,9 @@ impl ironclaw_turns::run_profile::LoopTranscriptPort for MockHost {
         &self,
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        if let Some(kind) = *self.fail_transcript_with.lock().expect("lock") {
+            return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));
+        }
         if self.fail_append_result_ref {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,

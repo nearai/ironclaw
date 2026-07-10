@@ -754,6 +754,7 @@ mod tests {
 
     fn sample_request() -> LoopModelRequest {
         LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
             model_preference: None,
@@ -807,10 +808,7 @@ mod tests {
         governor
             .set_limit(
                 account,
-                ResourceLimits {
-                    max_usd: Some(dec!(0.000001)),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_usd(dec!(0.000001)),
             )
             .unwrap();
         let cost = ModelCost {
@@ -838,15 +836,13 @@ mod tests {
         governor
             .set_limit(
                 account,
-                ResourceLimits {
-                    max_usd: Some(dec!(10.00)),
-                    period: BudgetPeriod::Rolling24h,
-                    thresholds: BudgetThresholds {
+                ResourceLimits::default()
+                    .set_max_usd(dec!(10.00))
+                    .set_period(BudgetPeriod::Rolling24h)
+                    .set_thresholds(BudgetThresholds {
                         warn_at: 0.75,
                         pause_at: 0.90,
-                    },
-                    ..ResourceLimits::default()
-                },
+                    }),
             )
             .unwrap();
         let cost = ModelCost {
@@ -984,10 +980,7 @@ mod tests {
         governor
             .set_limit(
                 user_account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(100.00)),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_usd(dec!(100.00)),
             )
             .unwrap();
 
@@ -1021,11 +1014,9 @@ mod tests {
         governor
             .set_limit(
                 user_account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(100.00)),
-                    period: BudgetPeriod::Rolling24h,
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default()
+                    .set_max_usd(dec!(100.00))
+                    .set_period(BudgetPeriod::Rolling24h),
             )
             .unwrap();
         let cost = ModelCost {
@@ -1075,11 +1066,9 @@ mod tests {
         governor
             .set_limit(
                 user_account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(10_000.00)),
-                    period: BudgetPeriod::Rolling24h,
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default()
+                    .set_max_usd(dec!(10_000.00))
+                    .set_period(BudgetPeriod::Rolling24h),
             )
             .unwrap();
         let cost = ModelCost {

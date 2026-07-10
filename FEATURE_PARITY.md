@@ -674,7 +674,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Cron jobs | ✅ | ✅ | - | Routines with cron trigger; runtime state split into `jobs-state.json`; `sessionTarget: "current"`/`session:<id>` bindings |
-| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; scoped pause/resume/delete state transitions are available through first-party capabilities and WebUI v2 controls; first-class one-shot triggers (`TriggerSchedule::Once`, `schedule.kind = once`) are implemented (completion is derived from the schedule; the old year-pinned-cron + `completion_policy` workaround was removed); remaining follow-ups: legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
+| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; scoped pause/resume/rename/delete state transitions are available through first-party capabilities and WebUI v2 controls; first-class one-shot triggers (`TriggerSchedule::Once`, `schedule.kind = once`) are implemented (completion is derived from the schedule; the old year-pinned-cron + `completion_policy` workaround was removed); remaining follow-ups: legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
 | Per-job model fallback override | ✅ | ❌ | P2 | `payload.fallbacks` overrides agent-level fallbacks |
 | Cron stagger controls | ✅ | ❌ | P3 | Default stagger for scheduled jobs |
 | Cron finished-run webhook | ✅ | ❌ | P3 | Webhook on job completion |
@@ -711,6 +711,18 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Heartbeat system | ✅ | ✅ | - | Periodic execution; `heartbeat.skipWhenBusy` for nested lane pressure; deferred under cron load |
 | Gmail pub/sub | ✅ | ❌ | P3 | |
 | Inferred follow-up commitments | ✅ | ❌ | P3 | Heartbeat-delivered reminders; opt-in batched extraction |
+
+**State migration (v1/engine-v2 → Reborn):** `crates/ironclaw_reborn_migration`
+converts persisted automations. Cron routines and cron missions convert to
+Reborn `TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).
+Because Reborn's `TriggerSourceKind` is `Schedule`-only, **event / system-event /
+webhook / manual routines and non-cron mission cadences have no `TriggerRecord`
+target** and are recorded in the migration manifest rather than converted — even
+where the runtime supports the *behavior* via hooks/`event_emit`, the durable
+automation row does not carry over. Guardrails, notify config, run counters,
+`routine_runs` history (no public run-history insert), and mission-only fields
+(focus/approach/success-criteria) likewise have no target. See the crate's
+CLAUDE.md for the full mapping + gap catalog.
 
 ### Owner: _Unassigned_
 
@@ -823,7 +835,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, slash-command pairing recovery, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 chat-first pairing panels that redeem codes locally without sending them to the model, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the paired actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
+- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, extension-card personal OAuth setup that binds Slack `authed_user.id` to the authenticated Reborn user, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the OAuth-bound actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

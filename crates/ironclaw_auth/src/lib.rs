@@ -17,13 +17,14 @@ mod fakes;
 mod flow;
 mod ids;
 mod interaction;
-mod oauth;
+mod loopback_oauth;
+pub mod oauth;
 mod provider;
 mod scope;
 
 pub use cleanup::{
-    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupQuarantine,
+    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
@@ -45,7 +46,7 @@ pub use flow::{
     CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
     NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
-    flow_matches_turn_gate_query,
+    flow_matches_durable_owner, flow_matches_turn_gate_query,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -60,11 +61,15 @@ pub use oauth::{
     GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE,
     GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, GoogleOAuthCallbackState, GoogleOAuthRouteConfig,
-    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthClientId, OAuthExtraParam,
-    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash,
-    build_authorization_url, build_google_authorization_url, is_allowed_google_scope,
-    opaque_state_hash, parse_google_callback_scopes, parse_google_requested_scopes,
-    pkce_s256_challenge, pkce_verifier_hash, scope_text,
+    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
+    OAuthCallbackStateKind, OAuthClientId, OAuthExtraParam, OAuthProviderIdentity,
+    OAuthProviderIdentitySubject, OAuthRedirectUri, OAuthScopeParam, OAuthState,
+    OAuthTokenResponse, PkceCodeChallenge, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT,
+    SLACK_PERSONAL_PROVIDER_ID, SLACK_PERSONAL_TOKEN_ENDPOINT, authorization_code_hash,
+    build_authorization_url, build_authorization_url_with_scope_param,
+    build_google_authorization_url, is_allowed_google_scope, opaque_state_hash,
+    parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
+    pkce_verifier_hash, scope_text,
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,

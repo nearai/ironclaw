@@ -27,11 +27,6 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
-};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
 use ironclaw_reborn_composition::{
@@ -50,6 +45,11 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
 use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_runner::turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1494,6 +1494,10 @@ async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
         "01234567890123456789012345678901",
     );
     let _pool_max_size = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+    let _resource_governor_singleton = PostgresEnvVarGuard::set(
+        "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
+        "true",
+    );
     let _allow_cleartext =
         PostgresEnvVarGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "true");
     let _ssl_mode = PostgresEnvVarGuard::clear("DATABASE_SSLMODE");

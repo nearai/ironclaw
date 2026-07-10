@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_extractors = { path = "../ironclaw_extractors", version = "0.1.0" }

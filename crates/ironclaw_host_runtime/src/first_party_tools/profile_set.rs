@@ -121,12 +121,14 @@ mod tests {
         FirstPartyCapabilityRequest {
             capability_id: CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ironclaw_host_api::ResourceEstimate::default(),
             mounts,
             services: InvocationServices {
                 filesystem: Arc::new(InMemoryBackend::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
+                runtime_secret_material_stager: None,
                 process: Arc::new(LocalHostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
