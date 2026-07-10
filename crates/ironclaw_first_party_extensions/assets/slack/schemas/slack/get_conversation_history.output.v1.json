@@ -5,6 +5,7 @@
   "properties": {
     "ok": { "type": "boolean" },
     "has_more": { "type": "boolean", "description": "True when older messages exist; page with `latest` set to the oldest returned ts." },
+    "current_user_id": { "type": "string", "description": "User ID of the connected account (from auth.test). Messages authored by this id are the requesting user's own. Absent when auth.test failed." },
     "messages": {
       "type": "array",
       "items": {
@@ -14,6 +15,7 @@
           "text": { "type": "string" },
           "user": { "type": "string", "description": "Raw Slack user ID of the author (e.g. U0123456789). Keep for follow-up calls; do not show to the user." },
           "user_display_name": { "type": "string", "description": "Human-readable author name resolved via users.info. Use this in user-facing output. Absent when resolution failed." },
+          "is_current_user": { "type": "boolean", "description": "True when this message was written by the connected account — the requesting user's own words; attribute them to the requester. Absent when the connected identity is unknown." },
           "type": { "type": "string" },
           "thread_ts": { "type": "string", "description": "Present on threaded replies: the parent message's ts." }
         },

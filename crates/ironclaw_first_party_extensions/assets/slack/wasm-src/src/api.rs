@@ -120,8 +120,51 @@ pub fn search_messages(
 /// The synchronous WASM tool resolves names with sequential `users.info`
 /// round-trips, so one read is allowed at most this many lookups; first-seen
 /// ids win the budget and the rest keep raw ids (the same degraded shape as a
-/// failed lookup).
+/// failed lookup). The single `auth.test` identity call does NOT count
+/// against this budget.
 const MAX_USER_NAME_LOOKUPS: usize = 25;
+
+/// Resolve the CONNECTED account via `auth.test`: `(user_id, team_id)`.
+fn auth_test() -> Result<(String, Option<String>), String> {
+    let parsed = slack_api_call("GET", "auth.test", None)?;
+    let user_id = parsed["user_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "auth.test response missing user_id".to_string())?
+        .to_string();
+    let team_id = parsed["team_id"].as_str().map(|s| s.to_string());
+    Ok((user_id, team_id))
+}
+
+/// Best-effort connected-account lookup for identity marking on reads: a
+/// failing `auth.test` (missing scope, outage) must never break the read
+/// itself — identity fields are simply absent.
+fn current_user_id_best_effort() -> Option<String> {
+    match auth_test() {
+        Ok((user_id, _team_id)) => Some(user_id),
+        Err(error) => {
+            crate::near::agent::host::log(
+                crate::near::agent::host::LogLevel::Debug,
+                &format!("auth.test identity lookup skipped: {error}"),
+            );
+            None
+        }
+    }
+}
+
+/// Mark which messages the CONNECTED account authored. `is_current_user` is
+/// set only when both the connected identity and the message author are
+/// known — never fabricated.
+fn mark_current_user_messages(messages: &mut [HistoryMessage], current_user_id: Option<&str>) {
+    let Some(current_user_id) = current_user_id else {
+        return;
+    };
+    for message in messages.iter_mut() {
+        if let Some(user_id) = &message.user {
+            message.is_current_user = Some(user_id == current_user_id);
+        }
+    }
+}
 
 /// Resolve Slack user IDs to human-readable names via `users.info`, one
 /// lookup per distinct ID in first-seen order, capped at
@@ -247,7 +290,30 @@ pub fn get_conversation_history(
     let parsed = slack_api_call("GET", &url, None)?;
 
     let has_more = parsed["has_more"].as_bool().unwrap_or(false);
-    let mut messages: Vec<HistoryMessage> = parsed["messages"]
+    let mut messages = history_messages_from_response(&parsed);
+
+    // Resolve authors to display names (one users.info per distinct author)
+    // so user-facing output never has to echo raw `U…` ids.
+    resolve_message_display_names(&mut messages);
+
+    // Mark the CONNECTED account's own messages so the model attributes the
+    // requester's words to the requester. Best-effort: identity fields are
+    // absent when auth.test fails, and the read still succeeds.
+    let current_user_id = current_user_id_best_effort();
+    mark_current_user_messages(&mut messages, current_user_id.as_deref());
+
+    Ok(ConversationHistoryResult {
+        ok: true,
+        messages,
+        has_more,
+        current_user_id,
+    })
+}
+
+/// Map a Slack `messages` array (conversations.history / conversations.replies)
+/// into [`HistoryMessage`] entries.
+fn history_messages_from_response(parsed: &serde_json::Value) -> Vec<HistoryMessage> {
+    parsed["messages"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -256,31 +322,28 @@ pub fn get_conversation_history(
                     text: m["text"].as_str().unwrap_or("").to_string(),
                     user: m["user"].as_str().map(|s| s.to_string()),
                     user_display_name: None,
+                    is_current_user: None,
                     msg_type: m["type"].as_str().unwrap_or("message").to_string(),
                     thread_ts: m["thread_ts"].as_str().map(|s| s.to_string()),
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    // Resolve authors to display names (one users.info per distinct author)
-    // so user-facing output never has to echo raw `U…` ids.
+/// Resolve message authors to display names (one `users.info` per distinct
+/// author, best-effort, budget-capped).
+fn resolve_message_display_names(messages: &mut [HistoryMessage]) {
     let author_ids: Vec<String> = messages
         .iter()
         .filter_map(|message| message.user.clone())
         .collect();
     let names = resolve_user_display_names(author_ids);
-    for message in &mut messages {
+    for message in messages.iter_mut() {
         if let Some(user_id) = &message.user {
             message.user_display_name = names.get(user_id).cloned();
         }
     }
-
-    Ok(ConversationHistoryResult {
-        ok: true,
-        messages,
-        has_more,
-    })
 }
 
 /// Get information about a user.
@@ -302,6 +365,35 @@ pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
             email: profile["email"].as_str().map(|s| s.to_string()),
             is_bot: user["is_bot"].as_bool().unwrap_or(false),
         },
+    })
+}
+
+/// Resolve who the CONNECTED account is: `auth.test` for the user id (the
+/// operation itself, so its failure fails the call) plus a best-effort
+/// `users.info` for the human-readable name.
+pub fn whoami() -> Result<WhoamiResult, String> {
+    let (user_id, team_id) = auth_test()?;
+    let user_display_name = match get_user_info(&user_id) {
+        Ok(info) => info
+            .user
+            .display_name
+            .filter(|name| !name.is_empty())
+            .or(info.user.real_name.filter(|name| !name.is_empty()))
+            .or(Some(info.user.name))
+            .filter(|name| !name.is_empty()),
+        Err(error) => {
+            crate::near::agent::host::log(
+                crate::near::agent::host::LogLevel::Debug,
+                &format!("whoami users.info lookup skipped: {error}"),
+            );
+            None
+        }
+    };
+    Ok(WhoamiResult {
+        ok: true,
+        user_id,
+        user_display_name,
+        team_id,
     })
 }
 

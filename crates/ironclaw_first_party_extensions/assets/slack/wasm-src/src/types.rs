@@ -68,6 +68,10 @@ pub enum SlackUserAction {
         user_id: String,
     },
 
+    /// Resolve who the connected Slack account is (`auth.test`), with a
+    /// best-effort display-name lookup. Takes no parameters.
+    Whoami,
+
     /// Send a message as you to a channel or DM. Requires the `chat:write`
     /// user scope. The message will appear to come from your account.
     SendMessage {
@@ -178,18 +182,28 @@ pub struct HistoryMessage {
     /// this in user-facing output instead of the raw user ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_display_name: Option<String>,
+    /// `Some(true)` when this message was authored by the CONNECTED account
+    /// (the requesting user), `Some(false)` for other authors. Absent when the
+    /// connected identity or the author is unknown — never fabricated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_current_user: Option<bool>,
     #[serde(rename = "type")]
     pub msg_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
 }
 
-/// Result from get_conversation_history.
+/// Result from get_conversation_history (also the shape of get_thread_replies).
 #[derive(Debug, Serialize)]
 pub struct ConversationHistoryResult {
     pub ok: bool,
     pub messages: Vec<HistoryMessage>,
     pub has_more: bool,
+    /// User ID of the CONNECTED account (from `auth.test`), so callers can
+    /// attribute `is_current_user` messages to the requester. Best-effort:
+    /// absent when `auth.test` fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_user_id: Option<String>,
 }
 
 /// User information.
@@ -219,4 +233,18 @@ pub struct SendMessageResult {
     pub ok: bool,
     pub channel: String,
     pub ts: String,
+}
+
+/// Result from whoami: the CONNECTED account's identity.
+#[derive(Debug, Serialize)]
+pub struct WhoamiResult {
+    pub ok: bool,
+    /// Raw Slack user ID of the connected account (`auth.test` user_id).
+    pub user_id: String,
+    /// Human-readable name for the connected account, resolved via
+    /// `users.info` (best-effort: absent when the lookup fails).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
 }

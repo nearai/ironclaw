@@ -46,7 +46,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.get_conversation_history"
-description = "Read message history from any channel or DM you can see, identified by its conversation ID. Messages include the author's raw user id plus a resolved user_display_name \u2014 use the display name in user-facing output, never the raw id."
+description = "Read message history from any channel or DM you can see, identified by its conversation ID. Messages include the author's raw user id plus a resolved user_display_name \u2014 use the display name in user-facing output, never the raw id. Messages with is_current_user=true were written by the connected account (result-level current_user_id): they are the requesting user's own words \u2014 attribute them to the requester, not a third party."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -70,6 +70,20 @@ visibility = "model"
 input_schema_ref = "schemas/slack/get_user_info.input.v1.json"
 output_schema_ref = "schemas/slack/get_user_info.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_user_info.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "slack.whoami"
+description = "Resolve who the connected Slack account is: the user id (and display name when resolvable) that search/history/DM results belong to. Call this before answering anything that depends on which messages are the requester's own. Takes no parameters."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack/whoami.input.v1.json"
+output_schema_ref = "schemas/slack/whoami.output.v1.json"
+prompt_doc_ref = "prompts/slack/whoami.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]

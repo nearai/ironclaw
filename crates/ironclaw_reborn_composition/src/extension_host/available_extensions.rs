@@ -1385,11 +1385,17 @@ fn slack_assets() -> Vec<AvailableExtensionAsset> {
         slack_schema_asset!("search_messages.input.v1.json"),
         slack_prompt_asset!("search_messages"),
         slack_schema_asset!("list_conversations.input.v1.json"),
+        slack_schema_asset!("list_conversations.output.v1.json"),
         slack_prompt_asset!("list_conversations"),
         slack_schema_asset!("get_conversation_history.input.v1.json"),
+        slack_schema_asset!("get_conversation_history.output.v1.json"),
         slack_prompt_asset!("get_conversation_history"),
         slack_schema_asset!("get_user_info.input.v1.json"),
+        slack_schema_asset!("get_user_info.output.v1.json"),
         slack_prompt_asset!("get_user_info"),
+        slack_schema_asset!("whoami.input.v1.json"),
+        slack_schema_asset!("whoami.output.v1.json"),
+        slack_prompt_asset!("whoami"),
         slack_schema_asset!("send_message.input.v1.json"),
         slack_prompt_asset!("send_message"),
         bytes_asset("wasm/slack_user_tool.wasm", SLACK_WASM_MODULE),
@@ -1816,7 +1822,8 @@ mod tests {
     fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        for extension_id in [
+        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+        let mut extension_ids = vec![
             "github",
             "notion",
             "web-access",
@@ -1827,7 +1834,11 @@ mod tests {
             "google-sheets",
             "google-slides",
             "gmail",
-        ] {
+        ];
+        #[cfg(feature = "slack-v2-host-beta")]
+        extension_ids.push(SLACK_EXTENSION_ID);
+
+        for extension_id in extension_ids {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();

@@ -16,6 +16,7 @@
 //! - `list_conversations`: List channels, DMs, and group DMs the user is in
 //! - `get_conversation_history`: Read history of any channel or DM
 //! - `get_user_info`: Get information about a Slack user
+//! - `whoami`: Resolve who the connected account is (auth.test)
 //! - `send_message`: Post a message as the user
 //!
 //! # Example Usage
@@ -120,6 +121,11 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
+        SlackUserAction::Whoami => {
+            let result = api::whoami()?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
         SlackUserAction::SendMessage {
             channel,
             text,
@@ -144,6 +150,7 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "slack.list_conversations" => Ok("list_conversations"),
         "slack.get_conversation_history" => Ok("get_conversation_history"),
         "slack.get_user_info" => Ok("get_user_info"),
+        "slack.whoami" => Ok("whoami"),
         "slack.send_message" => Ok("send_message"),
         _ => Err("unsupported_slack_user_capability".to_string()),
     }
