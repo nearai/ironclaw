@@ -38,12 +38,14 @@ impl ThreadContextWindowCache {
         scope: &ThreadScope,
         thread_id: &ThreadId,
         max_messages: usize,
+        allow_smaller_window: bool,
     ) -> Option<ContextWindow> {
         let mut cached = self.cached.lock().await;
         if cached.as_ref().is_some_and(|entry| {
             entry.scope == *scope
                 && entry.thread_id == *thread_id
-                && entry.max_messages == max_messages
+                && (entry.max_messages == max_messages
+                    || (allow_smaller_window && entry.max_messages <= max_messages))
         }) {
             return cached.take().map(|entry| entry.context);
         }

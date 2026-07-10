@@ -12,12 +12,12 @@ use ironclaw_product_workflow::{
 };
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::{
-    RebornBuildError, RebornProductAuthServices,
-    extension_activation_credentials::RuntimeExtensionActivationCredentialGate,
-    extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort},
-    webui_extension_credentials::ProductAuthExtensionCredentialSetup,
+use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use crate::extension_host::extension_lifecycle::{
+    ExtensionActivationMode, RebornLocalExtensionManagementPort,
 };
+use crate::extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use crate::{RebornBuildError, RebornProductAuthServices};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NearAiMcpEndpoint {
@@ -507,6 +507,7 @@ mod tests {
                 .map(|handle| ironclaw_host_api::SecretHandle::new(handle).expect("secret handle")),
             refresh_secret: None,
             scopes: Vec::new(),
+            provider_identity: None,
             created_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
             updated_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
         }

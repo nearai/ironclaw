@@ -331,6 +331,7 @@ impl DurableLoopHostMilestoneSink {
             LoopHostMilestoneKind::IterationStarted { .. }
             | LoopHostMilestoneKind::PromptBundleBuilt { .. }
             | LoopHostMilestoneKind::ModelReasoningDelta { .. }
+            | LoopHostMilestoneKind::ModelTextDelta { .. }
             | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
             | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
             | LoopHostMilestoneKind::GateBlocked { .. }

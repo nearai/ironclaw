@@ -144,11 +144,9 @@ async fn builtin_obligation_handler_allows_resource_ceiling_when_estimate_is_wit
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        usd: Some(1.into()),
-        input_tokens: Some(100),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_usd(1.into())
+        .set_input_tokens(100);
     let obligations = vec![Obligation::EnforceResourceCeiling {
         ceiling: ResourceCeiling {
             max_usd: Some(2.into()),
@@ -177,10 +175,7 @@ async fn builtin_obligation_handler_rejects_resource_ceiling_above_host_estimate
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        usd: Some(3.into()),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_usd(3.into());
     let obligations = vec![Obligation::EnforceResourceCeiling {
         ceiling: ResourceCeiling {
             max_usd: Some(2.into()),
@@ -255,10 +250,7 @@ async fn builtin_obligation_handler_rejects_wall_clock_ceiling_until_runtime_han
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        wall_clock_ms: Some(500),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_wall_clock_ms(500);
     let obligations = vec![Obligation::EnforceResourceCeiling {
         ceiling: ResourceCeiling {
             max_usd: None,
@@ -294,10 +286,7 @@ async fn builtin_obligation_handler_rejects_sandbox_network_ceiling_until_runtim
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        network_egress_bytes: Some(512),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_network_egress_bytes(512);
     let obligations = vec![Obligation::EnforceResourceCeiling {
         ceiling: ResourceCeiling {
             max_usd: None,
@@ -336,10 +325,7 @@ async fn builtin_obligation_handler_rejects_sandbox_process_ceiling_until_runtim
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_process_count(1);
     let obligations = vec![Obligation::EnforceResourceCeiling {
         ceiling: ResourceCeiling {
             max_usd: None,
@@ -455,10 +441,7 @@ async fn builtin_obligation_handler_enforces_resource_ceiling_after_dispatch_usa
     let handler = BuiltinObligationHandler::new();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        output_tokens: Some(10),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_tokens(10);
     let obligations = vec![Obligation::EnforceResourceCeiling {
         ceiling: ResourceCeiling {
             max_usd: None,
@@ -773,10 +756,7 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
     let context = execution_context(CapabilitySet::default());
     let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let handle = SecretHandle::new("api_token").unwrap();
     secret_store
         .put(
@@ -911,10 +891,7 @@ async fn builtin_obligation_handler_reserves_requested_resources_and_releases_on
     let context = execution_context(CapabilitySet::default());
     let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
     let capability_id = capability_id();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let reservation_id = ResourceReservationId::new();
     let obligations = vec![Obligation::ReserveResources { reservation_id }];
 
@@ -1021,10 +998,7 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context(CapabilitySet::default()),
             capability_id(),
-            ResourceEstimate {
-                usd: Some(1.into()),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(1.into()),
             json!({"message": "obligated"}),
             trust_decision(),
         ))

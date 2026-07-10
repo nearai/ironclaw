@@ -37,7 +37,7 @@ use crate::product_auth::oauth::oauth_dcr_protocol::{
 };
 use crate::product_auth::oauth::oauth_provider_client::{
     HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, authorize_oauth_egress,
-    oauth_endpoint_host, oauth_network_policy,
+    discard_oauth_egress_policy, oauth_endpoint_host, oauth_network_policy,
 };
 
 const DCR_RESPONSE_BODY_LIMIT: u64 = 32 * 1024;
@@ -714,24 +714,33 @@ impl OAuthDcrProvider {
                 format!("Bearer {}", token.expose_secret()),
             ));
         }
-        let response = self
+        let egress_result = self
             .egress
             .execute(RuntimeHttpEgressRequest {
                 runtime: RuntimeKind::System,
-                scope,
+                scope: scope.clone(),
                 capability_id: self.capability_id.clone(),
                 method,
                 url: url.to_string(),
                 headers,
                 body,
-                network_policy: policy,
+                network_policy: policy.clone(),
                 credential_injections: Vec::new(),
                 response_body_limit: Some(response_body_limit),
                 save_body_to: None,
                 timeout_ms: Some(DCR_TIMEOUT_MS),
             })
-            .await
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
+            .await;
+        // Success or failure, the staged policy must not outlive the request
+        // (the pipeline's own discard only covers pre-transport failures).
+        discard_oauth_egress_policy(
+            Arc::clone(&self.obligation_handler),
+            &scope,
+            &self.capability_id,
+            &policy,
+        )
+        .await;
+        let response = egress_result.map_err(|_| AuthProductError::BackendUnavailable)?;
         if !(200..300).contains(&response.status) {
             return Err(AuthProductError::BackendUnavailable);
         }
@@ -1169,6 +1178,8 @@ mod tests {
                     resource: Some("https://mcp.notion.com/mcp"),
                     exchange_scope_policy:
                         crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                    token_response_shape:
+                        crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
                 },
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
@@ -1614,6 +1625,8 @@ mod tests {
                     resource: Some("https://mcp.notion.com/mcp"),
                     exchange_scope_policy:
                         crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                    token_response_shape:
+                        crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
                 },
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
@@ -1676,6 +1689,8 @@ mod tests {
                 resource: Some("https://mcp.notion.com/mcp"),
                 exchange_scope_policy:
                     crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                token_response_shape:
+                    crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
             },
             callback_origin: "http://127.0.0.1:3000".to_string(),
             client_name: "Ironclaw".to_string(),

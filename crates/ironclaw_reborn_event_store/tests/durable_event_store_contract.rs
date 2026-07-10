@@ -103,10 +103,8 @@ async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
         .await
         .expect("append trailing project b");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -238,10 +236,8 @@ async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semant
     .await
     .expect("jsonl stores after restart");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let first = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 1)
@@ -264,10 +260,8 @@ async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semant
     );
     assert_eq!(second.next_cursor, EventCursor::new(3));
 
-    let project_b = ReadScope {
-        project_id: scope_b.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_b = ReadScope::default()
+        .set_project_id(scope_b.project_id.clone().expect("fixture has project id"));
     let replay_b = stores
         .events
         .read_after_cursor(&stream, &project_b, None, 10)
@@ -393,10 +387,8 @@ async fn jsonl_audit_log_survives_rebuild_and_filters_scope() {
     )
     .await
     .expect("jsonl stores after restart");
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .audit
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -479,10 +471,8 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
     .await
     .expect("libsql stores after restart");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let first = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 1)
@@ -561,10 +551,8 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
         .await
         .expect("append trailing project b");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -656,10 +644,8 @@ async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_se
     .await
     .expect("postgres stores after reconnect");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)
@@ -786,10 +772,8 @@ async fn jsonl_replay_advances_next_cursor_past_trailing_filtered_records() {
         .await
         .expect("append b1");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = stores
         .events
         .read_after_cursor(&stream, &project_a, None, 10)

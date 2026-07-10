@@ -226,6 +226,16 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             },
             "additionalProperties": false
         }),
+        "schemas/builtin/trace_commons-account_login_link.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user explicitly asked to open a Trace Commons account/profile login link in this conversation (default: false)"
+                }
+            },
+            "additionalProperties": false
+        }),
         "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
             "type": "object",
             "properties": {

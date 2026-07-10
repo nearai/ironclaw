@@ -1,7 +1,7 @@
 // arch-exempt: large_file, in-memory turn state decomposition, plan #5662
 use async_trait::async_trait;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -25,17 +25,18 @@ use crate::{
     TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
     TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord,
     TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
-    TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken,
+    TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
+    TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -144,6 +145,67 @@ impl Default for InMemoryTurnStateStoreLimits {
     }
 }
 
+impl InMemoryTurnStateStoreLimits {
+    pub fn set_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = max_events;
+        self
+    }
+
+    pub fn set_max_terminal_records(mut self, max_terminal_records: usize) -> Self {
+        self.max_terminal_records = max_terminal_records;
+        self
+    }
+
+    pub fn set_max_idempotency_records(mut self, max_idempotency_records: usize) -> Self {
+        self.max_idempotency_records = max_idempotency_records;
+        self
+    }
+
+    pub fn set_runner_lease_ttl(mut self, runner_lease_ttl: ChronoDuration) -> Self {
+        self.runner_lease_ttl = runner_lease_ttl;
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
+    }
+
+    pub fn clear_max_concurrent_runs_per_user(mut self) -> Self {
+        self.max_concurrent_runs_per_user = None;
+        self
+    }
+
+    pub fn set_max_concurrent_trigger_runs(
+        mut self,
+        max_concurrent_trigger_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_trigger_runs = Some(max_concurrent_trigger_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_trigger_runs(mut self) -> Self {
+        self.max_concurrent_trigger_runs = None;
+        self
+    }
+
+    pub fn set_max_concurrent_conversation_runs(
+        mut self,
+        max_concurrent_conversation_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_conversation_runs = Some(max_concurrent_conversation_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_conversation_runs(mut self) -> Self {
+        self.max_concurrent_conversation_runs = None;
+        self
+    }
+}
+
 pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Notify,
@@ -185,6 +247,16 @@ impl Default for InMemoryTurnStateStore {
     }
 }
 
+/// In-memory value for `Inner::tree_reservations`. `released_children` is
+/// the durable dedup record `release_tree_descendants`'s `idempotency_key`
+/// checks before decrementing `count` — see `SpawnTreeReservation`'s
+/// doc-comment (store.rs) for the full rationale.
+#[derive(Debug, Clone, Default)]
+struct TreeReservationState {
+    count: u64,
+    released_children: BTreeSet<TurnRunId>,
+}
+
 #[derive(Default)]
 struct Inner {
     cursor: u64,
@@ -209,7 +281,7 @@ struct Inner {
     events: Vec<TurnLifecycleEvent>,
     event_retention_floor: EventCursor,
     admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
-    tree_reservations: HashMap<SpawnTreeReservationKey, u64>,
+    tree_reservations: HashMap<SpawnTreeReservationKey, TreeReservationState>,
     limits: InMemoryTurnStateStoreLimits,
     concurrency: ConcurrencyLimiter,
 }
@@ -1478,7 +1550,12 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         }
 
         let reservation_key = SpawnTreeReservationKey::new(&request.child_scope, root_run_id);
-        let previous_tree_count = *inner.tree_reservations.get(&reservation_key).unwrap_or(&0);
+        let previous_state = inner
+            .tree_reservations
+            .get(&reservation_key)
+            .cloned()
+            .unwrap_or_default();
+        let previous_tree_count = previous_state.count;
         let next_tree_count = previous_tree_count.checked_add(1).ok_or_else(|| {
             TurnError::capacity_exceeded(
                 TurnCapacityResource::SpawnTreeDescendants,
@@ -1502,9 +1579,13 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 return response;
             }
         };
-        inner
-            .tree_reservations
-            .insert(reservation_key.clone(), next_tree_count);
+        inner.tree_reservations.insert(
+            reservation_key.clone(),
+            TreeReservationState {
+                count: next_tree_count,
+                released_children: previous_state.released_children.clone(),
+            },
+        );
 
         let admission_class = profile.admission_class.clone();
         if let Err(rejection) = inner.reserve_admission(
@@ -1519,7 +1600,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             } else {
                 inner
                     .tree_reservations
-                    .insert(reservation_key, previous_tree_count);
+                    .insert(reservation_key, previous_state);
             }
             let response = Err(TurnError::AdmissionRejected(rejection));
             inner.remember_submit_idempotency(
@@ -1671,7 +1752,11 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             });
         }
         let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
-        let current = *inner.tree_reservations.get(&key).unwrap_or(&0);
+        let current = inner
+            .tree_reservations
+            .get(&key)
+            .map(|state| state.count)
+            .unwrap_or(0);
         let next = current.checked_add(u64::from(delta)).ok_or_else(|| {
             TurnError::capacity_exceeded(TurnCapacityResource::SpawnTreeDescendants, u64::from(cap))
         })?;
@@ -1681,11 +1766,23 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 u64::from(cap),
             ));
         }
-        inner.tree_reservations.insert(key, next);
+        let released_children = inner
+            .tree_reservations
+            .get(&key)
+            .map(|state| state.released_children.clone())
+            .unwrap_or_default();
+        inner.tree_reservations.insert(
+            key,
+            TreeReservationState {
+                count: next,
+                released_children: released_children.clone(),
+            },
+        );
         Ok(SpawnTreeReservation {
             scope: scope.clone(),
             root_run_id: canonical_root_run_id,
             descendant_count: next,
+            released_children,
         })
     }
 
@@ -1694,6 +1791,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         let mut inner = self.lock_inner()?;
         let Some(root) = inner.records.get(&root_run_id) else {
@@ -1710,18 +1808,28 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         }
         let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
         let mut released_reservation = false;
-        if let Some(count) = inner.tree_reservations.get_mut(&key) {
-            let previous = *count;
+        if let Some(state) = inner.tree_reservations.get_mut(&key) {
+            // §5.5 round-5/6 idempotency: a release already recorded for
+            // this child is a no-op, not a second decrement — this is what
+            // makes a retried release call (recovery re-driving an edge
+            // stuck at `Claimed`) safe to repeat unconditionally.
+            if !state.released_children.insert(idempotency_key) {
+                return Ok(());
+            }
+            let previous = state.count;
             if previous < u64::from(delta) {
                 // Reject over-release loudly so callers can diagnose
                 // double-release bugs instead of silently zeroing the
-                // reservation and uncapping the spawn tree.
+                // reservation and uncapping the spawn tree. Undo the just-
+                // inserted dedup marker so a legitimate retry after fixing
+                // the caller bug isn't permanently swallowed as a no-op.
+                state.released_children.remove(&idempotency_key);
                 return Err(TurnError::InvalidRequest {
                     reason: "release delta exceeds current reservation count".to_string(),
                 });
             }
-            *count = previous - u64::from(delta);
-            if *count == 0 {
+            state.count = previous - u64::from(delta);
+            if state.count == 0 {
                 inner.tree_reservations.remove(&key);
                 released_reservation = true;
             }
@@ -1743,6 +1851,30 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         }
         Ok(())
     }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(root) = inner.records.get(&root_run_id) else {
+            // The reservation (and its tree) may already be fully released
+            // and gone — benign, matches `release_tree_descendants`'s own
+            // missing-root handling being the only hard error case there.
+            return Ok(());
+        };
+        if !same_scope_envelope(&root.scope, scope) {
+            return Err(TurnError::Unauthorized);
+        }
+        let canonical_root_run_id = root.spawn_tree_root_run_id.unwrap_or(root.run_id);
+        let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
+        if let Some(state) = inner.tree_reservations.get_mut(&key) {
+            state.released_children.remove(&child_run_id);
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1752,29 +1884,31 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
         let mut inner = self.lock_inner()?;
-        let Some(run_id) = inner.pop_matching_queued_run(request.scope_filter.as_ref()) else {
-            return Ok(None);
-        };
-        let mut record = inner.take_record(run_id)?;
-        let now = Utc::now();
-        let transition = record.status.set(TurnStatus::Running);
-        record.runner_id = Some(request.runner_id);
-        record.lease_token = Some(request.lease_token);
-        record.lease_expires_at = Some(inner.next_lease_expiry(now));
-        record.last_heartbeat_at = Some(now);
-        record.claim_count = record.claim_count.saturating_add(1);
-        record.event_cursor = inner.next_cursor();
-        inner.update_active_lock(&record, now);
-        inner.apply_status_transition(transition, &record);
-        let claimed = ClaimedTurnRun {
-            state: record.state(),
-            resolved_run_profile: record.profile.resolved.clone(),
-            runner_id: request.runner_id,
-            lease_token: request.lease_token,
-        };
-        inner.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
-        inner.records.insert(run_id, record);
-        Ok(Some(claimed))
+        inner.claim_matching_queued_run(
+            request.runner_id,
+            request.lease_token,
+            request.scope_filter.as_ref(),
+        )
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let mut claimed_runs = Vec::new();
+        for _ in 0..request.max_runs {
+            let Some(claimed) = inner.claim_matching_queued_run(
+                request.runner_id,
+                TurnLeaseToken::new(),
+                request.scope_filter.as_ref(),
+            )?
+            else {
+                break;
+            };
+            claimed_runs.push(claimed);
+        }
+        Ok(claimed_runs)
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
@@ -2209,7 +2343,10 @@ impl Inner {
         for reservation in snapshot.spawn_tree_reservations {
             tree_reservations.insert(
                 SpawnTreeReservationKey::new(&reservation.scope, reservation.root_run_id),
-                reservation.descendant_count,
+                TreeReservationState {
+                    count: reservation.descendant_count,
+                    released_children: reservation.released_children,
+                },
             );
         }
 
@@ -2350,12 +2487,13 @@ impl Inner {
         let mut spawn_tree_reservations = self
             .tree_reservations
             .iter()
-            .filter_map(|(key, descendant_count)| {
+            .filter_map(|(key, state)| {
                 let root = self.records.get(&key.root_run_id)?;
                 Some(SpawnTreeReservation {
                     scope: root.scope.clone(),
                     root_run_id: key.root_run_id,
-                    descendant_count: *descendant_count,
+                    descendant_count: state.count,
+                    released_children: state.released_children.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2606,6 +2744,37 @@ impl Inner {
             self.queued_runs.push_back(run_id);
         }
         None
+    }
+
+    fn claim_matching_queued_run(
+        &mut self,
+        runner_id: crate::TurnRunnerId,
+        lease_token: TurnLeaseToken,
+        scope_filter: Option<&TurnScope>,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        let Some(run_id) = self.pop_matching_queued_run(scope_filter) else {
+            return Ok(None);
+        };
+        let mut record = self.take_record(run_id)?;
+        let now = Utc::now();
+        let transition = record.status.set(TurnStatus::Running);
+        record.runner_id = Some(runner_id);
+        record.lease_token = Some(lease_token);
+        record.lease_expires_at = Some(self.next_lease_expiry(now));
+        record.last_heartbeat_at = Some(now);
+        record.claim_count = record.claim_count.saturating_add(1);
+        record.event_cursor = self.next_cursor();
+        self.update_active_lock(&record, now);
+        self.apply_status_transition(transition, &record);
+        let claimed = ClaimedTurnRun {
+            state: record.state(),
+            resolved_run_profile: record.profile.resolved.clone(),
+            runner_id,
+            lease_token,
+        };
+        self.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
+        self.records.insert(run_id, record);
+        Ok(Some(claimed))
     }
 
     fn remove_queued_run(&mut self, run_id: TurnRunId) {
@@ -3913,10 +4082,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_pruning_removes_orphaned_turn_records() {
-        let limits = InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        };
+        let limits = InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1);
         let store = InMemoryTurnStateStore::with_limits(limits);
         let policy = AllowAllTurnAdmissionPolicy;
         let resolver = TestRunProfileResolver;

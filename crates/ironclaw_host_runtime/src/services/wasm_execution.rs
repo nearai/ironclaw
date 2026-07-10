@@ -605,10 +605,7 @@ mod tests {
     }
 
     fn accountable_usage() -> ResourceUsage {
-        ResourceUsage {
-            output_bytes: 32,
-            ..ResourceUsage::default()
-        }
+        ResourceUsage::default().set_output_bytes(32)
     }
 
     #[test]

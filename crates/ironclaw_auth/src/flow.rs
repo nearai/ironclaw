@@ -89,6 +89,10 @@ pub struct AuthContinuationEvent {
     pub flow_id: AuthFlowId,
     pub scope: AuthProductScope,
     pub continuation: AuthContinuationRef,
+    /// Provider of the completed flow, so dispatchers can fan the completion
+    /// out to other runs blocked on the same provider's credentials without
+    /// re-reading the flow record.
+    pub provider: AuthProviderId,
     pub credential_account_id: Option<CredentialAccountId>,
     pub emitted_at: Timestamp,
 }
@@ -199,7 +203,7 @@ pub struct NewAuthFlow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderCallbackOutcome {
     Authorized {
-        exchange: crate::OAuthProviderExchange,
+        exchange: Box<crate::OAuthProviderExchange>,
     },
     Denied,
 }

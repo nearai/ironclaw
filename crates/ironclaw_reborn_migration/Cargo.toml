@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "app"
+
 # Keep out of cargo-dist release packaging; this is an operator/migration tool,
 # not a shipped product binary (mirrors ironclaw_reborn_cli).
 [package.metadata.dist]

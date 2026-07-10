@@ -1163,6 +1163,8 @@ mod tests {
             sequence: 1,
             kind: ironclaw_threads::MessageKind::User,
             status: ironclaw_threads::MessageStatus::Submitted,
+            created_at: None,
+            updated_at: None,
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,

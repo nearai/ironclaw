@@ -11,6 +11,7 @@ mod host;
 mod runtime;
 mod store;
 mod types;
+pub mod wasm_sandbox_core;
 
 pub use config::{WIT_TOOL_VERSION, WitToolRuntimeConfig};
 pub use error::{WasmError, WasmHostError};

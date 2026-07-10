@@ -1,6 +1,4 @@
-// The filesystem-backed ref store folded in from
-// `ironclaw_reborn_openai_compat_storage` lives behind the `storage` feature.
-#![cfg(feature = "storage")]
+// The filesystem-backed ref store lives behind the storage feature.
 
 use std::sync::Arc;
 

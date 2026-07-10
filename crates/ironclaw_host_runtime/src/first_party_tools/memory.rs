@@ -108,10 +108,7 @@ pub(super) async fn dispatch(
     let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(FirstPartyCapabilityResult::new(
         output,
-        ResourceUsage {
-            wall_clock_ms,
-            ..ResourceUsage::default()
-        },
+        ResourceUsage::default().set_wall_clock_ms(wall_clock_ms),
     ))
 }
 
@@ -566,6 +563,7 @@ mod tests {
                 filesystem: Arc::new(InMemoryBackend::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
+                runtime_secret_material_stager: None,
                 process: Arc::new(LocalHostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,

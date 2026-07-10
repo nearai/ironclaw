@@ -710,19 +710,14 @@ async fn resource_managed_store_denies_before_process_record_creation() {
     governor
         .set_limit(
             ResourceAccount::tenant(scope.tenant_id.clone()),
-            ResourceLimits {
-                max_process_count: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_process_count(1),
         )
         .unwrap();
     let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
 
-    let exceeding_estimate = ResourceEstimate {
-        process_count: Some(2),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let exceeding_estimate = ResourceEstimate::default()
+        .set_process_count(2)
+        .set_concurrency_slots(1);
     let err = store
         .start(process_start_with_estimate(
             process_id,
@@ -914,11 +909,9 @@ async fn resource_managed_store_does_not_release_unowned_process_reservation_on_
 #[tokio::test]
 async fn resource_managed_store_reconciles_on_complete_and_releases_on_failure_or_kill() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let completion_usage = ResourceUsage {
-        process_count: 1,
-        output_tokens: 7,
-        ..ResourceUsage::default()
-    };
+    let completion_usage = ResourceUsage::default()
+        .set_process_count(1)
+        .set_output_tokens(7);
     let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone())
         .with_completion_usage(completion_usage);
     let complete_invocation_id = InvocationId::new();
@@ -1021,10 +1014,7 @@ async fn background_process_manager_cleans_up_process_resource_reservations() {
     let success_governor = Arc::new(InMemoryResourceGovernor::new());
     let success_store = Arc::new(
         ResourceManagedProcessStore::new(InMemoryProcessStore::new(), success_governor.clone())
-            .with_completion_usage(ResourceUsage {
-                process_count: 1,
-                ..ResourceUsage::default()
-            }),
+            .with_completion_usage(ResourceUsage::default().set_process_count(1)),
     );
     let success_manager =
         BackgroundProcessManager::new(success_store.clone(), Arc::new(CountingExecutor::success()));
@@ -1803,16 +1793,10 @@ async fn assert_unowned_process_reservation_rejected(transition: UnownedTransiti
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_process_count: Some(2),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_process_count(2),
         )
         .unwrap();
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_process_count(1);
     let forged_reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let process_id = ProcessId::new();
     let inner = ForgedProcessStore::default();
@@ -2580,11 +2564,9 @@ fn process_start_with_estimate(
 }
 
 fn process_estimate() -> ResourceEstimate {
-    ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    }
+    ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1)
 }
 
 // ── Test path layout ───────────────────────────────────────────

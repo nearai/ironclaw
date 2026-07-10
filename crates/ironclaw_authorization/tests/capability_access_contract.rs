@@ -36,10 +36,7 @@ async fn capability_access_allows_matching_extension_grant() {
         .authorize_dispatch(
             &context,
             &descriptor,
-            &ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            &ResourceEstimate::default().set_concurrency_slots(1),
         )
         .await;
 
@@ -106,10 +103,7 @@ async fn capability_access_returns_grant_constraints_as_runtime_obligations() {
                 grants: vec![grant],
             }),
             &descriptor,
-            &ResourceEstimate {
-                output_bytes: Some(512),
-                ..ResourceEstimate::default()
-            },
+            &ResourceEstimate::default().set_output_bytes(512),
         )
         .await;
 
@@ -404,10 +398,7 @@ async fn capability_access_with_trust_denies_when_estimate_exceeds_authority_cei
         .authorize_dispatch_with_trust(
             &context,
             &descriptor,
-            &ResourceEstimate {
-                output_bytes: Some(1500),
-                ..ResourceEstimate::default()
-            },
+            &ResourceEstimate::default().set_output_bytes(1500),
             &trust,
         )
         .await;
@@ -455,10 +446,7 @@ async fn capability_access_with_trust_clamps_runtime_resource_obligation_to_auth
         .authorize_dispatch_with_trust(
             &context,
             &descriptor,
-            &ResourceEstimate {
-                output_bytes: Some(512),
-                ..ResourceEstimate::default()
-            },
+            &ResourceEstimate::default().set_output_bytes(512),
             &trust,
         )
         .await;
@@ -693,10 +681,7 @@ async fn capability_access_denies_when_resource_estimate_exceeds_grant_ceiling()
                 grants: vec![grant],
             }),
             &descriptor,
-            &ResourceEstimate {
-                input_tokens: Some(11),
-                ..ResourceEstimate::default()
-            },
+            &ResourceEstimate::default().set_input_tokens(11),
         )
         .await;
 
@@ -773,15 +758,13 @@ async fn capability_access_returns_full_resource_ceiling_as_runtime_obligation()
                 grants: vec![grant],
             }),
             &descriptor,
-            &ResourceEstimate {
-                input_tokens: Some(5),
-                output_tokens: Some(10),
-                wall_clock_ms: Some(500),
-                output_bytes: Some(1_024),
-                network_egress_bytes: Some(2_048),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            &ResourceEstimate::default()
+                .set_input_tokens(5)
+                .set_output_tokens(10)
+                .set_wall_clock_ms(500)
+                .set_output_bytes(1_024)
+                .set_network_egress_bytes(2_048)
+                .set_process_count(1),
         )
         .await;
 

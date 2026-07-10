@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
@@ -26,9 +26,14 @@ use futures::stream::Stream;
 use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationMutationResponse, RebornCancelRunResponse,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductOutboundEnvelope,
+    ProductWorkflowError, ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
@@ -54,11 +59,13 @@ use ironclaw_product_workflow::{
     SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
+
+use ironclaw_host_api::{SecretHandle, UserId};
 
 use crate::error::WebUiV2HttpError;
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
@@ -177,6 +184,180 @@ pub async fn delete_thread(
         .delete_thread(caller, RebornDeleteThreadRequest { thread_id })
         .await?;
     Ok(Json(response))
+}
+
+// --- Admin user management ---------------------------------------------------
+//
+// Every handler delegates straight to the facade, which enforces admin
+// authorization (operator token or admin/owner role) and last-admin protection.
+// The `{user_id}` and `{handle}` path segments are parsed into their domain
+// types (`UserId` / `SecretHandle`) here so a malformed value is a sanitized
+// 400 before the facade runs — raw strings are a boundary format and never
+// travel deeper than this edge (see `.claude/rules/types.md`).
+
+/// Parse a `{user_id}` path segment into a `UserId`, mapping a malformed value
+/// to a sanitized `400 invalid_request` before the facade is touched.
+fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
+    UserId::new(raw).map_err(|_| {
+        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+            "user_id",
+            WebUiInboundValidationCode::InvalidId,
+        )))
+    })
+}
+
+/// Parse a `{handle}` path segment into a `SecretHandle`, mapping a malformed
+/// value to a sanitized `400 invalid_request` before the facade is touched.
+/// Keeps a bad handle a client fault (400), never an internal 500 downstream.
+fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpError> {
+    SecretHandle::new(raw).map_err(|_| {
+        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+            "handle",
+            WebUiInboundValidationCode::InvalidId,
+        )))
+    })
+}
+
+/// `GET /api/webchat/v2/admin/users`
+pub async fn admin_list_users(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornAdminUserListQuery>,
+) -> Result<Json<RebornAdminUserListResponse>, WebUiV2HttpError> {
+    Ok(Json(
+        state.services().list_admin_users(caller, query).await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users`
+pub async fn admin_create_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornAdminCreateUserRequest>,
+) -> Result<Json<RebornAdminUserCreatedResponse>, WebUiV2HttpError> {
+    Ok(Json(
+        state.services().create_admin_user(caller, body).await?,
+    ))
+}
+
+/// `GET /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_get_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state.services().get_admin_user(caller, user_id).await?,
+    ))
+}
+
+/// `PATCH /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_update_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminUpdateUserRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .update_admin_user(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `DELETE /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_delete_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserDeletedResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state.services().delete_admin_user(caller, user_id).await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users/{user_id}/status`
+pub async fn admin_set_user_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminSetStatusRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .set_admin_user_status(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users/{user_id}/role`
+pub async fn admin_set_user_role(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminSetRoleRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .set_admin_user_role(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `GET /api/webchat/v2/admin/users/{user_id}/secrets`
+pub async fn admin_list_user_secrets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserSecretsListResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .list_admin_user_secrets(caller, user_id)
+            .await?,
+    ))
+}
+
+/// `PUT /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
+pub async fn admin_put_user_secret(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((user_id, handle)): Path<(String, String)>,
+    Json(body): Json<RebornAdminPutSecretRequest>,
+) -> Result<Json<RebornAdminSecretResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    let handle = parse_admin_secret_handle(handle)?;
+    Ok(Json(
+        state
+            .services()
+            .put_admin_user_secret(caller, user_id, handle, body)
+            .await?,
+    ))
+}
+
+/// `DELETE /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
+pub async fn admin_delete_user_secret(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((user_id, handle)): Path<(String, String)>,
+) -> Result<Json<RebornAdminSecretDeletedResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    let handle = parse_admin_secret_handle(handle)?;
+    Ok(Json(
+        state
+            .services()
+            .delete_admin_user_secret(caller, user_id, handle)
+            .await?,
+    ))
 }
 
 /// `POST /api/webchat/v2/threads/{thread_id}/messages`
@@ -691,9 +872,9 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// `Last-Event-ID`, which bounds drift and recycles slots even under
 /// long-running tab leaks.
 ///
-/// Until the facade gains a true subscription API, the handler drains and
-/// polls in a loop. Drain-only semantics are documented on
-/// [`RebornServicesApi::stream_events`].
+/// When the facade supports subscriptions, the handler forwards that live
+/// stream directly. Older compositions fall back to drain/poll semantics,
+/// documented on [`RebornServicesApi::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::schema::WebChatV2EventFrame
 /// [`RebornServicesApi::stream_events`]: ironclaw_product_workflow::RebornServicesApi::stream_events
@@ -704,7 +885,7 @@ pub async fn stream_events(
     Path(thread_id): Path<String>,
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebUiV2HttpError> {
+) -> Result<Response, WebUiV2HttpError> {
     let slot = state
         .sse_capacity()
         .try_acquire(&caller.tenant_id, &caller.user_id)
@@ -719,7 +900,18 @@ pub async fn stream_events(
         .map(str::to_string)
         .or(query.after_cursor);
     let stream = build_sse_stream(services, caller, thread_id, initial_cursor, slot);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL)))
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL))
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
 }
 
 /// Build the 429 response for SSE openings that exceed the per-caller
@@ -755,6 +947,52 @@ struct SseErrorPayload {
     retryable: bool,
 }
 
+fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<Event> {
+    let frame = WebChatV2EventFrame::from_outbound(envelope);
+    let id = cursor_token(frame.cursor());
+    match serde_json::to_string(&frame) {
+        Ok(payload) => {
+            let mut event = Event::default().event(frame.event_name()).data(payload);
+            if let Some(id) = id {
+                event = event.id(id);
+            }
+            Some(event)
+        }
+        Err(error) => {
+            // debug, not warn: this is an internal diagnostic, not
+            // user-facing status, and info!/warn! corrupts the REPL/TUI
+            // per CLAUDE.md.
+            tracing::debug!(
+                target = "ironclaw_webui_v2::sse",
+                error = %error,
+                "failed to serialize WebChatV2EventFrame for SSE",
+            );
+            None
+        }
+    }
+}
+
+fn sse_error_event(error: RebornServicesError) -> Event {
+    let payload = SseErrorPayload {
+        error: error.code,
+        kind: error.kind,
+        retryable: error.retryable,
+    };
+    match Event::default().event("error").json_data(payload) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::debug!(
+                target = "ironclaw_webui_v2::sse",
+                error = %error,
+                "failed to serialize redacted SSE error payload",
+            );
+            Event::default()
+                .event("error")
+                .data(r#"{"error":"unavailable","kind":"service_unavailable","retryable":true}"#)
+        }
+    }
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn RebornServicesApi>,
     caller: WebUiAuthenticatedCaller,
@@ -770,6 +1008,71 @@ fn build_sse_stream(
         let _slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+        if services.supports_stream_events_subscription() {
+            let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+            if remaining.is_zero() {
+                return;
+            }
+            let request = RebornStreamEventsRequest {
+                thread_id: thread_id.clone(),
+                after_cursor: after_cursor.clone(),
+            };
+            let mut subscription = match tokio::time::timeout(
+                remaining,
+                services.subscribe_events(caller.clone(), request),
+            )
+            .await
+            {
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::sse",
+                        "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                    );
+                    return;
+                }
+                Ok(Ok(subscription)) => subscription,
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::sse",
+                        error = ?error,
+                        "facade rejected SSE subscription; closing stream",
+                    );
+                    yield Ok(sse_error_event(error));
+                    return;
+                }
+            };
+            loop {
+                let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                if remaining.is_zero() {
+                    return;
+                }
+                match tokio::time::timeout(remaining, subscription.next()).await {
+                    Err(_elapsed) => {
+                        tracing::debug!(
+                            target = "ironclaw_webui_v2::sse",
+                            "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                        );
+                        return;
+                    }
+                    Ok(Some(Ok(envelope))) => {
+                        if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                            yield Ok(event);
+                        }
+                    }
+                    Ok(Some(Err(error))) => {
+                        tracing::debug!(
+                            target = "ironclaw_webui_v2::sse",
+                            error = ?error,
+                            "facade rejected SSE subscription event; closing stream",
+                        );
+                        yield Ok(sse_error_event(error));
+                        return;
+                    }
+                    Ok(None) => return,
+                }
+            }
+        }
+
         let mut idle_polls = 0_u32;
         loop {
             // Force a clean close once the budget is exhausted so the
@@ -810,34 +1113,19 @@ fn build_sse_stream(
                         after_cursor = Some(latest.projection_cursor.clone());
                     }
                     for envelope in response.events {
-                        let frame = WebChatV2EventFrame::from_outbound(envelope);
-                        let id = cursor_token(frame.cursor());
-                        match serde_json::to_string(&frame) {
-                            Ok(payload) => {
-                                let mut event = Event::default().event(frame.event_name()).data(payload);
-                                if let Some(id) = id {
-                                    event = event.id(id);
-                                }
-                                yield Ok(event);
-                            }
-                            Err(error) => {
-                                // debug, not warn: this is an internal
-                                // diagnostic, not user-facing status, and
-                                // info!/warn! corrupts the REPL/TUI per
-                                // CLAUDE.md.
-                                tracing::debug!(
-                                    target = "ironclaw_webui_v2::sse",
-                                    error = %error,
-                                    "failed to serialize WebChatV2EventFrame for SSE",
-                                );
-                            }
+                        if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                            yield Ok(event);
                         }
                     }
-                    idle_polls = if had_events {
-                        0
-                    } else {
-                        idle_polls.saturating_add(1)
-                    };
+                    if had_events {
+                        // The production projection facade waits on its live
+                        // subscription when no new item is replayable. Re-enter
+                        // it immediately after delivering a batch so assistant
+                        // text deltas are not delayed by the idle poll cadence.
+                        idle_polls = 0;
+                        continue;
+                    }
+                    idle_polls = idle_polls.saturating_add(1);
                     // Bound the poll sleep too so we never oversleep past the
                     // lifetime budget; the top-of-loop check then fires.
                     let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
@@ -855,15 +1143,7 @@ fn build_sse_stream(
                         error = ?error,
                         "facade rejected SSE drain; closing stream",
                     );
-                    let payload = SseErrorPayload {
-                        error: error.code,
-                        kind: error.kind,
-                        retryable: error.retryable,
-                    };
-                    yield Ok(Event::default()
-                        .event("error")
-                        .json_data(payload)
-                        .expect("SseErrorPayload is a tagged enum + bool with derived Serialize; cannot fail")); // safety: typed struct with derived Serialize on serde-compatible fields only
+                    yield Ok(sse_error_event(error));
                     return;
                 }
             }
@@ -1035,6 +1315,20 @@ pub async fn resume_automation(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/automations/:automation_id`
+pub async fn rename_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+    Json(request): Json<WebUiRenameAutomationRequest>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .rename_automation(caller, automation_id, request)
+        .await?;
+    Ok(Json(response))
+}
+
 /// `DELETE /api/webchat/v2/automations/:automation_id`
 pub async fn delete_automation(
     State(state): State<WebUiV2State>,
@@ -1084,6 +1378,34 @@ pub async fn trace_credits(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
     let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/traces/account`
+///
+/// Read-only list of the authenticated caller's submitted Trace Commons traces,
+/// fetched per-user from the server. Scope is derived from the caller; no input
+/// is accepted. Unenrolled callers receive the zero-state, not an error.
+pub async fn trace_account_traces(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_account_traces(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/traces/account-login-link`
+///
+/// Mint a one-time Trace Commons browser login link for the authenticated
+/// caller (hosted users have no host-file access; this response is the only
+/// delivery channel). Scope is derived from the caller; no input is accepted.
+/// Unenrolled callers receive the zero-state, not an error. SECURITY: the
+/// returned URL is a one-time account credential — it must never be logged.
+pub async fn trace_account_login_link(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornAccountLoginLinkResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_account_login_link(caller).await?;
     Ok(Json(response))
 }
 
@@ -1917,7 +2239,7 @@ async fn ws_drain_loop(
     mut socket: axum::extract::ws::WebSocket,
 ) {
     // Mirror the SSE generator: own the slot guard, bound stream
-    // lifetime, drain stream_events on the same poll cadence, emit
+    // lifetime, drain stream_events with the same idle cadence, emit
     // each envelope as a JSON text frame.
     //
     // Two failure modes the loop must observe:
@@ -1935,6 +2257,128 @@ async fn ws_drain_loop(
     let _slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+    if services.supports_stream_events_subscription() {
+        let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+        if remaining.is_zero() {
+            let _ =
+                ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
+            return;
+        }
+        let request = RebornStreamEventsRequest {
+            thread_id: thread_id.clone(),
+            after_cursor: after_cursor.clone(),
+        };
+        let mut subscription =
+            match tokio::time::timeout(remaining, services.subscribe_events(caller, request)).await
+            {
+                Err(_elapsed) => {
+                    let _ = socket.close().await;
+                    return;
+                }
+                Ok(Ok(subscription)) => subscription,
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::ws",
+                        error = ?error,
+                        "facade rejected WS subscription; closing stream",
+                    );
+                    let payload = SseErrorPayload {
+                        error: error.code,
+                        kind: error.kind,
+                        retryable: error.retryable,
+                    };
+                    if let Ok(text) = serde_json::to_string(&payload) {
+                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                        let _ = ws_send_with_timeout(
+                            &mut socket,
+                            Some(axum::extract::ws::Message::Text(text.into())),
+                            send_budget,
+                        )
+                        .await;
+                    }
+                    let _ = socket.close().await;
+                    return;
+                }
+            };
+        loop {
+            let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+            if remaining.is_zero() {
+                let _ = socket.close().await;
+                return;
+            }
+            let outcome = tokio::select! {
+                biased;
+                incoming = socket.recv() => {
+                    match incoming {
+                        None | Some(Err(_)) => return,
+                        Some(Ok(axum::extract::ws::Message::Close(_))) => return,
+                        Some(Ok(_)) => continue,
+                    }
+                }
+                next = tokio::time::timeout(remaining, subscription.next()) => next,
+            };
+            match outcome {
+                Err(_elapsed) => {
+                    let _ = socket.close().await;
+                    return;
+                }
+                Ok(Some(Ok(envelope))) => match serde_json::to_string(&envelope) {
+                    Ok(text) => {
+                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                        if send_budget.is_zero() {
+                            let _ = socket.close().await;
+                            return;
+                        }
+                        if ws_send_with_timeout(
+                            &mut socket,
+                            Some(axum::extract::ws::Message::Text(text.into())),
+                            send_budget,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            target = "ironclaw_webui_v2::ws",
+                            error = %error,
+                            "failed to serialize ProductOutboundEnvelope for WS",
+                        );
+                    }
+                },
+                Ok(Some(Err(error))) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::ws",
+                        error = ?error,
+                        "facade rejected WS subscription event; closing stream",
+                    );
+                    let payload = SseErrorPayload {
+                        error: error.code,
+                        kind: error.kind,
+                        retryable: error.retryable,
+                    };
+                    if let Ok(text) = serde_json::to_string(&payload) {
+                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                        let _ = ws_send_with_timeout(
+                            &mut socket,
+                            Some(axum::extract::ws::Message::Text(text.into())),
+                            send_budget,
+                        )
+                        .await;
+                    }
+                    let _ = socket.close().await;
+                    return;
+                }
+                Ok(None) => {
+                    let _ = socket.close().await;
+                    return;
+                }
+            }
+        }
+    }
+
     let mut idle_polls = 0_u32;
     loop {
         let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
@@ -2008,11 +2452,14 @@ async fn ws_drain_loop(
                         }
                     }
                 }
-                idle_polls = if had_events {
-                    0
-                } else {
-                    idle_polls.saturating_add(1)
-                };
+                if had_events {
+                    // Match SSE semantics: do not sleep after a delivered
+                    // batch, because the production facade waits on the live
+                    // projection subscription for the next item.
+                    idle_polls = 0;
+                    continue;
+                }
+                idle_polls = idle_polls.saturating_add(1);
                 let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
                     .min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
                 if sleep_for.is_zero() {

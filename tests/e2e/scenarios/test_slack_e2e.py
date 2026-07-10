@@ -9,7 +9,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import time
 
 import httpx
@@ -26,7 +25,6 @@ SIGNING_SECRET = "e2e-test-slack-signing-secret"
 OWNER_USER_ID = "U42OWNER"
 # Bot user ID (used to detect self-messages and strip mentions).
 BOT_USER_ID = "UBOTUSER"
-PAIRING_CODE_RE = re.compile(r"approve slack ([A-Z0-9]+)|`([A-Z0-9]+)`")
 
 
 # -- helpers ---------------------------------------------------------------
@@ -69,7 +67,7 @@ def _patch_slack_capabilities_for_testing(channels_dir: str):
 
     1. Add files.slack.com to HTTP allowlist for file download tests.
     2. Add files.slack.com to credential host_patterns.
-    3. Bind the test Slack owner so DM tests do not depend on pairing state.
+    3. Bind the test Slack owner so DM tests exercise the chat path.
     """
     cap_path = os.path.join(channels_dir, "slack.capabilities.json")
     assert os.path.exists(cap_path), (
@@ -102,9 +100,7 @@ def _patch_slack_capabilities_for_testing(channels_dir: str):
         json.dump(caps, f, indent=2)
 
 
-async def activate_slack(
-    base_url: str, http_url: str, fake_slack_url: str, channels_dir: str
-) -> None:
+async def activate_slack(base_url: str, fake_slack_url: str, channels_dir: str) -> None:
     """Install (if needed) and set up the Slack channel.
 
     Slack setup is single-step (no verification flow like Telegram).
@@ -135,18 +131,6 @@ async def activate_slack(
         f"Slack setup failed: {body}"
     )
 
-    # Complete DM pairing so subsequent Slack webhook tests exercise the real
-    # chat path instead of the pairing prompt path.
-    await reset_fake_slack(fake_slack_url)
-    pairing_resp = await post_slack_webhook(
-        http_url,
-        build_slack_dm_event(OWNER_USER_ID, "hello"),
-    )
-    assert pairing_resp.status_code == 200
-    messages = await wait_for_sent_messages(fake_slack_url, min_count=1, timeout=30)
-    code = extract_pairing_code(messages)
-    if code:
-        await approve_slack_pairing(base_url, code)
     await reset_fake_slack(fake_slack_url)
 
 
@@ -157,7 +141,7 @@ async def activate_slack_with_token(
     owner_id: str,
     channels_dir: str,
 ) -> None:
-    """Install and configure Slack without fake-provider reset/pairing helpers."""
+    """Install and configure Slack with a supplied owner binding."""
     await install_slack(base_url)
     _patch_slack_capabilities_for_testing(channels_dir)
 
@@ -188,39 +172,14 @@ async def activate_slack_with_token(
     )
 
 
-def extract_pairing_code(messages: list[dict]) -> str | None:
-    """Extract a pairing code from Slack reply text."""
-    for message in reversed(messages):
-        text = message.get("text", "")
-        match = PAIRING_CODE_RE.search(text)
-        if match:
-            return match.group(1) or match.group(2)
-    return None
-
-
-async def approve_slack_pairing(base_url: str, code: str) -> None:
-    """Approve a Slack pairing code through the web API."""
-    async with httpx.AsyncClient() as c:
-        response = await c.post(
-            f"{base_url}/api/pairing/slack/approve",
-            headers=auth_headers(),
-            json={"code": code},
-            timeout=10,
-        )
-    response.raise_for_status()
-    body = response.json()
-    assert body.get("success"), f"Slack pairing approval failed: {body}"
-
-
 @pytest.fixture
 async def active_slack(slack_e2e_server):
     """Ensure Slack is installed, configured, and clean for each test."""
     base_url = slack_e2e_server["base_url"]
-    http_url = slack_e2e_server["http_url"]
     fake_slack_url = slack_e2e_server["fake_slack_url"]
     channels_dir = slack_e2e_server["channels_dir"]
 
-    await activate_slack(base_url, http_url, fake_slack_url, channels_dir)
+    await activate_slack(base_url, fake_slack_url, channels_dir)
     await reset_fake_slack(fake_slack_url)
     return slack_e2e_server
 

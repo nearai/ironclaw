@@ -61,9 +61,9 @@ pub use skill_management::{
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 pub use trace_commons::{
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use trigger_management::TriggerManagementClock;
@@ -181,6 +181,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::credits_manifest()?,
                     trace_commons::profile_token_manifest()?,
                     trace_commons::profile_set_manifest()?,
+                    trace_commons::account_login_link_manifest()?,
                     profile_set::manifest()?,
                 ];
                 capabilities.extend(memory::manifests()?);
@@ -419,6 +420,10 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID)?,
         handler.clone(),
     );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID)?,
+        handler.clone(),
+    );
     registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
@@ -499,22 +504,20 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
                 let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)
                     .map_err(|error| {
-                        error.with_usage(ResourceUsage {
-                            wall_clock_ms,
-                            network_egress_bytes,
-                            process_count: 1,
-                            ..ResourceUsage::default()
-                        })
+                        error.with_usage(
+                            ResourceUsage::default()
+                                .set_wall_clock_ms(wall_clock_ms)
+                                .set_network_egress_bytes(network_egress_bytes)
+                                .set_process_count(1),
+                        )
                     })?;
                 return Ok(FirstPartyCapabilityResult::new(
                     output,
-                    ResourceUsage {
-                        wall_clock_ms,
-                        output_bytes,
-                        network_egress_bytes,
-                        process_count: 1,
-                        ..ResourceUsage::default()
-                    },
+                    ResourceUsage::default()
+                        .set_wall_clock_ms(wall_clock_ms)
+                        .set_output_bytes(output_bytes)
+                        .set_network_egress_bytes(network_egress_bytes)
+                        .set_process_count(1),
                 ));
             }
             SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
@@ -538,6 +541,10 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID => {
                 (trace_commons::dispatch_profile_set(&request).await?, None)
             }
+            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID => (
+                trace_commons::dispatch_account_login_link(&request).await?,
+                None,
+            ),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(
@@ -567,21 +574,19 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {
             if network_egress_bytes > 0 {
-                error.with_usage(ResourceUsage {
-                    wall_clock_ms,
-                    network_egress_bytes,
-                    ..ResourceUsage::default()
-                })
+                error.with_usage(
+                    ResourceUsage::default()
+                        .set_wall_clock_ms(wall_clock_ms)
+                        .set_network_egress_bytes(network_egress_bytes),
+                )
             } else {
                 error
             }
         })?;
-        let usage = ResourceUsage {
-            wall_clock_ms,
-            output_bytes,
-            network_egress_bytes,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default()
+            .set_wall_clock_ms(wall_clock_ms)
+            .set_output_bytes(output_bytes)
+            .set_network_egress_bytes(network_egress_bytes);
         Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }
@@ -674,11 +679,9 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
 
 fn resource_profile() -> Option<ResourceProfile> {
     Some(ResourceProfile {
-        default_estimate: ResourceEstimate {
-            wall_clock_ms: Some(FIRST_PARTY_DEFAULT_WALL_CLOCK_MS),
-            output_bytes: Some(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
-            ..ResourceEstimate::default()
-        },
+        default_estimate: ResourceEstimate::default()
+            .set_wall_clock_ms(FIRST_PARTY_DEFAULT_WALL_CLOCK_MS)
+            .set_output_bytes(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
         hard_ceiling: Some(ResourceCeiling {
             max_usd: None,
             max_input_tokens: None,
