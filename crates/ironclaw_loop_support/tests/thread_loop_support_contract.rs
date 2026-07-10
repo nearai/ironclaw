@@ -3706,7 +3706,8 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
 async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() {
     let fixture = ThreadFixture::new().await;
     let gateway = Arc::new(RecordingGateway::deny_with_safe_summary(
-        "RAW_PROVIDER_SECRET invalid api key sk-provider-secret /host/path tool_input",
+        "RAW_PROVIDER_SECRET invalid api key sk-provider-secret \
+         ghp_012345678901234567890123456789012345 /host/path tool_input",
     ));
     let port = ThreadBackedLoopModelPort::new(
         Arc::clone(&fixture.thread_service),
@@ -3729,18 +3730,34 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
         .await
         .unwrap_err();
 
+    // The card summary still degrades to the fixed category sentence.
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
     assert_eq!(error.safe_summary, "model profile is not permitted");
     let wire = format!("{}{:?}", serde_json::to_string(&error).unwrap(), error);
+    // Phase 2 (item 4): the rejected provider summary now rides the
+    // model-visible `detail` channel through the hardened scrubber. Secret
+    // VALUES, credential tokens, and sentinel markers must NEVER appear.
     for forbidden in [
         "RAW_PROVIDER_SECRET",
-        "invalid api key",
         "sk-provider-secret",
-        "/host/path",
-        "tool_input",
+        "ghp_012345678901234567890123456789012345",
     ] {
         assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
     }
+    // The descriptive cause DOES survive on the model-visible detail so the
+    // failure explainer can describe the fault (stripped only at the public
+    // projection boundary).
+    let detail = error
+        .detail
+        .expect("rejected provider cause should ride detail");
+    assert!(
+        detail.contains("/host/path"),
+        "path cause must survive: {detail}"
+    );
+    assert!(
+        detail.contains("tool_input"),
+        "descriptive cause must survive: {detail}"
+    );
 }
 
 #[tokio::test]

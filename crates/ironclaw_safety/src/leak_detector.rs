@@ -293,6 +293,42 @@ impl LeakDetector {
             .unwrap_or_else(|| content.to_string()))
     }
 
+    /// Redact every detected secret VALUE in `content`, preserving the
+    /// surrounding descriptive text.
+    ///
+    /// Unlike [`Self::scan_and_clean`], this never returns an error: a
+    /// `Block`-severity match is redacted in place rather than blocking the
+    /// whole string, and lower-severity (`Redact`/`Warn`) matches are redacted
+    /// too. Intended for the model-visible error `detail` channel, where the
+    /// descriptive cause (paths, status codes, schema refs) must survive so the
+    /// model can retry or explain, but no secret value may reach the model.
+    ///
+    /// Returns the redacted string and whether any redaction was applied.
+    pub fn redact_all_secrets(&self, content: &str) -> (String, bool) {
+        let result = self.scan(content);
+        if result.matches.is_empty() {
+            return (content.to_string(), false);
+        }
+        // Different patterns can match overlapping spans of one secret; merge
+        // the ranges so a single value redacts to one `[REDACTED]` and no slice
+        // ever crosses a redaction already applied by an earlier range.
+        let mut ranges: Vec<Range<usize>> =
+            result.matches.iter().map(|m| m.location.clone()).collect();
+        ranges.sort_by_key(|range| range.start);
+        let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => {
+                    if range.end > last.end {
+                        last.end = range.end;
+                    }
+                }
+                _ => merged.push(range),
+            }
+        }
+        (apply_redactions(content, &merged), true)
+    }
+
     /// Scan an outbound HTTP request for potential secret leakage.
     ///
     /// This MUST be called before executing any HTTP request from WASM
@@ -720,6 +756,52 @@ mod tests {
         let result = detector.scan_and_clean(content);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), content);
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_block_severity_without_dropping_cause() {
+        // The model-visible detail channel must keep the descriptive cause
+        // (path, status code) while masking every secret value — even
+        // Block-severity tokens that `scan_and_clean` would refuse outright.
+        let detector = LeakDetector::new();
+        let content = "auth failed at /workspace/config using ghp_012345678901234567890123456789012345 \
+             and AKIAIOSFODNN7EXAMPLE (HTTP 401)";
+
+        let (redacted, changed) = detector.redact_all_secrets(content);
+
+        assert!(
+            changed,
+            "a leak was present, so redaction must report a change"
+        );
+        assert!(
+            !redacted.contains("ghp_012345678901234567890123456789012345"),
+            "github token must be redacted: {redacted}"
+        );
+        assert!(
+            !redacted.contains("AKIAIOSFODNN7EXAMPLE"),
+            "aws access key must be redacted: {redacted}"
+        );
+        // Descriptive cause survives so the model can act on it.
+        assert!(
+            redacted.contains("/workspace/config"),
+            "path must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("HTTP 401"),
+            "status code must survive: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_secrets_leaves_clean_text_untouched() {
+        let detector = LeakDetector::new();
+        let content = "read_file failed at /workspace/x (HTTP 404)";
+
+        let (redacted, changed) = detector.redact_all_secrets(content);
+
+        assert!(!changed);
+        assert_eq!(redacted, content);
     }
 
     #[test]

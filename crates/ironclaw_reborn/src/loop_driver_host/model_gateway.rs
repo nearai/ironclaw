@@ -116,11 +116,19 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
     let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
     let gate_ref = error.gate_ref;
-    // Text-only legacy driver: keep the model-provider error fully sanitized
-    // (fixed fallback, no raw cause on detail). The provider summary is the
-    // highest-leak-risk string and this path has an explicit sanitization
-    // contract (`ironclaw_reborn/tests/loop_driver_host.rs`). Phase-1 detail
-    // recovery targets the planned driver in `crate::model_gateway`, not here.
+    // Phase 2 (item 4): the card summary still degrades to a fixed fallback when
+    // it fails strict validation, but the model-visible `detail` — already
+    // producer-scrubbed upstream (`scrub_model_visible_detail` via
+    // `HostManagedModelError::safe_with_detail` / `model_gateway_error`) — is no
+    // longer dropped. It rides through, re-scrubbed here as a fail-closed
+    // backstop so this highest-leak-risk path is provably safe even if an
+    // upstream producer forgot: secret VALUES are redacted through the full
+    // leak-detector registry + prefix matcher and any injection payload is
+    // fenced. See the `text_only_host_factory_*` contracts in
+    // `ironclaw_reborn/tests/loop_driver_host.rs`.
+    let detail = error
+        .detail
+        .map(ironclaw_loop_support::scrub_model_visible_detail);
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
@@ -141,5 +149,39 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
     }
+    if let Some(detail) = detail {
+        converted = converted.with_detail(detail);
+    }
     converted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_turns::run_profile::AgentLoopHostErrorKind;
+
+    #[test]
+    fn host_error_carries_model_visible_detail_with_fail_closed_rescrub() {
+        // Phase 2 (item 4): the model-visible detail is carried onto the
+        // gateway error (previously dropped) and defensively re-scrubbed here so
+        // a credential token an upstream producer forgot never reaches this
+        // highest-leak-risk wire, while the descriptive cause survives.
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model service is unavailable",
+        )
+        .with_detail("provider 500 at /host/route body ghp_012345678901234567890123456789012345");
+
+        let converted = host_error_to_model_gateway_error(error);
+
+        let detail = converted.detail.expect("detail carried onto gateway error");
+        assert!(
+            !detail.contains("ghp_012345678901234567890123456789012345"),
+            "fail-closed backstop must redact a credential token: {detail}"
+        );
+        assert!(
+            detail.contains("/host/route"),
+            "descriptive cause must survive: {detail}"
+        );
+    }
 }
