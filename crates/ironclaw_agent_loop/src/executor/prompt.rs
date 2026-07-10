@@ -613,12 +613,18 @@ async fn compaction_failed_continue(
     drop_through_seq: u64,
     error: &LoopCompactionError,
 ) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
+    let reason_kind = loop_compaction_reason(error);
+    tracing::warn!(
+        task_id = ?task_id,
+        %reason_kind,
+        "compaction failed; continuing run with uncompacted prompt"
+    );
     CheckpointStage
         .emit_progress(
             ctx,
             LoopProgressEvent::CompactionFailed {
                 task_id,
-                reason_kind: loop_compaction_reason(error),
+                reason_kind,
             },
         )
         .await;
