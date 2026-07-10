@@ -14,11 +14,14 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntimeServices, ProductionWiringComponent,
-    ProductionWiringIssueKind, SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError,
-    TurnRunScheduler, TurnRunSchedulerConfig,
+    ProductionWiringIssueKind,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_runner::turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig,
+};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
@@ -988,7 +991,7 @@ fn executor_error_exposes_typed_sanitized_failure() {
 }
 
 #[test]
-fn production_services_build_scheduler_from_configured_transition_port_without_notifier() {
+fn production_services_expose_verified_transition_port_without_notifier() {
     let store = Arc::new(DurableTurnStoreStub);
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
@@ -1001,9 +1004,10 @@ fn production_services_build_scheduler_from_configured_transition_port_without_n
     .with_turn_state_and_transition_port(store);
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(CompletingExecutor::default());
 
-    let _scheduler = services
-        .turn_scheduler_for_production(executor, fast_config())
-        .expect("production turn scheduler should build from configured transition port");
+    let transition_port = services
+        .turn_run_transition_port_for_production()
+        .expect("production transition port should be verified");
+    let _scheduler = TurnRunScheduler::new(transition_port, executor, fast_config());
 }
 
 #[test]
@@ -1020,11 +1024,9 @@ fn production_services_reject_unverified_scheduler_transition_port() {
     )
     .with_turn_state(turn_state)
     .with_turn_run_transition_port(transition_port);
-    let executor: Arc<dyn TurnRunExecutor> = Arc::new(CompletingExecutor::default());
-
-    let result = services.turn_scheduler_for_production(executor, fast_config());
+    let result = services.turn_run_transition_port_for_production();
     let Err(report) = result else {
-        panic!("production scheduler should reject unverified transition port");
+        panic!("production wiring should reject unverified transition port");
     };
     assert!(report.contains(
         ProductionWiringComponent::TurnState,
@@ -1083,12 +1085,14 @@ async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end()
     .with_turn_state_and_transition_port(Arc::clone(&store));
     let executor = Arc::new(CompletingExecutor::default());
     let executor_port: Arc<dyn TurnRunExecutor> = executor.clone();
-    let scheduler = services
-        .turn_scheduler_for_production(
-            executor_port,
-            fast_config().with_poll_interval(Duration::from_secs(60)),
-        )
-        .expect("production scheduler should build from verified turn store");
+    let transition_port = services
+        .turn_run_transition_port_for_production()
+        .expect("production transition port should be verified");
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor_port,
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
     let handle = scheduler.start();
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
@@ -1114,7 +1118,7 @@ async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end()
 /// no-op global dispatcher. `#[traced_test]` registers a global subscriber
 /// instead, which correctly captures events from spawned tasks regardless of
 /// parallelism. The `no-env-filter` feature is required because the event
-/// originates in this crate's `turn_scheduler` module.
+/// originates in the runner crate's `turn_scheduler` module.
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn scheduler_executor_emits_thread_run_correlated_operator_log() {

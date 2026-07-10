@@ -34,12 +34,14 @@ use crate::slack::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
     SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
+#[cfg(test)]
+use crate::slack::slack_personal_binding::RebornUserIdentityBinding;
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
-    SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
-    SlackPersonalUserBindingService,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, SlackConnectionEpoch, SlackPersonalBindingInstallation,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
+    SlackPersonalUserBindingOutcome, SlackPersonalUserBindingRequest,
+    SlackPersonalUserBindingService, SlackUserBindingLifecycleStore,
 };
 use crate::slack::slack_serve::{
     ResolvedSlackIngress, SlackEventsRouteState, SlackIngressError, SlackInstallationResolver,
@@ -85,8 +87,27 @@ pub(super) async fn build_runtime_mounts(
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
     let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
+    let user_binding_lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore> = state.clone();
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
+    // Durable, filesystem-backed conversation binding store so Slack
+    // conversation continuity survives a process restart. Backend
+    // (libSQL / Postgres / local disk) is a property of the host-state
+    // root filesystem, shared with the idempotency ledger.
+    let conversation_services = Arc::new(
+        RebornFilesystemConversationServices::new(Arc::clone(
+            &parts.local_runtime.host_state_filesystem,
+        ))
+        .await
+        .map_err(
+            |error| SlackHostBetaBuildError::ConversationStoreUnavailable {
+                reason: error.to_string(),
+            },
+        )?,
+    );
+    let conversation_actor_pairings: Arc<
+        dyn ironclaw_conversations::ConversationActorPairingService,
+    > = conversation_services.clone();
     let dynamic_binding_service: Arc<dyn SlackPersonalUserBinder> = Arc::new(
         DynamicSlackPersonalUserBinder::new(Arc::clone(&setup_service), Arc::clone(&binding_store)),
     );
@@ -116,6 +137,7 @@ pub(super) async fn build_runtime_mounts(
         Arc::clone(&setup_service),
         state.clone(),
         Arc::clone(&channel_route_store),
+        Arc::clone(&conversation_services),
     );
     let mut channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
         Arc::clone(&channel_route_store),
@@ -195,6 +217,8 @@ pub(super) async fn build_runtime_mounts(
         personal_oauth_binder,
         user_identity_lookup,
         user_identity_delete_store,
+        user_binding_lifecycle_store,
+        conversation_actor_pairings,
         personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
@@ -266,10 +290,7 @@ impl SlackPersonalConnectionScopeResolver for DynamicSlackPersonalConnectionScop
         };
         let installation_id =
             AdapterInstallationId::new(setup.installation_id).map_err(|error| error.to_string())?;
-        Ok(Some(SlackPersonalConnectionScope {
-            installation_id,
-            team_id: SlackTeamId::new(setup.team_id),
-        }))
+        Ok(Some(SlackPersonalConnectionScope { installation_id }))
     }
 }
 
@@ -448,14 +469,15 @@ impl std::fmt::Debug for DynamicSlackPersonalDmTargetProvisioner {
 
 #[async_trait::async_trait]
 impl SlackPersonalDmTargetProvisioning for DynamicSlackPersonalDmTargetProvisioner {
-    async fn provision_for_user(
+    async fn provision_for_user_for_epoch(
         &self,
         user_id: ironclaw_host_api::UserId,
         slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
         self.configured_provisioner()
             .await?
-            .provision_for_user(user_id, slack_user_id)
+            .provision_for_user_for_epoch(user_id, slack_user_id, epoch)
             .await
     }
 }
@@ -563,6 +585,7 @@ struct DynamicSlackInstallationResolver {
     setup_service: Arc<SlackSetupService>,
     state: Arc<dyn RebornUserIdentityLookup>,
     channel_route_store: Arc<dyn SlackChannelRouteStore>,
+    conversation_services: Arc<RebornFilesystemConversationServices>,
     live_resolvers: Arc<Mutex<DynamicSlackInstallationResolverLifecycle>>,
 }
 
@@ -572,12 +595,14 @@ impl DynamicSlackInstallationResolver {
         setup_service: Arc<SlackSetupService>,
         state: Arc<dyn RebornUserIdentityLookup>,
         channel_route_store: Arc<dyn SlackChannelRouteStore>,
+        conversation_services: Arc<RebornFilesystemConversationServices>,
     ) -> Self {
         Self {
             parts,
             setup_service,
             state,
             channel_route_store,
+            conversation_services,
             live_resolvers: Arc::new(Mutex::new(
                 DynamicSlackInstallationResolverLifecycle::default(),
             )),
@@ -650,26 +675,12 @@ impl DynamicSlackInstallationResolver {
                 config.installation_id.clone(),
                 Arc::clone(&self.channel_route_store),
             ));
-        // Durable, filesystem-backed conversation binding store so Slack
-        // conversation continuity survives a process restart. Backend
-        // (libSQL / Postgres / local disk) is a property of the host-state
-        // root filesystem, shared with the idempotency ledger.
-        let conversations = RebornFilesystemConversationServices::new(Arc::clone(
-            &self.parts.local_runtime.host_state_filesystem,
-        ))
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "Slack durable conversation store unavailable");
-            SlackIngressError::ConversationStoreUnavailable {
-                reason: error.to_string(),
-            }
-        })?;
         let record = build_slack_installation_record_with_resolvers(
             &self.parts,
             config,
             actor_user_resolver,
             Some(subject_route_resolver),
-            SlackConversationServices::from_shared(Arc::new(conversations)),
+            SlackConversationServices::from_shared(Arc::clone(&self.conversation_services)),
         )
         .map_err(map_build_error_to_ingress_not_found(
             "build Slack installation resolver",
@@ -799,14 +810,15 @@ impl std::fmt::Debug for DynamicSlackPersonalUserBinder {
 
 #[async_trait::async_trait]
 impl SlackPersonalUserBinder for DynamicSlackPersonalUserBinder {
-    async fn bind_personal_user(
+    async fn bind_personal_user_for_epoch(
         &self,
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
-    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        epoch: SlackConnectionEpoch,
+    ) -> Result<SlackPersonalUserBindingOutcome, SlackPersonalUserBindingError> {
         self.binding_service()
             .await?
-            .bind_personal_user(principal, request)
+            .bind_personal_user_for_epoch_with_rollback(principal, request, epoch)
             .await
     }
 }
@@ -1121,7 +1133,6 @@ mod tests {
             .expect("setup exists");
 
         assert_eq!(scope.installation_id.as_str(), "install-a");
-        assert_eq!(scope.team_id.as_str(), "T123");
     }
 
     #[tokio::test]
@@ -1222,6 +1233,22 @@ mod tests {
         ) -> Result<(), RebornUserIdentityBindingError> {
             self.bindings.lock().unwrap().push(binding);
             Ok(())
+        }
+
+        async fn bind_user_identity_for_epoch(
+            &self,
+            binding: RebornUserIdentityBinding,
+            _epoch: SlackConnectionEpoch,
+        ) -> Result<
+            crate::slack::slack_personal_binding::SlackUserIdentityBindingRollback,
+            RebornUserIdentityBindingError,
+        > {
+            self.bind_user_identity(binding).await?;
+            Ok(
+                crate::slack::slack_personal_binding::SlackUserIdentityBindingRollback::new(
+                    async {},
+                ),
+            )
         }
     }
 

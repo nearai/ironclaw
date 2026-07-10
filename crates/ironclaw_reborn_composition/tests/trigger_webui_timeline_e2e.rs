@@ -251,6 +251,7 @@ fn make_trigger_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
         last_run_at: None,

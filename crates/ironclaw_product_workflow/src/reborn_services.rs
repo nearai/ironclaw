@@ -4758,13 +4758,7 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(
-            self.lifecycle_facade.as_ref(),
-            self.channel_connection_facade.clone(),
-            caller,
-            package_ref,
-        )
-        .await
+        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
     async fn setup_extension(

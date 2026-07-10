@@ -33,8 +33,8 @@ use super::projection::{
 /// project's no-`.expect()`-in-production rule.
 fn reborn_replay_error(
     reason: String,
-) -> ironclaw_reborn::loop_driver_host::RebornLoopDriverHostError {
-    ironclaw_reborn::loop_driver_host::RebornLoopDriverHostError::InvalidRequest { reason }
+) -> ironclaw_runner::loop_driver_host::RebornLoopDriverHostError {
+    ironclaw_runner::loop_driver_host::RebornLoopDriverHostError::InvalidRequest { reason }
 }
 
 /// Install the first-party builtin hook set into `builder`.

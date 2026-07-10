@@ -9,8 +9,8 @@
 //!
 //! The public surface here is intentionally a **directory of modules**, not a
 //! shopping list of types. Each module is reachable by path
-//! (`ironclaw_reborn::driver_registry::DriverRegistry`,
-//! `ironclaw_reborn::model_gateway::LlmProviderModelGateway`, …) so that a
+//! (`ironclaw_runner::driver_registry::DriverRegistry`,
+//! `ironclaw_runner::model_gateway::LlmProviderModelGateway`, …) so that a
 //! glance at this file tells a reader what areas exist without enumerating
 //! every type. We deliberately do **not** flatten the modules via a wall of
 //! `pub use` re-exports — that was the noisy "speculative public API" pattern
@@ -42,6 +42,7 @@ mod tool_disclosure;
 mod tool_disclosure_port;
 pub mod turn_run_executor;
 pub mod turn_runner;
+pub mod turn_scheduler;
 
 #[cfg(feature = "root-llm-provider")]
 pub mod model_gateway;

@@ -533,13 +533,18 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
         "generic_failure" => {
             validate_object_keys(
                 object,
-                &["kind", "failure_kind"],
+                &["kind", "failure_kind", "detail"],
                 "model observation detail",
             )?;
             validate_model_observation_identifier(
                 required_string(object, "failure_kind", "model observation detail")?,
                 "model observation failure kind",
                 128,
+            )?;
+            validate_optional_observation_text_len(
+                optional_string(object, "detail", "model observation detail")?,
+                "model observation failure detail",
+                MAX_MODEL_OBSERVATION_BYTES,
             )
         }
         other => Err(format!(
@@ -799,8 +804,16 @@ fn validate_optional_observation_text(
     value: Option<&str>,
     label: &'static str,
 ) -> Result<(), String> {
+    validate_optional_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)
+}
+
+fn validate_optional_observation_text_len(
+    value: Option<&str>,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<(), String> {
     if let Some(value) = value {
-        validate_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)?;
+        validate_observation_text_len(value, label, max_bytes)?;
     }
     Ok(())
 }
@@ -905,6 +918,47 @@ mod tests {
                 .and_then(|detail| detail.get("failure_kind"))
                 .and_then(serde_json::Value::as_str),
             Some("repeated_error_elided")
+        );
+    }
+
+    #[test]
+    fn generic_failure_observation_accepts_diagnostic_detail() {
+        let diagnostic = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let error_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with missing_runtime.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "missing_runtime",
+                "detail": diagnostic,
+            },
+            "recovery": {
+                "same_call_retry": "not_useful",
+                "repairs": [],
+                "recovery_hint": "respect_failure_constraint",
+            },
+            "trust": "untrusted_tool_output",
+        });
+
+        let envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-output_1.4",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            error_obs,
+        )
+        .expect("diagnostic observation envelope");
+
+        envelope
+            .validate()
+            .expect("diagnostic observation validates");
+        assert_eq!(
+            envelope
+                .model_observation
+                .as_ref()
+                .and_then(|observation| observation.get("detail"))
+                .and_then(|detail| detail.get("detail"))
+                .and_then(serde_json::Value::as_str),
+            Some(diagnostic)
         );
     }
 
