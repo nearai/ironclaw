@@ -593,6 +593,213 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         .expect("rebuilt runtime shuts down");
 }
 
+/// PR #5499 review finding (High): a persisted installation row whose
+/// extension id the catalog does not (yet) materialize a package for — e.g. a
+/// placeholder row the standalone v1->Reborn migration tool writes ahead of
+/// catalog package materialization — must not abort
+/// `restore_extension_lifecycle_state` for every other installation. Before
+/// the fix, `catalog.resolve(&package_ref)?` on that one row propagated all
+/// the way through `build_reborn_runtime`, so a SINGLE orphan row made every
+/// subsequent `ironclaw-reborn serve` startup fail. This mirrors
+/// `production_runtime_canonicalizes_legacy_multi_row_extension_installs`'s
+/// restart-with-hand-edited-state-file shape, but for a catalog-absent row
+/// instead of a legacy multi-row membership shape.
+#[tokio::test]
+async fn production_runtime_restart_skips_installation_row_absent_from_catalog() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let storage_root = root.path().join("local-dev");
+    let tenant_id = TenantId::new("webui-orphan-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-orphan-agent").expect("agent id");
+    let operator_id = UserId::new("webui-orphan-operator").expect("operator id");
+    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-orphan-source".to_string(),
+                reply_target_binding_id: "webui-orphan-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id.clone(),
+        operator_id.clone(),
+        Some(agent_id.clone()),
+        None,
+    );
+
+    let operator_router = webui_v2_router(WebUiV2State::new(
+        Arc::clone(&webui.api),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(
+        operator_caller.with_operator_webui_config(true),
+    ))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+    let (status, body) = post_raw(
+        operator_router.clone(),
+        "/api/webchat/v2/extensions/import",
+        importable_extension_zip("catalog-present"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator response: {body}");
+    assert_eq!(body["success"], true);
+    let install_request = serde_json::json!({
+        "package_ref": {"kind": "extension", "id": "catalog-present"}
+    });
+    let (status, body) = post_json(
+        operator_router,
+        "/api/webchat/v2/extensions/install",
+        install_request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator install response: {body}");
+    assert_eq!(body["success"], true, "operator install response: {body}");
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+
+    // Hand-edit the persisted state file the way a standalone v1->Reborn
+    // migration tool would: add a manifest + installation row for an
+    // extension id that has no corresponding materialized catalog package
+    // (no `/system/extensions/<id>/` files were written for it), simulating
+    // a migration that has not yet materialized catalog packages.
+    let state_path = storage_root.join("system/extensions/.installations/state.json");
+    let mut state: Value = serde_json::from_slice(
+        &std::fs::read(&state_path).expect("read extension installation state"),
+    )
+    .expect("extension installation state is JSON");
+    let manifests = state["manifests"]
+        .as_array()
+        .expect("manifests array")
+        .clone();
+    let mut orphan_manifest = manifests
+        .first()
+        .expect("at least one manifest present")
+        .clone();
+    orphan_manifest["raw_toml"] = Value::String(
+        orphan_manifest["raw_toml"]
+            .as_str()
+            .expect("raw_toml is a string")
+            .replace("catalog-present", "orphan-migrated"),
+    );
+    let mut new_manifests = manifests;
+    new_manifests.push(orphan_manifest);
+    state["manifests"] = Value::Array(new_manifests);
+
+    let installations = state["installations"]
+        .as_array()
+        .expect("installations array")
+        .clone();
+    let mut orphan_row = installations
+        .first()
+        .expect("at least one installation present")
+        .clone();
+    orphan_row["installation_id"] = Value::String("orphan-migrated".to_string());
+    orphan_row["extension_id"] = Value::String("orphan-migrated".to_string());
+    orphan_row["manifest_ref"]["extension_id"] = Value::String("orphan-migrated".to_string());
+    let mut new_installations = installations;
+    new_installations.push(orphan_row);
+    state["installations"] = Value::Array(new_installations);
+
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("serialize orphan installation state"),
+    )
+    .expect("write orphan installation state");
+
+    let rebuilt_input = RebornBuildInput::local_dev("webui-orphan-operator", storage_root.clone())
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let rebuilt_runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(rebuilt_input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-orphan-source".to_string(),
+                reply_target_binding_id: "webui-orphan-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("rebuilt production Reborn runtime builds despite the orphan installation row");
+    let rebuilt_webui =
+        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI facade builds");
+
+    // The orphan row is preserved untouched (never deleted or rewritten) so
+    // it can restore once the migration tool later materializes its catalog
+    // package.
+    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+        &storage_root,
+    )
+    .await
+    .expect("reopen canonical extension installation store");
+    assert!(
+        store
+            .get_installation(
+                &ironclaw_extensions::ExtensionInstallationId::new("orphan-migrated")
+                    .expect("valid installation id")
+            )
+            .await
+            .expect("read orphan installation")
+            .is_some(),
+        "orphan installation row must be preserved, not deleted"
+    );
+
+    // The catalog-present installation still restores and is reachable
+    // through the real WebUI facade.
+    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id,
+        operator_id,
+        Some(agent_id),
+        None,
+    );
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui.api), operator_caller),
+        "/api/webchat/v2/extensions",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "operator extensions response: {body}"
+    );
+    let present_extension = body["extensions"]
+        .as_array()
+        .and_then(|extensions| {
+            extensions
+                .iter()
+                .find(|extension| extension["package_ref"]["id"] == "catalog-present")
+        })
+        .unwrap_or_else(|| panic!("catalog-present extension must still restore: {body}"));
+    assert_eq!(present_extension["install_scope"], "shared");
+
+    drop(store);
+    drop(rebuilt_webui);
+    rebuilt_runtime
+        .shutdown()
+        .await
+        .expect("rebuilt runtime shuts down");
+}
+
 /// Pins PR #5499 private-install membership through the PRODUCTION webui
 /// facade, mirroring the crate-tier invariants in
 /// `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/tests/private_install_tests.rs`

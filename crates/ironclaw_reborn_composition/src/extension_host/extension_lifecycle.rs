@@ -277,7 +277,32 @@ pub(crate) async fn restore_extension_lifecycle_state(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
         )?;
-        let available = catalog.resolve(&package_ref)?;
+        // A row whose extension id the catalog does not (yet) materialize a
+        // package for — e.g. a placeholder row written by the standalone
+        // v1->Reborn migration tool ahead of catalog package materialization
+        // — must not abort restore for every other installation (#5499
+        // review). `resolve`'s only realistic failure here is "not found";
+        // skip and keep the row (never delete/rewrite persisted state) so it
+        // restores once the catalog gains the package.
+        // A row whose extension id the catalog does not (yet) materialize a
+        // package for — e.g. a placeholder row written by the standalone
+        // v1->Reborn migration tool ahead of catalog package materialization
+        // — must not abort restore for every other installation (#5499
+        // review). `resolve`'s only realistic failure here is "not found";
+        // skip and keep the row (never delete/rewrite persisted state) so it
+        // restores once the catalog gains the package.
+        let available = match catalog.resolve(&package_ref) {
+            Ok(available) => available,
+            Err(error) => {
+                tracing::warn!(
+                    extension_id = installation.extension_id().as_str(),
+                    installation_id = installation.installation_id().as_str(),
+                    %error,
+                    "skipping extension installation restore: not available in the catalog"
+                );
+                continue;
+            }
+        };
         if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
             migrate_host_bundled_manifest_hash(
                 installation_store,
@@ -3905,6 +3930,105 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
+    async fn restore_skips_installation_absent_from_catalog_and_restores_valid_installation() {
+        // Regression for PR #5499 review finding: a persisted installation
+        // row whose extension id the catalog does not (yet) materialize a
+        // package for — e.g. a placeholder row written by the standalone
+        // v1->Reborn migration tool — must not abort restore for every other
+        // installation.
+        let (_dir, _storage_root, port, _active_registry, installation_store, _trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
+
+        let orphan_extension_id = ExtensionId::new("orphan_migrated").expect("valid extension id");
+        let orphan_installation_id =
+            ExtensionInstallationId::new("orphan_migrated").expect("valid installation");
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                &orphan_migrated_manifest(),
+                ManifestSource::InstalledLocal,
+                None,
+            ))
+            .await
+            .expect("upsert orphan manifest absent from the catalog");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    orphan_installation_id.clone(),
+                    orphan_extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(orphan_extension_id.clone(), None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    InstallationOwner::Tenant,
+                )
+                .expect("orphan installation"),
+            )
+            .await
+            .expect("upsert orphan installation absent from the catalog");
+
+        let restored_catalog =
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]);
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+
+        restore_extension_lifecycle_state(
+            &restored_catalog,
+            &port.filesystem,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect("restore succeeds by skipping the orphan installation");
+
+        // The valid installation still restores normally.
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").expect("valid extension id"))
+                .is_some()
+        );
+        // The orphan row is preserved (never deleted or rewritten) for when
+        // the migration tool later materializes its catalog package.
+        assert!(
+            installation_store
+                .get_installation(&orphan_installation_id)
+                .await
+                .expect("read orphan installation")
+                .is_some()
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&orphan_extension_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn restore_refreshes_materialized_extension_assets_from_catalog() {
         let (_dir, storage_root, port, _active_registry, installation_store, _trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -6401,6 +6525,41 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 "#
+    }
+
+    /// Manifest for an installation row persisted with an extension id the
+    /// [`AvailableExtensionCatalog`] does not materialize a package for —
+    /// mirrors the placeholder rows the standalone v1->Reborn migration tool
+    /// writes ahead of catalog package materialization (#5459 review).
+    fn orphan_migrated_manifest() -> String {
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "orphan_migrated"
+name = "Orphan Migrated Extension"
+version = "0.1.0"
+description = "Placeholder row from the v1->Reborn migration tool"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/orphan_migrated.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "orphan_migrated.search"
+description = "Search orphan migrated data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+        .to_string()
     }
 
     fn retired_slack_user_manifest() -> &'static str {
