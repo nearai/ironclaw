@@ -285,6 +285,7 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
 
     let mut text_bodies = Vec::new();
     let mut saw_tool = false;
+    let mut latest_text_preceded_tool = false;
     for _ in 0..8 {
         let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
             .await
@@ -305,6 +306,8 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
                 ProductProjectionItem::CapabilityActivity(activity)
                     if activity.invocation_id == InvocationId::from_uuid(activity_id.as_uuid()) =>
                 {
+                    latest_text_preceded_tool =
+                        text_bodies.last().map(String::as_str) == Some("partial answer 63");
                     saw_tool = true;
                 }
                 _ => {}
@@ -318,6 +321,10 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
     assert!(
         saw_tool,
         "the text burst must not terminate the live subscription"
+    );
+    assert!(
+        latest_text_preceded_tool,
+        "releasing the state lock must not reorder the latest text after tool activity"
     );
     assert_eq!(
         text_bodies.last().map(String::as_str),

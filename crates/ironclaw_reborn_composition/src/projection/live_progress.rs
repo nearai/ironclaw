@@ -65,6 +65,10 @@ pub(crate) struct LiveProjectionPublisher {
 struct LiveTextProjectionCoalescer {
     publisher: Arc<LiveProjectionPublisher>,
     next_generation: AtomicU64,
+    // State mutation and channel publication are separate critical sections.
+    // This guard preserves their relative order without holding `states` while
+    // the broadcast source wakes subscribers.
+    publication_order: Mutex<()>,
     states: Mutex<HashMap<TurnRunId, LiveTextProjectionState>>,
 }
 
@@ -245,6 +249,7 @@ impl LiveTextProjectionCoalescer {
         Self {
             publisher,
             next_generation: AtomicU64::new(0),
+            publication_order: Mutex::new(()),
             states: Mutex::new(HashMap::new()),
         }
     }
@@ -255,32 +260,39 @@ impl LiveTextProjectionCoalescer {
         // than in the generic stream manager, whose other items are lossless.
         let run_id = projection.run_id;
         let mut timer = None;
+        let mut publish_projection = None;
         {
-            let mut states = self.lock_states();
-            match states.get_mut(&run_id) {
-                Some(state) => {
-                    state.pending = Some(projection);
-                    if !state.timer_scheduled {
-                        state.timer_scheduled = true;
-                        timer = Some((
-                            state.generation,
-                            state.last_published_at + LIVE_TEXT_COALESCE_WINDOW,
-                        ));
+            let _publication_order = self.lock_publication_order();
+            {
+                let mut states = self.lock_states();
+                match states.get_mut(&run_id) {
+                    Some(state) => {
+                        state.pending = Some(projection);
+                        if !state.timer_scheduled {
+                            state.timer_scheduled = true;
+                            timer = Some((
+                                state.generation,
+                                state.last_published_at + LIVE_TEXT_COALESCE_WINDOW,
+                            ));
+                        }
+                    }
+                    None => {
+                        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                        states.insert(
+                            run_id,
+                            LiveTextProjectionState {
+                                generation,
+                                last_published_at: tokio::time::Instant::now(),
+                                pending: None,
+                                timer_scheduled: false,
+                            },
+                        );
+                        publish_projection = Some(projection);
                     }
                 }
-                None => {
-                    let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
-                    self.publish(projection);
-                    states.insert(
-                        run_id,
-                        LiveTextProjectionState {
-                            generation,
-                            last_published_at: tokio::time::Instant::now(),
-                            pending: None,
-                            timer_scheduled: false,
-                        },
-                    );
-                }
+            }
+            if let Some(projection) = publish_projection.take() {
+                self.publish(projection);
             }
         }
 
@@ -294,27 +306,36 @@ impl LiveTextProjectionCoalescer {
     }
 
     fn flush_boundary(&self, run_id: TurnRunId) {
-        let mut states = self.lock_states();
-        if let Some(state) = states.remove(&run_id)
-            && let Some(projection) = state.pending
-        {
+        let _publication_order = self.lock_publication_order();
+        let projection = {
+            let mut states = self.lock_states();
+            states.remove(&run_id).and_then(|state| state.pending)
+        };
+        if let Some(projection) = projection {
             self.publish(projection);
         }
     }
 
     fn flush_timer(&self, run_id: TurnRunId, generation: u64) {
-        let mut states = self.lock_states();
-        let Some(state) = states.get_mut(&run_id) else {
-            return;
-        };
-        if state.generation != generation {
-            return;
-        }
+        let _publication_order = self.lock_publication_order();
+        let projection = {
+            let mut states = self.lock_states();
+            let Some(state) = states.get_mut(&run_id) else {
+                return;
+            };
+            if state.generation != generation {
+                return;
+            }
 
-        state.timer_scheduled = false;
-        if let Some(projection) = state.pending.take() {
+            state.timer_scheduled = false;
+            let projection = state.pending.take();
+            if projection.is_some() {
+                state.last_published_at = tokio::time::Instant::now();
+            }
+            projection
+        };
+        if let Some(projection) = projection {
             self.publish(projection);
-            state.last_published_at = tokio::time::Instant::now();
         }
     }
 
@@ -338,6 +359,17 @@ impl LiveTextProjectionCoalescer {
             Err(poisoned) => {
                 tracing::warn!("live text projection coalescer lock recovered after panic");
                 self.states.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn lock_publication_order(&self) -> MutexGuard<'_, ()> {
+        match self.publication_order.lock() {
+            Ok(order) => order,
+            Err(poisoned) => {
+                tracing::warn!("live text projection publication lock recovered after panic");
+                self.publication_order.clear_poison();
                 poisoned.into_inner()
             }
         }
