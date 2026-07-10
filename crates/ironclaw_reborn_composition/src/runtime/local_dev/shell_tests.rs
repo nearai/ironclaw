@@ -83,11 +83,11 @@ fn local_dev_shell_factory(
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     LocalDevLoopCapabilityPortFactory {
-        runtime: services.host_runtime.clone().expect("host runtime"),
-        fallback_user_id: UserId::new(fallback_user_id).expect("user id"),
+        runtime: services.host_runtime.clone().expect("host runtime"), // safety: test-only local-dev service builder always wires host runtime.
+        fallback_user_id: UserId::new(fallback_user_id).expect("user id"), // safety: test helper passes static valid user IDs.
         policy: Arc::new(
             crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+                .expect("policy parses"), // safety: test-only assertion for static policy definition.
         ),
         workspace_mounts: local_runtime.workspace_mounts.clone(),
         memory_mounts: local_runtime.memory_mounts.clone(),

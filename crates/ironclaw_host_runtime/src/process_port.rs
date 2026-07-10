@@ -1555,7 +1555,7 @@ mod tests {
                 .expect_err("mount-sensitive shell expansion should be rejected");
 
             assert!(
-                matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace")),
+                matches!(&error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace")),
                 "unexpected error for {command:?}: {error:?}"
             );
         }
