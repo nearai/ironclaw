@@ -1096,6 +1096,7 @@ test("useChat.send: a thread 404 evicts stale caches and skips the generic error
   const removedThreads = [];
   const evictedHistories = [];
   const missingThreads = [];
+  const missingThreadRecoveries = [];
   let renderedMessages = [];
 
   const context = {
@@ -1148,15 +1149,100 @@ test("useChat.send: a thread 404 evicts stale caches and skips the generic error
 
   runUseChatSource(context);
   const chat = context.globalThis.__testExports.useChat(threadId, {
-    onThreadNotFound: (id) => missingThreads.push(id),
+    onThreadNotFound: (id, recovery) => {
+      missingThreads.push(id);
+      missingThreadRecoveries.push(recovery);
+    },
   });
 
-  await assert.rejects(chat.send("please answer"), /Not found/);
+  await assert.rejects(
+    chat.send("please answer", { displayContent: "please answer" }),
+    /Not found/,
+  );
 
   assert.deepEqual(removedThreads, [threadId]);
   assert.deepEqual(evictedHistories, [threadId]);
   assert.deepEqual(missingThreads, [threadId]);
+  assert.deepEqual(JSON.parse(JSON.stringify(missingThreadRecoveries)), [
+    { composerDraft: "please answer", stagedAttachments: [] },
+  ]);
   assert.equal(renderedMessages.some((message) => message.role === "error"), false);
+});
+
+test("useChat.send: missing-thread recovery runs again after leaving and reopening a thread", async () => {
+  const threadId = "thread-missing";
+  const stateSlots = new Map();
+  const react = createReactStub({ stateSlots });
+  const missingThreads = [];
+  let renderedMessages = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: react,
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    evictThreadHistory: () => {},
+    globalThis: {},
+    queryClient: { fetchQuery: async () => [], invalidateQueries: () => {} },
+    recordAcceptedMessageRef,
+    removePending,
+    removeThreadFromCache: () => {},
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw Object.assign(new Error("Not found"), {
+        status: 404,
+        payload: { kind: "not_found" },
+      });
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  react.__beginRender();
+  let chat = context.globalThis.__testExports.useChat(threadId, {
+    onThreadNotFound: (id) => missingThreads.push(id),
+  });
+  await assert.rejects(chat.send("first"), /Not found/);
+
+  react.__beginRender();
+  context.globalThis.__testExports.useChat(null, {
+    onThreadNotFound: (id) => missingThreads.push(id),
+  });
+
+  react.__beginRender();
+  chat = context.globalThis.__testExports.useChat(threadId, {
+    onThreadNotFound: (id) => missingThreads.push(id),
+  });
+  await assert.rejects(chat.send("second"), /Not found/);
+
+  assert.deepEqual(missingThreads, [threadId, threadId]);
 });
 
 test("useChat.send: create-thread failure appends inline error on new chat", async () => {
@@ -6181,6 +6267,41 @@ test("useChat.send: addresses a second thread in parallel while viewing a runnin
   assert.ok(sentBody(), "the parallel-thread message must reach sendMessage");
   assert.equal(sentBody().threadId, "thread-b");
   assert.ok(result, "send must resolve with a response, not null");
+});
+
+test("useChat.send: a stale target 404 does not clear the viewed thread processing state", async () => {
+  const stateUpdates = [];
+  const removedThreads = [];
+  const evictedHistories = [];
+  const { context } = createParallelSendContext({
+    threadId: "thread-a",
+    isProcessing: true,
+    stateUpdates,
+  });
+  context.removeThreadFromCache = (threadId) => removedThreads.push(threadId);
+  context.evictThreadHistory = (threadId) => evictedHistories.push(threadId);
+  context.sendMessage = async () => {
+    throw Object.assign(new Error("Not found"), {
+      status: 404,
+      payload: { kind: "not_found" },
+    });
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-a");
+  await assert.rejects(
+    chat.send("message for deleted background thread", { threadId: "thread-b" }),
+    /Not found/,
+  );
+
+  assert.deepEqual(removedThreads, ["thread-b"]);
+  assert.deepEqual(evictedHistories, ["thread-b"]);
+  assert.deepEqual(
+    stateUpdatesFor(stateUpdates, STATE_SLOT.isProcessing),
+    [],
+    "background 404 must not clear the viewed thread's processing flag",
+  );
 });
 
 test("useChat.send: still blocks a duplicate send into the already-running thread", async () => {

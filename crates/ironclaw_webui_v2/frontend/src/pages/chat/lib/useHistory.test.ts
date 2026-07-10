@@ -39,7 +39,7 @@ function useHistorySourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `function isThreadNotFoundError(error) { return error?.status === 404; }\n${helperLines.join("\n")}\n${lines.join(
+  return `function isThreadNotFoundError(error) { return error?.status === 404; }\nvar removeThreadFromCache = typeof __removeThreadFromCache === "function" ? __removeThreadFromCache : function () {};\n${helperLines.join("\n")}\n${lines.join(
     "\n",
   )}\nglobalThis.__testExports = { clearHistoryCache, evictThreadHistory, useHistory, mergeFullRefresh };`;
 }
@@ -156,6 +156,43 @@ test("useHistory reports a missing active thread without a generic load error", 
 
   assert.deepEqual(missingThreads, ["thread-missing"]);
   assert.equal(setCalls.some((state) => state?.loadError), false);
+});
+
+test("useHistory evicts sidebar cache when a stale background timeline returns 404", async () => {
+  const react = createPersistentReactStub();
+  const removedThreads = [];
+  const missingThreads = [];
+  let rejectTimeline;
+  const context = {
+    console: { error: () => {} },
+    fetchTimeline: async () =>
+      new Promise((_, reject) => {
+        rejectTimeline = reject;
+      }),
+    authScope: () => "test-user",
+    __removeThreadFromCache: (threadId) => removedThreads.push(threadId),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: react,
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  react.__beginRender();
+  const missingHistory = context.globalThis.__testExports.useHistory("thread-missing", {
+    onThreadNotFound: (threadId) => missingThreads.push(threadId),
+  });
+  const loadPromise = missingHistory.loadHistory();
+
+  react.__beginRender();
+  context.globalThis.__testExports.useHistory("thread-other", {
+    onThreadNotFound: (threadId) => missingThreads.push(threadId),
+  });
+
+  rejectTimeline(Object.assign(new Error("Not found"), { status: 404 }));
+  await loadPromise;
+
+  assert.deepEqual(removedThreads, ["thread-missing"]);
+  assert.deepEqual(missingThreads, []);
 });
 
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {

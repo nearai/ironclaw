@@ -163,12 +163,12 @@ export function useChat(threadId, options = {}) {
   );
 
   const handleThreadNotFound = React.useCallback(
-    (missingThreadId) => {
+    (missingThreadId, recovery) => {
       if (!missingThreadId || missingThreadIdsRef.current.has(missingThreadId)) return;
       missingThreadIdsRef.current.add(missingThreadId);
       removeThreadFromCache(missingThreadId);
       evictThreadHistory(missingThreadId);
-      onThreadNotFound?.(missingThreadId);
+      onThreadNotFound?.(missingThreadId, recovery);
     },
     [onThreadNotFound],
   );
@@ -276,6 +276,7 @@ export function useChat(threadId, options = {}) {
   // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
+    missingThreadIdsRef.current.clear();
     setIsProcessingState(false);
     setPendingGateState(null);
     setPendingOnboardingState(null);
@@ -796,13 +797,15 @@ export function useChat(threadId, options = {}) {
         }
         if (isThreadNotFoundError(err) && sendThreadId) {
           if (!threadIdRef.current || threadIdRef.current === sendThreadId) {
-            handleThreadNotFound(sendThreadId);
+            handleThreadNotFound(sendThreadId, {
+              composerDraft: renderContent,
+              stagedAttachments,
+            });
+            updateCurrentRunState(() => setIsProcessing(false));
           } else {
             removeThreadFromCache(sendThreadId);
             evictThreadHistory(sendThreadId);
           }
-          updateCurrentRunState(() => setIsProcessing(false));
-          submitBusyRef.current = false;
           throw err;
         }
         const failureContent = failureMessageForRequestError(err);

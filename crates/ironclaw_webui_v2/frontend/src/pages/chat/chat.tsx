@@ -21,7 +21,11 @@ import { SuggestionChips } from "./components/suggestion-chips";
 import { TypingIndicator } from "./components/typing-indicator";
 import { useChat } from "./hooks/useChat";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
-import { NEW_DRAFT_KEY } from "./lib/draft-store";
+import {
+  NEW_DRAFT_KEY,
+  setDraft,
+  setStagedAttachments,
+} from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
@@ -69,10 +73,19 @@ export function Chat({
   const t = useT();
   const { showChatLogsShortcut } = useInterfacePreferences();
   const handleThreadNotFound = React.useCallback(
-    (missingThreadId) => {
+    (missingThreadId, recovery = {}) => {
+      const draft = recovery.composerDraft || "";
+      const stagedAttachments = recovery.stagedAttachments || [];
+      if (draft) setDraft(NEW_DRAFT_KEY, draft);
+      if (stagedAttachments.length > 0) {
+        setStagedAttachments(NEW_DRAFT_KEY, stagedAttachments);
+      }
       clearThreadState(missingThreadId);
       toast(t("chat.threadNoLongerExists"), { tone: "error", duration: 5000 });
-      onSelectThread?.(null, { replace: true });
+      onSelectThread?.(null, {
+        replace: true,
+        ...(draft ? { state: { composerDraft: draft } } : {}),
+      });
     },
     [onSelectThread, t],
   );

@@ -4,6 +4,7 @@ import { fetchTimeline } from "../../../lib/api";
 import { authScope } from "../../../lib/auth-scope";
 import { isThreadNotFoundError } from "../../../lib/thread-errors";
 import { messagesFromTimeline } from "../lib/history-messages";
+import { removeThreadFromCache } from "../lib/thread-cache";
 import {
   carryFinalAssistantOrderFlags,
   isFinalAssistantMessage,
@@ -187,6 +188,7 @@ export function useHistory(threadId, options = {}) {
         // Identity changed mid-flight — the error isn't the new user's.
         if (authScope() !== issuingScope) return;
         if (isThreadNotFoundError(err)) {
+          removeThreadFromCache(threadId);
           evictThreadHistory(threadId);
           if (threadIdRef.current === threadId) {
             setState((state) => ({

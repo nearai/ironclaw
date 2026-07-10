@@ -83,6 +83,8 @@ function renderChat({
   showChatLogsShortcut = true,
   selectedThreads = [],
   toasts = [],
+  drafts = [],
+  stagedAttachments = [],
   chatHookOptions = [],
   translations = {},
 }) {
@@ -127,6 +129,9 @@ function renderChat({
     channelConnectionDisplayName,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
+    setDraft: (key, text) => drafts.push({ key, text }),
+    setStagedAttachments: (key, attachments) =>
+      stagedAttachments.push({ key, attachments }),
     toast: (message, options) => toasts.push({ message, options }),
     setTimeout: () => 1,
     clearTimeout: () => {},
@@ -192,6 +197,52 @@ test("Chat leaves a missing thread and shows the dedicated notice", () => {
       message: "This thread no longer exists",
       options: { tone: "error", duration: 5000 },
     },
+  ]);
+});
+
+test("Chat preserves a submitted draft when a send discovers the thread is missing", () => {
+  const drafts = [];
+  const stagedAttachments = [];
+  const { chatHookOptions, selectedThreads } = renderChat({
+    drafts,
+    stagedAttachments,
+    translations: {
+      "chat.threadNoLongerExists": "This thread no longer exists",
+    },
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "idle",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+  const attachment = { id: "attachment-1", filename: "notes.txt" };
+
+  chatHookOptions[0].onThreadNotFound("thread-1", {
+    composerDraft: "recover this send",
+    stagedAttachments: [attachment],
+  });
+
+  assert.deepEqual(drafts, [{ key: "new", text: "recover this send" }]);
+  assert.deepEqual(stagedAttachments, [
+    { key: "new", attachments: [attachment] },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(selectedThreads)), [
+    [null, { replace: true, state: { composerDraft: "recover this send" } }],
   ]);
 });
 
