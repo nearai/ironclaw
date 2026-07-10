@@ -255,11 +255,29 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
-        model_observation: None,
+        model_observation: model_visible_capability_success_observation(result),
     })
     .await
     .map_err(capability_host_error)?;
     Ok(())
+}
+
+fn model_visible_capability_success_observation(
+    result: &CapabilityResultMessage,
+) -> Option<ModelVisibleToolObservation> {
+    let failure_kind = CapabilityFailureKind::unknown("none").ok()?;
+    Some(ModelVisibleToolObservation {
+        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: truncate_model_observation_text(&result.safe_summary),
+        detail: ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    })
 }
 
 pub(super) fn provider_tool_call_reference(
