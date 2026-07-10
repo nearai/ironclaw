@@ -866,8 +866,7 @@ mod tests {
         };
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(
             &fire,
-            TriggerInboundContentRef::new("content:unpaired-trigger-creator")
-                .expect("content ref"),
+            TriggerInboundContentRef::new("content:unpaired-trigger-creator").expect("content ref"),
         );
 
         let first = submitter
@@ -880,9 +879,7 @@ mod tests {
             .expect("unpaired trusted trigger creator self-pairs and submits");
 
         let TrustedTriggerFireSubmitOutcome::Accepted {
-            run_id,
-            turn_scope,
-            ..
+            run_id, turn_scope, ..
         } = first
         else {
             panic!("expected accepted trigger fire");

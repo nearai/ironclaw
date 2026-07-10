@@ -474,7 +474,7 @@ impl InMemoryConversationServices {
         let old_state = self.lock_state()?.clone();
         let (resolution, snapshot) = {
             let mut state = self.lock_state()?;
-            let actor_user_id = state.resolve_actor_with_trusted_owner(
+            let (actor_user_id, pending_actor_pairing) = state.resolve_actor_with_trusted_owner(
                 &request.tenant_id,
                 &request.adapter_kind,
                 &request.adapter_installation_id,
@@ -541,6 +541,7 @@ impl InMemoryConversationServices {
                     .get(&binding_key)
                     .cloned()
                     .ok_or(InboundTurnError::StatePoisoned)?;
+                state.commit_pending_actor_pairing(pending_actor_pairing);
                 let resolution = binding.resolution(actor_user_id, request.tenant_id);
                 (resolution, state.clone())
             } else {
@@ -581,6 +582,7 @@ impl InMemoryConversationServices {
                     &external_conversation_identity,
                     &actor_user_id,
                 )?;
+                state.commit_pending_actor_pairing(pending_actor_pairing);
                 (resolution, state.clone())
             }
         };
@@ -1056,14 +1058,14 @@ impl InMemoryState {
     }
 
     fn resolve_actor_with_trusted_owner(
-        &mut self,
+        &self,
         tenant_id: &TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
         external_actor_ref: &ExternalActorRef,
         route_kind: ConversationRouteKind,
         trusted_owner_user_id: Option<&UserId>,
-    ) -> Result<UserId, InboundTurnError> {
+    ) -> Result<(UserId, Option<PendingActorPairing>), InboundTurnError> {
         let actor_key = ActorKey::new(
             tenant_id,
             adapter_kind,
@@ -1071,7 +1073,7 @@ impl InMemoryState {
             external_actor_ref,
         );
         if let Some(existing) = self.pairings.get(&actor_key).cloned() {
-            return Ok(existing);
+            return Ok((existing, None));
         }
         let Some(trusted_owner_user_id) = trusted_owner_user_id.cloned() else {
             return Err(InboundTurnError::BindingRequired {
@@ -1091,9 +1093,19 @@ impl InMemoryState {
                 external_actor_id: external_actor_ref.id().to_string(),
             });
         }
-        self.pairings
-            .insert(actor_key, trusted_owner_user_id.clone());
-        Ok(trusted_owner_user_id)
+        Ok((
+            trusted_owner_user_id.clone(),
+            Some(PendingActorPairing {
+                actor_key,
+                user_id: trusted_owner_user_id,
+            }),
+        ))
+    }
+
+    fn commit_pending_actor_pairing(&mut self, pending_pairing: Option<PendingActorPairing>) {
+        if let Some(pairing) = pending_pairing {
+            self.pairings.insert(pairing.actor_key, pairing.user_id);
+        }
     }
 
     fn ensure_participant(
@@ -1125,6 +1137,11 @@ impl InMemoryState {
         }
         Ok(thread.clone())
     }
+}
+
+struct PendingActorPairing {
+    actor_key: ActorKey,
+    user_id: UserId,
 }
 
 fn can_trusted_owner_self_pair_actor(
