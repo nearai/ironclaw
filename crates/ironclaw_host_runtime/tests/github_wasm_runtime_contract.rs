@@ -2613,7 +2613,7 @@ async fn seed_slack_user_token(secret_store: &InMemorySecretStore, scope: &Resou
 }
 
 const SLACK_HISTORY_BODY: &str = r#"{"ok":true,"has_more":false,"messages":[
-    {"type":"message","user":"U0AAA","text":"hey","ts":"1751970001.000100"},
+    {"type":"message","user":"U0AAA","text":"hey","ts":"1751970001.000100","thread_ts":"1751970001.000100","reply_count":2},
     {"type":"message","user":"U0BBB","text":"yo","ts":"1751970002.000100"},
     {"type":"message","user":"U0AAA","text":"again","ts":"1751970003.000100"}
 ]}"#;
@@ -2699,6 +2699,89 @@ async fn slack_history_output_carries_display_names_alongside_raw_user_ids() {
         "other authors must be explicitly not-current-user: {output}"
     );
     assert_eq!(messages[2]["is_current_user"], json!(true));
+
+    // Threads: history returns only thread PARENTS (replies live behind
+    // conversations.replies), so the parent must advertise its reply_count —
+    // the model's cue to fetch the thread with slack.get_thread_replies.
+    assert_eq!(
+        messages[0]["reply_count"],
+        json!(2),
+        "thread parents must surface reply_count: {output}"
+    );
+    assert!(
+        messages[1].get("reply_count").is_none(),
+        "non-parents must not fabricate a reply_count: {output}"
+    );
+}
+
+const SLACK_REPLIES_BODY: &str = r#"{"ok":true,"has_more":false,"messages":[
+    {"type":"message","user":"U0AAA","text":"parent","ts":"1751970001.000100","thread_ts":"1751970001.000100","reply_count":2},
+    {"type":"message","user":"U0BBB","text":"first reply","ts":"1751970005.000100","thread_ts":"1751970001.000100"},
+    {"type":"message","user":"U0AAA","text":"second reply","ts":"1751970006.000100","thread_ts":"1751970001.000100"}
+]}"#;
+
+/// Thread replies are NOT in `conversations.history`; `slack.get_thread_replies`
+/// must fetch them via `conversations.replies` with the same enrichment
+/// contract as history: resolved display names (one users.info per distinct
+/// author) and connected-account marking.
+#[tokio::test]
+async fn slack_thread_replies_resolve_names_and_mark_connected_account() {
+    let capability_id = CapabilityId::new("slack.get_thread_replies").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.replies", 200, SLACK_REPLIES_BODY),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "C0GENERAL", "thread_ts": "1751970001.000100"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let replies_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("conversations.replies"))
+        .expect("get_thread_replies must call conversations.replies");
+    assert!(
+        replies_request.url.contains("channel=C0GENERAL")
+            && replies_request.url.contains("ts=1751970001.000100"),
+        "conversations.replies must be keyed by channel + thread ts: {}",
+        replies_request.url
+    );
+
+    let messages = output["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 3);
+    assert_eq!(
+        messages[1]["user_display_name"],
+        json!("Ada Lovelace"),
+        "thread replies must resolve display names like history does: {output}"
+    );
+    assert_eq!(
+        output["current_user_id"],
+        json!("U0AAA"),
+        "thread replies must surface the connected account: {output}"
+    );
+    assert_eq!(messages[0]["is_current_user"], json!(true));
+    assert_eq!(
+        messages[1]["is_current_user"],
+        json!(false),
+        "thread replies must mark the connected account's messages: {output}"
+    );
 }
 
 /// DM entries from `list_conversations` carry the counterpart's display name

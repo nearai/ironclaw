@@ -62,6 +62,19 @@ pub enum SlackUserAction {
         oldest: Option<String>,
     },
 
+    /// Read the replies of one thread (`conversations.replies`). Thread
+    /// replies are NOT part of conversation history — the parent's
+    /// `reply_count`/`thread_ts` point here.
+    GetThreadReplies {
+        /// Conversation ID the thread lives in (e.g. `C123...`).
+        channel: String,
+        /// The thread parent's `ts` (also exposed as `thread_ts` on replies).
+        thread_ts: String,
+        /// Maximum number of messages to return (default: 50, max: 999).
+        #[serde(default = "default_history_limit")]
+        limit: u32,
+    },
+
     /// Get information about a user (name, real name).
     GetUserInfo {
         /// User ID (e.g., "U1234567890").
@@ -187,6 +200,11 @@ pub struct HistoryMessage {
     /// connected identity or the author is unknown — never fabricated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_current_user: Option<bool>,
+    /// Number of thread replies under this message (thread parents only).
+    /// History does NOT include the replies themselves — fetch them with
+    /// `get_thread_replies`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_count: Option<u64>,
     #[serde(rename = "type")]
     pub msg_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]

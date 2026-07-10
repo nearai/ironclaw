@@ -349,25 +349,49 @@ pub fn get_conversation_history(
 
     let parsed = slack_api_call("GET", &url, None)?;
 
+    Ok(enriched_history_result(&parsed))
+}
+
+/// Read the replies of one thread (`conversations.replies`), with the same
+/// enrichment contract as history: resolved display names and
+/// connected-account marking.
+pub fn get_thread_replies(
+    channel: &str,
+    thread_ts: &str,
+    limit: u32,
+) -> Result<ConversationHistoryResult, String> {
+    // Slack rejects limit=1000; 999 is the real maximum.
+    let limit = limit.clamp(1, 999);
+    let url = format!(
+        "conversations.replies?channel={}&ts={}&limit={}",
+        url_encode(channel),
+        url_encode(thread_ts),
+        limit
+    );
+
+    let parsed = slack_api_call("GET", &url, None)?;
+
+    Ok(enriched_history_result(&parsed))
+}
+
+/// Shared post-processing for `conversations.history` / `conversations.replies`
+/// responses: map messages, resolve authors to display names (one users.info
+/// per distinct author) so user-facing output never has to echo raw `U…` ids,
+/// and mark the CONNECTED account's own messages so the model attributes the
+/// requester's words to the requester. Both enrichments are best-effort:
+/// identity/name fields are absent on failure and the read still succeeds.
+fn enriched_history_result(parsed: &serde_json::Value) -> ConversationHistoryResult {
     let has_more = parsed["has_more"].as_bool().unwrap_or(false);
-    let mut messages = history_messages_from_response(&parsed);
-
-    // Resolve authors to display names (one users.info per distinct author)
-    // so user-facing output never has to echo raw `U…` ids.
+    let mut messages = history_messages_from_response(parsed);
     resolve_message_display_names(&mut messages);
-
-    // Mark the CONNECTED account's own messages so the model attributes the
-    // requester's words to the requester. Best-effort: identity fields are
-    // absent when auth.test fails, and the read still succeeds.
     let current_user_id = current_user_id_best_effort();
     mark_current_user_messages(&mut messages, current_user_id.as_deref());
-
-    Ok(ConversationHistoryResult {
+    ConversationHistoryResult {
         ok: true,
         messages,
         has_more,
         current_user_id,
-    })
+    }
 }
 
 /// Map a Slack `messages` array (conversations.history / conversations.replies)
@@ -383,6 +407,7 @@ fn history_messages_from_response(parsed: &serde_json::Value) -> Vec<HistoryMess
                     user: m["user"].as_str().map(|s| s.to_string()),
                     user_display_name: None,
                     is_current_user: None,
+                    reply_count: m["reply_count"].as_u64(),
                     msg_type: m["type"].as_str().unwrap_or("message").to_string(),
                     thread_ts: m["thread_ts"].as_str().map(|s| s.to_string()),
                 })

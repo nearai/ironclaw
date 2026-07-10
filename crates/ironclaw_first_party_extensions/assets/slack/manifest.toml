@@ -46,7 +46,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.get_conversation_history"
-description = "Read message history from any channel or DM you can see, identified by its conversation ID. Messages include the author's raw user id plus a resolved user_display_name \u2014 use the display name in user-facing output, never the raw id. Messages with is_current_user=true were written by the connected account (result-level current_user_id): they are the requesting user's own words \u2014 attribute them to the requester, not a third party."
+description = "Read message history from any channel or DM you can see, identified by its conversation ID. Messages include the author's raw user id plus a resolved user_display_name \u2014 use the display name in user-facing output, never the raw id. Messages with is_current_user=true were written by the connected account (result-level current_user_id): they are the requesting user's own words \u2014 attribute them to the requester, not a third party. Thread replies are NOT included \u2014 a parent's reply_count > 0 means there is a thread; fetch it with slack.get_thread_replies."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -56,6 +56,20 @@ visibility = "model"
 input_schema_ref = "schemas/slack/get_conversation_history.input.v1.json"
 output_schema_ref = "schemas/slack/get_conversation_history.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_conversation_history.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "slack.get_thread_replies"
+description = "Read the replies of one thread (channel + the parent message's thread_ts). Conversation history only shows thread parents (reply_count), never the replies — use this whenever a thread's content matters. Same output shape as history: resolved user_display_name per message, is_current_user marking, and current_user_id."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack/get_thread_replies.input.v1.json"
+output_schema_ref = "schemas/slack/get_thread_replies.output.v1.json"
+prompt_doc_ref = "prompts/slack/get_thread_replies.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
