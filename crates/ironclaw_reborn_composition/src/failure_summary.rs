@@ -160,54 +160,109 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
 
 pub(crate) fn reborn_failure_summary_for_category_and_detail(
     category: Option<&str>,
-    detail: Option<&str>,
-) -> String {
+    detail: Option<InvalidModelOutputFailureDetail>,
+) -> &'static str {
     let Some(category) = category else {
-        return unknown_failure_summary().to_string();
+        return unknown_failure_summary();
     };
 
     if let Some(summary) = pinned_failure_summary_for_category(category) {
-        return summary.to_string();
+        return summary;
     }
 
     if matches!(category, "model_invalid_output" | "invalid_model_output")
-        && let Some(summary) = invalid_model_output_detail_summary(detail)
+        && let Some(detail) = detail
     {
-        return summary.to_string();
+        return detail.failure_summary();
     }
 
-    reborn_failure_summary_for_category(Some(category)).to_string()
+    reborn_failure_summary_for_category(Some(category))
 }
 
-fn invalid_model_output_detail_summary(detail: Option<&str>) -> Option<&'static str> {
-    let detail = detail?.trim();
-    match detail {
-        "model returned an empty assistant response" => Some(
-            "The run failed because the model returned an empty assistant response. Retry the run or choose a different model.",
-        ),
-        "model returned textual tool-call syntax instead of structured tool calls" => Some(
-            "The run failed because the model returned a tool call as text instead of structured tool-call data. Retry the run or choose a different model.",
-        ),
-        "model returned a tool call outside the advertised capability surface" => Some(
-            "The run failed because the model tried to call a tool that was not available in this turn. Retry with a narrower request or choose a different model.",
-        ),
-        "model returned tool-use finish without tool calls" => Some(
-            "The run failed because the model requested tool use without providing structured tool calls. Retry the run or choose a different model.",
-        ),
-        "model returned unsupported tool calls for a text-only loop" => Some(
-            "The run failed because the model tried to call a tool when this turn required a text answer. Retry with a clearer request or choose a different model.",
-        ),
-        "model returned an invalid provider tool name" => Some(
-            "The run failed because the model returned an invalid tool name. Retry the run or choose a different model.",
-        ),
-        "model returned invalid tool-call arguments" => Some(
-            "The run failed because the model returned invalid tool-call arguments. Retry with a clearer or narrower request.",
-        ),
-        _ if detail.starts_with("failed to parse tool-call arguments JSON:") => Some(
-            "The run failed because the model returned malformed tool-call arguments. Retry with a clearer or narrower request.",
-        ),
-        _ => None,
+const INVALID_MODEL_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InvalidModelOutputFailureDetail {
+    EmptyAssistantResponse,
+    TextualToolCallSyntax,
+    OutsideCapabilitySurface,
+    ToolUseFinishWithoutToolCalls,
+    UnsupportedToolCallsForTextOnlyLoop,
+    InvalidProviderToolName,
+    InvalidToolCallArguments,
+    MalformedToolCallArguments,
+}
+
+impl InvalidModelOutputFailureDetail {
+    pub(crate) fn from_projection_detail(detail: Option<&str>) -> Option<Self> {
+        let detail = detail?;
+        if !is_invalid_model_output_projection_detail_shape(detail) {
+            return None;
+        }
+        match detail {
+            "model returned an empty assistant response" => Some(Self::EmptyAssistantResponse),
+            "model returned textual tool-call syntax instead of structured tool calls" => {
+                Some(Self::TextualToolCallSyntax)
+            }
+            "model returned a tool call outside the advertised capability surface" => {
+                Some(Self::OutsideCapabilitySurface)
+            }
+            "model returned tool-use finish without tool calls" => {
+                Some(Self::ToolUseFinishWithoutToolCalls)
+            }
+            "model returned unsupported tool calls for a text-only loop" => {
+                Some(Self::UnsupportedToolCallsForTextOnlyLoop)
+            }
+            "model returned an invalid provider tool name" => Some(Self::InvalidProviderToolName),
+            "model returned invalid tool-call arguments" => Some(Self::InvalidToolCallArguments),
+            _ if detail.starts_with("failed to parse tool-call arguments JSON:") => {
+                Some(Self::MalformedToolCallArguments)
+            }
+            _ => None,
+        }
     }
+
+    fn failure_summary(self) -> &'static str {
+        match self {
+            Self::EmptyAssistantResponse => {
+                "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+            }
+            Self::TextualToolCallSyntax => {
+                "The run failed because the model returned a tool call as text instead of structured tool-call data. Retry the run or choose a different model."
+            }
+            Self::OutsideCapabilitySurface => {
+                "The run failed because the model tried to call a tool that was not available in this turn. Retry with a narrower request or choose a different model."
+            }
+            Self::ToolUseFinishWithoutToolCalls => {
+                "The run failed because the model requested tool use without providing structured tool calls. Retry the run or choose a different model."
+            }
+            Self::UnsupportedToolCallsForTextOnlyLoop => {
+                "The run failed because the model tried to call a tool when this turn required a text answer. Retry with a clearer request or choose a different model."
+            }
+            Self::InvalidProviderToolName => {
+                "The run failed because the model returned an invalid tool name. Retry the run or choose a different model."
+            }
+            Self::InvalidToolCallArguments => {
+                "The run failed because the model returned invalid tool-call arguments. Retry with a clearer or narrower request."
+            }
+            Self::MalformedToolCallArguments => {
+                "The run failed because the model returned malformed tool-call arguments. Retry with a clearer or narrower request."
+            }
+        }
+    }
+}
+
+fn is_invalid_model_output_projection_detail_shape(detail: &str) -> bool {
+    if detail.is_empty() || detail.len() > INVALID_MODEL_OUTPUT_DETAIL_MAX_BYTES {
+        return false;
+    }
+    if !detail.is_ascii() {
+        return false;
+    }
+    let bytes = detail.as_bytes();
+    !bytes[0].is_ascii_whitespace()
+        && !bytes[bytes.len() - 1].is_ascii_whitespace()
+        && !bytes.iter().any(u8::is_ascii_control)
 }
 
 pub(crate) fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
@@ -228,7 +283,10 @@ fn unknown_failure_summary() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::reborn_failure_summary_for_category;
+    use super::{
+        InvalidModelOutputFailureDetail, reborn_failure_summary_for_category,
+        reborn_failure_summary_for_category_and_detail,
+    };
 
     #[test]
     fn reborn_failure_summary_describes_known_category() {
@@ -251,6 +309,48 @@ mod tests {
         assert_eq!(
             reborn_failure_summary_for_category(Some("unexpected_category")),
             "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
+        );
+    }
+
+    #[test]
+    fn invalid_model_output_detail_summary_uses_typed_whitelist() {
+        let detail = InvalidModelOutputFailureDetail::from_projection_detail(Some(
+            "model returned an empty assistant response",
+        ));
+
+        assert_eq!(
+            detail,
+            Some(InvalidModelOutputFailureDetail::EmptyAssistantResponse)
+        );
+        assert_eq!(
+            reborn_failure_summary_for_category_and_detail(Some("model_invalid_output"), detail),
+            "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+        );
+    }
+
+    #[test]
+    fn invalid_model_output_detail_matching_rejects_unvalidated_detail() {
+        let oversized = format!(
+            "failed to parse tool-call arguments JSON: {}",
+            "x".repeat(512)
+        );
+
+        for detail in [
+            " model returned an empty assistant response",
+            "model returned an empty assistant response\n",
+            "model returned an empty assistant response\0",
+            oversized.as_str(),
+        ] {
+            assert_eq!(
+                InvalidModelOutputFailureDetail::from_projection_detail(Some(detail)),
+                None,
+                "{detail:?} should not be accepted for projection matching"
+            );
+        }
+
+        assert_eq!(
+            reborn_failure_summary_for_category_and_detail(Some("model_invalid_output"), None),
+            reborn_failure_summary_for_category(Some("model_invalid_output"))
         );
     }
 

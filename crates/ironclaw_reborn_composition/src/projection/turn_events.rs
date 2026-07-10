@@ -33,7 +33,8 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
 use crate::failure_summary::{
-    pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+    InvalidModelOutputFailureDetail, pinned_failure_summary_for_category,
+    reborn_failure_summary_for_category_and_detail,
 };
 use crate::product_auth::api::auth_prompt::{
     BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
@@ -890,8 +891,11 @@ async fn failure_details_for_turn_event(
     // upstream runner. Source it here so the explainer (and model) get the real
     // cause instead of only the bounded category.
     let detail = detail_for_turn_event(event, &category);
+    let invalid_output_detail =
+        InvalidModelOutputFailureDetail::from_projection_detail(detail.as_deref());
     let fallback_summary =
-        reborn_failure_summary_for_category_and_detail(Some(&category), detail.as_deref());
+        reborn_failure_summary_for_category_and_detail(Some(&category), invalid_output_detail)
+            .to_string();
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
