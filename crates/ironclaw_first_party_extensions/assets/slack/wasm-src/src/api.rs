@@ -176,17 +176,22 @@ pub fn search_messages(
         })
         .unwrap_or_default();
 
-    // Resolve match authors to display names, same contract as history:
-    // best-effort, one users.info per distinct author, budget-capped.
-    let author_ids: Vec<String> = matches
-        .iter()
-        .filter_map(|search_match| search_match.user.clone())
-        .collect();
-    let names = resolve_user_display_names(author_ids);
+    // Resolve match authors AND in-text mentions to display names, same
+    // contract as history: best-effort, one users.info per distinct id,
+    // budget-capped, raw tokens left as-is when unresolved.
+    let mut referenced_ids = Vec::new();
+    for search_match in &matches {
+        if let Some(user_id) = &search_match.user {
+            referenced_ids.push(user_id.clone());
+        }
+        referenced_ids.extend(mention_user_ids(&search_match.text));
+    }
+    let names = resolve_user_display_names(referenced_ids);
     for search_match in &mut matches {
         if let Some(user_id) = &search_match.user {
             search_match.user_display_name = names.get(user_id).cloned();
         }
+        search_match.text = humanize_message_text(&search_match.text, &names);
     }
 
     Ok(SearchMessagesResult {
@@ -414,15 +419,35 @@ pub fn get_thread_replies(
 }
 
 /// Shared post-processing for `conversations.history` / `conversations.replies`
-/// responses: map messages, resolve authors to display names (one users.info
-/// per distinct author) so user-facing output never has to echo raw `U…` ids,
-/// and mark the CONNECTED account's own messages so the model attributes the
-/// requester's words to the requester. Both enrichments are best-effort:
-/// identity/name fields are absent on failure and the read still succeeds.
+/// responses: map messages, resolve authors AND in-text `<@U…>` mentions to
+/// display names (one users.info per distinct id, shared budget) so
+/// user-facing output never has to echo raw `U…` ids, rewrite Slack control
+/// tokens/entities in text, and mark the CONNECTED account's own messages so
+/// the model attributes the requester's words to the requester. All
+/// enrichments are best-effort: identity/name fields are absent (and tokens
+/// stay raw) on failure, and the read still succeeds.
 fn enriched_history_result(parsed: &serde_json::Value) -> ConversationHistoryResult {
     let has_more = parsed["has_more"].as_bool().unwrap_or(false);
     let mut messages = history_messages_from_response(parsed);
-    resolve_message_display_names(&mut messages);
+
+    // One combined id pool per read: message author first, then the mention
+    // tokens inside its text, in reading order — all against the same
+    // MAX_USER_NAME_LOOKUPS budget and cache.
+    let mut referenced_ids = Vec::new();
+    for message in &messages {
+        if let Some(user_id) = &message.user {
+            referenced_ids.push(user_id.clone());
+        }
+        referenced_ids.extend(mention_user_ids(&message.text));
+    }
+    let names = resolve_user_display_names(referenced_ids);
+    for message in &mut messages {
+        if let Some(user_id) = &message.user {
+            message.user_display_name = names.get(user_id).cloned();
+        }
+        message.text = humanize_message_text(&message.text, &names);
+    }
+
     let current_user_id = current_user_id_best_effort();
     mark_current_user_messages(&mut messages, current_user_id.as_deref());
     ConversationHistoryResult {
@@ -431,6 +456,92 @@ fn enriched_history_result(parsed: &serde_json::Value) -> ConversationHistoryRes
         has_more,
         current_user_id,
     }
+}
+
+/// Extract the user ids referenced by `<@U…>` / `<@U…|label>` mention tokens
+/// inside message text, in order of appearance.
+fn mention_user_ids(text: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<@") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('>') else {
+            break;
+        };
+        let id = after[..end].split('|').next().unwrap_or("");
+        if is_slack_user_id(id) {
+            ids.push(id.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    ids
+}
+
+/// Slack user ids are uppercase alphanumeric and start with `U` (or `W` for
+/// Enterprise Grid users).
+fn is_slack_user_id(id: &str) -> bool {
+    (id.starts_with('U') || id.starts_with('W'))
+        && id.len() > 1
+        && id
+            .chars()
+            .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+}
+
+/// Rewrite Slack control tokens in message text for human consumption
+/// (inbound entity hygiene): resolved `<@U…>` / `<@U…|label>` mentions become
+/// `@Display Name` (unresolved tokens are left as-is — never fabricated),
+/// `<#C…|name>` channel refs become `#name`, other tokens (links, `<!here>`)
+/// pass through untouched, and Slack's HTML entities (&lt; &gt; &amp;) are
+/// decoded AFTER token rewriting so literal `&lt;@U…&gt;` text never turns
+/// into a live token.
+fn humanize_message_text(
+    text: &str,
+    names: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('>') else {
+            // Unterminated token: emit the remainder verbatim.
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let token = &after[..end];
+        let original = &rest[start..start + end + 2];
+        if let Some(mention) = token.strip_prefix('@') {
+            let id = mention.split('|').next().unwrap_or("");
+            match names.get(id) {
+                Some(name) if is_slack_user_id(id) => {
+                    out.push('@');
+                    out.push_str(name);
+                }
+                _ => out.push_str(original),
+            }
+        } else if let Some(channel_ref) = token.strip_prefix('#') {
+            match channel_ref
+                .split_once('|')
+                .map(|(_id, label)| label)
+                .filter(|label| !label.is_empty())
+            {
+                Some(label) => {
+                    out.push('#');
+                    out.push_str(label);
+                }
+                None => out.push_str(original),
+            }
+        } else {
+            out.push_str(original);
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    // &amp; must decode LAST so a literal "&amp;lt;" ends as "&lt;".
+    out.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 /// Map a Slack `messages` array (conversations.history / conversations.replies)
@@ -453,21 +564,6 @@ fn history_messages_from_response(parsed: &serde_json::Value) -> Vec<HistoryMess
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Resolve message authors to display names (one `users.info` per distinct
-/// author, best-effort, budget-capped).
-fn resolve_message_display_names(messages: &mut [HistoryMessage]) {
-    let author_ids: Vec<String> = messages
-        .iter()
-        .filter_map(|message| message.user.clone())
-        .collect();
-    let names = resolve_user_display_names(author_ids);
-    for message in messages.iter_mut() {
-        if let Some(user_id) = &message.user {
-            message.user_display_name = names.get(user_id).cloned();
-        }
-    }
 }
 
 /// Get information about a user.
@@ -539,25 +635,51 @@ pub fn whoami() -> Result<WhoamiResult, String> {
 }
 
 /// Send a message as the user.
+///
+/// Pins `as_user=true`: with a CLASSIC Slack app's user token,
+/// `chat.postMessage` defaults to as_user=false and attributes the post to
+/// the APP (bot_id/bot_profile) instead of the connected user — the exact
+/// wrong-identity failure this tool exists to avoid ("posts as you").
+/// Granular (new) apps reject the legacy flag with `as_user_not_supported`;
+/// their user-token posts are always authored by the user, so retry exactly
+/// once without it.
 pub fn send_message(
     channel: &str,
     text: &str,
     thread_ts: Option<&str>,
 ) -> Result<SendMessageResult, String> {
-    let mut payload = serde_json::json!({
-        "channel": channel,
-        "text": text,
-    });
-    if let Some(ts) = thread_ts {
-        payload["thread_ts"] = serde_json::Value::String(ts.to_string());
-    }
-
-    let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-    let parsed = slack_api_call("POST", "chat.postMessage", Some(&body))?;
+    let payload = send_message_payload(channel, text, thread_ts, true)?;
+    let parsed = match slack_api_call("POST", "chat.postMessage", Some(&payload)) {
+        Ok(parsed) => parsed,
+        Err(error) if error.contains("as_user_not_supported") => {
+            let payload = send_message_payload(channel, text, thread_ts, false)?;
+            slack_api_call("POST", "chat.postMessage", Some(&payload))?
+        }
+        Err(error) => return Err(error),
+    };
 
     Ok(SendMessageResult {
         ok: true,
         channel: parsed["channel"].as_str().unwrap_or(channel).to_string(),
         ts: parsed["ts"].as_str().unwrap_or("").to_string(),
     })
+}
+
+fn send_message_payload(
+    channel: &str,
+    text: &str,
+    thread_ts: Option<&str>,
+    as_user: bool,
+) -> Result<String, String> {
+    let mut payload = serde_json::json!({
+        "channel": channel,
+        "text": text,
+    });
+    if as_user {
+        payload["as_user"] = serde_json::Value::Bool(true);
+    }
+    if let Some(ts) = thread_ts {
+        payload["thread_ts"] = serde_json::Value::String(ts.to_string());
+    }
+    serde_json::to_string(&payload).map_err(|e| e.to_string())
 }
