@@ -306,6 +306,7 @@ fn slack_outbound_delivery_target_provider_key(config: &SlackHostBetaConfig) -> 
     let mut suffix = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write as _;
+        #[allow(clippy::let_underscore_must_use)] // writing to a String is infallible
         let _ = write!(&mut suffix, "{byte:02x}");
     }
     format!("{SLACK_OUTBOUND_PROVIDER_KEY_PREFIX}:{suffix}")

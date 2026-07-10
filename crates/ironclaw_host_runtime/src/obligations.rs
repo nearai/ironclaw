@@ -735,8 +735,10 @@ impl ProcessObligationLifecycleStore {
                 None
             }
         };
-        if let Some(event_sink) = event_sink {
-            let _ = event_sink.emit(event).await;
+        if let Some(event_sink) = event_sink
+            && let Err(error) = event_sink.emit(event).await
+        {
+            tracing::debug!(?error, "best-effort process lifecycle event emit failed");
         }
     }
 
@@ -1509,11 +1511,13 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         if let Some(reservation) = &outcome.resource_reservation
             && let Err(error) = self.release_resource_reservation(reservation)
         {
-            let _ = self.discard_staged_handoffs(
+            if let Err(cleanup_error) = self.discard_staged_handoffs(
                 &request.context.resource_scope,
                 request.capability_id,
                 request.obligations,
-            );
+            ) {
+                tracing::debug!(error = ?cleanup_error, "best-effort discard of staged handoffs failed");
+            }
             return Err(error);
         }
         Ok(())
