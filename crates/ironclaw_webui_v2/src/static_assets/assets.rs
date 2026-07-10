@@ -500,6 +500,31 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_thread_delete_assets_are_wired() {
+        let sidebar = source_text("components/sidebar.tsx");
+        assert!(sidebar.contains("onDeleteThread"));
+        assert!(sidebar.contains("onDelete={onDeleteThread}"));
+
+        let sidebar_threads = source_text("components/sidebar-threads.tsx");
+        assert!(sidebar_threads.contains("data-testid=\"thread-delete\""));
+        assert!(sidebar_threads.contains("data-thread-id={thread.id}"));
+        assert!(sidebar_threads.contains("t(\"common.deleteChat\")"));
+        assert!(sidebar_threads.contains("t(\"thread.deleteConfirm\")"));
+        assert!(sidebar_threads.contains("opacity-70 transition"));
+        assert!(!sidebar_threads.contains("window.alert"));
+
+        let api = source_text("lib/api.ts");
+        assert!(api.contains("export function deleteThread"));
+        assert!(api.contains("/threads/${encodeURIComponent(threadId)}"));
+        assert!(api.contains("method: \"DELETE\""));
+
+        let bundle = bundled_javascript();
+        assert!(bundle.contains("thread-delete"));
+        assert!(bundle.contains("common.deleteChat"));
+        assert!(bundle.contains("thread.deleteConfirm"));
+    }
+
+    #[test]
     fn desktop_sidebar_toggle_assets_are_wired() {
         let header = source_text("components/page-header.tsx");
         assert!(header.contains("type=\"button\""));

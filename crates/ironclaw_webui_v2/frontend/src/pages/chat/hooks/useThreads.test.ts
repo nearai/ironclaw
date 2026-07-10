@@ -138,6 +138,27 @@ test("handleCreateThread upserts the created thread without refetching the list"
   assert.deepEqual(upserted, [{ thread_id: "thread-created", title: "Created" }]);
 });
 
+test("handleDeleteThread deletes the requested thread and refreshes the list", async () => {
+  const deleted = [];
+  const invalidations = [];
+  const hook = instantiate(
+    async () => ({ thread: { thread_id: "unused" } }),
+    {
+      deleteThreadRequest: async ({ threadId }) => {
+        deleted.push(threadId);
+      },
+      queryClient: {
+        invalidateQueries: (request) => invalidations.push(request),
+      },
+    },
+  );
+
+  await hook.deleteThread("thread-old");
+
+  assert.deepEqual(deleted, ["thread-old"]);
+  assert.equal(JSON.stringify(invalidations), JSON.stringify([{ queryKey: ["threads"] }]));
+});
+
 test("normalizes raw thread id titles out of sidebar records", () => {
   const hook = instantiate(async () => ({ thread: { thread_id: "unused" } }), {
     useQuery: () => ({
