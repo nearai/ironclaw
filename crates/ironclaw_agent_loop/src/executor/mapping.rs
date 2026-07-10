@@ -9,8 +9,8 @@ use ironclaw_turns::{
 use crate::{
     state::CheckpointKind,
     strategies::{
-        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelPreference,
-        RetryAlteration, SanitizedStrategySummary,
+        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelErrorSummary,
+        ModelPreference, RetryAlteration, SanitizedStrategySummary,
     },
 };
 
@@ -224,6 +224,13 @@ pub(super) fn model_error_failure_category(
         ModelErrorClass::Unavailable => "model_unavailable",
         ModelErrorClass::Internal => "model_internal",
     })
+}
+
+pub(super) fn model_error_failure_summary(
+    summary: &ModelErrorSummary,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    Ok(model_error_failure_category(summary.class)?
+        .with_detail(summary.safe_summary.as_str().to_string()))
 }
 
 fn sanitized_failure_category(

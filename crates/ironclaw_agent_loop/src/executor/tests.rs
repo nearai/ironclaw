@@ -2813,6 +2813,44 @@ async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
 }
 
 #[tokio::test]
+async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model returned an empty assistant response",
+        ),
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model returned an empty assistant response",
+        ),
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model returned an empty assistant response",
+        ),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
+            let summary = failed.safe_summary.expect("model failure summary");
+            assert_eq!(summary.category(), "model_invalid_output");
+            assert_eq!(
+                summary.detail(),
+                Some("model returned an empty assistant response")
+            );
+        }
+        other => panic!("expected invalid-model-output failed exit, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn model_unrecoverable_host_error_carries_detail_to_executor_error() {
     let host = MockHost::new(Vec::new()).with_model_errors(vec![
         AgentLoopHostError::new(

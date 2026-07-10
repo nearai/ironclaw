@@ -158,6 +158,58 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
     }
 }
 
+pub(crate) fn reborn_failure_summary_for_category_and_detail(
+    category: Option<&str>,
+    detail: Option<&str>,
+) -> String {
+    let Some(category) = category else {
+        return unknown_failure_summary().to_string();
+    };
+
+    if let Some(summary) = pinned_failure_summary_for_category(category) {
+        return summary.to_string();
+    }
+
+    if matches!(category, "model_invalid_output" | "invalid_model_output")
+        && let Some(summary) = invalid_model_output_detail_summary(detail)
+    {
+        return summary.to_string();
+    }
+
+    reborn_failure_summary_for_category(Some(category)).to_string()
+}
+
+fn invalid_model_output_detail_summary(detail: Option<&str>) -> Option<&'static str> {
+    let detail = detail?.trim();
+    match detail {
+        "model returned an empty assistant response" => Some(
+            "The run failed because the model returned an empty assistant response. Retry the run or choose a different model.",
+        ),
+        "model returned textual tool-call syntax instead of structured tool calls" => Some(
+            "The run failed because the model returned a tool call as text instead of structured tool-call data. Retry the run or choose a different model.",
+        ),
+        "model returned a tool call outside the advertised capability surface" => Some(
+            "The run failed because the model tried to call a tool that was not available in this turn. Retry with a narrower request or choose a different model.",
+        ),
+        "model returned tool-use finish without tool calls" => Some(
+            "The run failed because the model requested tool use without providing structured tool calls. Retry the run or choose a different model.",
+        ),
+        "model returned unsupported tool calls for a text-only loop" => Some(
+            "The run failed because the model tried to call a tool when this turn required a text answer. Retry with a clearer request or choose a different model.",
+        ),
+        "model returned an invalid provider tool name" => Some(
+            "The run failed because the model returned an invalid tool name. Retry the run or choose a different model.",
+        ),
+        "model returned invalid tool-call arguments" => Some(
+            "The run failed because the model returned invalid tool-call arguments. Retry with a clearer or narrower request.",
+        ),
+        _ if detail.starts_with("failed to parse tool-call arguments JSON:") => Some(
+            "The run failed because the model returned malformed tool-call arguments. Retry with a clearer or narrower request.",
+        ),
+        _ => None,
+    }
+}
+
 pub(crate) fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
     match category {
         MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(

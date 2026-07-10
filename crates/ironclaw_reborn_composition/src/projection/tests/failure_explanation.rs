@@ -403,11 +403,57 @@ async fn assert_failed_run_status_summary(
     failure_category: &str,
     expected_summary: &str,
 ) {
-    assert_failed_run_status_summary_with_explainer(
+    assert_failed_run_status_summary_for_event(
         thread_id,
         failure_category,
+        None,
         expected_summary,
         None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_invalid_model_output_detail_summary() {
+    assert_failed_run_status_summary_for_event(
+        "webui-events-invalid-model-output-detail-thread",
+        "model_invalid_output",
+        Some("model returned an empty assistant response"),
+        "The run failed because the model returned an empty assistant response. Retry the run or choose a different model.",
+        None,
+    )
+    .await;
+}
+
+async fn assert_failed_run_status_summary_with_explainer(
+    thread_id: &str,
+    failure_category: &str,
+    expected_summary: &str,
+    failure_explainer: Option<Arc<dyn FailureExplanationProvider>>,
+) {
+    assert_failed_run_status_summary_for_event(
+        thread_id,
+        failure_category,
+        None,
+        expected_summary,
+        failure_explainer,
+    )
+    .await;
+}
+
+async fn assert_failed_run_status_summary_for_event(
+    thread_id: &str,
+    failure_category: &str,
+    detail: Option<&str>,
+    expected_summary: &str,
+    failure_explainer: Option<Arc<dyn FailureExplanationProvider>>,
+) {
+    assert_failed_run_status_summary_internal(
+        thread_id,
+        failure_category,
+        detail,
+        expected_summary,
+        failure_explainer,
     )
     .await;
 }
@@ -479,9 +525,10 @@ async fn webui_event_stream_projects_retryable_flag_for_failed_run() {
     );
 }
 
-async fn assert_failed_run_status_summary_with_explainer(
+async fn assert_failed_run_status_summary_internal(
     thread_id: &str,
     failure_category: &str,
+    detail: Option<&str>,
     expected_summary: &str,
     failure_explainer: Option<Arc<dyn FailureExplanationProvider>>,
 ) {
@@ -515,7 +562,7 @@ async fn assert_failed_run_status_summary_with_explainer(
                 blocked_gate: None,
                 sanitized_reason: Some(failure_category.to_string()),
                 retryable: None,
-                detail: None,
+                detail: detail.map(str::to_string),
             }],
         }),
         Arc::new(FakeTurnCoordinator {
