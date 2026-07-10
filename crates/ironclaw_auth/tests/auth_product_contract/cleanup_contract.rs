@@ -497,3 +497,79 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
         "an unrelated provider's account must survive extension-keyed cleanup"
     );
 }
+
+#[tokio::test]
+async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(account_request(
+            owner.clone(),
+            "cleanup completed",
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .expect("account");
+    let expires_at = Utc::now() + Duration::minutes(5);
+    let flow = services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string())
+                    .expect("turn run ref"),
+                gate_ref: AuthGateRef::new("gate:cleanup-completed").expect("gate ref"),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("flow");
+    let completed = services
+        .complete_credential_selection(
+            &owner,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("selection completes");
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert!(completed.continuation_emitted_at.is_none());
+
+    // Completion is durable but dispatch is not acknowledged yet. Lifecycle
+    // cleanup must still synthesize a denial so a gate cannot remain parked
+    // after its credential is removed.
+    let request = SecretCleanupRequest {
+        scope: owner.clone(),
+        extension_id: ExtensionId::new("github").expect("extension"),
+        provider: Some(provider()),
+        action: SecretCleanupAction::Uninstall,
+    };
+    let report = services
+        .cleanup_for_lifecycle(request.clone())
+        .await
+        .expect("cleanup");
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
+    let event = &report.canceled_turn_gate_continuations[0];
+    assert_eq!(event.flow_id, flow.id);
+
+    services
+        .mark_continuation_dispatched(&owner, flow.id, event.emitted_at)
+        .await
+        .expect("acknowledge cleanup continuation");
+    let retry = services
+        .cleanup_for_lifecycle(request)
+        .await
+        .expect("cleanup retry");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
+}

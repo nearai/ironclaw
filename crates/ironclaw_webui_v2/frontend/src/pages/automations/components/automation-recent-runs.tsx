@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { Link } from "react-router";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
@@ -7,6 +8,24 @@ import { runSummaryView } from "../lib/automations-presenters";
 import { buildScopedLogsPath } from "../../logs/lib/logs-data";
 
 const MAX_VISIBLE_DOTS = 8;
+const MAX_NAVIGATION_ID_LENGTH = 512;
+const DISABLED_LINK_TARGET = "#";
+
+// Run/thread ids feed straight into hrefs; reject anything oversized or
+// carrying control characters so a malformed payload can't mint a bogus link
+// (upstream fix #5873).
+function navigationId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    trimmed.length > MAX_NAVIGATION_ID_LENGTH ||
+    /[\u0000-\u001F\u007F]/.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
 // Completed runs older than this fade back so recent activity reads first.
 const STALE_RUN_MS = 24 * 60 * 60 * 1000;
 
@@ -202,14 +221,15 @@ const RUN_STATUS_DOT = {
   muted: "bg-[var(--v2-text-faint)]",
 };
 
-export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
+export function RecentRunRow({ run }) {
   const t = useT();
-  const canOpen = Boolean(run.chat_path);
-  const logsPath = buildScopedLogsPath({
-    threadId: run.thread_id,
-    runId: run.run_id,
-  });
-  const canOpenLogs = Boolean((run.thread_id || run.run_id) && onOpenLogs);
+  const threadId = navigationId(run.thread_id);
+  const runId = navigationId(run.run_id);
+  const chatPath = threadId ? `/chat/${encodeURIComponent(threadId)}` : null;
+  const canOpenLogs = Boolean(threadId || runId);
+  const logsPath = canOpenLogs
+    ? buildScopedLogsPath({ threadId, runId })
+    : DISABLED_LINK_TARGET;
   const tone = RUN_STATUS_TEXT[run.status_tone] ? run.status_tone : "muted";
 
   return (
@@ -242,26 +262,30 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
           </div>
         )}
       </div>
-      {/* Actions share one control size: Open run is a quiet text button with
-          an expand affordance (the run opens as a full chat view), Logs is the
-          matching icon-only button. */}
+      {/* Actions share one control size and render as real links (#5873):
+          Open run is a quiet text link with an expand affordance (the run
+          opens as a full chat view), Logs is the matching icon-only link. */}
       <div className="flex shrink-0 items-center gap-1.5">
         <Button
+          as={Link}
+          to={chatPath || DISABLED_LINK_TARGET}
           variant="ghost"
           size="sm"
-          disabled={!canOpen}
-          onClick={canOpen ? () => onOpenRun(run.chat_path) : undefined}
+          disabled={!chatPath}
+          data-testid="automation-run-open"
         >
           <Icon name="expand" className="mr-1.5 h-3.5 w-3.5" />
           {t("automations.detail.openRun")}
         </Button>
         <Button
+          as={Link}
+          to={logsPath}
           variant="ghost"
           size="icon-sm"
           aria-label={t("nav.logs")}
           title={t("nav.logs")}
           disabled={!canOpenLogs}
-          onClick={canOpenLogs ? () => onOpenLogs(logsPath) : undefined}
+          data-testid="automation-run-logs"
         >
           <Icon name="file" className="h-4 w-4" />
         </Button>

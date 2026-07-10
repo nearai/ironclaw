@@ -91,7 +91,7 @@ crates/ironclaw_turns/src/run_profile/host.rs
         LoopProgressEvent derives Eq. compression_ratio_ppm is u32
         (parts-per-million); other ratios stored as scaled integers.
 
-crates/ironclaw_reborn/src/loop_driver_host/port_adapters.rs
+crates/ironclaw_runner/src/loop_driver_host/port_adapters.rs
   EDIT HostManagedLoopProgressPort::emit_loop_progress match expression
        — add arms (or a wildcard) for the 8 new variants so the
        exhaustive match compiles.

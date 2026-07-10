@@ -87,6 +87,7 @@ fn make_record(
             timezone: "UTC".to_string(),
         },
         prompt: "run the daily task".to_string(),
+        delivery_target: None,
         state,
         next_run_at: now(),
         last_run_at: None,

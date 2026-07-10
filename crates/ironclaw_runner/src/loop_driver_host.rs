@@ -712,7 +712,7 @@ impl EventTriggeredHookSubscription {
     /// background task spawns. See [`Self::effective_read_scope`].
     ///
     /// Deliberately module-private (not `pub(crate)`): it has no cross-module
-    /// caller, and widening its visibility would let other `ironclaw_reborn`
+    /// caller, and widening its visibility would let other `ironclaw_runner`
     /// code install an arbitrary `ReadScope` (e.g. `ReadScope::any()`) and
     /// bypass `effective_read_scope`, reopening the cross-thread/project leak
     /// PR #3931 Bug 1 closed.

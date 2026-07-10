@@ -162,11 +162,7 @@ export function AutomationDetailPage({
         </Panel>
 
         <Panel variant="flat" className="p-4 sm:p-5">
-          <AutomationDetailBody
-            automation={automation}
-            onOpenRun={navigate}
-            onOpenLogs={navigate}
-          />
+          <AutomationDetailBody automation={automation} />
         </Panel>
       </div>
     </div>

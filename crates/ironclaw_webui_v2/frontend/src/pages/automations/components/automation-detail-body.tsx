@@ -34,7 +34,7 @@ function MetaItem({ label, value, tone = null }) {
 // the recent-run history. Rendered inside the per-automation modal and the
 // persistent full-screen page. Container chrome (panel / modal / header) is
 // owned by the caller so this stays layout-agnostic.
-export function AutomationDetailBody({ automation, onOpenRun, onOpenLogs }) {
+export function AutomationDetailBody({ automation }) {
   const t = useT();
   const activeRun = automation.current_run;
 
@@ -74,12 +74,7 @@ export function AutomationDetailBody({ automation, onOpenRun, onOpenLogs }) {
               {t("automations.detail.recentRuns")}
             </h4>
             {(automation.recent_runs || []).map((run) => (
-              <RecentRunRow
-                key={recentRunKey(run)}
-                run={run}
-                onOpenRun={onOpenRun}
-                onOpenLogs={onOpenLogs}
-              />
+              <RecentRunRow key={recentRunKey(run)} run={run} />
             ))}
           </div>
         ) : (

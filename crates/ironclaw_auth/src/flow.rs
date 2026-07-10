@@ -323,6 +323,15 @@ pub trait AuthFlowRecordSource: Send + Sync {
         query: TurnGateAuthFlowQuery,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
 
+    /// Look up one opaque flow id at durable credential-owner granularity.
+    /// Thread, invocation, surface, session, and mission are provenance rather
+    /// than authority here; tenant/user/agent/project must still match.
+    async fn flow_for_owner_by_id(
+        &self,
+        owner_scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
+
     async fn flows_for_owner(
         &self,
         owner: AuthFlowOwnerScope,
@@ -343,6 +352,15 @@ pub fn flow_matches_turn_gate_query(flow: &AuthFlowRecord, query: &TurnGateAuthF
             gate_ref,
         } if turn_run_ref == &query.turn_run_ref && gate_ref == &query.gate_ref
     )
+}
+
+pub fn flow_matches_durable_owner(flow: &AuthFlowRecord, owner_scope: &AuthProductScope) -> bool {
+    let flow_resource = &flow.scope.resource;
+    let owner_resource = &owner_scope.resource;
+    flow_resource.tenant_id == owner_resource.tenant_id
+        && flow_resource.user_id == owner_resource.user_id
+        && flow_resource.agent_id == owner_resource.agent_id
+        && flow_resource.project_id == owner_resource.project_id
 }
 
 pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {

@@ -44,6 +44,7 @@ pub struct RunRecord {
     pub invocation_id: InvocationId,
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub status: RunStatus,
     pub approval_request_id: Option<ApprovalRequestId>,
     pub error_kind: Option<String>,
@@ -60,7 +61,7 @@ pub struct ApprovalRecord {
 }
 ```
 
-`BlockedAuth` is reserved for future auth/OAuth/secret-auth flows. A grant denial is currently terminal `Failed`, not `BlockedAuth`.
+`BlockedAuth` records a resumable auth/OAuth/secret-auth gate. A grant denial remains terminal `Failed`, not `BlockedAuth`.
 
 ---
 
@@ -68,7 +69,7 @@ pub struct ApprovalRecord {
 
 The run-state API is current-state oriented and async so durable implementations can use the host filesystem abstraction.
 
-Every read, list, and mutation after `start` requires a `ResourceScope`. `start` creates a new invocation record and must fail if the same tenant/user/agent/invocation already exists; callers must use explicit resume/transition APIs rather than overwriting current state. Stored `error_kind` values use the shared sanitized `ErrorKind` contract so current-state APIs do not expose detail-like runtime strings.
+Every read, list, and mutation after `start` requires a `ResourceScope`. `start` creates a new invocation record, persists the optional authenticated actor supplied in `RunStart`, and must fail if the same tenant/user/agent/invocation already exists; callers must use explicit resume/transition APIs rather than overwriting current state. `authenticated_actor_user_id` has a serde default so records written before the field existed load as `None`; a later `Some(actor)` resume does not match that legacy record. Stored `error_kind` values use the shared sanitized `ErrorKind` contract so current-state APIs do not expose detail-like runtime strings.
 
 
 ```rust
@@ -165,7 +166,7 @@ spawn process creation failed -> Failed(error_kind = ProcessSpawn)
 
 For `spawn_json`, run state tracks the start request lifecycle only. Long-running/background process lifecycle belongs to `ironclaw_processes::ProcessStore` after the start workflow returns a `ProcessId`.
 
-`resume_json` continues a `BlockedApproval` run only after loading an approved request and matching lease under the same tenant/user/agent/invocation scope:
+`resume_json` continues a `BlockedApproval` run only after the request's authenticated actor exactly matches the actor persisted on the run and after loading an approved request and matching lease under the same tenant/user/agent/invocation scope. Actor mismatch fails closed with `PolicyDenied` while leaving the run and lease unchanged:
 
 ```text
 Approved + matching fingerprint + active lease -> claim lease -> dispatch -> consume lease -> Completed
@@ -202,4 +203,4 @@ Those should be follow-on slices built on this scoped current-state and approval
 
 Run-state remains current-state storage, not transition history. Durable history and UI replay are owned by the event/audit append log and projections.
 
-Run-state records must include `agent_id` where the owning execution context carries one, and must preserve exact invocation identity for V1 approval/resume flows.
+Run-state records must include `agent_id` where the owning execution context carries one, preserve exact invocation identity for V1 approval/resume flows, and preserve the optional authenticated actor separately from the resource-scope subject. Every approval/auth/spawn resume must compare the request actor exactly before mutating the record.

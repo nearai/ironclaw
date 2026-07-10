@@ -132,11 +132,7 @@ export function AutomationDetailModal({
       </div>
 
       <ModalBody>
-        <AutomationDetailBody
-          automation={automation}
-          onOpenRun={navigate}
-          onOpenLogs={navigate}
-        />
+        <AutomationDetailBody automation={automation} />
       </ModalBody>
 
       <ModalFooter>

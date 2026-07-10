@@ -20,9 +20,10 @@ use ironclaw_secrets::SecretStore;
 use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
-    AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError, AuthSessionId, AuthSurface,
-    CredentialAccount, CredentialAccountId, CredentialAccountOwnerScope,
-    CredentialAccountSelectionRequest, CredentialAccountStatus, NewCredentialAccount,
+    AuthContinuationRef, AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError,
+    AuthSessionId, AuthSurface, CredentialAccount, CredentialAccountId,
+    CredentialAccountOwnerScope, CredentialAccountSelectionRequest, CredentialAccountStatus,
+    NewCredentialAccount,
 };
 use ironclaw_host_api::VirtualPath;
 
@@ -43,6 +44,15 @@ mod tests;
 
 const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
+
+fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
+    !ironclaw_auth::is_terminal_status(flow.status)
+        || (flow.continuation_emitted_at.is_none()
+            && matches!(
+                flow.continuation,
+                AuthContinuationRef::TurnGateResume { .. }
+            ))
+}
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) use provider::UnavailableAuthProviderClient;
@@ -263,6 +273,18 @@ where
             thread_id: Some(owner.thread_id.clone()),
             invocation_id: ironclaw_host_api::InvocationId::new(),
         };
+        self.flow_records_for_resource_filtered(&resource, |flow| owner.matches(flow))
+            .await
+    }
+
+    async fn flow_records_for_resource_filtered<P>(
+        &self,
+        resource: &ResourceScope,
+        predicate: P,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError>
+    where
+        P: Fn(&AuthFlowRecord) -> bool + Sync,
+    {
         let mut flows = Vec::new();
         for surface in AuthSurface::ALL {
             let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
@@ -271,13 +293,13 @@ where
                     .await?
                     .into_iter()
                     .map(|(flow, _)| flow)
-                    .filter(|flow| owner.matches(flow)),
+                    .filter(|flow| predicate(flow)),
             );
-            let sessions_root = surface_sessions_root(&resource, surface)?;
+            let sessions_root = surface_sessions_root(resource, surface)?;
             let mut entries = match self
                 .filesystem
                 .list_dir_bounded(
-                    &resource,
+                    resource,
                     &sessions_root,
                     MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
                 )
@@ -296,6 +318,7 @@ where
                     continue;
                 }
                 let Ok(session_id) = AuthSessionId::new(entry.name) else {
+                    // silent-ok: ignore an unexpected non-session directory under the bounded root.
                     continue;
                 };
                 let mut session_scope =
@@ -306,13 +329,43 @@ where
                         .await?
                         .into_iter()
                         .map(|(flow, _)| flow)
-                        .filter(|flow| owner.matches(flow)),
+                        .filter(|flow| predicate(flow)),
                 );
             }
         }
         flows.sort_by_key(|flow| flow.id);
         flows.dedup_by_key(|flow| flow.id);
         Ok(flows)
+    }
+
+    /// Auth-flow records still requiring lifecycle cleanup for a credential
+    /// owner + provider, walked across surfaces/sessions but not one thread.
+    ///
+    /// The lifecycle/disconnect analogue of [`Self::account_records_for_owner`]:
+    /// flow storage is keyed by agent/project/surface/session (see `flow_root`)
+    /// and never by thread, so a channel disconnect — which carries no thread —
+    /// can still reach every pending flow a connect created, including
+    /// thread-less setup flows and thread-scoped turn-gate flows. Used by
+    /// lifecycle cleanup to cancel the disconnected provider's stale flows so
+    /// they cannot wedge the next connect. Provider-agnostic by construction.
+    async fn lifecycle_flows_for_owner_provider(
+        &self,
+        resource: &ResourceScope,
+        provider: &ironclaw_auth::AuthProviderId,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
+        let resource = ResourceScope {
+            tenant_id: resource.tenant_id.clone(),
+            user_id: resource.user_id.clone(),
+            agent_id: resource.agent_id.clone(),
+            project_id: resource.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        self.flow_records_for_resource_filtered(&resource, |flow| {
+            &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
+        })
+        .await
     }
 
     async fn read_account(
@@ -824,6 +877,23 @@ where
         provider_identity: Option<ironclaw_auth::OAuthProviderIdentity>,
         cas: CasExpectation,
     ) -> Result<CredentialAccount, AuthProductError> {
+        self.create_account_with_id_and_provider_identity_versioned(
+            account_id,
+            request,
+            provider_identity,
+            cas,
+        )
+        .await
+        .map(|(account, _)| account)
+    }
+
+    async fn create_account_with_id_and_provider_identity_versioned(
+        &self,
+        account_id: CredentialAccountId,
+        request: NewCredentialAccount,
+        provider_identity: Option<ironclaw_auth::OAuthProviderIdentity>,
+        cas: CasExpectation,
+    ) -> Result<(CredentialAccount, RecordVersion), AuthProductError> {
         validate_new_credential_account(&request)?;
         let now = Utc::now();
         let account = CredentialAccount {
@@ -842,8 +912,8 @@ where
             created_at: now,
             updated_at: now,
         };
-        self.write_account(&account, cas).await?;
-        Ok(account)
+        let version = self.write_account(&account, cas).await?;
+        Ok((account, version))
     }
 }
 
