@@ -4767,6 +4767,20 @@ def _name_token_in_text(text: str, name: str) -> bool:
     )
 
 
+# Hyphenated all-caps code tokens (e.g. OOO-CANARY-FIXTURE) embedded in a
+# status text: each segment is >=2 caps/digits and at least one hyphen joins
+# them, so prose words and lowercase echoes never match.
+STATUS_CODE_TOKEN_PATTERN = re.compile(r"\b[A-Z0-9]{2,}(?:-[A-Z0-9]{2,})+\b")
+
+
+def _status_code_tokens(text: str) -> list[str]:
+    """Hyphenated code tokens in a status text — when the ground-truth
+    status carries one (OOO-CANARY-FIXTURE), the reply must quote it
+    verbatim; token-level matching alone would accept a paraphrase that
+    drops the code."""
+    return STATUS_CODE_TOKEN_PATTERN.findall(text or "")
+
+
 def _channel_name_mentioned(text: str, channel_name: str) -> bool:
     """Word-boundary channel-name match that treats ``-`` as part of the name.
 
@@ -5075,28 +5089,20 @@ async def _slack_auth_identity(token: str) -> dict[str, object]:
     }
 
 
-def _slack_status_profile(
-    text: str, emoji: str, expiration: int = 0
-) -> dict[str, object]:
-    """users.profile.set payload shape; ``("", "", 0)`` is the restore/clear
-    form the status probe's finally block must always send."""
-    return {
-        "status_text": text,
-        "status_emoji": emoji,
-        "status_expiration": expiration,
-    }
-
-
-async def _slack_set_own_status(
-    token: str, text: str, emoji: str, expiration: int = 0
-) -> dict[str, object]:
-    """Set (or, with empty text/emoji, clear) the token owner's own Slack
-    status via users.profile.set."""
-    return await _slack_api_post(
-        token,
-        "users.profile.set",
-        {"profile": _slack_status_profile(text, emoji, expiration)},
-    )
+async def _slack_user_status_text(token: str, user_id: str) -> dict[str, object]:
+    """profile.status_text for ``user_id`` via users.info — the qa_10b
+    read-verify ground truth (the probe never writes a status)."""
+    payload = await _slack_api_get(token, "users.info", {"user": user_id})
+    if not payload.get("ok"):
+        return {
+            "ok": False,
+            "error": str(payload.get("error") or "slack_users_info_failed"),
+        }
+    user = payload.get("user")
+    user = user if isinstance(user, dict) else {}
+    profile = user.get("profile")
+    profile = profile if isinstance(profile, dict) else {}
+    return {"ok": True, "status_text": str(profile.get("status_text") or "")}
 
 
 async def _slack_display_name(token: str, user_id: str) -> dict[str, object]:
@@ -5668,44 +5674,56 @@ async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
 
 
 async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
-    """Own-status readback probe: after the harness sets the connected
-    user's Slack status via users.profile.set, "what does my current status
-    say" must surface the exact status text.
+    """Own-status readback probe (read-verify mode): the QA account carries
+    a manually-set permanent OOO canary status; "what does my current status
+    say" must surface it.
 
     Pins dropped status fields + self-identity (Firat audit part 2): the
     host's user lookup strips status_text/status_emoji and the agent cannot
-    resolve which user is "me", so it fabricates or refuses. The canary
-    status is always cleared again in the finally block.
+    resolve which user is "me", so it fabricates or refuses. Ground truth is
+    READ via personal-token auth.test + users.info before the prompt — the
+    probe never writes to the live account (no users.profile.set seeding,
+    nothing to restore). The reply must carry a word-boundary token of the
+    ground-truth status text, and when the status embeds a hyphenated code
+    token (e.g. OOO-CANARY-FIXTURE) that exact substring must be quoted
+    verbatim — token matching alone would accept a paraphrase that drops the
+    code.
     """
     case_name = "qa_10b_slack_ooo_status"
     started = time.monotonic()
     suffix = str(int(time.time() * 1000))
     answer_marker = f"REBORN_QA_10B_STATUS_{suffix}"
-    status_marker = f"OOO_{suffix}"
-    status_text = f"{status_marker} back July 20"
-    details: dict[str, object] = {"status_text": status_text}
-    personal_token: str | None = None
-    status_was_set = False
-    success = False
+    details: dict[str, object] = {}
     try:
         personal_token = _require_slack_personal_token(ctx)
-        set_response = await _slack_set_own_status(
-            personal_token, status_text, ":palm_tree:"
-        )
-        details["status_set_ok"] = bool(set_response.get("ok"))
-        if not set_response.get("ok"):
-            error = str(set_response.get("error") or "users_profile_set_failed")
-            if error == "missing_scope":
-                raise AssertionError(
-                    "probe precondition failed: the personal token lacks the "
-                    "users.profile:write scope needed to seed the canary "
-                    f"status (missing_scope, needed={set_response.get('needed')!r})"
-                )
+        identity = await _slack_auth_identity(personal_token)
+        if not identity.get("ok"):
             raise AssertionError(
-                "probe precondition failed: could not set the canary Slack "
-                f"status: {error}"
+                "probe precondition failed: auth.test could not resolve the "
+                f"connected user's identity: {identity.get('error')!r}"
             )
-        status_was_set = True
+        own_user_id = str(identity.get("user_id") or "")
+        status = await _slack_user_status_text(personal_token, own_user_id)
+        if not status.get("ok"):
+            raise AssertionError(
+                "probe precondition failed: users.info could not read the "
+                f"QA account's status: {status.get('error')!r}"
+            )
+        status_text = str(status.get("status_text") or "").strip()
+        details["status_text"] = status_text
+        if not status_text:
+            raise AssertionError(
+                "probe precondition failed: no status is set on the QA account "
+                "— restore the OOO canary status fixture"
+            )
+        code_tokens = _status_code_tokens(status_text)
+        details["status_code_tokens"] = code_tokens
+        if not _display_name_tokens(status_text):
+            raise AssertionError(
+                "probe precondition failed: the QA account status text "
+                f"{status_text!r} has no matchable token (>=3 chars) for the "
+                "readback arm"
+            )
         chat, reply_text = await _slack_correctness_chat_reply(
             ctx,
             case_name=case_name,
@@ -5718,36 +5736,31 @@ async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
             answer_marker=answer_marker,
             extra_details=details,
         )
-        details.update(chat.details)
         if not chat.success:
-            raise AssertionError(
-                str(chat.details.get("error") or "chat turn failed")
-            )
-        if status_marker not in reply_text:
+            return chat
+        details.update(chat.details)
+        missing_codes = [code for code in code_tokens if code not in reply_text]
+        details["missing_status_code_tokens"] = missing_codes
+        if missing_codes:
             raise AssertionError(
                 "agent did not report the user's own current Slack status "
-                "(dropped status fields / self-identity): reply lacked "
-                f"{status_marker}"
+                "(dropped status fields / self-identity): reply lacked the "
+                f"exact status code token(s) {missing_codes}"
             )
-        success = True
+        token_matched = _name_token_in_text(reply_text, status_text)
+        details["status_token_matched"] = token_matched
+        if not token_matched:
+            raise AssertionError(
+                "agent did not report the user's own current Slack status "
+                "(dropped status fields / self-identity): reply contained no "
+                "word-boundary token (>=3 chars) of the ground-truth status "
+                "text"
+            )
+        return _result(case_name, True, started, details)
     except Exception as exc:
-        details["error"] = _exc_text(exc)
-    finally:
-        # The canary status must never outlive the probe on the live account.
-        if status_was_set and personal_token:
-            restore = await _slack_set_own_status(personal_token, "", "")
-            details["status_restored"] = bool(restore.get("ok"))
-            if not restore.get("ok"):
-                restore_error = str(restore.get("error") or "")
-                details["status_restore_error"] = restore_error
-                # A failed restore leaves the canary status live on the real
-                # account — a green verdict must never mask that.
-                success = False
-                details.setdefault(
-                    "error",
-                    f"canary status restore failed: {restore_error}",
-                )
-    return _result(case_name, success, started, details)
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
 
 
 async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
