@@ -4,6 +4,7 @@ import { useT } from "../../../lib/i18n";
 import { Panel, StatCard, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
 import {
@@ -26,6 +27,13 @@ function DetailRow({ label, children }) {
   );
 }
 
+function buildRoleOptions(t) {
+  return [
+    { value: "member", label: t("admin.users.member") },
+    { value: "admin", label: t("admin.users.admin") },
+  ];
+}
+
 export function UserDetail({ userId, onBack }) {
   const t = useT();
   const userQuery = useAdminUserDetail(userId);
@@ -34,6 +42,7 @@ export function UserDetail({ userId, onBack }) {
 
   const [role, setRole] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const roleOptions = buildRoleOptions(t);
 
   const user = userQuery.data;
   const usageEntries = usageQuery.data?.usage || [];
@@ -160,14 +169,14 @@ export function UserDetail({ userId, onBack }) {
         <div className="flex items-end gap-3">
           <div>
             <label className="mb-1 block text-xs text-iron-300">{t("admin.user.currentRole")}</label>
-            <select
+            <SelectMenu
               value={role || user.role}
-              onChange={(e) => setRole(e.currentTarget.value)}
-              className="v2-select h-9 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-            >
-              <option value="member">{t("admin.users.member")}</option>
-              <option value="admin">{t("admin.users.admin")}</option>
-            </select>
+              options={roleOptions}
+              onChange={setRole}
+              ariaLabel={t("admin.user.currentRole")}
+              className="!min-w-0 w-36"
+              buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
+            />
           </div>
           <Button onClick={handleSaveRole} disabled={!role || role === user.role}>
             {t("admin.user.saveRole")}

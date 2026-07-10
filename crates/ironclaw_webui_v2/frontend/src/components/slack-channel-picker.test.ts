@@ -57,6 +57,15 @@ function html(strings, ...values) {
   return { strings: Array.from(strings), values };
 }
 
+function SelectMenu(props) {
+  return html`<SelectMenu
+    value=${props.value}
+    options=${props.options}
+    onChange=${props.onChange}
+    disabled=${props.disabled}
+  />`;
+}
+
 function visit(node, fn) {
   if (Array.isArray(node)) {
     for (const item of node) visit(item, fn);
@@ -145,6 +154,7 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
   const context = {
     Button: "button",
     React: createReactStub(state),
+    SelectMenu,
     globalThis: {},
     html,
     listSlackAllowedChannels: () => query.data,
@@ -318,6 +328,7 @@ test("SlackChannelPicker preserves row subjects when subject catalog fails", () 
   const context = {
     Button: "button",
     React: createReactStub(state),
+    SelectMenu,
     globalThis: {},
     html,
     listSlackAllowedChannels: () => query.data,
