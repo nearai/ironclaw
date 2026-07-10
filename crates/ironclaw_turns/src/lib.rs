@@ -20,6 +20,7 @@ pub(crate) mod memory;
 mod origin;
 mod request;
 mod response;
+pub mod run_failure;
 pub mod run_profile;
 pub mod runner;
 pub mod scope;
@@ -89,6 +90,10 @@ pub use request::{
 };
 pub use response::{
     CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse, ThreadBusy,
+};
+pub use run_failure::{
+    FailureLane, FailureSource, RetryPolicy, RunFailureCategory, RunFailureReason,
+    SafetyStopEvidence, UserMessage, UserMessageError,
 };
 pub use run_profile::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
