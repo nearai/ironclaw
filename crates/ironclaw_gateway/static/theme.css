@@ -156,6 +156,7 @@
   /* Action-button language (ironclaw.com / nux parity) */
   --v2-btn-primary-bg: radial-gradient(ellipse 100% 100% at 50% 130%, #4ca7e6 0%, #2882c8 65%);
   --v2-btn-primary-bg-hover: radial-gradient(ellipse 200% 220% at 50% 110%, #5bbaf5 0%, #2882c8 60%);
+  --v2-btn-primary-border: rgba(76, 167, 230, 0.72);
   --v2-btn-secondary-border: rgba(76, 167, 230, 0.6);
   --v2-btn-secondary-bg: rgba(76, 167, 230, 0.05);
 

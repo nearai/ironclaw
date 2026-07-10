@@ -779,7 +779,9 @@ document.getElementById('scroll-to-bottom-btn').addEventListener('click', () => 
 function autoResizeTextarea(el) {
   const prev = el.offsetHeight;
   el.style.height = 'auto';
-  const target = Math.min(el.scrollHeight, 120);
+  // Grow with content up to ~8 lines (matches the textarea's CSS
+  // max-height), after which the textarea scrolls internally.
+  const target = Math.min(el.scrollHeight, 200);
   el.style.height = prev + 'px';
   requestAnimationFrame(() => {
     el.style.height = target + 'px';

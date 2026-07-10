@@ -13,7 +13,33 @@
 .btn-small:hover { background: var(--bg-tertiary); }
 .btn-danger { border-color: var(--danger); color: var(--danger); }
 .btn-danger:hover { background: var(--danger); color: var(--text-on-danger); }
-.btn-primary { background: var(--accent); color: #fff; border: none; padding: 0.4rem 0.8rem; border-radius: var(--v2-radius-xs); cursor: pointer; font-size: 0.85rem; }
-.btn-primary:hover { opacity: 0.9; }
+/* DS primary role (md step) for bare .btn-primary usages (users page,
+   skills install, routines links). */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
+  background: var(--v2-btn-primary-bg);
+  color: var(--v2-on-accent);
+  border: 1px solid var(--v2-btn-primary-border);
+  border-radius: var(--v2-radius-md);
+  cursor: pointer;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
+}
+/* Table-row actions stay on the sm step. */
+.btn-small.btn-primary {
+  height: var(--v2-control-h-sm);
+  padding: 0 var(--v2-control-px-sm);
+  font-size: var(--v2-font-size-caption);
+  border-radius: var(--v2-radius-sm);
+}
 .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: var(--v2-radius-xs); cursor: pointer; font-size: 0.85rem; }
 

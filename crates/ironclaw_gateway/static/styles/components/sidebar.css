@@ -183,14 +183,6 @@
   transition: color 0.2s ease, background-color 0.25s ease;
 }
 
-/* Nav labels use the pixel face like the landing nav links */
-.sidebar-nav-item .sidebar-label {
-  font-family: var(--font-pixel);
-  font-size: var(--v2-font-size-label);
-  text-transform: uppercase;
-  letter-spacing: var(--v2-tracking-tag);
-}
-
 .sidebar-nav-item svg {
   flex-shrink: 0;
 }
@@ -239,15 +231,16 @@
   flex: 1;
   min-height: 0;
   margin-top: 10px;
-  padding: 0 10px;
+  /* No horizontal inset: thread rows run edge-to-edge so the hover/active
+     background spans the full rail width. */
+  padding: 0;
 }
 
+/* Section label in the app's nav vocabulary: sans face, normal case. */
 .sidebar-threads-header {
-  padding: 4px 12px 6px;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  padding: 4px 22px 6px;
+  font-size: var(--text-sm);
+  font-weight: 500;
   color: var(--text-muted);
   flex-shrink: 0;
   white-space: nowrap;
@@ -257,6 +250,13 @@
   flex: 1;
   overflow-y: auto;
   padding-bottom: 8px;
+}
+
+/* Rows sit flush and square: full-width background, no radius, no accent
+   border. Text keeps the 22px left inset shared with the nav labels. */
+.sidebar-threads .thread-item {
+  border-radius: 0;
+  padding: 10px 22px;
 }
 
 /* ── Footer (utilities + account) — borderless, quiet ── */

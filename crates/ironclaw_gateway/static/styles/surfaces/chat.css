@@ -7,31 +7,37 @@
   position: relative;
 }
 
+/* Floating "jump to bottom" chip — lives in the chat area, centered just
+   above the composer (standard chat pattern), not in the footer strip. */
 .scroll-to-bottom-btn {
   position: absolute;
-  right: var(--space-4);
-  bottom: calc(var(--chat-input-height, 72px) + var(--space-3));
-  width: 28px;
-  height: 28px;
+  left: 50%;
+  /* Clear the composer's height plus its 16px bottom margin, hovering 8px
+     above its top edge. */
+  bottom: calc(var(--chat-input-height, 72px) + var(--space-6));
+  transform: translateX(-50%);
+  width: 32px;
+  height: 32px;
   padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-muted, var(--text));
-  font-size: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--v2-radius-full);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 18px;
   line-height: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10;
-  opacity: 0.55;
-  transition: opacity 150ms ease, transform 150ms ease, color 150ms ease;
+  box-shadow: var(--v2-shadow-md);
+  z-index: var(--v2-z-raised, 10);
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
 }
 
 .scroll-to-bottom-btn:hover {
-  opacity: 1;
   color: var(--text);
-  transform: translateY(2px);
+  border-color: var(--border-hover);
+  background: var(--bg-tertiary);
 }
 
 /* ChatGPT-style centered column: the horizontal padding grows once the
@@ -1120,7 +1126,7 @@
   /* macOS-window radius (radius-md + 2): rounded, not a pill. */
   border-radius: calc(var(--v2-radius-md) + 2px);
   flex-shrink: 0;
-  min-height: 52px;
+  min-height: 60px;
   box-shadow: var(--v2-shadow-sm);
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
@@ -1175,7 +1181,9 @@
   font-family: inherit;
   resize: none;
   min-height: 24px;
-  max-height: 120px;
+  /* Grows with content (autoResizeTextarea) up to ~8 lines, then scrolls. */
+  max-height: 200px;
+  overflow-y: auto;
   transition: height 100ms ease;
 }
 
@@ -1732,11 +1740,25 @@
   color: var(--text-secondary);
 }
 
-.flow-connect-btn {
+/* DS primary role (md step): gradient fill, accent border, white text.
+   Doubled class selector: outranks the bare .btn-primary rule in users.css,
+   which loads later in the bundle. */
+.btn-primary.flow-connect-btn {
   height: var(--v2-control-h-md);
-  padding: 0 var(--v2-control-px-lg);
-  font-size: var(--text-sm);
-  border-radius: var(--v2-radius-full);
+  padding: 0 var(--v2-control-px-md);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
+  cursor: pointer;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.btn-primary.flow-connect-btn:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
 }
 
 .flow-connect-done {
@@ -1979,10 +2001,23 @@
   flex: 0 0 auto;
 }
 
-.flow-proposal-approve {
+/* DS primary role on the sm step (radius-sm, caption size). */
+.btn-primary.flow-proposal-approve {
   height: var(--v2-control-h-sm);
-  padding: 0 var(--v2-control-px-md);
+  padding: 0 var(--v2-control-px-sm);
   font-size: var(--v2-font-size-caption);
+  font-weight: 500;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
+  cursor: pointer;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.btn-primary.flow-proposal-approve:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
 }
 
 .flow-proposal-dismiss {
@@ -2031,14 +2066,25 @@
 
 /* Plan-upgrade CTA (end of the scripted first hour) */
 
-.flow-upgrade-btn {
+.btn-primary.flow-upgrade-btn {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   height: var(--v2-control-h-md);
-  padding: 0 var(--v2-control-px-lg);
-  font-size: var(--text-sm);
-  border-radius: var(--v2-radius-full);
+  padding: 0 var(--v2-control-px-md);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
+  cursor: pointer;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.btn-primary.flow-upgrade-btn:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
 }
 
 .flow-upgrade-done {
@@ -2190,30 +2236,47 @@
 
 .flow-modal-actions .btn-primary {
   height: var(--v2-control-h-md);
-  padding: 0 var(--v2-control-px-lg);
-  font-size: var(--text-sm);
-  border-radius: var(--v2-radius-full);
+  padding: 0 var(--v2-control-px-md);
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-btn-primary-bg);
+  border: 1px solid var(--v2-btn-primary-border);
+  color: var(--v2-on-accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
+  transition: background 0.35s ease, box-shadow 0.3s ease;
+}
+
+.flow-modal-actions .btn-primary:hover:not(:disabled) {
+  background: var(--v2-btn-primary-bg-hover);
+  box-shadow: var(--v2-shadow-accent-hover);
 }
 
 .flow-modal-secondary {
   height: var(--v2-control-h-md);
-  padding: 0 var(--v2-control-px-lg);
+  padding: 0 var(--v2-control-px-md);
   background: var(--v2-btn-secondary-bg);
-  border: 1px solid var(--v2-btn-secondary-border);
-  border-radius: var(--v2-radius-full);
+  border: 2px solid var(--v2-btn-secondary-border);
+  border-radius: var(--v2-radius-md);
   color: var(--text);
-  font-size: var(--text-sm);
-  font-weight: 600;
+  font-size: var(--v2-font-size-body-sm);
+  font-weight: 500;
   font-family: var(--font-sans);
   cursor: pointer;
-  transition: background var(--v2-duration-fast) var(--v2-ease-standard);
+  transition: background var(--v2-duration-fast) var(--v2-ease-standard),
+    border-color var(--v2-duration-fast) var(--v2-ease-standard),
+    color var(--v2-duration-fast) var(--v2-ease-standard);
 }
 
-.flow-modal-secondary:hover { background: var(--hover-subtle); }
+.flow-modal-secondary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--v2-on-accent);
+}
+
 
 .flow-detail-section {
   display: flex;

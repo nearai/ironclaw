@@ -1,12 +1,16 @@
-/* ── Landing-page button parity (ironclaw.com) ────────────────────────────
+/* ── Design-system button roles (ironclaw_webui_v2 button spec) ───────────
    Loaded LAST in the style bundle so it overrides the per-surface button
-   styling without rewriting seventeen files. Two roles:
+   styling without rewriting seventeen files. Ported from the v2 design
+   system's button.tsx: control heights/paddings come from the
+   --v2-control-* scale (sm 28 / md 32 / lg 36), radius from
+   --v2-radius-md, text sizes from the --v2-font-size-* scale, and text on
+   accent fills is always white (--v2-on-accent). Two roles:
 
-   PRIMARY — brand-blue radial gradient, white text, 16px radius; hover
-   brightens the gradient and lifts with the landing's signature shadow.
+   PRIMARY — brand-blue radial gradient, 1px accent border, white text;
+   hover brightens the gradient and lifts with the signature glow.
 
-   SECONDARY — 2px accent outline, translucent frosted fill, 16px radius;
-   fills solid blue on hover.
+   SECONDARY (v2 "outline") — 2px accent outline, translucent fill; fills
+   solid blue with white text on hover, deepens on press.
 
    Danger/destructive buttons keep their per-surface styling on purpose. */
 
@@ -28,11 +32,18 @@
 .api-tokens-create,
 .restart-modal-btn.confirm,
 .empty-state-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
   background: var(--btn-primary-bg);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--btn-radius);
+  color: var(--v2-on-accent);
+  border: 1px solid var(--v2-btn-primary-border);
+  border-radius: var(--v2-radius-md);
   font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
   font-weight: 500;
   letter-spacing: 0;
   cursor: pointer;
@@ -62,6 +73,71 @@
   transform: none;
 }
 
+/* Press: settle back down (drop the hover glow). */
+#send-btn:active:not(:disabled),
+.discover-btn.primary:active:not(:disabled),
+.btn-ext.install:active:not(:disabled),
+.btn-save:active:not(:disabled),
+.ms-btn.primary:active:not(:disabled),
+.btn-add-provider:active:not(:disabled),
+.provider-dialog-footer button:first-child:active:not(:disabled),
+.config-form-actions button:first-child:active:not(:disabled),
+.nux-wizard-footer .btn-primary:active:not(:disabled),
+.nux-channel-btn.btn-primary:active:not(:disabled),
+.auth-card-login .auth-form button:active:not(:disabled),
+.auth-card .auth-actions button.auth-submit:active:not(:disabled),
+.approval-card .approval-actions button.approve:active:not(:disabled),
+.ext-install-form button:active:not(:disabled),
+.skill-search-box button:active:not(:disabled),
+.api-tokens-create:active:not(:disabled),
+.restart-modal-btn.confirm:active:not(:disabled),
+.empty-state-action:active:not(:disabled) {
+  background: var(--btn-primary-bg);
+  box-shadow: none;
+}
+
+#send-btn:disabled,
+.discover-btn.primary:disabled,
+.btn-ext.install:disabled,
+.btn-save:disabled,
+.ms-btn.primary:disabled,
+.btn-add-provider:disabled,
+.provider-dialog-footer button:first-child:disabled,
+.config-form-actions button:first-child:disabled,
+.nux-wizard-footer .btn-primary:disabled,
+.nux-channel-btn.btn-primary:disabled,
+.auth-card-login .auth-form button:disabled,
+.auth-card .auth-actions button.auth-submit:disabled,
+.approval-card .approval-actions button.approve:disabled,
+.ext-install-form button:disabled,
+.skill-search-box button:disabled,
+.api-tokens-create:disabled,
+.restart-modal-btn.confirm:disabled,
+.empty-state-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Prominent CTAs (hero forms, wizard footers, empty states) sit on the
+   lg step of the control scale. */
+.nux-wizard-footer .btn-primary,
+.nux-channel-btn.btn-primary,
+.auth-card-login .auth-form button,
+.auth-card .auth-actions button.auth-submit,
+.empty-state-action {
+  height: var(--v2-control-h-lg);
+  padding: 0 var(--v2-control-px-lg);
+  font-size: var(--v2-font-size-body);
+}
+
+/* Composer send: icon button on the md step (h == w, radius-md square). */
+#send-btn {
+  width: var(--v2-control-h-md);
+  height: var(--v2-control-h-md);
+  padding: 0;
+  border-radius: var(--v2-radius-md);
+}
+
 /* Secondary role — accent outline, frosted fill, solid blue on hover */
 .discover-btn.secondary,
 .btn-secondary,
@@ -71,11 +147,18 @@
 .provider-dialog-footer .btn-secondary,
 .restart-modal-btn.cancel,
 .config-form-actions .btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--v2-space-2);
+  height: var(--v2-control-h-md);
+  padding: 0 var(--v2-control-px-md);
   background: var(--btn-secondary-bg);
   border: 2px solid var(--btn-secondary-border);
-  border-radius: var(--btn-radius);
+  border-radius: var(--v2-radius-md);
   color: var(--text);
   font-family: inherit;
+  font-size: var(--v2-font-size-body-sm);
   font-weight: 500;
   cursor: pointer;
   backdrop-filter: blur(4px);
@@ -93,7 +176,27 @@
 .config-form-actions .btn-secondary:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--text-on-accent);
+  color: var(--v2-on-accent);
+}
+
+.discover-btn.secondary:active:not(:disabled),
+.btn-secondary:active:not(:disabled),
+.btn-cancel-edit:active:not(:disabled),
+.nux-wizard-footer .btn-secondary:active:not(:disabled),
+.nux-channel-btn.btn-secondary:active:not(:disabled),
+.provider-dialog-footer .btn-secondary:active:not(:disabled),
+.restart-modal-btn.cancel:active:not(:disabled),
+.config-form-actions .btn-secondary:active:not(:disabled) {
+  background: var(--v2-accent-strong);
+  border-color: var(--v2-accent-strong);
+  color: var(--v2-on-accent);
+}
+
+.nux-wizard-footer .btn-secondary,
+.nux-channel-btn.btn-secondary {
+  height: var(--v2-control-h-lg);
+  padding: 0 var(--v2-control-px-lg);
+  font-size: var(--v2-font-size-body);
 }
 
 /* The danger flavour of .btn-secondary contexts stays red */
@@ -109,7 +212,6 @@
 .skill-trust,
 .skill-version,
 .badge,
-.sidebar-threads-header,
 .integrations-connected-section h3,
 .integrations-available-section h3 {
   font-family: var(--font-pixel);
