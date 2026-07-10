@@ -272,7 +272,7 @@ fn model_visible_capability_success_observation(
     // "none" is the static sentinel for successful capability observations and
     // satisfies CapabilityFailureKind's validation invariants.
     let failure_kind = CapabilityFailureKind::unknown("none")
-        .expect("static success observation failure kind must be valid");
+        .expect("static success observation failure kind must be valid"); // safety: static valid sentinel
     Some(ModelVisibleToolObservation {
         schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
