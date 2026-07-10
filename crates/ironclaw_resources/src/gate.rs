@@ -40,6 +40,31 @@ impl BudgetGateId {
     pub fn as_uuid(&self) -> uuid::Uuid {
         self.0
     }
+
+    /// Canonical gate-ref prefix for budget gates (`gate:budget-<uuid>`).
+    ///
+    /// This is the single source of truth for the budget gate-ref convention.
+    /// Producers ([`Self::to_gate_ref`]) and consumers ([`Self::from_gate_ref`])
+    /// must route through these methods rather than re-deriving the prefix, so
+    /// gate routing — a security boundary — cannot drift between crates.
+    pub const GATE_REF_PREFIX: &'static str = "gate:budget-";
+
+    /// Render the canonical `gate:budget-<uuid>` ref for this gate.
+    pub fn to_gate_ref(&self) -> String {
+        format!("{}{}", Self::GATE_REF_PREFIX, self.0)
+    }
+
+    /// Parse a budget gate id from a canonical `gate:budget-<uuid>` ref.
+    /// Returns `None` for any other gate-ref shape.
+    pub fn from_gate_ref(gate_ref: &str) -> Option<Self> {
+        let raw = gate_ref.strip_prefix(Self::GATE_REF_PREFIX)?;
+        uuid::Uuid::parse_str(raw).ok().map(Self)
+    }
+
+    /// True when `gate_ref` is a canonical budget gate ref.
+    pub fn is_budget_gate_ref(gate_ref: &str) -> bool {
+        Self::from_gate_ref(gate_ref).is_some()
+    }
 }
 
 impl std::fmt::Display for BudgetGateId {

@@ -78,6 +78,41 @@ test("gateFromEvent defaults missing always-allow affordance to false", () => {
   );
 });
 
+test("gateFromEvent preserves live resource gate metadata", () => {
+  const { gateFromEvent } = loadGates();
+
+  assert.deepEqual(
+    plain(gateFromEvent("gate", {
+      turn_run_id: "run-1",
+      gate_kind: "resource",
+      gate_ref: "gate:budget-1",
+      headline: "Budget approval required",
+      body: "Approve additional model budget to continue this run.",
+      details: [
+        { label: "Current usage", value: "$4.4525" },
+        { label: "Current limit", value: "$5" },
+        { label: "Estimated for this step", value: "$0.0985" },
+      ],
+    })),
+    {
+      kind: "gate",
+      gateKind: "resource",
+      runId: "run-1",
+      gateRef: "gate:budget-1",
+      invocationId: null,
+      headline: "Budget approval required",
+      body: "Approve additional model budget to continue this run.",
+      description: "Approve additional model budget to continue this run.",
+      approvalDetails: [
+        { label: "Current usage", value: "$4.4525" },
+        { label: "Current limit", value: "$5" },
+        { label: "Estimated for this step", value: "$0.0985" },
+      ],
+      allowAlways: false,
+    },
+  );
+});
+
 test("gateFromEvent keeps a readable approval description when context lookup is missing", () => {
   const { gateFromEvent } = loadGates();
 

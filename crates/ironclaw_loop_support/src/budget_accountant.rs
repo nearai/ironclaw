@@ -661,7 +661,7 @@ fn internal_summary_error(reason: String) -> LoopModelGatewayError {
 }
 
 fn budget_gate_ref(gate_id: BudgetGateId) -> Option<LoopGateRef> {
-    LoopGateRef::new(format!("gate:budget-{gate_id}")).ok()
+    LoopGateRef::new(gate_id.to_gate_ref()).ok()
 }
 
 #[cfg(test)]

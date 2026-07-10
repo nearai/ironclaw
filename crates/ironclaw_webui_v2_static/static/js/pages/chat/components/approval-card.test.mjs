@@ -137,6 +137,43 @@ test("ApprovalCard ignores long parameters when approval details are rendered", 
   assert.match(text, /echo ok/);
 });
 
+test("ApprovalCard uses resource gate headline as title", () => {
+  const { rendered } = renderApprovalCard({
+    gate: {
+      gateKind: "resource",
+      headline: "Budget approval required",
+      description: "Approve additional model budget to continue this run.",
+      allowAlways: false,
+      approvalDetails: [],
+    },
+  });
+  const text = collectStrings(rendered).join("\n");
+
+  assert.match(text, /Budget approval required/);
+  assert.doesNotMatch(text, /Approval required/);
+});
+
+test("ApprovalCard renders resource gate details without a scroll box", () => {
+  const { rendered } = renderApprovalCard({
+    gate: {
+      gateKind: "resource",
+      headline: "Budget approval required",
+      description: "Approve additional model budget to continue this run.",
+      allowAlways: false,
+      approvalDetails: [
+        { label: "Current usage", value: "$4.4525" },
+        { label: "Current limit", value: "$5" },
+        { label: "Limit after approval", value: "$6" },
+        { label: "Limit increase", value: "$1" },
+      ],
+    },
+  });
+  const text = collectStrings(rendered).join("\n");
+
+  assert.match(text, /max-h-none overflow-visible/);
+  assert.doesNotMatch(text, /max-h-36 overflow-y-auto/);
+});
+
 test("ApprovalCard resets expanded command details when the gate changes", () => {
   const gate = defaultApprovalGate();
   const { rendered, effects, expandedPayloadUpdates } = renderApprovalCard({

@@ -34,6 +34,7 @@ use ironclaw_turns::{
     TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
 };
 
+mod budget_gate_details;
 mod display_preview;
 mod live_progress;
 mod runtime_replay;
@@ -78,6 +79,8 @@ pub(crate) struct RebornProjectionServices {
     live_updates: Arc<InMemoryProjectionUpdateSource>,
     turn_events: TurnEventBridge,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+    budget_gates: Option<Arc<dyn ironclaw_resources::BudgetGateStore>>,
+    budget_governor: Option<Arc<dyn ironclaw_resources::ResourceGovernor>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
@@ -93,6 +96,8 @@ impl RebornProjectionServices {
             turn_event_source,
             turn_coordinator,
             self.approval_requests.clone(),
+            self.budget_gates.clone(),
+            self.budget_governor.clone(),
         );
         self
     }
@@ -105,6 +110,24 @@ impl RebornProjectionServices {
         self.turn_events = self
             .turn_events
             .with_approval_requests(Some(approval_requests));
+        self
+    }
+
+    pub(crate) fn with_budget_gates(
+        mut self,
+        budget_gates: Arc<dyn ironclaw_resources::BudgetGateStore>,
+    ) -> Self {
+        self.budget_gates = Some(budget_gates.clone());
+        self.turn_events = self.turn_events.with_budget_gates(Some(budget_gates));
+        self
+    }
+
+    pub(crate) fn with_budget_governor(
+        mut self,
+        budget_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
+    ) -> Self {
+        self.budget_governor = Some(budget_governor.clone());
+        self.turn_events = self.turn_events.with_budget_governor(Some(budget_governor));
         self
     }
 
@@ -200,6 +223,8 @@ pub(crate) fn build_reborn_projection_services(
         live_updates,
         turn_events: TurnEventBridge::default(),
         approval_requests: None,
+        budget_gates: None,
+        budget_governor: None,
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         webui_reply_target_binding_ref,
         auth_challenges: None,

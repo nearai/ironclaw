@@ -845,7 +845,14 @@ impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
 fn budget_gate_id_from_gate_ref(
     gate_ref: &LoopGateRef,
 ) -> Result<Option<ironclaw_resources::BudgetGateId>, TurnError> {
-    let Some(value) = gate_ref.as_str().strip_prefix("gate:budget-") else {
+    // A non-budget gate ref is `Ok(None)`; a budget-prefixed ref with an
+    // invalid uuid is an error (not silently skipped), so this consumer needs
+    // finer semantics than `BudgetGateId::from_gate_ref` and parses the uuid
+    // itself after matching the canonical prefix.
+    let Some(value) = gate_ref
+        .as_str()
+        .strip_prefix(ironclaw_resources::BudgetGateId::GATE_REF_PREFIX)
+    else {
         return Ok(None);
     };
     let id = uuid::Uuid::parse_str(value).map_err(|error| TurnError::InvalidRequest {
@@ -2837,7 +2844,9 @@ pub async fn build_reborn_runtime(
     if let Some(local_runtime) = local_runtime {
         projection_services = projection_services
             .with_approval_requests(Arc::clone(&local_runtime.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>);
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>)
+            .with_budget_gates(Arc::clone(&local_runtime.budget_gate_store))
+            .with_budget_governor(Arc::clone(&local_runtime.resource_governor));
     }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());
@@ -9301,17 +9310,26 @@ output_schema_ref = "schemas/write.output.json"
             )
             .await
             .expect("approval gate event stream");
-        assert!(
-            streamed.events.iter().any(|event| {
-                matches!(
-                    event.payload(),
-                    ProductOutboundPayload::GatePrompt(prompt)
-                        if prompt.turn_run_id == run_id
-                            && prompt.gate_ref == gate_ref.as_str()
-                            && prompt.headline == "Approval required"
-                )
-            }),
-            "blocked approval run should be visible as a gate prompt on the product event stream"
+        let prompt = streamed
+            .events
+            .iter()
+            .find_map(|event| match event.payload() {
+                ProductOutboundPayload::GatePrompt(prompt)
+                    if prompt.turn_run_id == run_id && prompt.gate_ref == gate_ref.as_str() =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+            .expect("blocked approval run should be visible as a gate prompt on the product event stream");
+        assert_eq!(prompt.headline, "Approval required");
+        assert_eq!(
+            prompt
+                .approval_context
+                .as_ref()
+                .expect("approval gate prompt should include tool context")
+                .tool_name,
+            "demo.echo"
         );
 
         bundle

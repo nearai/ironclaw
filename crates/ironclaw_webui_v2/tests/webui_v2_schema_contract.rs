@@ -1,5 +1,6 @@
 use chrono::Utc;
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, ThreadId};
+use ironclaw_product_adapters::ProductGateKind;
 use ironclaw_product_workflow::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
@@ -84,11 +85,13 @@ fn final_reply() -> FinalReplyView {
 fn gate_prompt() -> GatePromptView {
     GatePromptView {
         turn_run_id: run_id(),
+        gate_kind: ProductGateKind::Approval,
         gate_ref: "gate:approval".to_string(),
         invocation_id: None,
         headline: "Approve action".to_string(),
         body: "Review the requested action.".to_string(),
         allow_always: true,
+        details: Vec::new(),
         approval_context: None,
     }
 }

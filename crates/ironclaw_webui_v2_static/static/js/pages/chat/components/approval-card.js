@@ -64,7 +64,19 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
       ? headline
       : t("approval.title");
   const longPayload = approvalPayloadIsLong(parameters, approvalDetails);
-  const payloadMaxHeight = expandedPayload ? "max-h-72" : "max-h-36";
+  const compactDetails = gateKind === GATE_KIND.RESOURCE;
+  const payloadMaxHeight = compactDetails
+    ? "max-h-none"
+    : expandedPayload
+      ? "max-h-72"
+      : "max-h-36";
+  const payloadOverflow = compactDetails ? "overflow-visible" : "overflow-y-auto";
+  const detailRowClass = compactDetails
+    ? "grid gap-1 border-b border-iron-800/70 px-2.5 py-1.5 last:border-b-0 sm:grid-cols-[8.5rem_1fr]"
+    : "grid gap-1 border-b border-iron-800/70 px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]";
+  const detailValueClass = compactDetails
+    ? "min-w-0 whitespace-pre-wrap break-words font-mono text-iron-100"
+    : "min-w-0 whitespace-pre-wrap break-all font-mono text-iron-100";
 
   const onPrimary = React.useCallback(() => {
     if (always && allowAlways) {
@@ -98,12 +110,12 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
       html`<div className="mb-3 break-words text-sm text-iron-200">${description}</div>`}
       ${approvalDetails.length > 0
         ? html`
-            <dl className=${`mb-2 ${payloadMaxHeight} overflow-y-auto rounded-md border border-iron-800 bg-iron-950/80 text-xs`}>
+            <dl className=${`mb-2 ${payloadMaxHeight} ${payloadOverflow} rounded-md border border-iron-800 bg-iron-950/80 text-xs`}>
               ${approvalDetails.map(
                 (detail) => html`
-                  <div className="grid gap-1 border-b border-iron-800/70 px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]">
+                  <div className=${detailRowClass}>
                     <dt className="font-medium text-iron-400">${detail.label}</dt>
-                    <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-iron-100">${approvalPayloadPreview(detail.value, expandedPayload)}</dd>
+                    <dd className=${detailValueClass}>${approvalPayloadPreview(detail.value, expandedPayload)}</dd>
                   </div>
                 `,
               )}
