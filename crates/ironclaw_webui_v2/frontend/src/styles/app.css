@@ -366,9 +366,16 @@ body {
   color: var(--v2-text);
 }
 
-/* Font inheritance for form elements */
-button, input, select, textarea {
-  font: inherit;
+/* Font inheritance for form elements.
+   IMPORTANT: layered as `base` — unlayered author CSS outranks every
+   Tailwind layer (v4 emits utilities inside @layer utilities), so an
+   unlayered `font: inherit` here silently vetoed the design-system
+   font-size/weight utilities on <button>/<input> (buttons rendered at
+   the inherited 15px/400 instead of their tokenized control scale). */
+@layer base {
+  button, input, select, textarea {
+    font: inherit;
+  }
 }
 
 button {
