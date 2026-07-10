@@ -3618,6 +3618,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn(".product_ref == $product_ref", prepare_body)
         self.assertIn("Build fallback Reborn WebUI v2 binary once", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
+        self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
 
         reborn_e2e_path = (
             Path(__file__).resolve().parents[2] / ".github/workflows/reborn-e2e.yml"

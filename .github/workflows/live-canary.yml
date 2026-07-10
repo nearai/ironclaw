@@ -604,7 +604,7 @@ jobs:
           set -euo pipefail
           artifact_name="reborn-webui-v2-binary-${TARGET_REF}"
           workflow_id="$(gh api "repos/${REPO}/actions/workflows/reborn-e2e.yml" --jq '.id')"
-          mkdir -p .live-qa-binary
+          mkdir -p artifacts/prepared-reborn-webui-v2-binary
           echo "found=0" >> "${GITHUB_OUTPUT}"
 
           for attempt in $(seq 1 20); do
@@ -644,13 +644,13 @@ jobs:
             fi
 
             gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/reborn-webui-v2-binary.zip"
-            unzip -q "${RUNNER_TEMP}/reborn-webui-v2-binary.zip" -d .live-qa-binary
-            (cd .live-qa-binary && sha256sum --check ironclaw-reborn.tar.gz.sha256)
+            unzip -q "${RUNNER_TEMP}/reborn-webui-v2-binary.zip" -d artifacts/prepared-reborn-webui-v2-binary
+            (cd artifacts/prepared-reborn-webui-v2-binary && sha256sum --check ironclaw-reborn.tar.gz.sha256)
             jq -e \
               --arg product_ref "${TARGET_REF}" \
               --arg features "webui-v2-beta,slack-v2-host-beta" \
               '.format_version == 1 and .product_ref == $product_ref and .features == $features' \
-              .live-qa-binary/manifest.json > /dev/null
+              artifacts/prepared-reborn-webui-v2-binary/manifest.json > /dev/null
             echo "found=1" >> "${GITHUB_OUTPUT}"
             echo "source=reborn-e2e" >> "${GITHUB_OUTPUT}"
             echo "Using tested Reborn E2E binary from run ${run_id}."
@@ -698,25 +698,25 @@ jobs:
           TARGET_REF: ${{ steps.target.outputs.checkout_ref }}
         run: |
           set -euo pipefail
-          rm -rf .live-qa-binary
-          mkdir -p .live-qa-binary
-          tar -C target/debug -czf .live-qa-binary/ironclaw-reborn.tar.gz ironclaw-reborn
+          rm -rf artifacts/prepared-reborn-webui-v2-binary
+          mkdir -p artifacts/prepared-reborn-webui-v2-binary
+          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw-reborn
           (
-            cd .live-qa-binary
+            cd artifacts/prepared-reborn-webui-v2-binary
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
           )
           jq -n \
             --arg product_ref "${TARGET_REF}" \
             --arg features "webui-v2-beta,slack-v2-host-beta" \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
-            > .live-qa-binary/manifest.json
+            > artifacts/prepared-reborn-webui-v2-binary/manifest.json
           echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
 
       - name: Upload prepared Reborn WebUI v2 binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}
-          path: .live-qa-binary/
+          path: artifacts/prepared-reborn-webui-v2-binary/
           if-no-files-found: error
           retention-days: 1
 
