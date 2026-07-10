@@ -173,6 +173,7 @@ mod tests {
         let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
             .expect("policy parses");
         let empty_mounts = MountView::default();
+        let empty_provider_trust = std::collections::BTreeMap::new();
 
         local_dev_visible_capability_request(
             run_context,
@@ -184,6 +185,7 @@ mod tests {
                 system_extensions_lifecycle_mounts: &empty_mounts,
                 policy: &policy,
                 extension_surface: &LocalDevExtensionSurface::default(),
+                additional_provider_trust: &empty_provider_trust,
             },
         )
         .expect("visible request")

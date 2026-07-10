@@ -1151,6 +1151,22 @@ pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
     local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
 }
 
+/// Test-support forwarder (harness-port-seam P1 seam) for
+/// `create_refreshing_local_dev_capability_port`
+/// (`refreshing_capability_port.rs:75`), production's sole capability-port
+/// factory. Bridges the private `local_dev` module to `test_support`; mirrors
+/// the `outbound_delivery` forwarder above. For tests only -- gated behind
+/// `test-support`, ships zero bytes in production builds.
+#[cfg(feature = "test-support")]
+pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
+    parts: crate::test_support::RefreshingLocalDevCapabilityPortTestParts,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::create_refreshing_local_dev_capability_port_for_test(parts).await
+}
+
 #[async_trait::async_trait]
 impl ApprovalGateEvidenceStore for LocalDevApprovalGateEvidence {
     async fn pending_approval_gate(

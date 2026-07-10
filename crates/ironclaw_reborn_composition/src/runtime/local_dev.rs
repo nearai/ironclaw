@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex as StdMutex},
 };
 
@@ -81,6 +81,8 @@ pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use project_create::wrap_project_create_capability_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use refreshing_capability_port::create_refreshing_local_dev_capability_port_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
@@ -248,6 +250,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
             external_tool_catalog: Arc::clone(&self.external_tool_catalog),
+            // Test-support-only knobs (see each field's doc-comment on
+            // `RefreshingLocalDevCapabilityPortConfig`): always empty here.
+            capability_execution_mount_overrides: HashMap::new(),
+            additional_provider_trust: BTreeMap::new(),
+            capability_id_filter: HashSet::new(),
         })
         .await
     }
@@ -979,6 +986,10 @@ struct LocalDevVisibleCapabilityInputs<'a> {
     system_extensions_lifecycle_mounts: &'a MountView,
     policy: &'a LocalDevCapabilityPolicy,
     extension_surface: &'a LocalDevExtensionSurface,
+    /// Test-support-only extra provider-trust entries (empty in production,
+    /// see `RefreshingLocalDevCapabilityPortConfig::additional_provider_trust`'s
+    /// doc-comment).
+    additional_provider_trust: &'a BTreeMap<ExtensionId, TrustDecision>,
 }
 
 fn local_dev_visible_capability_request(
@@ -1040,6 +1051,7 @@ fn local_dev_visible_capability_request(
         },
     );
     provider_trust.extend(inputs.extension_surface.provider_trust(&context.user_id));
+    provider_trust.extend(inputs.additional_provider_trust.clone());
 
     Ok(HostVisibleCapabilityRequest::new(
         context,
