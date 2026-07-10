@@ -35,7 +35,7 @@ use crate::{
         validate_refresh_target, validate_selection_flow,
     },
     flow::credential_status_for_completed_flow,
-    flow_matches_turn_gate_query,
+    flow_matches_durable_owner, flow_matches_turn_gate_query,
     interaction::PendingSecretInteraction,
     provider::validate_provider_callback_request,
     scope_matches,
@@ -142,6 +142,19 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
             .flows
             .values()
             .find(|flow| flow_matches_turn_gate_query(flow, &query))
+            .cloned())
+    }
+
+    async fn flow_for_owner_by_id(
+        &self,
+        owner_scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let state = self.lock_state();
+        Ok(state
+            .flows
+            .get(&flow_id)
+            .filter(|flow| flow_matches_durable_owner(flow, owner_scope))
             .cloned())
     }
 

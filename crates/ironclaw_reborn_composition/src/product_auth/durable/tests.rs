@@ -1318,6 +1318,26 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
         Some(submitted.account_id),
         "manual-token completion must remain visible to the auth read model"
     );
+
+    let mut other_thread_scope = scope.clone();
+    other_thread_scope.resource.thread_id = Some(ThreadId::new("thread-auth-flow-2").unwrap());
+    let reused = service
+        .flow_for_owner_by_id(&other_thread_scope, flow.id)
+        .await
+        .unwrap()
+        .expect("same owner must find an opaque flow id across threads");
+    assert_eq!(reused.id, flow.id);
+
+    let mut foreign_owner_scope = other_thread_scope;
+    foreign_owner_scope.resource.user_id = UserId::new("user-foreign").unwrap();
+    assert!(
+        service
+            .flow_for_owner_by_id(&foreign_owner_scope, flow.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "cross-thread lookup must not cross the durable user owner boundary"
+    );
 }
 
 #[tokio::test]

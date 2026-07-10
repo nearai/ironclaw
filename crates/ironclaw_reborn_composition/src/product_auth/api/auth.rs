@@ -2820,6 +2820,14 @@ mod tests {
                 Err(AuthProductError::BackendUnavailable)
             }
 
+            async fn flow_for_owner_by_id(
+                &self,
+                _owner_scope: &ironclaw_auth::AuthProductScope,
+                _flow_id: ironclaw_auth::AuthFlowId,
+            ) -> Result<Option<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+                unreachable!("flow-source-error test does not call flow_for_owner_by_id")
+            }
+
             async fn flows_for_owner(
                 &self,
                 _owner: ironclaw_auth::AuthFlowOwnerScope,

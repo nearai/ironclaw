@@ -4797,11 +4797,10 @@ where
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
-        // No blocked-auth fan-out here yet: this builder's turn state is the
-        // generic filesystem store, not the local-dev alias the snapshot
-        // source is implemented for. Completions resume only their own run,
-        // exactly this builder's prior behavior.
-        None,
+        Some(Arc::clone(&turn_state)
+            as Arc<
+                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+            >),
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),

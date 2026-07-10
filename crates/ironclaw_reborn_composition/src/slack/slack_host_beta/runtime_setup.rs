@@ -34,11 +34,13 @@ use crate::slack::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
     SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
+#[cfg(test)]
+use crate::slack::slack_personal_binding::RebornUserIdentityBinding;
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackConnectionEpoch,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
-    SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, SlackConnectionEpoch, SlackPersonalBindingInstallation,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
+    SlackPersonalUserBindingOutcome, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService, SlackUserBindingLifecycleStore,
 };
 use crate::slack::slack_serve::{
@@ -813,10 +815,10 @@ impl SlackPersonalUserBinder for DynamicSlackPersonalUserBinder {
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
         epoch: SlackConnectionEpoch,
-    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+    ) -> Result<SlackPersonalUserBindingOutcome, SlackPersonalUserBindingError> {
         self.binding_service()
             .await?
-            .bind_personal_user_for_epoch(principal, request, epoch)
+            .bind_personal_user_for_epoch_with_rollback(principal, request, epoch)
             .await
     }
 }
@@ -1237,8 +1239,16 @@ mod tests {
             &self,
             binding: RebornUserIdentityBinding,
             _epoch: SlackConnectionEpoch,
-        ) -> Result<(), RebornUserIdentityBindingError> {
-            self.bind_user_identity(binding).await
+        ) -> Result<
+            crate::slack::slack_personal_binding::SlackUserIdentityBindingRollback,
+            RebornUserIdentityBindingError,
+        > {
+            self.bind_user_identity(binding).await?;
+            Ok(
+                crate::slack::slack_personal_binding::SlackUserIdentityBindingRollback::new(
+                    async {},
+                ),
+            )
         }
     }
 

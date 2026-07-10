@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem};
+use ironclaw_host_api::ResourceScope;
 
 use super::domain::{
     PreparedCallbackFlow, prepare_callback_flow, update_account_from_exchange,
@@ -17,7 +18,8 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
     ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
-    TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_turn_gate_query,
+    TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_durable_owner,
+    flow_matches_turn_gate_query,
 };
 
 struct CallbackAccountWrite {
@@ -456,6 +458,29 @@ where
             .await?
             .into_iter()
             .find(|flow| flow_matches_turn_gate_query(flow, &query)))
+    }
+
+    async fn flow_for_owner_by_id(
+        &self,
+        owner_scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let resource = ResourceScope {
+            tenant_id: owner_scope.resource.tenant_id.clone(),
+            user_id: owner_scope.resource.user_id.clone(),
+            agent_id: owner_scope.resource.agent_id.clone(),
+            project_id: owner_scope.resource.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        Ok(self
+            .flow_records_for_resource_filtered(&resource, |flow| {
+                flow.id == flow_id && flow_matches_durable_owner(flow, owner_scope)
+            })
+            .await?
+            .into_iter()
+            .next())
     }
 
     async fn flows_for_owner(

@@ -302,7 +302,7 @@ impl ProductAuthRouteState {
             .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
     }
 
-    fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
+    pub(crate) fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
         self.pkce_verifiers.remove(&flow_id);
     }
 }

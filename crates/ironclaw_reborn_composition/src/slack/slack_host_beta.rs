@@ -69,9 +69,9 @@ use crate::slack::slack_outbound_targets::{
     SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingStore, SlackConnectionEpoch, SlackPersonalBindingInstallation,
-    SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore, SlackConnectionEpoch,
+    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
+    SlackPersonalUserBindingError, SlackPersonalUserBindingOutcome,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
     SlackUserBindingLifecycleStore,
 };
@@ -633,14 +633,14 @@ impl SlackPersonalUserBinder for ProvisioningSlackPersonalUserBinder {
         principal: SlackPersonalBindingPrincipal,
         request: SlackPersonalUserBindingRequest,
         epoch: SlackConnectionEpoch,
-    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+    ) -> Result<SlackPersonalUserBindingOutcome, SlackPersonalUserBindingError> {
         let slack_user_id = request.slack_user_id.clone();
-        let binding = self
+        let outcome = self
             .binding_service
             .bind_personal_user_for_epoch(principal, request, epoch)
             .await?;
-        self.spawn_dm_provisioning(binding.user_id.clone(), slack_user_id, epoch);
-        Ok(binding)
+        self.spawn_dm_provisioning(outcome.binding.user_id.clone(), slack_user_id, epoch);
+        Ok(outcome)
     }
 }
 
