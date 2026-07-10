@@ -66,7 +66,7 @@ Not generic yet — the work:
 | Crate | Change |
 | --- | --- |
 | `ironclaw_host_api` | Add `ToolAdapter`, `ToolCall`/`ToolResult`/`ToolPorts`, `RestrictedEgress` trait, auth recipe types, ingress verification recipe types. Base vocabulary — no implementations |
-| `ironclaw_extensions` | Manifest v3 (inline `[channel]`, `[auth.*]`, `[dynamic_tools]`), v2 normalization, `ResolvedExtensionManifest` + persisted resolved record + `manifest_digest`, widening diff |
+| `ironclaw_extensions` | Manifest v3 (inline `[channel]`, `[auth.*]`, `[mcp_tools]`), v2 normalization, `ResolvedExtensionManifest` + persisted resolved record + `manifest_digest`, widening diff |
 | `ironclaw_product_adapters` | `ChannelAdapter` (replaces `ProductAdapter`; metadata getters deleted), normalized inbound/outbound DTOs, exported conformance suite |
 | `ironclaw_auth` | `AuthEngine` (oauth2_code + api_key), auth account state machine, recipe execution, flow/grant stores kept |
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
@@ -91,19 +91,27 @@ engine, or the router.
 
 **Changes** (`crates/ironclaw_extensions`, `crates/ironclaw_host_api`):
 
-- Add v3 schema: top-level `[[tools]]`, `[dynamic_tools]`, `[channel]`
-  (ingress + verification + config + egress + presentation), `[auth.<provider>]`
-  recipes. Exact shapes: `overview.md` §3.
+- Add v3 schema: top-level `[[tools]]`, `[mcp_tools]`, `[channel]`
+  (ingress + verification + config + egress + presentation +
+  `conversation_model`), `[auth.<vendor>]` recipes. Exact shapes:
+  `overview.md` §3.
+- **Vendor rename:** rename `RuntimeCredentialAccountProviderId` → `VendorId`
+  in `ironclaw_host_api` (temporary deprecation alias until callers migrate,
+  deleted by P7). The v3 manifest field is `vendor`; v2's `provider` maps to it
+  in normalization. Stored identifier strings (`google`, `slack`, …) are
+  unchanged — no data migration.
 - Recipe types live in `ironclaw_host_api` (both the manifest parser and the
   auth engine/ingress verifier consume them without a dependency cycle).
 - v2 manifests keep parsing through the existing reader and normalize into the
   same resolved model (auth surfaces synthesized from tool credentials, as
-  today). v3 requires explicit `[auth.*]` for every referenced provider.
+  today). v3 requires explicit `[auth.*]` for every referenced vendor.
 - Validation: JSON pointers RFC 6901, depth ≤ 8, no wildcards; all recipe
   endpoints `https`; `extra_authorize_params` may not contain reserved keys
   (`state`, `redirect_uri`, `code_challenge*`, `client_id`, `response_type`,
-  the scope param); `[channel].route_suffix` one URL-safe segment; egress
-  hosts non-wildcard; dynamic-tools requires `namespace` + `max_tools`;
+  the scope param); `[channel].route_suffix` one URL-safe segment;
+  `[channel].conversation_model` required (`continuous` | `isolated`); egress
+  hosts non-wildcard; `[mcp_tools]` requires `runtime.kind = "mcp"`, is
+  mutually exclusive with `[[tools]]`, and requires `namespace` + `max_tools`;
   unknown fields fail closed (`deny_unknown_fields`).
 - Resolved record: persist `{ manifest_source, manifest_digest, resolved }` in
   the installation store; all production projection reads the record. Keep the
@@ -114,9 +122,11 @@ engine, or the router.
   approval required through the existing trust/approval flow.
 
 **Tests first:** `manifest_v3_contract.rs` in `ironclaw_extensions/tests` —
-v3 Slack-shaped fixture resolves to the same surfaces as its v2 equivalent;
-recipe validation failures (reserved param, bad pointer, http endpoint,
-wildcard egress); v2 normalization parity; record round-trip and
+v3 Slack-shaped fixture resolves to the same surfaces as its v2 equivalent
+(including `provider` → `vendor` mapping); recipe validation failures
+(reserved param, bad pointer, http endpoint, wildcard egress); missing
+`conversation_model` fails; `[mcp_tools]` with static tools or a non-mcp
+runtime fails; v2 normalization parity; record round-trip and
 restart-without-source on both DBs; widening diff cases (equal / narrow /
 widen). Extend `manifest_v2_contract.rs` rather than duplicating where a case
 already exists.
@@ -137,10 +147,13 @@ already exists.
     ports). Binding check: declared↔bound exactly (overview §4.0).
   - `loaders/{native,wasm,mcp}.rs` — native resolves `runtime.service` in the
     injected factory registry; wasm wraps the existing WASM execution lane
-    (`ironclaw_host_runtime`) as a `WasmToolAdapter`; mcp synthesizes a
-    `ToolAdapter` over the existing hosted-MCP client with `discover_tools`
-    running `tools/list` and the host validating namespace/count/schema-size
-    ceilings before publishing tool surfaces.
+    (`ironclaw_host_runtime`) as a `WasmToolAdapter`; the **mcp loader owns
+    discovery**: it runs `tools/list` through the existing hosted-MCP client,
+    validates results against the `[mcp_tools]` ceiling
+    (namespace/count/schema-size/effects), publishes the discovered tool
+    surfaces atomically, and synthesizes a `ToolAdapter` that proxies
+    invocations. `ToolAdapter` itself has one method (`invoke`); discovery is
+    never part of the extension ABI.
   - `active.rs` — immutable `ActiveSnapshot` (`Arc` swap), resolver views.
     Resolver ports are defined in consumer crates and implemented here:
     `ToolResolver` (dispatcher), `ChannelResolver` (workflow/router),
@@ -190,7 +203,7 @@ acme fixture install → activate → resolve → remove on both DBs.
   `ironclaw_product_adapter_registry` goes here or in P4, whichever cuts its
   last caller).
 - Missing-credential path raises the generic auth gate keyed by the tool's
-  declared provider; resume after the engine completes.
+  declared vendor; resume after the engine completes.
 
 **Tests first:** dispatcher contract tests updated to drive resolution through
 a scripted resolver (unknown capability fails before adapter work; policy
@@ -213,19 +226,20 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   consumes a callback; TTL expiry → `disconnected` with reason.
 - Routes: keep the mounted paths (`.../product-auth/start`, `status`,
   `revoke`, and `/api/reborn/product-auth/oauth/{provider}/callback`) so
-  vendor-registered redirect URLs keep working; `{provider}` is a path
-  parameter resolved via `AuthRecipeResolver` — never a match arm.
-- Shared providers: unify recipes at activation (identical except
+  vendor-registered redirect URLs keep working; the `{provider}` path
+  parameter carries the vendor id and is resolved via `AuthRecipeResolver` —
+  never a match arm.
+- Shared vendors: unify recipes at activation (identical except
   `scopes`/`display_name`, else conflict); scope union and incremental
-  re-consent keep NEA-25 behavior; grants are provider-scoped and survive
-  removal of one consumer while another active extension shares the provider.
+  re-consent keep NEA-25 behavior; grants are vendor-scoped and survive
+  removal of one consumer while another active extension shares the vendor.
 - Recipe reference (fields beyond `overview.md` §3): `scope_param` (default
   `scope`), `scope_join` (default space), `exchange_auth = "post_body"|"basic"`,
   `token_response.{access_token,refresh_token,expires_in,scope}` pointers with
   `missing = "fallback_to_requested"` option, `identity` from token response or
   follow-up `endpoint`, `refresh.rotates_refresh_token`, `revoke.{endpoint,
   token_param}`, `client_credentials.{client_id_handle,client_secret_handle}`
-  (deployment-level secrets via the existing secret store). Provider response
+  (deployment-level secrets via the existing secret store). Vendor response
   bodies are size-capped and redacted from errors/logs.
 - Write the recipes: Slack and Google (`oauth2_code`), Notion (`oauth2_code`;
   if the hosted-MCP path requires dynamic client registration, implement
@@ -239,7 +253,7 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   engine.
 
 **Tests first:** one `auth_engine_contract.rs` suite against a scripted
-provider HTTP server, table-driven over recipes: authorize-URL construction
+vendor HTTP server, table-driven over recipes: authorize-URL construction
 (reserved params host-built; recipe cannot override), state/PKCE/replay/TTL,
 exchange with `post_body` and `basic`, pointer extraction incl.
 `fallback_to_requested`, refresh rotation both flags, revoke idempotency,
@@ -271,6 +285,11 @@ oauth-connect integration test rather than adding a parallel one).
   - `Ignore` → 2xx after the same durable no-op commit.
 - `reply_context` from the message is stored host-side with the conversation
   source binding and handed back in `OutboundEnvelope`.
+- Conversation binding consumes the channel's declared `conversation_model`:
+  `continuous` channels bind one IronClaw conversation per external
+  conversation ref (today's Slack/Telegram behavior, now declared instead of
+  assumed); the host WebUI's internal channel shares the same enum
+  (`isolated`), so the workflow carries no per-channel conversation logic.
 - **Slack:** `SlackChannelAdapter::inbound` absorbs envelope parsing, URL
   verification challenge, ignored-event rules, and normalization from
   `slack_serve.rs` / `slack_serve/installation.rs` / the v2 adapter. Signature
@@ -385,7 +404,7 @@ Small, versioned, idempotent, in `ironclaw_reborn_migration`, tested on both
 DBs with old-wire fixtures. Reuse storage instead of migrating wherever
 possible.
 
-1. **OAuth grants/accounts:** storage reused as-is (provider ids unchanged) —
+1. **OAuth grants/accounts:** storage reused as-is (vendor id strings unchanged) —
    no data migration; rows gain the standard state column with a backfill
    mapping (`connected` for live grants).
 2. **Legacy raw-TOML installed records:** compiled once through the v2 reader
@@ -403,7 +422,11 @@ possible.
 7. **First-party manifests:** rewrite all 11 packages v2 → v3 in one PR, with
    a projection-equality test (derived surfaces, capability ids, scopes,
    credentials identical before/after) — plus the new explicit `[auth.*]` and
-   `[channel]` sections. The v2 reader remains for third-party/local packages.
+   `[channel]` sections. Exception: the two hosted-MCP packages
+   (`notion-mcp`, `nearai-mcp`) intentionally change shape — their placeholder
+   static capabilities become `[mcp_tools]` discovery; their parity assertion
+   is the declared ceiling plus the post-discovery tool set instead of static
+   equality. The v2 reader remains for third-party/local packages.
 
 Each migration: dry-run flag, idempotent second run, malformed-record skip
 with log. Nothing here needs telemetry windows — the installed base is beta;
@@ -421,7 +444,7 @@ carries a removal note in `checklist.md`.
     all run it.
   - Tool adapter conformance in `ironclaw_host_api` test-support (invoke
     respects deadline/ports; dynamic discovery respects ceilings).
-  - The auth engine suite (D) is the auth conformance — providers are rows.
+  - The auth engine suite (D) is the auth conformance — vendors are rows.
 - **Fixture extension** `tests/fixtures/extensions/acme-messenger/` (invented
   vendor): manifest with 1 tool + channel (hmac recipe) + oauth recipe + config
   fields; a tiny native factory registered only in tests. Drives every generic
@@ -431,8 +454,8 @@ carries a removal note in `checklist.md`.
 - **Architecture gates** (`crates/ironclaw_architecture/tests/`):
   - keep `reborn_retired_taxonomy.rs`;
   - add `reborn_extension_specificity.rs`: scans generic `crates/**/src`,
-    WebUI TS, and production TOML for concrete extension ids, provider ids,
-    and vendor hosts **derived from the bundled package inventory** (a future
+    WebUI TS, and production TOML for concrete extension ids, vendor ids,
+    and vendor API hosts **derived from the bundled package inventory** (a future
     `discord` package is caught without editing the scanner). Path-scoped
     allowlist with enforced shrinkage: an entry whose file no longer matches
     fails; a new violating path fails; the list is empty at P7.
@@ -471,7 +494,7 @@ of the two sanctioned compatibility surfaces in section 11).
 ## 14. Out of scope
 
 See `overview.md` §7 for the full exclusion table (fragments, package
-blob store/leases, signing, fencing, provider packages, per-provider auth
+blob store/leases, signing, fencing, shared vendor packages, per-vendor auth
 adapters, trigger/file runtime, evidence tooling, second e2e harness) and the
 named triggers for revisiting each. Reintroducing any of them requires a new
 ADR that cites its trigger.

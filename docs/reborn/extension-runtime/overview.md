@@ -25,23 +25,28 @@ Acceptance is three concrete tests:
    source file changes — a new package and a new extension crate only.
 3. **Testing test.** Each capability has *one* conformance/behavior suite that
    every implementation passes, plus protocol unit tests inside each extension
-   crate. There is no per-provider copy of the OAuth, ingress, or delivery test
+   crate. There is no per-vendor copy of the OAuth, ingress, or delivery test
    suites (no "Gmail OAuth tests" *and* "Slack OAuth tests" — one auth-engine
    suite, table-driven over recipes).
 
 ## 2. Product model
 
-Unchanged from NEA-25; restated so this document stands alone.
+Unchanged from NEA-25 except one rename; restated so this document stands alone.
 
 - **Extension** — the only installable product object. One `ExtensionId`
   (`slack`, `github`, `gmail`) owns every surface in the package.
 - **Capability surfaces** — an extension declares up to three kinds:
   **tool** (model-callable capability), **channel** (message inbound/outbound),
-  **auth** (credential acquisition for a provider). `trigger` and `file` remain
+  **auth** (credential acquisition from a vendor). `trigger` and `file` remain
   reserved enum variants with no runtime behavior.
-- **`ProviderId`** — names an external credential authority. Several extensions
-  may share one (`google` across gmail/drive/calendar/docs/sheets/slides). It is
-  never a product identity.
+- **`VendorId`** — names the external service that issues credentials and
+  accounts (`google`, `slack`, `github`). Several extensions may share one
+  (`google` across gmail/drive/calendar/docs/sheets/slides). It is never a
+  product identity. *(Renamed from `ProviderId`/`RuntimeCredentialAccountProviderId`:
+  "provider" is already taken three ways in this codebase — `LlmProvider`,
+  `EmbeddingProvider`, the `capability_provider` host API — while "vendor"
+  matches the existing vendor-API/vendor-payload vocabulary. Stored id strings
+  are unchanged.)*
 - **Runtime kind** (`first_party` native, `wasm`, `mcp`) — how implementations
   load. Never taxonomy: it cannot affect what surfaces exist or how they render.
 - **Simplification, this version:** at most **one channel surface per
@@ -87,7 +92,7 @@ prompt_doc_ref = "prompts/slack/search_messages.md"
 
 [[tools.credentials]]
 handle = "slack_user_token"
-provider = "slack"
+vendor = "slack"
 scopes = ["search:read"]
 audience = { scheme = "https", host = "slack.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
@@ -106,7 +111,7 @@ prompt_doc_ref = "prompts/slack/send_message.md"
 
 [[tools.credentials]]
 handle = "slack_user_token"
-provider = "slack"
+vendor = "slack"
 scopes = ["chat:write"]
 audience = { scheme = "https", host = "slack.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
@@ -118,6 +123,7 @@ id = "messages"
 display_name = "Slack messages"
 inbound = true
 outbound = true
+conversation_model = "continuous"   # see notes below
 
 [channel.ingress]
 route_suffix = "events"           # served at /webhooks/extensions/slack/events
@@ -158,7 +164,7 @@ max_message_chars = 40000
 
 # ---- auth surface: recipe data, zero extension code ------------------------
 
-[auth.slack]
+[auth.slack]                      # section key = the vendor id
 method = "oauth2_code"
 display_name = "Slack account"
 authorization_endpoint = "https://slack.com/oauth/v2/authorize"
@@ -181,46 +187,80 @@ Notes on the sections:
 
 - **Tools** are declared one per `[[tools]]` entry; the manifest is the tool
   list the model sees. Schemas and prompt docs are package assets. Credential
-  entries reuse the existing v2 injection model (`audience` + `injection`); the
-  host injects secrets during restricted egress, adapters never see bytes.
-- **Dynamic tools** (hosted MCP) replace `[[tools]]` with one declaration:
-
-  ```toml
-  [dynamic_tools]
-  source = "mcp_tools_list"
-  namespace = "notion"            # every discovered tool id must be `notion.*`
-  max_tools = 256
-  default_permission = "ask"
-  ```
-
-  Discovered tools are ordinary tool surfaces validated against this ceiling
-  (namespace, count, bounded schema size). They cannot add credentials, egress
-  hosts, or effects beyond what the manifest declares.
+  entries reuse the existing v2 injection model (`audience` + `injection`;
+  v2's `provider` field is `vendor` in v3); the host injects secrets during
+  restricted egress, adapters never see bytes.
+- **MCP extensions** declare `[mcp_tools]` instead of `[[tools]]` — see §3.1.
 - **`[channel.ingress.verification]`** is a declarative recipe the *host*
   executes: `hmac_sha256` (segment list: literals, named headers, body),
   `shared_secret_header` (constant-time compare), or `none`. Signing secrets
   never reach the adapter. Two recipe kinds cover Slack and Telegram; new kinds
   are added to the host when a protocol genuinely needs one.
+- **`conversation_model`** (required on `[channel]`) classifies how external
+  conversations map to IronClaw conversations:
+  - `continuous` — the protocol supplies conversation identity; each external
+    conversation (a Slack DM/channel, a Telegram chat) is one ongoing IronClaw
+    conversation, bound per external conversation ref. Slack and Telegram are
+    continuous.
+  - `isolated` — the client explicitly creates and switches isolated
+    conversations (the host WebUI's model).
+  Conversation binding and presentation policy consume the declared value, and
+  the host's own WebUI channel uses the same enum internally — the workflow
+  reasons about every channel one way, with no per-channel special cases.
 - **`[channel.config]`** replaces bespoke setup panels. The host renders the
   form, validates, and stores secret fields under the named handles. Vendor-side
   validation of the config happens in the adapter's `activate()` hook.
-- **`[auth.*]`** is one recipe per provider the extension needs. See section 4.3.
+- **`[auth.*]`** is one recipe per vendor the extension needs. See section 4.3.
 
-### 3.1 Shared providers
+### 3.1 MCP extensions and discovered tools
 
-Extensions that use the same `ProviderId` each carry the recipe (gmail, drive,
+Hosted MCP servers (`notion-mcp`, `nearai-mcp`) are the one case where the tool
+list is not known at authoring time: the server's `tools/list` is the source of
+truth. That is MCP-specific, so the manifest names it that way — there is no
+generic "dynamic tools" abstraction with a single implementation.
+
+```toml
+[runtime]
+kind = "mcp"                      # server endpoint/config as today
+
+[mcp_tools]
+namespace = "notion"              # discovered tools publish as `notion.<tool>`
+max_tools = 256
+default_permission = "ask"
+effects = ["network", "use_secret"]   # ceiling for every discovered tool
+```
+
+Rules that keep the boundary easy to reason about:
+
+- `[mcp_tools]` requires `runtime.kind = "mcp"` and is mutually exclusive with
+  `[[tools]]` — an extension's tools are either fully declared or fully
+  discovered, never mixed.
+- Discovery is **host-owned**: the MCP loader calls `tools/list` at activation
+  (and on explicit refresh), validates every result against the manifest
+  ceiling — namespace, count, bounded schema size, effects — and publishes the
+  set atomically. A refresh replaces the whole set or changes nothing.
+- Discovered tools inherit exactly the credentials and egress the manifest
+  declares. They cannot add credential handles, hosts, effects, or ports.
+- **Past activation there is no "dynamic" anywhere in the system.** A
+  discovered tool is an ordinary tool surface: same dispatcher pipeline, same
+  policy and approvals, same UI. The distinction exists only in the manifest
+  and the MCP loader.
+
+### 3.2 Shared vendors
+
+Extensions that use the same `VendorId` each carry the recipe (gmail, drive,
 calendar all embed the `[auth.google]` recipe). At activation the host unifies
-them: recipes for one provider must be **identical except `scopes` and
+them: recipes for one vendor must be **identical except `scopes` and
 `display_name`**, or activation fails with a conflict. Scope ceilings union
 across active extensions exactly as NEA-25 does today; a new extension needing
 more scopes triggers incremental re-consent. Accounts and grants are stored per
-provider and shared — connecting Google once serves gmail and drive.
+vendor and shared — connecting Google once serves gmail and drive.
 
-This replaces any notion of installable/shared "provider packages": ~20
-duplicated TOML lines per Google extension, one 5-line conflict check, zero new
-mechanism.
+This replaces any notion of installable/shared "vendor implementation
+packages": ~20 duplicated TOML lines per Google extension, one 5-line conflict
+check, zero new mechanism.
 
-### 3.2 The resolved contract
+### 3.3 The resolved contract
 
 The manifest is compiled **once** per install/upgrade into a typed
 `ResolvedExtensionManifest` (surfaces, tools, channel descriptor, auth recipes,
@@ -234,8 +274,8 @@ equal or narrower contracts do not.
 ## 4. The adapters
 
 The count follows the product model: one adapter per surface kind that has
-runtime behavior. Auth has none — every provider difference is data — so
-extensions implement at most **two** traits.
+extension-specific runtime behavior. Auth has none — every vendor difference is
+data — so extensions implement at most **two** traits.
 
 ### 4.0 Entrypoint and binding
 
@@ -256,7 +296,7 @@ pub struct ExtensionBindings {
 the installation context and the resolved contract. The binding rule is a
 direct check, not a framework:
 
-- manifest declares `[[tools]]` or `[dynamic_tools]` → `tools` must be `Some`;
+- manifest declares `[[tools]]` or `[mcp_tools]` → `tools` must be `Some`;
 - manifest declares `[channel]` → `channel` must be `Some`;
 - nothing undeclared may be bound; auth never binds (host-managed);
 - violations fail activation with a typed error. No partial extension activates.
@@ -269,26 +309,20 @@ Loaders by runtime kind:
 - **`wasm`** — wraps the existing WASM tool execution lane in a generic
   `WasmToolAdapter`; the entrypoint is synthesized from the manifest. (WASM
   channel adapters are out of scope until a WASM channel exists.)
-- **`mcp`** — synthesizes a `ToolAdapter` whose `discover_tools` runs the
-  hosted-MCP `tools/list` discovery and whose `invoke` proxies the MCP call.
+- **`mcp`** — the loader runs `tools/list` discovery against `[mcp_tools]`
+  (§3.1) and synthesizes a `ToolAdapter` that proxies invocations. The
+  extension ships no code.
 
 Adapters implement behavior only. They never report ids, schemas, effects,
 scopes, routes, credentials, or display metadata — the resolved manifest is the
 sole authority, and adapters receive the declaration they implement.
 
-### 4.1 `ToolAdapter` — one per extension
+### 4.1 `ToolAdapter` — one per extension, one method
 
 ```rust
 #[async_trait]
 pub trait ToolAdapter: Send + Sync {
-    /// Only meaningful for `[dynamic_tools]` extensions; static extensions
-    /// keep the default. The host validates results against the manifest
-    /// ceiling and publishes them as ordinary tool surfaces.
-    async fn discover_tools(&self, ports: &ToolPorts<'_>) -> Result<Vec<DiscoveredTool>, ToolError> {
-        Ok(Vec::new())
-    }
-
-    /// Invoke one declared (or validated-discovered) capability.
+    /// Invoke one declared (or MCP-discovered) capability.
     async fn invoke(&self, call: ToolCall, ports: &ToolPorts<'_>) -> Result<ToolResult, ToolError>;
 }
 ```
@@ -296,9 +330,10 @@ pub trait ToolAdapter: Send + Sync {
 `ToolCall` carries the capability id, schema-validated input, invocation id,
 actor/turn scope, and deadline. `ToolPorts` exposes restricted egress (with
 host-side credential injection), scoped key-value state, and logging — derived
-from the resolved contract, nothing wider. **Discovery is host-owned:** the
-model's tool list comes from the resolved manifest (static) or from validated
-discovery results (dynamic), never from asking the adapter at dispatch time.
+from the resolved contract, nothing wider. **Discovery is never the adapter's
+job:** the model's tool list comes from the resolved manifest (static) or from
+the MCP loader's validated discovery (§3.1). The adapter's entire contract is
+`invoke`.
 
 ### 4.2 `ChannelAdapter` — one per extension
 
@@ -355,13 +390,13 @@ There is deliberately **no auth trait in the extension ABI.** The host's
 `AuthEngine` implements each auth *method* once — `oauth2_code` (with PKCE) and
 `api_key` — and executes manifest recipes:
 
-- **Engine owns (once, for every provider):** start/status/callback/revoke
+- **Engine owns (once, for every vendor):** start/status/callback/revoke
   routes, state/CSRF/PKCE/replay/TTL, reserved OAuth parameters, redirect
   validation, scope intersection against the recipe ceiling, token exchange
   HTTP, secret encryption and storage, identity claim extraction via the
   recipe's JSON-pointer map, grant/account records, the blocked-tool auth gate
   and resume, revocation and grant cleanup on extension removal.
-- **Recipe declares (per provider, data only):** endpoints, scope parameter
+- **Recipe declares (per vendor, data only):** endpoints, scope parameter
   name, extra authorize params, token-exchange auth style, token-response and
   identity field paths (RFC 6901 JSON pointers, closed vocabulary), refresh
   rotation flags, revoke endpoint, client-credential handles — or, for
@@ -375,19 +410,24 @@ There is deliberately **no auth trait in the extension ABI.** The host's
   validation = { method = "GET", url = "https://api.github.com/user", success_status = [200], inject = { handle = "github_token", type = "header", name = "authorization", prefix = "Bearer " } }
   ```
 
-Why no code seam: no third-party code ever executes inside an auth flow (a
-whole class of attack surface — parameter override, state tampering, token
-exfiltration — cannot exist); OAuth is tested once against a scripted provider
-server with recipes as table rows; and a pure-manifest extension gets working
-auth with zero Rust. The current five providers (Slack, Google, Notion, GitHub,
-NEAR AI) are all expressible as recipes. If a future provider genuinely defeats
-the descriptor, add a narrow quirk hook *then* — do not pre-build it.
+Why no auth adapter trait: vendors differ in **parameters**, never in **flow
+behavior**. Every OAuth2 authorization-code flow is the same state machine with
+different endpoints, parameter names, and response field paths; every personal
+access token is store → validate → inject. Recipes carry the parameters; the
+engine implements each behavior once. This also means no third-party code ever
+executes inside an auth flow (a whole class of attack surface — parameter
+override, state tampering, token exfiltration — cannot exist), auth is tested
+once against a scripted vendor server with recipes as table rows, and a
+pure-manifest extension gets working auth with zero Rust. All five current
+vendors (Slack, Google, Notion, GitHub, NEAR AI) are expressible as recipes.
+If a future vendor genuinely defeats the descriptor, add a narrow quirk hook
+*then* — do not pre-build it.
 
 ### 4.4 Ownership summary
 
 | Concern | Host (generic, once) | Extension (adapter/recipe) |
 | --- | --- | --- |
-| Tool discovery | manifest / validated dynamic results | `discover_tools` for MCP only |
+| Tool discovery | manifest (static) / MCP loader (discovered) | — |
 | Tool invocation | authz, approvals, obligations, resources, audit, credential injection | `invoke` behavior |
 | Ingress | route table, body/rate/deadline limits, signature recipes, replay, durable admission, ack | payload parsing → normalized outcome |
 | Outbound | intent envelope, target policy, attempt persistence, retry/dedupe, drain | rendering, vendor API calls, part outcomes |
@@ -404,7 +444,8 @@ the descriptor, add a narrow quirk hook *then* — do not pre-build it.
    widening diff → approval).
 2. Loader produces the entrypoint; `bind` returns adapters; the binding rule is
    checked; global conflicts (duplicate capability id, duplicate route) are
-   checked against the staged next snapshot.
+   checked against the staged next snapshot. MCP loaders run bounded discovery
+   here (§3.1).
 3. `channel.activate()` hook runs (vendor wiring). Failure aborts with nothing
    published.
 4. Enabled state is persisted, then one immutable `Arc<ActiveSnapshot>` swap
@@ -440,8 +481,10 @@ sequenceDiagram
     W->>W: identity/conversation binding, turn submission
 ```
 
-With multiple installations on one route the host verifies each candidate's
-secret (bounded, small constant); hints are unnecessary at current scale.
+Conversation binding honors the channel's declared `conversation_model`
+(continuous channels bind per external conversation ref). With multiple
+installations on one route the host verifies each candidate's secret (bounded,
+small constant); hints are unnecessary at current scale.
 
 ### 5.4 Outbound delivery
 
@@ -457,14 +500,14 @@ anywhere else.
 ### 5.5 Auth connect
 
 UI/gate → `POST start` → engine builds the authorize URL from the recipe (host
-constructs `state`, `redirect_uri`, PKCE, `client_id`, scopes) → provider →
+constructs `state`, `redirect_uri`, PKCE, `client_id`, scopes) → vendor →
 callback on the existing `/api/reborn/product-auth/oauth/{provider}/callback`
-path (`{provider}` is a route parameter resolved against active recipes — not a
-code branch; registered vendor redirect URLs keep working) → engine validates
-state/PKCE/replay, exchanges the code per recipe, extracts the normalized grant
-and identity via pointer paths, encrypts and stores, resumes any blocked
-invocation. `api_key`: generic form from recipe fields → optional validation
-probe → store.
+path (the path parameter is the vendor id, resolved against active recipes —
+not a code branch; registered vendor redirect URLs keep working) → engine
+validates state/PKCE/replay, exchanges the code per recipe, extracts the
+normalized grant and identity via pointer paths, encrypts and stores, resumes
+any blocked invocation. `api_key`: generic form from recipe fields → optional
+validation probe → store.
 
 ## 6. Lifecycle and standard state machines
 
@@ -505,8 +548,8 @@ Removed ◀──done── Removing ◀──remove── Installed ◀── D
 2. Drain in-flight work (bounded deadline; in-flight holds its generation `Arc`).
 3. `channel.cleanup()` — vendor-side unwiring, idempotent, best-effort.
 4. Auth engine: best-effort remote revoke per recipe; **always** delete local
-   grants/accounts scoped to this extension's providers (unless another active
-   extension shares the provider — then grants survive for it).
+   grants/accounts scoped to this extension's vendors (unless another active
+   extension shares the vendor — then grants survive for it).
 5. Delete channel config/secrets, identity bindings, and route registrations.
 6. Persist `Removed`. Failure at 3–5 → `RemovalPending` + typed reason.
 7. Conversation and LLM history is **never** deleted (repo law); cleanup means
@@ -515,7 +558,7 @@ Removed ◀──done── Removing ◀──remove── Installed ◀── D
 The same order runs for every extension. Slack's old bespoke cleanup
 (`extension remove` special cases) is deleted, not generalized.
 
-### 6.3 Auth account state machine (one enum, every provider)
+### 6.3 Auth account state machine (one enum, every vendor)
 
 Owned entirely by the auth engine; recipes affect HTTP details only, never
 states or transitions:
@@ -535,14 +578,14 @@ Disconnected ──start flow──▶ Authenticating ──callback ok──▶
   validation probe running).
 - Exactly one transition consumes a callback (replay-safe); flow TTL expiry
   lands back in `disconnected` with a typed reason.
-- The generic auth card renders this enum for every provider. There is no
-  provider-specific or extension-specific connection state anywhere.
+- The generic auth card renders this enum for every vendor. There is no
+  vendor-specific or extension-specific connection state anywhere.
 
 ### 6.4 Derived connection status
 
 "Is this extension connected?" is **derived, not stored**: installation state
 (`Active`) + required `[channel.config]` fields present + auth account state
-(`connected`) for required providers. The UI computes affordances (Configure /
+(`connected`) for required vendors. The UI computes affordances (Configure /
 Connect / Reconnect / Remove) from those two enums plus config completeness —
 no third state machine, no per-extension logic.
 
@@ -551,7 +594,7 @@ no third state machine, no per-extension logic.
 - Startup restores all enabled generations from persisted records and publishes
   once; an invalid extension is skipped with a typed error and does not block
   valid ones.
-- Upgrade stages the new generation, applies the widening rule (§3.2), swaps
+- Upgrade stages the new generation, applies the widening rule (§3.3), swaps
   atomically; the old generation drains via its `Arc`.
 - Deployment assumption, documented not engineered: **one serving process per
   deployment** owns the active set. Multi-replica serving needs its own ADR.
@@ -567,8 +610,9 @@ reintroduced without one.
 | Content-addressed package blob store, generation leases, GC | packages are host-bundled; the binary is the immutable store | registry distributes mutable third-party packages |
 | Package signing (Ed25519, trust store, revocation) | no third-party distribution channel yet; own project | same as above |
 | Serving-leader lease / fencing tokens | single serving process documented | multi-replica deployment is real (new ADR) |
-| Digest-pinned shared provider packages | shared provider = identical-recipe rule (§3.1); native code shares via crate deps | third-party binary provider sharing exists |
-| Per-provider auth adapters, manual-validator trait | recipes cover all five current providers; no code in auth flows | a provider defeats the descriptor (add a narrow hook) |
+| Digest-pinned shared vendor implementation packages | shared vendor = identical-recipe rule (§3.2); native code shares via crate deps | third-party binary vendor-implementation sharing exists |
+| Per-vendor auth adapters, manual-validator trait | recipes cover all five current vendors; no code in auth flows | a vendor defeats the descriptor (add a narrow hook) |
+| Generic "dynamic tools" abstraction | MCP is the only dynamic source; named `[mcp_tools]`, owned by the MCP loader | a second, non-MCP discovery source is real |
 | Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[channel.config]` | a real action that config + hooks cannot express |
 | Multiple channel surfaces per extension | no extension has two | one does (wire already carries surface keys) |
 | Trigger/file runtime | reserved kinds, no implementation exists | a production trigger/file use case (fourth adapter, additive) |
@@ -585,8 +629,8 @@ The abstraction pays for itself here:
   shape, activate/cleanup idempotency against a scripted vendor server); each
   extension crate runs it in its tests. Tool adapters get the same treatment.
 - **One auth-engine suite.** State/PKCE/replay/exchange/refresh/revoke/identity
-  tested once against a scripted provider server; each provider recipe is a
-  table row, not a suite.
+  tested once against a scripted vendor server; each vendor recipe is a table
+  row, not a suite.
 - **One fixture extension** (`acme-messenger`: invented vendor, tools + channel
   + oauth recipe) drives every generic end-to-end path in the integration
   harness: install → activate → connect → inbound → turn → outbound → remove.

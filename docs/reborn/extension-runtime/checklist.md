@@ -21,20 +21,30 @@ Rules — kept short on purpose:
   recipes; parsing is a single entry point shared with normalized v2.
 - [ ] MAN-3 A v2 manifest and its v3 rewrite resolve to identical surfaces,
   capability ids, scopes, and credentials (projection-equality test over all
-  11 first-party packages).
+  11 first-party packages; the two hosted-MCP packages instead assert their
+  `[mcp_tools]` ceiling plus the discovered set, since their placeholder
+  static tools intentionally become discovery).
 - [ ] MAN-4 Unknown manifest fields fail closed with a path-qualified error.
 - [ ] MAN-5 Recipe validation rejects: non-https endpoints, reserved authorize
   params in `extra_authorize_params`, invalid/deep/wildcard JSON pointers,
   wildcard egress hosts, multi-segment `route_suffix`.
-- [ ] MAN-6 `[dynamic_tools]` requires namespace + max_tools; discovered tools
-  outside namespace/count/schema-size ceilings are rejected, and cannot add
-  credentials, egress hosts, or effects.
-- [ ] MAN-7 Two extensions with the same provider id and identical-except-
-  scopes recipes activate and share one provider record; differing recipes
-  fail activation with a conflict error.
+- [ ] MAN-6 `[mcp_tools]` requires `runtime.kind = "mcp"` and is mutually
+  exclusive with `[[tools]]`; discovered tools outside the
+  namespace/count/schema-size/effects ceiling are rejected and cannot add
+  credentials or egress hosts.
+- [ ] MAN-7 Two extensions with the same vendor id and identical-except-scopes
+  recipes activate and share one vendor record; differing recipes fail
+  activation with a conflict error.
 - [ ] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding.
 - [ ] MAN-9 Retired-taxonomy gate still passes (no `slack_bot`/
   `slack_personal`/channel-as-product vocabulary).
+- [ ] MAN-10 `[channel].conversation_model` is required and validated;
+  conversation binding honors the declared model through a caller-level
+  workflow test; the WebUI's internal channel uses the same enum.
+- [ ] MAN-11 The credential-authority type is `VendorId` end to end; the v3
+  field is `vendor` (v2 `provider` maps in normalization); stored vendor id
+  strings are unchanged; the old type name survives only as a deprecation
+  alias, deleted by P7.
 
 ## 2. Resolved record (REC)
 
@@ -50,7 +60,7 @@ Rules — kept short on purpose:
 
 ## 3. Binding, loaders, lifecycle (LIFE)
 
-- [ ] LIFE-1 Declared `[[tools]]`/`[dynamic_tools]` without a bound tool
+- [ ] LIFE-1 Declared `[[tools]]`/`[mcp_tools]` without a bound tool
   adapter fails activation; same for `[channel]`; undeclared bindings fail;
   auth never binds.
 - [ ] LIFE-2 `bind` is side-effect-free and receives no network/secret/store
@@ -75,7 +85,7 @@ Rules — kept short on purpose:
   scripted adapter and engine in one caller-level test.
 - [ ] LIFE-11 Vendor cleanup failure lands in `RemovalPending`, is retryable,
   and cannot report success early or resurrect the extension.
-- [ ] LIFE-12 Removing one extension preserves grants of a shared provider
+- [ ] LIFE-12 Removing one extension preserves grants of a shared vendor
   still used by another active extension; removes them when it was the last
   consumer.
 - [ ] LIFE-13 Conversation/LLM history survives extension removal.
@@ -106,25 +116,27 @@ Rules — kept short on purpose:
   dispatcher (integration, recorded egress).
 - [ ] TOOL-8 `slack.send_message` remains an explicit side-effect tool; final
   replies never route through it.
-- [ ] TOOL-9 Dynamic (MCP) discovery publishes validated tool surfaces
-  atomically; a refresh replaces the set completely or not at all.
+- [ ] TOOL-9 MCP discovery is loader-owned (`ToolAdapter` has no discovery
+  method); validated tool surfaces publish atomically; a refresh replaces the
+  set completely or not at all; discovered tools run the same dispatcher
+  pipeline as static ones.
 
 ## 5. Auth engine (AUTH)
 
 - [ ] AUTH-1 One engine implements `oauth2_code` and `api_key`; there is no
-  auth trait in the extension ABI and no per-provider code path (grep gate:
-  no provider-conditional in auth crates/composition).
+  auth trait in the extension ABI and no per-vendor code path (grep gate: no
+  vendor-conditional in auth crates/composition).
 - [ ] AUTH-2 The authorize URL is host-constructed; recipes cannot supply or
   override `state`, `redirect_uri`, PKCE, `client_id`, `response_type`, or the
   scope parameter.
 - [ ] AUTH-3 State/CSRF, PKCE, TTL, and callback replay are enforced; exactly
   one transition consumes a callback.
 - [ ] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
-  rejected before the provider call.
+  rejected before the vendor call.
 - [ ] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
   extract via bounded JSON pointers, including `fallback_to_requested` scope.
 - [ ] AUTH-6 Refresh honors `rotates_refresh_token` both ways; revoke is
-  idempotent; provider response bodies are size-capped and redacted from
+  idempotent; vendor response bodies are size-capped and redacted from
   errors and logs.
 - [ ] AUTH-7 Identity extracts from the token response or the declared
   identity endpoint and is validated against the flow before storage.
@@ -132,15 +144,15 @@ Rules — kept short on purpose:
   echoed to UI or adapters.
 - [ ] AUTH-9 The auth account state machine is one shared enum
   (`disconnected/authenticating/connected/expired/revoking` + typed
-  `last_error`); no provider- or extension-specific state exists; the wire
+  `last_error`); no vendor- or extension-specific state exists; the wire
   exposes exactly this enum.
-- [ ] AUTH-10 Flow TTL expiry and provider denial land in `disconnected` with
+- [ ] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
   a typed reason; refresh failure lands in `expired`.
 - [ ] AUTH-11 `api_key` renders from recipe fields, runs the optional
   validation probe through restricted egress, and uses the same state machine.
-- [ ] AUTH-12 All five current providers (Slack, Google, Notion, GitHub,
+- [ ] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
   NEAR AI) are expressed as recipes and pass the engine suite as table rows —
-  no provider-specific test suite exists.
+  no vendor-specific test suite exists.
 - [ ] AUTH-13 Callback route keeps the existing
   `/api/reborn/product-auth/oauth/{provider}/callback` shape; `{provider}` is
   resolved as data (vendor-registered redirect URLs unchanged).
@@ -258,8 +270,9 @@ Rules — kept short on purpose:
 
 ## 10. Migration and compatibility (MIG)
 
-- [ ] MIG-1 OAuth grant/account storage is reused; live grants backfill to
-  `connected`; no re-auth required for existing users.
+- [ ] MIG-1 OAuth grant/account storage is reused (vendor id strings
+  unchanged); live grants backfill to `connected`; no re-auth required for
+  existing users.
 - [ ] MIG-2 Slack setup slots migrate to config/client-credential handles
   (idempotent, dry-run supported).
 - [ ] MIG-3 Slack state roots migrate to generic scoped state; no slack-named
@@ -280,7 +293,7 @@ Rules — kept short on purpose:
 - [ ] TEST-2 The tool-adapter conformance checks run against static, WASM,
   and MCP lanes.
 - [ ] TEST-3 The auth engine suite is table-driven over recipes; adding a
-  provider adds a row + fixtures, not a suite (checked by suite structure).
+  vendor adds a row + fixtures, not a suite (checked by suite structure).
 - [ ] TEST-4 The acme fixture drives the full generic path end-to-end in the
   integration harness.
 - [ ] TEST-5 Slack and Telegram each have exactly one inbound and one outbound
