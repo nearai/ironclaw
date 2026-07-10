@@ -385,9 +385,14 @@ impl RebornLocalExtensionManagementPort {
                 "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected. For an explicit connect, pair, authenticate, or account-access request, call builtin.extension_activate for the matching extension id so channel-specific connection/setup instructions can be surfaced. For routine, trigger, or notification delivery, prefer the configured outbound delivery target when one is available; do not activate the channel just to send to an already configured delivery target."
                     .to_string(),
             );
+        } else if extension_search_has_inactive_installed_result(response.payload.as_ref()) {
+            response.message = Some(
+                "Search found installed extension results that are not active yet. Report these as installed but not activated; configured only means required credentials appear present, not that tools are published. Any visible_capability_ids on inactive results are catalog capabilities only, not currently callable tools. To make the extension available, call builtin.extension_activate for the matching extension id."
+                    .to_string(),
+            );
         } else if extension_search_has_ready_result(response.payload.as_ref()) {
             response.message = Some(
-                "Search found installed extension results that are already configured or active. Treat those results as ready for this connection request; do not ask the user for credentials unless a later tool call reports auth_required."
+                "Search found active installed extension results. Treat those results as ready for this connection request; do not ask the user for credentials unless a later tool call reports auth_required."
                     .to_string(),
             );
         }
@@ -1724,9 +1729,28 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
         return false;
     };
     extensions.iter().any(|extension| {
+        matches!(extension.installation_phase, Some(LifecyclePhase::Active))
+            && !extension
+                .summary
+                .surface_kinds
+                .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            && extension.summary.credential_requirements.is_empty()
+            && extension.summary.onboarding.is_none()
+    })
+}
+
+fn extension_search_has_inactive_installed_result(
+    payload: Option<&LifecycleProductPayload>,
+) -> bool {
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
+        return false;
+    };
+    extensions.iter().any(|extension| {
         matches!(
             extension.installation_phase,
-            Some(LifecyclePhase::Configured | LifecyclePhase::Active)
+            Some(
+                LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Disabled
+            )
         ) && !extension
             .summary
             .surface_kinds
