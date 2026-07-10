@@ -1912,6 +1912,39 @@ mod tests {
     }
 
     #[test]
+    fn disabled_extension_search_result_gets_inactive_activation_guidance() {
+        let payload = LifecycleProductPayload::ExtensionSearch {
+            extensions: vec![LifecycleSearchExtensionSummary {
+                summary: LifecycleExtensionSummary {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "disabled_fixture",
+                    )
+                    .expect("valid package ref"),
+                    name: "Disabled fixture".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Disabled lifecycle fixture".to_string(),
+                    source: LifecycleExtensionSource::HostBundled,
+                    runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
+                    surface_kinds: Vec::new(),
+                    visible_capability_ids: vec!["disabled_fixture.search".to_string()],
+                    visible_read_only_capability_ids: vec!["disabled_fixture.search".to_string()],
+                    credential_requirements: Vec::new(),
+                    onboarding: None,
+                },
+                installation_phase: Some(LifecyclePhase::Disabled),
+            }],
+            count: 1,
+        };
+
+        assert!(extension_search_has_inactive_installed_result(Some(&payload)));
+        assert!(!extension_search_has_ready_result(Some(&payload)));
+        assert!(!extension_search_has_installed_external_channel_result(
+            Some(&payload)
+        ));
+    }
+
+    #[test]
     fn activation_message_enumerates_published_tools_by_exact_name() {
         // Regression: the model only sees a *count* of deferred tools, so after
         // activating an extension it must be handed the exact tool names or it
