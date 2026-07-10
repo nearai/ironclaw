@@ -349,6 +349,95 @@ async fn capability_display_preview_store_summarizes_http_inputs_safely() {
 }
 
 #[tokio::test]
+async fn trigger_create_display_preview_hides_internal_configuration() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.trigger_create").unwrap();
+    let input_ref = preview_input_ref("trigger-create-preview-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "builtin__trigger_create",
+        &serde_json::json!({
+            "name": "Kansas weather check",
+            "prompt": "Call builtin.weather.lookup for Kansas and report the forecast.",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 8 * * *",
+                "timezone": "America/Chicago"
+            }
+        }),
+    );
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:trigger-create-preview",
+        output: &serde_json::json!({
+            "trigger": {
+                "trigger_id": "01KANSASWEATHERTRIGGERID",
+                "agent_id": "internal-agent-id",
+                "project_id": "internal-project-id",
+                "name": "Kansas weather check",
+                "source": "schedule",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "0 8 * * *",
+                    "timezone": "America/Chicago"
+                },
+                "state": "scheduled",
+                "next_run_at": "2026-07-11T13:00:00Z",
+                "created_at": "2026-07-10T13:00:00Z",
+                "recent_runs": []
+            }
+        }),
+        output_bytes: 512,
+    });
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-trigger-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(512),
+            error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(preview.title, "Routine");
+    assert_eq!(preview.subtitle.as_deref(), Some("Kansas weather check"));
+    assert_eq!(
+        preview.input_summary.as_deref(),
+        Some("routine: Kansas weather check\nschedule: recurring\ntimezone: America/Chicago")
+    );
+    assert_eq!(preview.output_summary.as_deref(), Some("Routine created"));
+    assert_eq!(
+        preview.output_preview.as_deref(),
+        Some("Routine created: Kansas weather check\nSchedule: recurring\nNext run: 2026-07-11 13:00 UTC")
+    );
+
+    let rendered = serde_json::to_string(&preview).unwrap();
+    assert!(!rendered.contains("trigger_id"));
+    assert!(!rendered.contains("01KANSASWEATHERTRIGGERID"));
+    assert!(!rendered.contains("internal-agent-id"));
+    assert!(!rendered.contains("internal-project-id"));
+    assert!(!rendered.contains("0 8 * * *"));
+    assert!(!rendered.contains("builtin.weather.lookup"));
+    assert!(!rendered.contains("created_at"));
+}
+
+#[tokio::test]
 async fn capability_display_preview_store_redacts_file_url_inputs() {
     let preview = completed_preview_for_input(
         "builtin.http.save",
