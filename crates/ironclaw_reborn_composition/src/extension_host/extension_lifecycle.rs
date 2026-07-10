@@ -1,8 +1,5 @@
 // arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #5905
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, OnceLock},
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
@@ -23,11 +20,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, ChannelConnectionRequirement, LifecycleExtensionSummary,
-    LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleSearchExtensionSummary, ProductWorkflowError, RebornChannelConnectStrategy,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    ChannelConnectionRequirement, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
+    ProductWorkflowError, RebornChannelConnectStrategy, RebornServicesError,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -74,9 +70,9 @@ mod hosted_mcp_test_support;
 mod install_policy;
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, SLACK_EXTENSION_ID,
+    AvailableExtensionCatalog, AvailableExtensionPackage,
     imported_extension_package, is_internal_extension_package_ref, materialize_available_extension,
-    surface_kinds_from_manifest_record, visible_capability_ids,
+    visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -84,6 +80,9 @@ use crate::extension_host::extension_activation_credentials::{
 };
 use crate::extension_host::extension_credential_requirements::{
     manifest_runtime_credential_auth_requirements, package_runtime_credential_auth_requirements,
+};
+use crate::extension_host::extension_removal_cleanup::{
+    ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry,
 };
 use crate::extension_host::lifecycle::response_with_payload;
 use crate::extension_host::mcp_discovery::{
@@ -99,70 +98,6 @@ use install_policy::{
 };
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RemovableChannelCleanup {
-    Required(String),
-    IfConnectionFacadeSupportsChannel(String),
-}
-
-impl RemovableChannelCleanup {
-    fn into_parts(self) -> (String, bool) {
-        match self {
-            Self::Required(channel) => (channel, false),
-            Self::IfConnectionFacadeSupportsChannel(channel) => (channel, true),
-        }
-    }
-}
-
-fn removable_channel_cleanup(
-    package_ref: &LifecyclePackageRef,
-    surface_kinds: &[LifecycleExtensionSurfaceKind],
-    declares_credentials: bool,
-) -> Option<RemovableChannelCleanup> {
-    // The bundled Slack tools package owns the personal Slack channel even
-    // though its manifest surface is tool-only.
-    if package_ref.id.as_str() == SLACK_EXTENSION_ID
-        || surface_kinds.contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
-    {
-        return Some(RemovableChannelCleanup::Required(
-            package_ref.id.as_str().to_string(),
-        ));
-    }
-    // Tool-only companion extensions can still own a personal connection
-    // whose channel id matches the extension id. Probe the generic connection
-    // facade when such an extension declares credentials; a missing channel is
-    // intentionally a no-op. This keeps provider-specific OAuth knowledge out
-    // of the lifecycle core.
-    if package_ref.kind == LifecyclePackageKind::Extension && declares_credentials {
-        return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            package_ref.id.as_str().to_string(),
-        ));
-    }
-    None
-}
-
-async fn disconnect_channel_for_cleanup(
-    facade: &dyn ChannelConnectionFacade,
-    caller: WebUiAuthenticatedCaller,
-    cleanup: RemovableChannelCleanup,
-) -> Result<(), RebornServicesError> {
-    let (channel, requires_connection_facade_support) = cleanup.into_parts();
-    let should_disconnect = if requires_connection_facade_support {
-        facade
-            .caller_channel_connections(caller.clone())
-            .await?
-            .contains_key(&channel)
-    } else {
-        true
-    };
-    if should_disconnect {
-        facade
-            .disconnect_channel_for_caller(caller, &channel)
-            .await?;
-    }
-    Ok(())
-}
 
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
@@ -196,7 +131,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// role-derived resolver instead of an identity comparison; callers do
     /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
-    channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+    removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -388,15 +323,15 @@ impl RebornLocalExtensionManagementPort {
             credential_cleanup,
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
-            channel_connection: Arc::new(OnceLock::new()),
+            removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
         }
     }
 
-    pub(crate) fn with_channel_connection_facade_slot(
+    pub(crate) fn with_removal_cleanup_registry(
         mut self,
-        channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+        removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
     ) -> Self {
-        self.channel_connection = channel_connection;
+        self.removal_cleanup = removal_cleanup;
         self
     }
 
@@ -1167,6 +1102,10 @@ impl RebornLocalExtensionManagementPort {
             let catalog = self.catalog.read().await;
             catalog.resolve(&package_ref)
         };
+        let cleanup_requirements = available_catalog_fallback
+            .as_ref()
+            .map(|available| available.cleanup_requirements.clone())
+            .unwrap_or_default();
         let caller = authenticated_actor_user_id.unwrap_or(&scope.user_id);
         let mut removal_scope = scope.clone();
         if let Some(actor_user_id) = authenticated_actor_user_id {
@@ -1217,13 +1156,11 @@ impl RebornLocalExtensionManagementPort {
             };
             let removed_providers =
                 Self::removed_extension_providers_from_manifest(&removal_manifest)?;
-            let surface_kinds =
-                surface_kinds_from_manifest_record(&removal_manifest, package_ref.id.as_str())?;
-            let channel_cleanup = removable_channel_cleanup(
-                &package_ref,
-                &surface_kinds,
-                !removed_providers.is_empty(),
-            );
+            if !cleanup_requirements.is_empty() && authenticated_actor_user_id.is_none() {
+                return Err(ProductWorkflowError::InvalidBindingRequest {
+                    reason: "extension removal cleanup requires an authenticated actor".to_string(),
+                });
+            }
             if !removed_providers.is_empty() && authenticated_actor_user_id.is_none() {
                 return Err(ProductWorkflowError::InvalidBindingRequest {
                     reason: "extension credential cleanup requires an authenticated actor"
@@ -1236,12 +1173,15 @@ impl RebornLocalExtensionManagementPort {
                     .await
                     .map_err(map_extension_installation_error)?;
             }
-            self.cleanup_channel_before_remove(
-                channel_cleanup,
-                &removal_scope,
-                authenticated_actor_user_id,
-            )
-            .await?;
+            if let Some(actor_user_id) = authenticated_actor_user_id {
+                let cleanup_context = ExtensionRemovalCleanupContext::new(
+                    removal_scope.clone(),
+                    actor_user_id.clone(),
+                );
+                self.removal_cleanup
+                    .cleanup_requirements(&cleanup_requirements, &cleanup_context)
+                    .await?;
+            }
             // Finish actor-scoped credential cleanup while an installed row
             // still proves who may remove it. This prevents a different user
             // from taking over a retry through the manifest-only tombstone.
@@ -1289,44 +1229,6 @@ impl RebornLocalExtensionManagementPort {
             );
         }
         Ok(response)
-    }
-
-    async fn cleanup_channel_before_remove(
-        &self,
-        cleanup: Option<RemovableChannelCleanup>,
-        scope: &ResourceScope,
-        authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
-    ) -> Result<(), ProductWorkflowError> {
-        let Some(cleanup) = cleanup else {
-            return Ok(());
-        };
-        let Some(channel_connection) = self.channel_connection.get() else {
-            let (channel, optional) = cleanup.into_parts();
-            if optional {
-                return Ok(());
-            }
-            return Err(ProductWorkflowError::Transient {
-                reason: format!(
-                    "extension removal requires {channel} channel cleanup but no channel connection facade is installed"
-                ),
-            });
-        };
-        let actor_user_id = authenticated_actor_user_id.ok_or_else(|| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: "extension channel cleanup requires an authenticated actor".to_string(),
-            }
-        })?;
-        let caller = WebUiAuthenticatedCaller::new(
-            scope.tenant_id.clone(),
-            actor_user_id.clone(),
-            scope.agent_id.clone(),
-            scope.project_id.clone(),
-        );
-        disconnect_channel_for_cleanup(channel_connection.as_ref(), caller, cleanup)
-            .await
-            .map_err(|error| ProductWorkflowError::Transient {
-                reason: format!("extension channel cleanup failed: {:?}", error.code),
-            })
     }
 
     /// Credential providers the extension declares, captured before removal (its
@@ -2451,13 +2353,22 @@ fn compensation_failure(
 mod tests {
     use std::{
         collections::BTreeSet,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Mutex as StdMutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use super::*;
     use crate::extension_host::available_extensions::{
         AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
+    };
+    use crate::extension_host::extension_removal_cleanup::{
+        ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter,
+        ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
+        ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry,
+        ExtensionRemovalCleanupRequirement,
     };
     use async_trait::async_trait;
     use ironclaw_extensions::{
@@ -2469,10 +2380,11 @@ mod tests {
         DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem,
     };
     use ironclaw_host_api::{
-        CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, InvocationId,
-        MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, ResourceScope,
-        RuntimeCredentialAccountSetup, RuntimeHttpEgress, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, TrustClass, UserId,
+        AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
+        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod,
+        ProjectId, ResourceScope, RuntimeCredentialAccountSetup, RuntimeHttpEgress,
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId,
+        TrustClass, UserId,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
@@ -3160,69 +3072,374 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
-    #[derive(Default)]
-    struct RecordingSlackChannelConnectionFacade {
-        disconnect_calls: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl ChannelConnectionFacade for RecordingSlackChannelConnectionFacade {
-        async fn caller_channel_connections(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
-            Ok(std::collections::HashMap::from([(
-                "slack".to_string(),
-                true,
-            )]))
-        }
-
-        async fn disconnect_channel_for_caller(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _channel: &str,
-        ) -> Result<(), RebornServicesError> {
-            self.disconnect_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
     #[tokio::test]
-    async fn generic_external_channel_remove_does_not_disconnect_registered_slack_facade() {
-        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+    async fn extension_remove_without_cleanup_or_credentials_does_not_require_actor() {
+        let (_dir, storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
                     "telegram", "Telegram",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let channel_connection = Arc::new(RecordingSlackChannelConnectionFacade::default());
-        let channel_connection_facade: Arc<dyn ChannelConnectionFacade> =
-            channel_connection.clone();
-        assert!(
-            port.channel_connection
-                .set(channel_connection_facade)
-                .is_ok(),
-            "channel connection facade slot must be unset in the fixture"
-        );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
             .expect("valid ref");
         port.install(package_ref.clone())
             .await
-            .expect("install generic external channel");
-        let removal_scope = hosted_mcp_scope("generic-channel-remove");
+            .expect("install external channel");
 
         let remove = port
-            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .remove(package_ref, &hosted_mcp_scope("scope-owner"), None)
             .await
-            .expect("remove generic external channel");
+            .expect("cleanup-free extension removal needs no actor");
 
         assert_eq!(remove.phase, LifecyclePhase::Removed);
-        assert_eq!(
-            channel_connection.disconnect_calls.load(Ordering::SeqCst),
-            0,
-            "removing Telegram must not disconnect the registered Slack facade"
+        assert!(
+            !storage_root.join("system/extensions/telegram").exists(),
+            "package files must be deleted"
         );
+        assert!(
+            installation_store
+                .list_installations()
+                .await
+                .expect("list installations")
+                .is_empty(),
+            "installation record must be deleted"
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    struct RemovalCleanupObservation {
+        context: ExtensionRemovalCleanupContext,
+        binding: ExtensionRemovalCleanupBinding,
+        package_files_present: bool,
+        manifest_present: bool,
+        installation_present: bool,
+    }
+
+    #[derive(Clone)]
+    struct RemovalCleanupProbe {
+        package_dir: std::path::PathBuf,
+        installation_store: Arc<InMemoryExtensionInstallationStore>,
+        extension_id: ExtensionId,
+        installation_id: ExtensionInstallationId,
+    }
+
+    struct RecordingExtensionRemovalCleanupAdapter {
+        id: ExtensionRemovalCleanupAdapterId,
+        calls: StdMutex<Vec<RemovalCleanupObservation>>,
+        probe: StdMutex<Option<RemovalCleanupProbe>>,
+        failure_detail: Option<&'static str>,
+    }
+
+    impl RecordingExtensionRemovalCleanupAdapter {
+        fn new(id: &str) -> Self {
+            Self {
+                id: ExtensionRemovalCleanupAdapterId::new(id).expect("valid cleanup adapter id"),
+                calls: StdMutex::new(Vec::new()),
+                probe: StdMutex::new(None),
+                failure_detail: None,
+            }
+        }
+
+        fn failing(id: &str, detail: &'static str) -> Self {
+            Self {
+                failure_detail: Some(detail),
+                ..Self::new(id)
+            }
+        }
+
+        fn set_probe(
+            &self,
+            storage_root: &std::path::Path,
+            installation_store: Arc<InMemoryExtensionInstallationStore>,
+            extension_id: &str,
+        ) {
+            *self.probe.lock().expect("cleanup probe lock") = Some(RemovalCleanupProbe {
+                package_dir: storage_root.join(format!("system/extensions/{extension_id}")),
+                installation_store,
+                extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+                installation_id: ExtensionInstallationId::new(extension_id)
+                    .expect("valid installation id"),
+            });
+        }
+
+        fn calls(&self) -> Vec<RemovalCleanupObservation> {
+            self.calls.lock().expect("cleanup calls lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ExtensionRemovalCleanupAdapter for RecordingExtensionRemovalCleanupAdapter {
+        fn adapter_id(&self) -> ExtensionRemovalCleanupAdapterId {
+            self.id.clone()
+        }
+
+        async fn cleanup(
+            &self,
+            context: &ExtensionRemovalCleanupContext,
+            binding: &ExtensionRemovalCleanupBinding,
+        ) -> Result<(), RebornServicesError> {
+            let probe = self.probe.lock().expect("cleanup probe lock").clone();
+            let (package_files_present, manifest_present, installation_present) =
+                if let Some(probe) = probe {
+                    let manifest_present = probe
+                        .installation_store
+                        .get_manifest(&probe.extension_id)
+                        .await
+                        .expect("manifest probe")
+                        .is_some();
+                    let installation_present = probe
+                        .installation_store
+                        .get_installation(&probe.installation_id)
+                        .await
+                        .expect("installation probe")
+                        .is_some();
+                    (
+                        probe.package_dir.exists(),
+                        manifest_present,
+                        installation_present,
+                    )
+                } else {
+                    (false, false, false)
+                };
+            self.calls
+                .lock()
+                .expect("cleanup calls lock")
+                .push(RemovalCleanupObservation {
+                    context: context.clone(),
+                    binding: binding.clone(),
+                    package_files_present,
+                    manifest_present,
+                    installation_present,
+                });
+            if let Some(detail) = self.failure_detail {
+                return Err(RebornServicesError::internal_from(detail));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn extension_remove_dispatches_only_declared_adapter_with_trusted_scope_before_deletion()
+    {
+        let matching = Arc::new(RecordingExtensionRemovalCleanupAdapter::new(
+            "fixture.cleanup",
+        ));
+        let unrelated = Arc::new(RecordingExtensionRemovalCleanupAdapter::new(
+            "unrelated.cleanup",
+        ));
+        let matching_adapter: Arc<dyn ExtensionRemovalCleanupAdapter> = matching.clone();
+        let unrelated_adapter: Arc<dyn ExtensionRemovalCleanupAdapter> = unrelated.clone();
+        let registry = Arc::new(
+            ExtensionRemovalCleanupRegistry::try_from_adapters(vec![
+                unrelated_adapter,
+                matching_adapter,
+            ])
+            .expect("unique cleanup adapters"),
+        );
+        let package = fixture_external_channel_package_with_cleanup(
+            "telegram",
+            "Telegram",
+            removal_cleanup_requirement("fixture.cleanup", "telegram"),
+        );
+        let (_dir, storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_removal_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![package]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                registry,
+            );
+        matching.set_probe(&storage_root, installation_store.clone(), "telegram");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install external channel");
+        let mut removal_scope = hosted_mcp_scope("scope-owner");
+        removal_scope.tenant_id = TenantId::new("trusted-tenant").expect("valid tenant");
+        removal_scope.agent_id = Some(AgentId::new("trusted-agent").expect("valid agent"));
+        removal_scope.project_id = Some(ProjectId::new("trusted-project").expect("valid project"));
+        let authenticated_actor = UserId::new("authenticated-actor").expect("valid actor");
+
+        let remove = port
+            .remove(package_ref, &removal_scope, Some(&authenticated_actor))
+            .await
+            .expect("declared cleanup and removal succeed");
+
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+        let calls = matching.calls();
+        assert_eq!(calls.len(), 1, "matching adapter runs exactly once");
+        assert!(
+            unrelated.calls().is_empty(),
+            "unrelated adapter must not run"
+        );
+        let call = &calls[0];
+        assert_eq!(call.context.authenticated_actor, authenticated_actor);
+        assert_eq!(call.context.scope.tenant_id.as_str(), "trusted-tenant");
+        assert_eq!(call.context.scope.user_id.as_str(), "authenticated-actor");
+        assert_eq!(
+            call.context.scope.agent_id.as_ref().map(AgentId::as_str),
+            Some("trusted-agent")
+        );
+        assert_eq!(
+            call.context
+                .scope
+                .project_id
+                .as_ref()
+                .map(ProjectId::as_str),
+            Some("trusted-project")
+        );
+        assert_eq!(
+            call.binding,
+            ExtensionRemovalCleanupBinding::ChannelConnection {
+                channel: ExtensionRemovalChannelId::new("telegram").expect("valid channel")
+            }
+        );
+        assert!(
+            call.package_files_present,
+            "cleanup must precede file deletion"
+        );
+        assert!(
+            call.manifest_present,
+            "cleanup must precede manifest deletion"
+        );
+        assert!(
+            call.installation_present,
+            "cleanup must precede installation deletion"
+        );
+        assert!(
+            !storage_root.join("system/extensions/telegram").exists(),
+            "package files are removed only after cleanup succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_remove_with_declared_cleanup_requires_authenticated_actor() {
+        let adapter = Arc::new(RecordingExtensionRemovalCleanupAdapter::new(
+            "fixture.cleanup",
+        ));
+        let adapter_trait: Arc<dyn ExtensionRemovalCleanupAdapter> = adapter.clone();
+        let registry = Arc::new(
+            ExtensionRemovalCleanupRegistry::try_from_adapters(vec![adapter_trait])
+                .expect("unique cleanup adapter"),
+        );
+        let package = fixture_external_channel_package_with_cleanup(
+            "telegram",
+            "Telegram",
+            removal_cleanup_requirement("fixture.cleanup", "telegram"),
+        );
+        let (_dir, storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_removal_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![package]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                registry,
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install external channel");
+
+        let error = port
+            .remove(package_ref, &hosted_mcp_scope("scope-owner"), None)
+            .await
+            .expect_err("declared cleanup requires an authenticated actor");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("removal cleanup requires an authenticated actor")
+        ));
+        assert!(
+            adapter.calls().is_empty(),
+            "adapter must not run without actor"
+        );
+        assert_removal_target_preserved(&storage_root, &installation_store, "telegram").await;
+    }
+
+    #[tokio::test]
+    async fn extension_remove_fails_closed_when_declared_cleanup_adapter_is_missing() {
+        let registry = Arc::new(
+            ExtensionRemovalCleanupRegistry::try_from_adapters(Vec::new())
+                .expect("empty cleanup registry"),
+        );
+        let package = fixture_external_channel_package_with_cleanup(
+            "telegram",
+            "Telegram",
+            removal_cleanup_requirement("missing.cleanup", "telegram"),
+        );
+        let (_dir, storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_removal_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![package]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                registry,
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install external channel");
+        let scope = hosted_mcp_scope("authenticated-actor");
+
+        let error = port
+            .remove(package_ref, &scope, Some(&scope.user_id))
+            .await
+            .expect_err("missing declared cleanup adapter must fail closed");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::Transient { reason }
+                if reason.contains("required extension removal cleanup adapter is unavailable")
+        ));
+        assert_removal_target_preserved(&storage_root, &installation_store, "telegram").await;
+    }
+
+    #[tokio::test]
+    async fn extension_remove_fails_closed_when_declared_cleanup_adapter_errors() {
+        let secret_detail = "opaque backend detail: /private/credential-store";
+        let adapter = Arc::new(RecordingExtensionRemovalCleanupAdapter::failing(
+            "fixture.cleanup",
+            secret_detail,
+        ));
+        let adapter_trait: Arc<dyn ExtensionRemovalCleanupAdapter> = adapter.clone();
+        let registry = Arc::new(
+            ExtensionRemovalCleanupRegistry::try_from_adapters(vec![adapter_trait])
+                .expect("unique cleanup adapter"),
+        );
+        let package = fixture_external_channel_package_with_cleanup(
+            "telegram",
+            "Telegram",
+            removal_cleanup_requirement("fixture.cleanup", "telegram"),
+        );
+        let (_dir, storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_removal_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![package]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                registry,
+            );
+        adapter.set_probe(&storage_root, installation_store.clone(), "telegram");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install external channel");
+        let scope = hosted_mcp_scope("authenticated-actor");
+
+        let error = port
+            .remove(package_ref, &scope, Some(&scope.user_id))
+            .await
+            .expect_err("declared cleanup adapter failure must fail closed");
+
+        let ProductWorkflowError::Transient { reason } = error else {
+            panic!("adapter failure must be retryable");
+        };
+        assert!(reason.contains("fixture.cleanup"));
+        assert!(!reason.contains(secret_detail));
+        let calls = adapter.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].package_files_present);
+        assert!(calls[0].manifest_present);
+        assert!(calls[0].installation_present);
+        assert_removal_target_preserved(&storage_root, &installation_store, "telegram").await;
     }
 
     #[tokio::test]
@@ -6328,6 +6545,91 @@ output_schema_ref = "schemas/run.output.json"
         )
     }
 
+    fn extension_management_port_fixture_with_removal_cleanup(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+        removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<RebornLocalExtensionManagementPort>,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let root_filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_management = Arc::new(
+            RebornLocalExtensionManagementPort::new(
+                root_filesystem,
+                catalog,
+                installation_store.clone(),
+                Arc::new(Mutex::new(lifecycle_service)),
+                test_active_extension_publisher(
+                    Arc::clone(&active_registry),
+                    test_extension_trust_policy(),
+                ),
+                None,
+            )
+            .with_removal_cleanup_registry(removal_cleanup),
+        );
+        (
+            dir,
+            storage_root,
+            extension_management,
+            active_registry,
+            installation_store,
+        )
+    }
+
+    async fn assert_removal_target_preserved(
+        storage_root: &std::path::Path,
+        installation_store: &InMemoryExtensionInstallationStore,
+        extension_id: &str,
+    ) {
+        assert!(
+            storage_root
+                .join(format!("system/extensions/{extension_id}"))
+                .exists(),
+            "package files must remain when cleanup fails"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&ExtensionId::new(extension_id).expect("valid extension id"))
+                .await
+                .expect("manifest lookup")
+                .is_some(),
+            "manifest must remain when cleanup fails"
+        );
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new(extension_id).expect("valid installation id")
+                )
+                .await
+                .expect("installation lookup")
+                .is_some(),
+            "installation must remain when cleanup fails"
+        );
+    }
+
     fn extension_management_port_fixture_with_catalog_service_and_trust(
         catalog: AvailableExtensionCatalog,
         lifecycle_service: ExtensionLifecycleService,
@@ -7334,6 +7636,26 @@ credential_handle = "{id}_bot_token"
             fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id);
         package.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
         package
+    }
+
+    fn fixture_external_channel_package_with_cleanup(
+        id: &str,
+        name: &str,
+        requirement: ExtensionRemovalCleanupRequirement,
+    ) -> AvailableExtensionPackage {
+        let mut package = fixture_external_channel_package(id, name);
+        package.cleanup_requirements = vec![requirement];
+        package
+    }
+
+    fn removal_cleanup_requirement(
+        adapter_id: &str,
+        channel: &str,
+    ) -> ExtensionRemovalCleanupRequirement {
+        ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(adapter_id).expect("valid cleanup adapter id"),
+            ExtensionRemovalChannelId::new(channel).expect("valid cleanup channel id"),
+        )
     }
 
     fn fixture_extension_manifest() -> &'static str {

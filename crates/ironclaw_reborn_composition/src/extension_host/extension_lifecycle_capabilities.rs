@@ -874,6 +874,113 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
+    async fn webui_and_tool_extension_remove_skip_personal_cleanup_for_slack_bot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let authenticated_actor =
+            UserId::new("extension-tool-test-alice").expect("valid actor user id");
+        let mut remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
+        remove_context.authenticated_actor_user_id = Some(authenticated_actor.clone());
+        let caller = WebUiAuthenticatedCaller::new(
+            remove_context.resource_scope.tenant_id.clone(),
+            authenticated_actor,
+            remove_context.resource_scope.agent_id.clone(),
+            remove_context.resource_scope.project_id.clone(),
+        );
+        let runtime = crate::build_reborn_runtime(
+            crate::RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev(
+                    "extension-tools-remove-slack-bot-owner",
+                    storage_root.clone(),
+                )
+                .with_runtime_policy(
+                    crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
+                ),
+            )
+            .with_identity(crate::RebornRuntimeIdentity {
+                tenant_id: caller.tenant_id.as_str().to_string(),
+                agent_id: "extension-remove-slack-bot-test-agent".to_string(),
+                source_binding_id: "extension-remove-slack-bot-test-source".to_string(),
+                reply_target_binding_id: "extension-remove-slack-bot-test-reply".to_string(),
+            }),
+        )
+        .await
+        .expect("local-dev runtime build");
+        let slack_bot_package_path = storage_root.join("system/extensions/slack_bot");
+        let channel_connection = Arc::new(
+            RecordingChannelConnectionFacade::with_connection("slack", false)
+                .watching_package(slack_bot_package_path.clone()),
+        );
+        let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
+        assert!(
+            runtime.set_channel_connection_facade(channel_connection_trait.clone()),
+            "channel connection facade slot should be unset in the test runtime"
+        );
+        let webui = crate::webui::facade::build_webui_services_with_connectable_channels(
+            &runtime,
+            None,
+            None,
+            Some(channel_connection_trait),
+            Vec::new(),
+        )
+        .expect("WebUI services build");
+        let slack_bot_package_ref =
+            extension_package_ref("slack_bot".to_string()).expect("valid Slack bot package ref");
+
+        webui
+            .api
+            .install_extension(caller.clone(), slack_bot_package_ref.clone())
+            .await
+            .expect("WebUI install succeeds");
+        webui
+            .api
+            .remove_extension(caller.clone(), slack_bot_package_ref.clone())
+            .await
+            .expect("WebUI remove succeeds");
+        assert!(
+            !slack_bot_package_path.exists(),
+            "WebUI removal deletes the Slack bot package"
+        );
+
+        webui
+            .api
+            .install_extension(caller, slack_bot_package_ref)
+            .await
+            .expect("WebUI reinstall succeeds");
+        let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
+            runtime.services(),
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            remove_context,
+            serde_json::json!({"extension_id": "slack_bot"}),
+            trust_decision(),
+        )
+        .await
+        .expect("tool removal succeeds");
+        assert_eq!(remove["payload"]["removed"], true);
+        assert!(
+            !slack_bot_package_path.exists(),
+            "tool removal deletes the Slack bot package"
+        );
+        assert!(
+            channel_connection.disconnects().is_empty(),
+            "operator-owned slack_bot must not inherit personal Slack cleanup"
+        );
+        assert_eq!(
+            channel_connection.connection_status_calls(),
+            0,
+            "cleanup selection must not probe channel connection status"
+        );
+        assert!(
+            channel_connection
+                .package_present_during_disconnect()
+                .is_empty(),
+            "no disconnect should be attempted for slack_bot"
+        );
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
     async fn extension_remove_fails_closed_without_authenticated_actor_for_personal_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
