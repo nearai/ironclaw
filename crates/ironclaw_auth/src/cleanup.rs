@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthProductError, AuthProviderId, CredentialAccountId, scope::AuthProductScope};
+use crate::{
+    AuthContinuationEvent, AuthFlowId, AuthProductError, AuthProviderId, CredentialAccountId,
+    OAuthProviderExchange, scope::AuthProductScope,
+};
 
 /// Lifecycle event that drives credential/session cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +36,15 @@ pub struct SecretCleanupRequest {
     pub action: SecretCleanupAction,
 }
 
+/// Provider-neutral OAuth exchange material that could not be deleted and
+/// must remain reachable by the normal lifecycle cleanup path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthExchangeCleanupRequest {
+    pub scope: AuthProductScope,
+    pub flow_id: AuthFlowId,
+    pub exchange: OAuthProviderExchange,
+}
+
 /// Redacted cleanup report. It carries account ids only, never secret handles or
 /// backend diagnostic details.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +57,12 @@ pub struct SecretCleanupReport {
     pub removed_grants: Vec<CredentialAccountId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quarantined_accounts: Vec<SecretCleanupQuarantine>,
+    /// Canceled turn-gate continuations that the composition layer must deny
+    /// through the canonical turn coordinator before lifecycle cleanup is
+    /// complete. This internal handoff is deliberately omitted from product
+    /// responses; it carries no secret material.
+    #[serde(skip)]
+    pub canceled_turn_gate_continuations: Vec<AuthContinuationEvent>,
 }
 
 /// Stable redacted cleanup quarantine category.
@@ -67,6 +85,13 @@ pub struct SecretCleanupQuarantine {
 
 #[async_trait]
 pub trait SecretCleanupService: Send + Sync {
+    /// Retain exchanged secret handles in a revoked, flow-keyed account so a
+    /// later lifecycle cleanup can retry deletion without a separate journal.
+    async fn retain_oauth_exchange_for_cleanup(
+        &self,
+        request: OAuthExchangeCleanupRequest,
+    ) -> Result<CredentialAccountId, AuthProductError>;
+
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,

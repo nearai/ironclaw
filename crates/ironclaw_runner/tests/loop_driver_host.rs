@@ -1371,7 +1371,7 @@ async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
     assert!(
         requests[0].messages.iter().any(|message| message
             .content
-            .contains("Set one with builtin__outbound_delivery_target_set.")),
+            .contains("Set a default with builtin__outbound_delivery_target_set.")),
         "delivery_tools_visible=true (both capabilities in surface) must render the tool-hint warning variant"
     );
 }

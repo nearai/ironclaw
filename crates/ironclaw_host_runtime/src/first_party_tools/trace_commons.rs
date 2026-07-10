@@ -1351,6 +1351,7 @@ mod tests {
         FirstPartyCapabilityRequest {
             capability_id: CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
