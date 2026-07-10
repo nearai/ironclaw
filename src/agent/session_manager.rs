@@ -4,17 +4,22 @@
 //! for each thread.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::agent::session::Session;
+use crate::agent::session_memory::SessionMemory;
 use crate::agent::undo::UndoManager;
 use crate::hooks::HookRegistry;
 
 /// Warn when session count exceeds this threshold.
 const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
+
+/// A stale conversation snapshot handed to the episodic summarizer on prune:
+/// `(conversation_id, channel, turns)` where each turn is `(user, response?)`.
+type StaleConversation = (String, String, Vec<(String, Option<String>)>);
 
 /// Key for mapping external thread IDs to internal ones.
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -30,6 +35,11 @@ pub struct SessionManager {
     thread_map: RwLock<HashMap<ThreadKey, Uuid>>,
     undo_managers: RwLock<HashMap<Uuid, Arc<Mutex<UndoManager>>>>,
     hooks: Option<Arc<HookRegistry>>,
+    /// Optional episodic-memory coordinator. When present, each stale
+    /// conversation is summarized on idle-prune (fire-and-forget). Set once,
+    /// after this manager is already shared as an `Arc`, so it uses interior
+    /// mutability. Absent in tests / when no workspace or LLM is wired.
+    session_memory: OnceLock<Arc<SessionMemory>>,
 }
 
 impl SessionManager {
@@ -40,6 +50,7 @@ impl SessionManager {
             thread_map: RwLock::new(HashMap::new()),
             undo_managers: RwLock::new(HashMap::new()),
             hooks: None,
+            session_memory: OnceLock::new(),
         }
     }
 
@@ -47,6 +58,13 @@ impl SessionManager {
     pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
         self.hooks = Some(hooks);
         self
+    }
+
+    /// Wire the episodic-memory coordinator. Callable on a shared `Arc`
+    /// (takes `&self`); the first call wins and later calls are ignored.
+    pub fn set_session_memory(&self, memory: Arc<SessionMemory>) {
+        // Ignore a redundant second wiring — the store is idempotent anyway.
+        let _ = self.session_memory.set(memory);
     }
 
     /// Get or create a session for a user.
@@ -334,6 +352,11 @@ impl SessionManager {
         // Per-session thread IDs so SessionEnd hooks can target the right conversations.
         let mut per_session_thread_ids: std::collections::HashMap<String, Vec<Uuid>> =
             std::collections::HashMap::new();
+        // Snapshot of each stale thread's turns (conversation_id, channel, turns)
+        // captured under the session lock, so the episodic summarizer can run
+        // fire-and-forget after the session is dropped.
+        let mut stale_thread_turns: Vec<StaleConversation> = Vec::new();
+        let want_memory = self.session_memory.get().is_some();
         {
             let sessions = self.sessions.read().await;
             for user_id in &stale_users {
@@ -343,7 +366,38 @@ impl SessionManager {
                     let tids: Vec<Uuid> = sess.threads.keys().copied().collect();
                     stale_thread_ids.extend(&tids);
                     per_session_thread_ids.insert(sess.id.to_string(), tids);
+                    if want_memory {
+                        for thread in sess.threads.values() {
+                            if thread.turns.is_empty() {
+                                continue;
+                            }
+                            let turns: Vec<(String, Option<String>)> = thread
+                                .turns
+                                .iter()
+                                .map(|t| (t.user_input.clone(), t.response.clone()))
+                                .collect();
+                            let channel = thread
+                                .source_channel
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+                            stale_thread_turns.push((thread.id.to_string(), channel, turns));
+                        }
+                    }
                 }
+            }
+        }
+
+        // Episodic memory: summarize each stale conversation that had activity.
+        // Fire-and-forget — memory must never block or fail the prune path.
+        if let Some(memory) = self.session_memory.get() {
+            for (conversation_id, channel, turns) in stale_thread_turns {
+                let memory = Arc::clone(memory);
+                let ts = chrono::Utc::now();
+                tokio::spawn(async move {
+                    memory
+                        .summarize_and_store(&conversation_id, &channel, ts, &turns)
+                        .await;
+                });
             }
         }
 

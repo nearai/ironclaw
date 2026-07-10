@@ -585,6 +585,17 @@ impl Agent {
 
         let session_manager = session_manager.unwrap_or_else(|| Arc::new(SessionManager::new()));
 
+        // Wire episodic memory: summarize conversations on idle-prune. Only when
+        // a workspace is present (the store target); the cheap LLM is preferred
+        // for this lightweight summarization, falling back to the main model.
+        // The setter takes `&self`, so it works on the already-shared `Arc`.
+        if let Some(ws) = deps.workspace.clone() {
+            let llm = deps.cheap_llm.clone().unwrap_or_else(|| deps.llm.clone());
+            let memory =
+                Arc::new(crate::agent::session_memory::SessionMemory::new(llm, ws));
+            session_manager.set_session_memory(memory);
+        }
+
         let mut scheduler = Scheduler::new(
             config.clone(),
             context_manager.clone(),
