@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
 use ironclaw_secrets::{
     FilesystemSecretStore, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
     SecretsCrypto,
@@ -33,12 +33,14 @@ pub(crate) trait AdminSecretProvisioner: Send + Sync {
         &self,
         tenant: &TenantId,
         user: &UserId,
+        agent_id: Option<&AgentId>,
     ) -> Result<Vec<SecretMetadata>, SecretStoreError>;
 
     async fn put(
         &self,
         tenant: &TenantId,
         user: &UserId,
+        agent_id: Option<&AgentId>,
         handle: SecretHandle,
         material: SecretMaterial,
     ) -> Result<SecretMetadata, SecretStoreError>;
@@ -47,6 +49,7 @@ pub(crate) trait AdminSecretProvisioner: Send + Sync {
         &self,
         tenant: &TenantId,
         user: &UserId,
+        agent_id: Option<&AgentId>,
         handle: &SecretHandle,
     ) -> Result<bool, SecretStoreError>;
 }
@@ -78,11 +81,12 @@ where
         &self,
         tenant: &TenantId,
         user: &UserId,
+        agent_id: Option<&AgentId>,
     ) -> Result<(FilesystemSecretStore<F>, ResourceScope), SecretStoreError> {
         let scope = ResourceScope {
             tenant_id: tenant.clone(),
             user_id: user.clone(),
-            agent_id: None,
+            agent_id: agent_id.cloned(),
             project_id: None,
             mission_id: None,
             thread_id: None,
@@ -113,8 +117,9 @@ where
         &self,
         tenant: &TenantId,
         user: &UserId,
+        agent_id: Option<&AgentId>,
     ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        let (store, scope) = self.store_for(tenant, user)?;
+        let (store, scope) = self.store_for(tenant, user, agent_id)?;
         store.metadata_for_scope(&scope).await
     }
 
@@ -122,10 +127,11 @@ where
         &self,
         tenant: &TenantId,
         user: &UserId,
+        agent_id: Option<&AgentId>,
         handle: SecretHandle,
         material: SecretMaterial,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        let (store, scope) = self.store_for(tenant, user)?;
+        let (store, scope) = self.store_for(tenant, user, agent_id)?;
         store.put(scope, handle, material, None).await
     }
 
@@ -133,9 +139,10 @@ where
         &self,
         tenant: &TenantId,
         user: &UserId,
+        agent_id: Option<&AgentId>,
         handle: &SecretHandle,
     ) -> Result<bool, SecretStoreError> {
-        let (store, scope) = self.store_for(tenant, user)?;
+        let (store, scope) = self.store_for(tenant, user, agent_id)?;
         store.delete(&scope, handle).await
     }
 }

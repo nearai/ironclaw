@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{AgentId, SecretHandle, TenantId, UserId};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -182,12 +182,14 @@ pub trait AdminUserService: Send + Sync {
         &self,
         tenant: &TenantId,
         user_id: &UserId,
+        agent_id: Option<&AgentId>,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError>;
 
     async fn put_secret(
         &self,
         tenant: &TenantId,
         user_id: &UserId,
+        agent_id: Option<&AgentId>,
         handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError>;
@@ -196,6 +198,7 @@ pub trait AdminUserService: Send + Sync {
         &self,
         tenant: &TenantId,
         user_id: &UserId,
+        agent_id: Option<&AgentId>,
         handle: SecretHandle,
     ) -> Result<bool, AdminUserError>;
 }
@@ -280,6 +283,7 @@ impl AdminUserService for RejectingAdminUserService {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
+        _agent_id: Option<&AgentId>,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
@@ -288,6 +292,7 @@ impl AdminUserService for RejectingAdminUserService {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
+        _agent_id: Option<&AgentId>,
         _handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
@@ -298,6 +303,7 @@ impl AdminUserService for RejectingAdminUserService {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
+        _agent_id: Option<&AgentId>,
         _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Unavailable)

@@ -26,7 +26,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -448,6 +448,36 @@ async fn admin_full_lifecycle_and_api_token_login() {
     assert!(
         !secrets.to_string().contains("sk-super-secret-value"),
         "listing secrets must not expose material"
+    );
+    let secret_store = harness._runtime.services().secret_store_for_test();
+    let runtime_scope = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        user_id: UserId::new(admin_id.as_str()).expect("admin user"),
+        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let handle = SecretHandle::new("openai_key").expect("handle");
+    let lease = secret_store
+        .lease_once(&runtime_scope, &handle)
+        .await
+        .expect("admin-provisioned secret is readable at the runtime agent scope");
+    let material = secret_store
+        .consume(&runtime_scope, lease.id)
+        .await
+        .expect("agent-scoped lease consumes");
+    assert_eq!(
+        material.expose_secret(),
+        "sk-super-secret-value",
+        "admin secret PUT must write to the default-agent scope capability preflight reads"
+    );
+    let mut user_scope = runtime_scope.clone();
+    user_scope.agent_id = None;
+    assert!(
+        secret_store.lease_once(&user_scope, &handle).await.is_err(),
+        "admin secret PUT should not fall back to writing a user-only duplicate"
     );
 
     // Delete cascades: the record is gone, and a re-read is a 404.

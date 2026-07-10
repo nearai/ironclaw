@@ -11397,6 +11397,7 @@ fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> 
 #[derive(Default)]
 struct FakeAdminUsers {
     users: Mutex<HashMap<String, AdminUserRecord>>,
+    secret_agent_ids: Mutex<Vec<Option<String>>>,
 }
 
 impl FakeAdminUsers {
@@ -11407,7 +11408,12 @@ impl FakeAdminUsers {
             .collect();
         Self {
             users: Mutex::new(map),
+            secret_agent_ids: Mutex::new(Vec::new()),
         }
+    }
+
+    fn secret_agent_ids(&self) -> Vec<Option<String>> {
+        self.secret_agent_ids.lock().unwrap().clone()
     }
 }
 
@@ -11532,7 +11538,12 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
+        agent_id: Option<&AgentId>,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        self.secret_agent_ids
+            .lock()
+            .unwrap()
+            .push(agent_id.map(|agent| agent.as_str().to_string()));
         Ok(Vec::new())
     }
 
@@ -11540,9 +11551,14 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
+        agent_id: Option<&AgentId>,
         handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        self.secret_agent_ids
+            .lock()
+            .unwrap()
+            .push(agent_id.map(|agent| agent.as_str().to_string()));
         Ok(AdminUserSecretMeta {
             handle: handle.as_str().to_string(),
             created_at: None,
@@ -11554,18 +11570,27 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
+        agent_id: Option<&AgentId>,
         _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
+        self.secret_agent_ids
+            .lock()
+            .unwrap()
+            .push(agent_id.map(|agent| agent.as_str().to_string()));
         Ok(true)
     }
 }
 
 fn admin_services(fake: FakeAdminUsers) -> RebornServices {
+    admin_services_shared(Arc::new(fake))
+}
+
+fn admin_services_shared(fake: Arc<FakeAdminUsers>) -> RebornServices {
     RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_admin_user_service(Arc::new(fake))
+    .with_admin_user_service(fake)
 }
 
 fn assert_forbidden(err: RebornServicesError) {
@@ -11880,6 +11905,57 @@ async fn admin_operator_bypasses_role_check() {
         .list_admin_users(operator, RebornAdminUserListQuery::default())
         .await
         .expect("an operator token clears the admin boundary without a user record");
+}
+
+#[tokio::test]
+async fn admin_secret_operations_use_caller_default_agent_scope() {
+    // The WebUI auth layer stamps the host-configured default agent onto the
+    // caller. Admin-installed extension secrets must be written/read/deleted
+    // at that same agent scope so capability preflight finds them.
+    let fake = Arc::new(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record(
+            "target-user",
+            AdminUserRole::Member,
+            AdminUserStatus::Active,
+        ),
+    ]));
+    let services = admin_services_shared(Arc::clone(&fake));
+    let target = UserId::new("target-user").expect("user");
+
+    services
+        .list_admin_user_secrets(caller(), target.clone())
+        .await
+        .expect("list secrets");
+    services
+        .put_admin_user_secret(
+            caller(),
+            target.clone(),
+            SecretHandle::new("hosted_mcp_token").unwrap(),
+            RebornAdminPutSecretRequest {
+                value: "bearer".to_string(),
+            },
+        )
+        .await
+        .expect("put secret");
+    services
+        .delete_admin_user_secret(
+            caller(),
+            target,
+            SecretHandle::new("hosted_mcp_token").unwrap(),
+        )
+        .await
+        .expect("delete secret");
+
+    assert_eq!(
+        fake.secret_agent_ids(),
+        vec![
+            Some("agent-alpha".to_string()),
+            Some("agent-alpha".to_string()),
+            Some("agent-alpha".to_string()),
+        ],
+        "admin secret operations must default to the authenticated caller's agent scope"
+    );
 }
 
 #[tokio::test]

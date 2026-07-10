@@ -3282,7 +3282,7 @@ impl RebornServicesApi for RebornServices {
             .await?;
         let secrets = self
             .admin_users
-            .list_secrets(&caller.tenant_id, &user_id)
+            .list_secrets(&caller.tenant_id, &user_id, caller.agent_id.as_ref())
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminUserSecretsListResponse { secrets })
@@ -3303,6 +3303,7 @@ impl RebornServicesApi for RebornServices {
             .put_secret(
                 &caller.tenant_id,
                 &user_id,
+                caller.agent_id.as_ref(),
                 handle,
                 SecretString::from(request.value),
             )
@@ -3324,7 +3325,12 @@ impl RebornServicesApi for RebornServices {
         let handle_str = handle.as_str().to_string();
         let deleted = self
             .admin_users
-            .delete_secret(&caller.tenant_id, &user_id, handle)
+            .delete_secret(
+                &caller.tenant_id,
+                &user_id,
+                caller.agent_id.as_ref(),
+                handle,
+            )
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminSecretDeletedResponse {
