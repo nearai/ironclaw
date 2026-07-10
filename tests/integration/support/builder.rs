@@ -643,6 +643,15 @@ impl RebornIntegrationHarness {
             .collect()
     }
 
+    /// Number of loop milestones recorded for this harness right now (i.e.
+    /// `[baseline_milestone_count..]` so far). Capture at the START of a turn
+    /// on a multi-turn harness and pass to `assert_compaction_failed_since` so
+    /// a prior turn's milestone can't satisfy the assertion — the
+    /// milestone analogue of `history_len`.
+    pub async fn milestone_len(&self) -> HarnessResult<usize> {
+        Ok(self.loop_milestones().len())
+    }
+
     /// Submit a user turn and wait for it to complete.
     pub async fn submit_turn(&self, text: &str) -> HarnessResult<TurnRunId> {
         let run_id = self.submit_turn_async(text).await?;

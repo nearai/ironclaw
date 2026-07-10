@@ -388,12 +388,27 @@ impl RebornIntegrationHarness {
     }
 
     /// Assert a `LoopHostMilestoneKind::CompactionFailed` milestone was
-    /// recorded whose `reason_kind` equals `reason_kind` — proves forced
-    /// compaction failed safety validation rather than the run silently
-    /// completing without ever attempting compaction.
-    pub async fn assert_compaction_failed(&self, reason_kind: &str) -> HarnessResult<()> {
+    /// recorded whose `reason_kind` equals `reason_kind`, scoped to the
+    /// milestones recorded SINCE `baseline` (a value from
+    /// [`RebornIntegrationHarness::milestone_len`] captured at the start of
+    /// the turn under test) — proves forced compaction failed safety
+    /// validation for that turn specifically, not a stale milestone from an
+    /// earlier turn on a multi-turn harness (mirrors the `_since` pattern
+    /// used by the tool-error and history assertions).
+    pub async fn assert_compaction_failed_since(
+        &self,
+        baseline: usize,
+        reason_kind: &str,
+    ) -> HarnessResult<()> {
         let milestones = self.loop_milestones();
-        if milestones.iter().any(|milestone| {
+        let Some(since) = milestones.get(baseline..) else {
+            return Err(format!(
+                "milestone baseline {baseline} exceeds current milestone count {} — stale baseline",
+                milestones.len()
+            )
+            .into());
+        };
+        if since.iter().any(|milestone| {
             matches!(
                 &milestone.kind,
                 LoopHostMilestoneKind::CompactionFailed { reason_kind: actual, .. }
@@ -402,11 +417,11 @@ impl RebornIntegrationHarness {
         }) {
             return Ok(());
         }
-        let seen: Vec<_> = milestones.iter().map(|milestone| &milestone.kind).collect();
-        Err(
-            format!("no CompactionFailed milestone with reason_kind {reason_kind:?}; saw {seen:?}")
-                .into(),
+        let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
+        Err(format!(
+            "no CompactionFailed milestone with reason_kind {reason_kind:?} since baseline {baseline}; saw {seen:?}"
         )
+        .into())
     }
 
     /// Assert a captured model request carried a multimodal `data:` image part

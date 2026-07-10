@@ -116,6 +116,7 @@ async fn multi_tool_turn_survives_failed_forced_compaction_after_results() {
     // must not leak into the role-scoped history assertion below (full-history
     // asserts are unsafe outside single-turn harnesses; see CLAUDE.md).
     let before_fetch_turn = h.history_len().await.expect("history len readable");
+    let before_fetch_milestones = h.milestone_len().await.expect("milestone len readable");
 
     h.submit_turn("fetch items and orders")
         .await
@@ -130,7 +131,7 @@ async fn multi_tool_turn_survives_failed_forced_compaction_after_results() {
     h.assert_tool_result_contains("orders-body")
         .await
         .expect("orders keyed body surfaced");
-    h.assert_compaction_failed("security rejected")
+    h.assert_compaction_failed_since(before_fetch_milestones, "security rejected")
         .await
         .expect("forced compaction must fail safety validation before the run continues");
     assert!(
