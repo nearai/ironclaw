@@ -50,10 +50,7 @@ use ironclaw_reborn_event_store::{
     CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
     RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
-use ironclaw_resources::{
-    FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,
-    ResourceGovernor,
-};
+use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
     ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
@@ -380,6 +377,12 @@ where
         self.security_audit_sink.clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wasm_runtime_credential_provider_captured_for_test(&self) -> bool {
+        self.component_types
+            .wasm_runtime_credential_provider_captured
+    }
+
     /// Builds a runtime dispatcher with every configured runtime adapter.
     fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
         let mut dispatcher = RuntimeDispatcher::from_shared_registry(
@@ -398,7 +401,8 @@ where
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
         )
-        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress));
+        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress))
+        .with_runtime_secret_material_stager(Some(self.runtime_secret_material_stager()));
         if let Some(audit_sink) = &self.audit_sink {
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));

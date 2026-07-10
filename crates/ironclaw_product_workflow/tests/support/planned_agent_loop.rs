@@ -6,10 +6,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal, ResourceScope,
-    RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
+    ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
+    MountView, NetworkPolicy, Principal, ResourceScope, RuntimeKind, TenantId, ThreadId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
@@ -39,6 +41,10 @@ use ironclaw_reborn::{
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
         RuntimeTurnStateStore, build_product_live_planned_runtime,
+    },
+    subagent::await_edge::{
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+        store::FilesystemAwaitEdgeStore,
     },
 };
 use ironclaw_reborn_composition::{
@@ -115,6 +121,46 @@ impl Default for ProductLiveAgentLoopHarnessConfig {
             capability: None,
             host_runtime_capability: None,
         }
+    }
+}
+
+impl ProductLiveAgentLoopHarnessConfig {
+    pub fn set_assistant_reply(mut self, assistant_reply: impl Into<String>) -> Self {
+        self.assistant_reply = assistant_reply.into();
+        self
+    }
+
+    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = user_id.into();
+        self
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = thread_id.into();
+        self
+    }
+
+    pub fn set_pause_model_until_released(mut self, pause_model_until_released: bool) -> Self {
+        self.pause_model_until_released = pause_model_until_released;
+        self
+    }
+
+    pub fn set_model_responses(mut self, model_responses: Vec<HostManagedModelResponse>) -> Self {
+        self.model_responses = model_responses;
+        self
+    }
+
+    pub fn set_capability(mut self, capability: HarnessCapabilityConfig) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    pub fn set_host_runtime_capability(
+        mut self,
+        host_runtime_capability: HostRuntimeCapabilityConfig,
+    ) -> Self {
+        self.host_runtime_capability = Some(host_runtime_capability);
+        self
     }
 }
 
@@ -286,6 +332,29 @@ impl ProductLiveAgentLoopHarness {
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
             Arc::new(ProductLiveCapabilityIo::default());
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+        let await_edge_mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").unwrap(),
+            VirtualPath::new("/turns").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
+            ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
+        )));
+        let await_edge_goal_store = Arc::new(
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+        );
+        let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+            Arc::clone(&await_edge_store),
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+            capability_result_writer.clone(),
+            Arc::new(thread_service.clone()),
+        ));
+        let await_edge_driver = Arc::new(ScopeRecoveryDriver::new(
+            Arc::clone(&await_edge_resolver),
+            Arc::clone(&await_edge_store),
+        ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
             turn_state: turn_state_for_runtime,
@@ -298,13 +367,13 @@ impl ProductLiveAgentLoopHarness {
             capability_factory,
             capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
             capability_result_writer,
-            subagent_goal_store: Arc::new(
-                ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
-            ),
-            subagent_gate_store: Arc::new(
-                ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(
-                ),
-            ),
+            subagent_goal_store: await_edge_goal_store,
+            subagent_await_edge_writer: await_edge_driver
+                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+            subagent_await_edge_settler: await_edge_resolver
+                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+            subagent_await_edge_evidence: Arc::clone(&await_edge_store)
+                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(
                 ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
             ),
@@ -317,6 +386,10 @@ impl ProductLiveAgentLoopHarness {
                     Arc::new(thread_service.clone()),
                     Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
                     checkpoint_store,
+                    await_edge_store
+                        as Arc<
+                            dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore,
+                        >,
                     thread_scope.clone(),
                 )
                 .with_cancellation_factory(cancellation_factory.clone()),
@@ -812,6 +885,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: harness_surface_version(),
             descriptors: vec![CapabilityDescriptorView {
                 capability_id: harness_capability_id(&self.capability.capability_id),

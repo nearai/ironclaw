@@ -6,8 +6,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
-    ScopedFilesystem,
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, LocalFilesystem,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
@@ -488,6 +488,225 @@ async fn filesystem_approval_request_store_discards_pending_request() {
     assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
 }
 
+/// Regression (#5467): discard must tombstone, not delete, so id reuse fails
+/// closed. Also covers the resolution path: `approve()`/`deny()` on an
+/// already-discarded id must reject with `ApprovalNotPending`, not resurrect
+/// the tombstone. Sibling of `filesystem_discard_tombstone_prevents_request_id_reuse`.
+#[tokio::test]
+async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.discard_pending(&scope, request_id).await.unwrap();
+
+    let approve_err = store.approve(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            approve_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {approve_err:?}",
+    );
+    let deny_err = store.deny(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            deny_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {deny_err:?}",
+    );
+
+    let mut second = approval_request(invocation_id);
+    second.id = request_id;
+
+    let err = store.save_pending(scope, second).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RunStateError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+        ),
+        "expected ApprovalRequestAlreadyExists but got {err:?}",
+    );
+}
+
+/// Regression test (PR #5234 review): `discard_pending` writes a `Discarded`
+/// tombstone rather than deleting the record, specifically to block a later
+/// `save_pending` from reusing the same request id. The existing discard
+/// tests only assert that `get`/`records_for_scope` hide the discarded
+/// record — that would pass equally well if `discard_pending` deleted the
+/// file outright. This test pins the actual reuse-blocking invariant: a
+/// `save_pending` for an id that was previously discarded must fail with
+/// `ApprovalRequestAlreadyExists`, not silently succeed. It also covers the
+/// resolution path: `deny()`/`approve()` on the discarded id must reject with
+/// `ApprovalNotPending`, not clobber the tombstone.
+#[tokio::test]
+async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
+    let fs = Arc::new(engine_filesystem());
+    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.discard_pending(&scope, request_id).await.unwrap();
+
+    let deny_err = store.deny(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            deny_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {deny_err:?}",
+    );
+    let approve_err = store.approve(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            approve_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {approve_err:?}",
+    );
+
+    let mut second = approval_request(invocation_id);
+    second.id = request_id;
+
+    let err = store.save_pending(scope, second).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RunStateError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+        ),
+        "expected ApprovalRequestAlreadyExists but got {err:?}",
+    );
+}
+
+/// Regression test for the TOCTOU race: a concurrent `approve()` that wins its
+/// CAS between `discard_pending`'s read and write must not have its record
+/// clobbered.  The fix routes discard through `cas_update` so a lost CAS race
+/// retries, re-reads the now-Approved record, and returns `ApprovalNotPending`
+/// instead of deleting the terminal record.
+///
+/// This sequential variant documents the precondition check: calling
+/// `discard_pending` on an already-approved record is rejected immediately.
+/// See `filesystem_discard_toctou_race_loses_to_concurrent_approve` below for
+/// the deterministic interleaving that actually forces the CAS-retry path.
+#[tokio::test]
+async fn filesystem_discard_does_not_clobber_resolved_approval() {
+    let fs = Arc::new(engine_filesystem());
+    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    // Save the approval request (Pending) then immediately approve it.
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    // discard_pending must refuse because the record is no longer Pending.
+    let err = store.discard_pending(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(err, RunStateError::ApprovalNotPending { .. }),
+        "expected ApprovalNotPending but got {err:?}",
+    );
+
+    // The Approved record must still be readable — discard must not clobber it.
+    let record = store
+        .get(&scope, request_id)
+        .await
+        .unwrap()
+        .expect("approved record must still exist after rejected discard");
+    assert_eq!(record.status, ApprovalStatus::Approved);
+}
+
+/// Deterministic TOCTOU regression: a concurrent `approve()` races into the
+/// window between `discard_pending`'s initial `get` (which returns `Pending`)
+/// and its subsequent CAS `put` (which must fail with `VersionMismatch`).
+///
+/// # How the interleaving is forced
+///
+/// `RaceApproveOnFirstRead` is a `RootFilesystem` decorator armed with a
+/// one-shot hook.  When `discard_pending`'s `cas_update_loop` issues its first
+/// `get` of the approval record:
+///
+/// 1. The hook fires: it calls `approve()` via a bypass store that shares the
+///    same `InMemoryBackend` but does NOT go through the hook (so the nested
+///    `get`/`put` from `approve()` never re-arm or re-trigger the hook).
+/// 2. `approve()` wins the CAS, bumping the record from `Pending@V` to
+///    `Approved@V+1`.
+/// 3. The hook returns the stale `Pending@V` snapshot to `discard_pending`.
+///
+/// `discard_pending` then attempts `put(Discarded, Version(V))`, receives
+/// `VersionMismatch` (the current version is `V+1`), retries, re-reads
+/// `Approved@V+1`, and the apply closure returns `ApprovalNotPending` — the
+/// expected error — without ever writing `Discarded` over the resolved record.
+#[tokio::test]
+async fn filesystem_discard_toctou_race_loses_to_concurrent_approve() {
+    // Shared in-memory backend — both stores see the same records and CAS
+    // versions, so approve()'s version bump is immediately visible to
+    // discard_pending's retry.
+    let inner = Arc::new(engine_filesystem());
+
+    // A bypass scoped filesystem that wraps the inner backend directly (no
+    // hook).  The injected approve() runs through this so the hook never
+    // re-fires on approve()'s own get/put calls.
+    let bypass_scoped = scoped_run_state_fs(Arc::clone(&inner));
+
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    // Save the pending approval via the bypass path — hook is not armed yet.
+    FilesystemApprovalRequestStore::new(Arc::clone(&bypass_scoped))
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    // Build the hook filesystem.  It knows the scope and request_id so it can
+    // call approve() synchronously inside the first get().
+    let hook_fs = Arc::new(RaceApproveOnFirstRead::new(
+        Arc::clone(&inner),
+        Arc::clone(&bypass_scoped),
+        scope.clone(),
+        request_id,
+    ));
+
+    // The discard store drives discard_pending through the hook filesystem.
+    let discard_store =
+        FilesystemApprovalRequestStore::new(scoped_run_state_fs(Arc::clone(&hook_fs)));
+
+    // discard_pending must:
+    //   • read Pending@V  →  hook fires  →  approve() bumps version to V+1
+    //   • try put(Discarded, Version(V))  →  VersionMismatch
+    //   • retry: read Approved@V+1  →  closure returns ApprovalNotPending
+    let err = discard_store
+        .discard_pending(&scope, request_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, RunStateError::ApprovalNotPending { .. }),
+        "expected ApprovalNotPending from TOCTOU-raced discard, got {err:?}",
+    );
+
+    // The Approved record must be intact — discard must not have clobbered it.
+    let record = discard_store
+        .get(&scope, request_id)
+        .await
+        .unwrap()
+        .expect("approved record must survive a TOCTOU-raced discard attempt");
+    assert_eq!(record.status, ApprovalStatus::Approved);
+}
+
 #[tokio::test]
 async fn in_memory_approval_store_allows_same_request_id_in_different_tenants() {
     let store = InMemoryApprovalRequestStore::new();
@@ -897,13 +1116,183 @@ async fn filesystem_run_state_store_isolates_two_tenants_with_same_user_project_
     ));
 }
 
+/// Regression: `record_entry` must produce a record-shaped entry (`entry.kind =
+/// Some(...)`) so byte-only backends (those that reject `put` when `kind` is
+/// set) surface `CasUnsupported` via `cas_update` rather than silently
+/// succeeding on a blind `CasExpectation::Absent` write.
+///
+/// `LocalFilesystem` is used here because it is the canonical byte-only
+/// `RootFilesystem`: its `put` impl returns `Unsupported{WriteFile}` when
+/// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`,
+/// which `map_cas_error` surfaces as `RunStateError::Backend(...)`.
+#[tokio::test]
+async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/engine").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /engine at temp dir");
+    let scoped = scoped_run_state_fs(Arc::new(local_fs));
+    let store = FilesystemApprovalRequestStore::new(scoped);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "test-tenant", "test-user");
+    let approval = approval_request(invocation_id);
+
+    let err = store.save_pending(scope, approval).await.unwrap_err();
+    assert!(
+        matches!(&err, RunStateError::Backend(msg) if msg.contains("compare-and-swap")),
+        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
+}
+
+/// Caller-level mirror of `filesystem_approval_store_fails_closed_on_byte_only_backend`
+/// for `FilesystemRunStateStore::start`: a regression that drops
+/// `RUN_STATE_RECORD_KIND` from the run-record encoder (`record_entry`), or
+/// breaks the `CasUnsupported` mapping, would let `start` silently succeed
+/// against a byte-only backend instead of failing closed.
+#[tokio::test]
+async fn filesystem_run_state_store_start_fails_closed_on_byte_only_backend() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/engine").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /engine at temp dir");
+    let scoped = scoped_run_state_fs(Arc::new(local_fs));
+    let store = FilesystemRunStateStore::new(scoped);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "test-tenant", "test-user");
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+
+    let err = store
+        .start(RunStart {
+            invocation_id,
+            capability_id,
+            scope,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, RunStateError::Backend(msg) if msg.contains("compare-and-swap")),
+        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
+}
+
+/// A `RootFilesystem` decorator that, when armed, fires a concurrent
+/// `approve()` inside the first `get` call for an approval record.
+///
+/// The hook fires ONCE (it disarms itself before calling approve so the nested
+/// approve's own get/put do not re-trigger it) and then returns the stale
+/// pre-approve snapshot to the original caller.  This forces the TOCTOU
+/// interleaving described on `filesystem_discard_toctou_race_loses_to_concurrent_approve`.
+struct RaceApproveOnFirstRead {
+    /// The raw backend shared with the bypass store.
+    inner: Arc<InMemoryBackend>,
+    /// Disarmed atomically before the injected approve() runs to prevent
+    /// reentrancy.
+    armed: AtomicBool,
+    /// Bypass store: wraps `inner` via a `ScopedFilesystem<InMemoryBackend>`
+    /// that does NOT pass through this hook.  approve() on this store bumps
+    /// the CAS version without re-entering `RaceApproveOnFirstRead::get`.
+    bypass_store: FilesystemApprovalRequestStore<InMemoryBackend>,
+    scope: ResourceScope,
+    request_id: ApprovalRequestId,
+}
+
+impl RaceApproveOnFirstRead {
+    fn new(
+        inner: Arc<InMemoryBackend>,
+        bypass_scoped: Arc<ScopedFilesystem<InMemoryBackend>>,
+        scope: ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Self {
+        Self {
+            inner,
+            armed: AtomicBool::new(true),
+            bypass_store: FilesystemApprovalRequestStore::new(bypass_scoped),
+            scope,
+            request_id,
+        }
+    }
+
+    fn is_approval_record(path: &VirtualPath) -> bool {
+        path.as_str().contains("/approvals/") && path.as_str().ends_with(".json")
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for RaceApproveOnFirstRead {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.append_file(path, bytes).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        // Read first so we return the pre-approve snapshot (stale version) to
+        // the caller.  discard_pending will then attempt put(Version(V)) while
+        // approve() has already bumped the version to V+1.
+        let result = self.inner.get(path).await;
+
+        if Self::is_approval_record(path) && self.armed.swap(false, Ordering::SeqCst) {
+            // Disarmed above — approve()'s own get/put go through bypass_store
+            // (ScopedFilesystem<InMemoryBackend>) and never reach this hook.
+            self.bypass_store
+                .approve(&self.scope, self.request_id)
+                .await
+                .expect("injected approve() must succeed while record is Pending");
+        }
+
+        result
+    }
+}
+
 struct ConcurrentMissingReadFilesystem {
-    inner: LocalFilesystem,
+    inner: InMemoryBackend,
     missing_reads: AtomicUsize,
 }
 
 impl ConcurrentMissingReadFilesystem {
-    fn new(inner: LocalFilesystem) -> Self {
+    fn new(inner: InMemoryBackend) -> Self {
         Self {
             inner,
             missing_reads: AtomicUsize::new(0),
@@ -983,12 +1372,12 @@ impl RootFilesystem for ConcurrentMissingReadFilesystem {
 }
 
 struct DisappearingApprovalReadFilesystem {
-    inner: LocalFilesystem,
+    inner: InMemoryBackend,
     fail_next_approval_read: AtomicBool,
 }
 
 impl DisappearingApprovalReadFilesystem {
-    fn new(inner: LocalFilesystem) -> Self {
+    fn new(inner: InMemoryBackend) -> Self {
         Self {
             inner,
             fail_next_approval_read: AtomicBool::new(false),
@@ -1065,20 +1454,14 @@ impl RootFilesystem for DisappearingApprovalReadFilesystem {
     }
 }
 
-/// Build a [`LocalFilesystem`] with `/engine` mounted to a tempdir. The
-/// `/run-state` and `/approvals` mount aliases on the outer
-/// [`ScopedFilesystem`] resolve under `/engine/...` so the legacy local-disk
-/// fault-injection wrappers (which match by post-resolution path) keep
-/// working unchanged.
-fn engine_filesystem() -> LocalFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/engine").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    fs
+/// Build an [`InMemoryBackend`] for use in tests. The backend supports
+/// full CAS semantics including `Version`-preconditioned writes, which
+/// `LocalFilesystem` does not. The `/run-state` and `/approvals` mount
+/// aliases on the outer [`ScopedFilesystem`] resolve under `/engine/...`
+/// so the fault-injection wrappers (which match by post-resolution path)
+/// keep working unchanged.
+fn engine_filesystem() -> InMemoryBackend {
+    InMemoryBackend::new()
 }
 
 /// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] that exposes

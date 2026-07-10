@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -18,9 +19,10 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
+use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
-    Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -34,24 +36,25 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -61,6 +64,7 @@ use crate::{
     is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
 };
 
+mod admin_users;
 mod error;
 mod extension_credentials;
 mod extension_onboarding;
@@ -74,19 +78,33 @@ mod projects;
 mod trace_credits;
 mod types;
 
+use admin_users::{
+    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
+};
+pub use admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+};
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
-pub use trace_credits::{RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse};
+pub use trace_credits::{
+    RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+};
 
 pub use fs_browse::{
     FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
 };
 use ironclaw_approvals::{
-    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingStore,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
-    ToolPermissionState, permission_mode_allows_persistent_approval,
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
+    AutoApproveSettingStore, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
+    ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
@@ -135,13 +153,14 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -223,6 +242,40 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
         })
+    }
+}
+
+/// Per-user channel connection state. Returns, for the calling user, which
+/// channel extensions they have personally connected (for example, Slack OAuth).
+/// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
+/// Only channels that have a per-user connection concept appear in the map;
+/// absence means "no per-user connection concept for this channel".
+#[async_trait]
+pub trait ChannelConnectionFacade: Send + Sync {
+    async fn caller_channel_connections(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    async fn disconnect_channel_for_caller(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _channel: &str,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticChannelConnectionFacade;
+
+#[async_trait]
+impl ChannelConnectionFacade for StaticChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+        Ok(std::collections::HashMap::new())
     }
 }
 
@@ -579,6 +632,41 @@ pub struct TriggerRunThreadScope {
     pub creator_user_id: UserId,
 }
 
+#[derive(Debug, Clone)]
+struct AutomationNotificationTitle(String);
+
+impl AutomationNotificationTitle {
+    const MAX_CHARS: usize = 120;
+
+    fn from_name(name: &str) -> Option<Self> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let sanitized = trimmed
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(Self::MAX_CHARS)
+            .collect::<String>();
+        let sanitized = sanitized.trim();
+        if sanitized.is_empty() {
+            None
+        } else {
+            Some(Self(sanitized.to_string()))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutomationApprovalThreadCandidate {
+    thread_id: ThreadId,
+    title: Option<AutomationNotificationTitle>,
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
@@ -599,6 +687,15 @@ pub trait AutomationProductFacade: Send + Sync {
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn rename_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+        _name: AutomationName,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -677,6 +774,15 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn rename_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+        _name: AutomationName,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -948,6 +1054,8 @@ fn operator_config_invalid_value(field: &'static str) -> RebornServicesError {
     ))
 }
 
+// `internal_from` logs the backend cause while keeping the facade payload
+// sanitized, so operator diagnostics survive without leaking over the wire.
 fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesError {
     RebornServicesError::internal_from(error)
 }
@@ -963,7 +1071,9 @@ async fn auto_approve_config_entry(
         .get(&key)
         .await
         .map_err(operator_config_store_error)?;
-    let enabled = record.as_ref().is_some_and(|record| record.enabled);
+    let enabled = record
+        .as_ref()
+        .map_or(AUTO_APPROVE_DEFAULT_ENABLED, |record| record.enabled);
     Ok(RebornOperatorConfigEntry {
         key: AUTO_APPROVE_CONFIG_KEY.to_string(),
         value: serde_json::json!(enabled),
@@ -1183,6 +1293,24 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
         ToolPermissionState::AskEachTime => "ask_each_time",
         ToolPermissionState::Disabled => "disabled",
     }
+}
+
+/// Wire enum for the WebUI settings/tools permission request body.
+///
+/// Request-side vocabulary on the RebornServicesApi contract surface: the
+/// three resolved [`ToolPermissionState`] values plus `default`, which clears
+/// the stored per-capability override. The serialized strings must stay
+/// byte-identical to what [`parse_tool_permission_state`] accepts and
+/// [`tool_permission_state_wire`] emits — the
+/// `settings_tool_permission_state_wire_strings_stay_linked` test pins that
+/// link so the request enum cannot drift from the storage vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
 }
 
 enum ToolPermissionUpdate {
@@ -1627,6 +1755,18 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError>;
 
+    /// Return the effective global auto-approve toggle for the authenticated
+    /// caller. This is a narrow session-bootstrap read, not the operator
+    /// config key/value surface; implementations must derive scope from the
+    /// trusted caller. The default returns `Ok(false)` for compositions that
+    /// have not wired the approval settings surface.
+    async fn global_auto_approve_enabled(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        Ok(false)
+    }
+
     /// Read the raw bytes of one landed attachment so the browser can render an
     /// image thumbnail (or download a file) for a persisted message. The default
     /// reports the bytes are unavailable; compositions that wire a reader over
@@ -1650,6 +1790,23 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError>;
 
+    fn supports_stream_events_subscription(&self) -> bool {
+        false
+    }
+
+    async fn subscribe_events(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        Err(RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ReplayUnavailable,
+            503,
+            true,
+        ))
+    }
+
     async fn cancel_run(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1661,6 +1818,12 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError>;
+
+    async fn retry_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError>;
 
     async fn get_run_state(
         &self,
@@ -1880,6 +2043,16 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    async fn rename_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn delete_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1918,6 +2091,50 @@ pub trait RebornServicesApi: Send + Sync {
         // not a misleading zero/not-enrolled view (carry the cause for the
         // server-side trail per error-handling.md).
         trace_credits::local_trace_credits_for_user(&scope)
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Read-only list of the authenticated caller's submitted Trace Commons
+    /// traces, fetched directly from the server (not a local view).
+    ///
+    /// The scope is always derived from the authenticated caller's tenant +
+    /// user id — never from request input. A user who is not enrolled gets the
+    /// unenrolled zero-state (`{ enrolled: false, traces: [] }`), never an
+    /// error. Transport failures surface as an internal error.
+    ///
+    /// The default body is the production implementation using the crate-local
+    /// hardened reqwest path (no host-egress sink), so impls (including test
+    /// fakes) only override this when they need a non-standard fetch path.
+    async fn trace_account_traces(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        let actor = caller.actor();
+        trace_credits::account_traces_for_user(&caller.tenant_id, &actor.user_id)
+            .await
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Mint a one-time Trace Commons browser login link for the
+    /// authenticated caller, so hosted users (no host-file access) can open
+    /// their contributor account from the WebUI.
+    ///
+    /// The scope is always derived from the authenticated caller's tenant +
+    /// user id — never from request input. An unenrolled caller gets the
+    /// zero-state (`minted: false, enrolled: false`), never an error.
+    ///
+    /// SECURITY: the returned URL is a one-time account-access credential. It
+    /// travels only over this authenticated response to the caller's own
+    /// browser; it must never be logged or exposed on a model-visible
+    /// surface. The default body is the production implementation (pinned
+    /// direct client, same lane as `trace_account_traces`).
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        let actor = caller.actor();
+        trace_credits::account_login_link_for_user(&caller.tenant_id, &actor.user_id)
+            .await
             .map_err(RebornServicesError::internal_from)
     }
 
@@ -2306,6 +2523,109 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
+
+    // --- Admin user management -----------------------------------------------
+    //
+    // Each method authorizes the caller (admin/owner role, or env-bearer
+    // operator) and enforces last-admin protection in the implementation.
+    // Default bodies report the service unavailable so implementors without a
+    // wired admin service (and existing fakes) compile untouched.
+
+    async fn list_admin_users(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornAdminUserListQuery,
+    ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn get_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn create_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAdminCreateUserRequest,
+    ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn update_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminUpdateUserRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_admin_user_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetStatusRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_admin_user_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetRoleRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn delete_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
+        let _ = (caller, user_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn list_admin_user_secrets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
+        let _ = (caller, user_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn put_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: SecretHandle,
+        request: RebornAdminPutSecretRequest,
+    ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
+        let _ = (caller, user_id, handle, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn delete_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: SecretHandle,
+    ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
+        let _ = (caller, user_id, handle);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 /// Lands inbound attachment bytes into durable, agent-accessible storage and
@@ -2355,12 +2675,14 @@ pub struct RebornServices {
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
+    admin_users: Arc<dyn AdminUserService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
@@ -2389,6 +2711,7 @@ impl RebornServices {
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
+            channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2397,6 +2720,7 @@ impl RebornServices {
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
+            admin_users: Arc::new(RejectingAdminUserService),
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
@@ -2517,6 +2841,14 @@ impl RebornServices {
         self
     }
 
+    pub fn with_channel_connection_facade(
+        mut self,
+        channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    ) -> Self {
+        self.channel_connection_facade = channel_connection_facade;
+        self
+    }
+
     pub fn with_outbound_preferences_facade(
         mut self,
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
@@ -2573,6 +2905,14 @@ impl RebornServices {
         self
     }
 
+    /// Wire the admin user-management port (user CRUD + per-user secret
+    /// provisioning). Without it, every admin facade method reports the service
+    /// unavailable via the fail-closed [`RejectingAdminUserService`] default.
+    pub fn with_admin_user_service(mut self, admin_users: Arc<dyn AdminUserService>) -> Self {
+        self.admin_users = admin_users;
+        self
+    }
+
     pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
     where
         F: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError>
@@ -2622,10 +2962,375 @@ impl RebornServices {
         }
         Ok(())
     }
+
+    /// Authorize the caller for admin operations. An env-bearer operator is an
+    /// implicit owner; otherwise the caller's persisted role must be admin or
+    /// owner. The role is read from the directory on EVERY call (never cached),
+    /// so a demoted admin loses access immediately — see
+    /// `product_workflow/CLAUDE.md` ("No caching. Caching the authz result is
+    /// explicitly forbidden").
+    async fn authorize_admin(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<(), RebornServicesError> {
+        if caller.operator_webui_config {
+            return Ok(());
+        }
+        let record = self
+            .admin_users
+            .get_user(&caller.tenant_id, &caller.user_id)
+            .await
+            .map_err(map_admin_user_error)?;
+        match record {
+            // Admin/owner role AND an active account. A suspended admin keeps
+            // the role field but must not act: status gates authorization, so
+            // suspending an admin immediately revokes their admin API access
+            // (same "read on every call, never cache" contract as role).
+            Some(user) if user.role.is_admin() && user.status == AdminUserStatus::Active => Ok(()),
+            // "No record", "not admin", and "suspended admin" are all a 403: the
+            // caller is authenticated but not authorized. Never leak which.
+            _ => Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::Forbidden,
+                403,
+                false,
+            )),
+        }
+    }
+
+    /// Fetch the target user, mapping absence to a sanitized 404.
+    async fn require_admin_target(
+        &self,
+        tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<AdminUserRecord, RebornServicesError> {
+        self.admin_users
+            .get_user(tenant, user_id)
+            .await
+            .map_err(map_admin_user_error)?
+            .ok_or_else(|| {
+                RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+            })
+    }
+
+    /// Reject a mutation that would strand the tenant without an admin.
+    /// `target` is the user's CURRENT record; `still_admin_after` is whether the
+    /// user remains an active admin once the mutation lands. Re-reads the
+    /// active-admin count immediately before the decision as a TOCTOU guard
+    /// (mirrors the `blocked_gate_state` re-read pattern).
+    async fn ensure_not_last_admin(
+        &self,
+        tenant: &TenantId,
+        target: &AdminUserRecord,
+        still_admin_after: bool,
+    ) -> Result<(), RebornServicesError> {
+        // Only a mutation that drops a currently-active admin below the line can
+        // strand the tenant. If the target is not now an active admin, or stays
+        // one, there is nothing to protect.
+        if still_admin_after || target.status != AdminUserStatus::Active || !target.role.is_admin()
+        {
+            return Ok(());
+        }
+        let active_admins = self
+            .admin_users
+            .count_active_admins(tenant)
+            .await
+            .map_err(map_admin_user_error)?;
+        if active_admins <= 1 {
+            return Err(last_admin_error());
+        }
+        Ok(())
+    }
+}
+
+/// Map the coarse admin-port error into the sanitized WebUI wire taxonomy.
+fn map_admin_user_error(error: AdminUserError) -> RebornServicesError {
+    match error {
+        AdminUserError::NotFound => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        // Client-supplied value is malformed (e.g. a bad secret handle) — a 400,
+        // never a 500: the input is at fault, not the backend.
+        AdminUserError::InvalidInput => {
+            RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
+        }
+        // Transient backend failure — the browser may retry.
+        AdminUserError::Unavailable => RebornServicesError::service_unavailable(true),
+        AdminUserError::Internal => RebornServicesError::internal(),
+    }
+}
+
+/// Stable last-admin-protection error: a 409 conflict carrying a `last_admin`
+/// marker so the UI can render a specific message and tests can pin it.
+fn last_admin_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: Some("last_admin".to_string()),
+        validation_code: None,
+    }
 }
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn list_admin_users(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornAdminUserListQuery,
+    ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        // Bound the page: clamp the caller's `limit` and parse the opaque
+        // cursor into a `UserId`. A malformed cursor is caller input at fault
+        // (it should only ever be a value we minted), so it is a 400.
+        let limit = query
+            .limit
+            .map(|value| value as usize)
+            .unwrap_or(ADMIN_USER_LIST_DEFAULT_LIMIT)
+            .clamp(1, ADMIN_USER_LIST_MAX_LIMIT);
+        let after = match query.cursor.as_deref() {
+            Some(raw) => Some(UserId::new(raw).map_err(|_| {
+                RebornServicesError::from_status(
+                    RebornServicesErrorCode::InvalidRequest,
+                    400,
+                    false,
+                )
+            })?),
+            None => None,
+        };
+        let users = self
+            .admin_users
+            .list_users(&caller.tenant_id, query.status, after.as_ref(), limit)
+            .await
+            .map_err(map_admin_user_error)?;
+        // A full page means there may be more rows past it; hand back the last
+        // id as the next cursor. A short page is the end of the tenant's users.
+        let next_cursor = (users.len() == limit)
+            .then(|| users.last().map(|user| user.user_id.as_str().to_string()))
+            .flatten();
+        Ok(RebornAdminUserListResponse { users, next_cursor })
+    }
+
+    async fn get_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let user = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn create_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAdminCreateUserRequest,
+    ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let created = self
+            .admin_users
+            .create_user(
+                &caller.tenant_id,
+                &caller.user_id,
+                AdminCreateUserFields {
+                    email: request.email,
+                    display_name: request.display_name,
+                    role: request.role,
+                },
+            )
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserCreatedResponse {
+            user: created.record,
+            // Exposed exactly once, here. The DTO carries it in no other path.
+            api_token: created.api_token.expose_secret().to_string(),
+        })
+    }
+
+    async fn update_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminUpdateUserRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        // Surface a 404 before attempting the mutation.
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let user = self
+            .admin_users
+            .update_profile(
+                &caller.tenant_id,
+                &user_id,
+                request.display_name,
+                request.metadata,
+            )
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn set_admin_user_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetStatusRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        // Serialize with concurrent role/status/delete on this tenant so the
+        // last-admin count read below reflects any in-flight demotion.
+        let _admin_guard = self.lock_admin_mutation(&caller.tenant_id).await;
+        let target = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        // Activating keeps/raises an admin; suspending drops one.
+        let still_admin_after = matches!(request.status, AdminUserStatus::Active);
+        self.ensure_not_last_admin(&caller.tenant_id, &target, still_admin_after)
+            .await?;
+        let user = self
+            .admin_users
+            .set_status(&caller.tenant_id, &user_id, request.status)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn set_admin_user_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetRoleRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        // Serialize with concurrent role/status/delete on this tenant so the
+        // last-admin count read below reflects any in-flight demotion.
+        let _admin_guard = self.lock_admin_mutation(&caller.tenant_id).await;
+        let target = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let still_admin_after = request.role.is_admin();
+        self.ensure_not_last_admin(&caller.tenant_id, &target, still_admin_after)
+            .await?;
+        let user = self
+            .admin_users
+            .set_role(&caller.tenant_id, &user_id, request.role)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn delete_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        // Serialize with concurrent role/status/delete on this tenant so the
+        // last-admin count read below reflects any in-flight demotion.
+        let _admin_guard = self.lock_admin_mutation(&caller.tenant_id).await;
+        let target = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        // Deletion always removes the user, so it can never leave them an admin.
+        self.ensure_not_last_admin(&caller.tenant_id, &target, false)
+            .await?;
+        self.admin_users
+            .delete_user(&caller.tenant_id, &user_id)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserDeletedResponse {
+            user_id,
+            deleted: true,
+        })
+    }
+
+    async fn list_admin_user_secrets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let secrets = self
+            .admin_users
+            .list_secrets(&caller.tenant_id, &user_id)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserSecretsListResponse { secrets })
+    }
+
+    async fn put_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: SecretHandle,
+        request: RebornAdminPutSecretRequest,
+    ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let secret = self
+            .admin_users
+            .put_secret(
+                &caller.tenant_id,
+                &user_id,
+                handle,
+                SecretString::from(request.value),
+            )
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminSecretResponse { secret })
+    }
+
+    async fn delete_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: SecretHandle,
+    ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        // Echo the parsed, canonical handle back on the wire as a plain string.
+        let handle_str = handle.as_str().to_string();
+        let deleted = self
+            .admin_users
+            .delete_secret(&caller.tenant_id, &user_id, handle)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminSecretDeletedResponse {
+            handle: handle_str,
+            deleted,
+        })
+    }
+
+    async fn global_auto_approve_enabled(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        let Some(config) = &self.operator_approval_config else {
+            return Ok(false);
+        };
+        let scope = caller_resource_scope(&caller);
+        let operator_scope = operator_tool_permission_scope(&scope);
+        config
+            .auto_approve
+            .is_enabled(&operator_scope)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    tenant_id = %caller.tenant_id,
+                    user_id = %caller.user_id,
+                    error = %error,
+                    "failed to read global auto-approve setting"
+                );
+                operator_config_store_error(error)
+            })
+    }
+
     async fn get_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3048,6 +3753,11 @@ impl RebornServicesApi for RebornServices {
                 event_cursor,
                 ..
             }) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    run_id = %run_id,
+                    "webui submit_turn accepted: turn run enqueued"
+                );
                 mark_message_submitted_or_replay(
                     &*self.thread_service,
                     &thread_scope,
@@ -3070,6 +3780,11 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    active_run_id = ?busy.active_run_id,
+                    "webui submit_turn deferred: thread busy with an active run"
+                );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 mark_message_rejected_busy_or_replay(
                     &*self.thread_service,
@@ -3089,6 +3804,11 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(error) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    error = ?error,
+                    "webui submit_turn rejected by coordinator; no run enqueued"
+                );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 Err(map_turn_error(error))
             }
@@ -3498,6 +4218,89 @@ impl RebornServicesApi for RebornServices {
         Ok(RebornStreamEventsResponse { events })
     }
 
+    fn supports_stream_events_subscription(&self) -> bool {
+        self.event_stream
+            .as_ref()
+            .is_some_and(|stream| stream.supports_subscription())
+    }
+
+    async fn subscribe_events(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let actor = caller.actor();
+        let access = self
+            .resolve_thread_access_for_caller(
+                caller.clone(),
+                caller.turn_scope(thread_id.clone()),
+                &actor,
+            )
+            .await?;
+        let Some(event_stream) = &self.event_stream else {
+            return Err(RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ReplayUnavailable,
+                503,
+                false,
+            ));
+        };
+        let mut subscription = event_stream
+            .subscribe(ProjectionSubscriptionRequest {
+                actor: access.run_actor,
+                scope: access.scope,
+                after_cursor: request.after_cursor,
+            })
+            .await
+            .map_err(map_projection_error)?;
+
+        let service = self.clone();
+        let caller_for_revalidation = caller.clone();
+        let actor_for_revalidation = actor;
+        let (sender, receiver) = mpsc::channel(128);
+        tokio::spawn(async move {
+            loop {
+                let next = tokio::select! {
+                    _ = sender.closed() => return,
+                    next = subscription.next() => next,
+                };
+                let Some(next) = next else {
+                    return;
+                };
+                let envelope = match next {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        let _ = sender.send(Err(map_projection_error(error))).await;
+                        return;
+                    }
+                };
+                if sender.is_closed() {
+                    return;
+                }
+                let revalidate = service
+                    .resolve_thread_access_for_caller(
+                        caller_for_revalidation.clone(),
+                        caller_for_revalidation.turn_scope(thread_id.clone()),
+                        &actor_for_revalidation,
+                    )
+                    .await;
+                if let Err(error) = revalidate {
+                    let _ = sender.send(Err(error)).await;
+                    return;
+                }
+                if sender.is_closed() {
+                    return;
+                }
+                if sender.send(Ok(envelope)).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        Ok(RebornStreamEventsSubscription::new(receiver))
+    }
+
     async fn cancel_run(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3601,6 +4404,54 @@ impl RebornServicesApi for RebornServices {
         }
     }
 
+    async fn retry_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
+        let command = request.into_command(caller)?;
+        let WebUiInboundCommand::RetryRun {
+            scope,
+            actor,
+            run_id,
+            client_action_id,
+        } = command
+        else {
+            return Err(RebornServicesError::internal_invariant());
+        };
+
+        let access = self
+            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
+            .await?;
+        // Serialize retry admission with thread deletion. `delete_thread` holds
+        // this same per-thread lock across its active-run probe + delete; taking
+        // it here closes the window where a concurrent delete passes its probe
+        // (the failed run is terminal) and then deletes the thread while
+        // `retry_turn` enqueues a replacement run against it.
+        let _thread_operation_guard = self.lock_thread_operation(&access.scope).await;
+        let binding_id = webui_retry_binding_id(&access.scope, run_id, &client_action_id);
+        let response = self
+            .turn_coordinator
+            .retry_turn(RetryTurnRequest {
+                scope: access.scope,
+                actor: access.run_actor,
+                run_id,
+                source_binding_ref: webui_source_binding_ref_from_raw(
+                    "webui-retry-src",
+                    &binding_id,
+                )?,
+                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
+                    "webui-retry-reply",
+                    &binding_id,
+                )?,
+                idempotency_key: client_action_id,
+            })
+            .await
+            .map_err(map_turn_error)?;
+        Ok(response.into())
+    }
+
     async fn get_run_state(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3651,7 +4502,8 @@ impl RebornServicesApi for RebornServices {
             owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         };
-        self.list_visible_threads_for_scope(scope, request).await
+        self.list_visible_threads_for_scope(scope, request, caller)
+            .await
     }
 
     async fn list_automations(
@@ -3720,6 +4572,25 @@ impl RebornServicesApi for RebornServices {
             .await
     }
 
+    async fn rename_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let name = parse_automation_name(request)?;
+        self.automation_facade
+            .rename_automation(caller, automation_id, name)
+            .await
+    }
+
     async fn delete_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3781,6 +4652,7 @@ impl RebornServicesApi for RebornServices {
         extensions::list_extensions(
             Arc::clone(&self.lifecycle_facade),
             self.extension_credentials.clone(),
+            Arc::clone(&self.channel_connection_facade),
             caller,
         )
         .await
@@ -3886,7 +4758,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+        extensions::remove_extension(
+            self.lifecycle_facade.as_ref(),
+            self.channel_connection_facade.clone(),
+            caller,
+            package_ref,
+        )
+        .await
     }
 
     async fn setup_extension(
@@ -4216,8 +5094,22 @@ impl RebornServices {
         &self,
         scope: ThreadScope,
         request: WebUiListThreadsRequest,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
         let visible_limit = clamp_thread_list_limit(request.limit);
+        let needs_approval = request.needs_approval;
+        if needs_approval {
+            return tokio::time::timeout(
+                NOTIFICATION_APPROVAL_QUERY_TIMEOUT,
+                self.list_automation_threads_needing_approval(
+                    caller,
+                    visible_limit,
+                    request.candidate_thread_id,
+                ),
+            )
+            .await
+            .map_err(|_| notification_approval_timeout_error())?;
+        }
         let fetch_limit = visible_limit
             .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
             .min(THREAD_LIST_MAX_PAGE_SIZE as usize);
@@ -4249,12 +5141,12 @@ impl RebornServices {
                 })
                 .await
                 .map_err(map_thread_error)?;
-            visible_threads.extend(
-                response
-                    .threads
-                    .into_iter()
-                    .filter(|thread| !is_automation_trigger_thread(thread)),
-            );
+            for thread in response.threads {
+                if is_automation_trigger_thread(&thread) {
+                    continue;
+                }
+                visible_threads.push(thread);
+            }
             next_cursor = response.next_cursor;
             let Some(next) = next_cursor.clone() else {
                 break;
@@ -4283,6 +5175,220 @@ impl RebornServices {
         })
     }
 
+    async fn list_automation_threads_needing_approval(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        visible_limit: usize,
+        candidate_thread_id: Option<String>,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let automations = self
+            .automation_facade
+            .list_automations(
+                bound_caller.clone(),
+                AutomationListRequest {
+                    limit: NOTIFICATION_APPROVAL_AUTOMATION_LIMIT,
+                    run_limit: NOTIFICATION_APPROVAL_RUN_LIMIT,
+                    include_completed: true,
+                },
+            )
+            .await?;
+
+        let mut candidate_seen = HashSet::new();
+        let mut candidates = Vec::with_capacity(NOTIFICATION_APPROVAL_CANDIDATE_LIMIT);
+        for automation in &automations {
+            let title = AutomationNotificationTitle::from_name(&automation.name);
+            for run in &automation.recent_runs {
+                if let Some(thread_id) = &run.thread_id {
+                    if candidate_seen.insert(thread_id.clone()) {
+                        candidates.push(AutomationApprovalThreadCandidate {
+                            thread_id: thread_id.clone(),
+                            title: title.clone(),
+                        });
+                    }
+                    if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                        break;
+                    }
+                }
+            }
+            if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                break;
+            }
+        }
+
+        let mut seen = HashSet::new();
+        let mut threads = Vec::with_capacity(visible_limit);
+        if let Some(candidate_thread_id) = candidate_thread_id {
+            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
+            if seen.insert(thread_id.clone()) {
+                let listed_candidate = candidates
+                    .iter()
+                    .find(|candidate| candidate.thread_id == thread_id)
+                    .cloned();
+                let record = if let Some(candidate) = listed_candidate {
+                    self.automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                } else {
+                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
+                        .await?
+                };
+                if let Some(record) = record {
+                    threads.push(record);
+                }
+            }
+        }
+        for candidate in candidates {
+            if threads.len() >= visible_limit {
+                break;
+            }
+            if !seen.insert(candidate.thread_id.clone()) {
+                continue;
+            }
+            let Some(record) = self
+                .automation_run_thread_record(
+                    &caller,
+                    &bound_caller,
+                    candidate.thread_id,
+                    candidate.title,
+                )
+                .await?
+            else {
+                continue;
+            };
+            threads.push(record);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads,
+            next_cursor: None,
+        })
+    }
+
+    async fn automation_run_thread_record(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        automation_title: Option<AutomationNotificationTitle>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
+        let Some(trigger_scope) = self
+            .automation_facade
+            .resolve_run_thread_scope(bound_caller.clone(), &thread_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.automation_run_thread_record_for_scope(
+            caller,
+            bound_caller,
+            thread_id,
+            trigger_scope,
+            automation_title,
+        )
+        .await
+    }
+
+    async fn automation_run_thread_record_for_scope(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        trigger_scope: TriggerRunThreadScope,
+        title: Option<AutomationNotificationTitle>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
+        let true_agent_id = trigger_scope
+            .agent_id
+            .clone()
+            .or_else(|| Some(bound_caller.agent_id.clone()));
+        let creator_user_id = trigger_scope.creator_user_id.clone();
+
+        let approval_turn_scope = TurnScope::new(
+            caller.tenant_id.clone(),
+            true_agent_id.clone(),
+            trigger_scope.project_id.clone(),
+            thread_id.clone(),
+        );
+        let run_actor = TurnActor::new(creator_user_id.clone());
+        if !self
+            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
+            .await?
+        {
+            return Ok(None);
+        }
+
+        let mut record = None;
+        for owner_user_id in [Some(creator_user_id.clone()), None] {
+            let thread_turn_scope = TurnScope::new_with_owner(
+                caller.tenant_id.clone(),
+                true_agent_id.clone(),
+                trigger_scope.project_id.clone(),
+                thread_id.clone(),
+                owner_user_id,
+            );
+            let thread_scope = thread_scope_from_turn_scope(
+                &thread_turn_scope,
+                thread_turn_scope.explicit_owner_user_id().cloned(),
+            )?;
+            match self
+                .thread_service
+                .read_thread(ThreadHistoryRequest {
+                    scope: thread_scope,
+                    thread_id: thread_turn_scope.thread_id.clone(),
+                })
+                .await
+            {
+                Ok(found) => {
+                    record = Some(found);
+                    break;
+                }
+                Err(
+                    SessionThreadError::UnknownThread { .. }
+                    | SessionThreadError::ThreadScopeMismatch { .. },
+                ) => {}
+                Err(error) => return Err(map_ownership_probe_error(error)),
+            }
+        }
+        let Some(mut record) = record else {
+            return Ok(None);
+        };
+        if record
+            .title
+            .as_ref()
+            .is_none_or(|title| title.trim().is_empty())
+            && let Some(title) = title.as_ref()
+        {
+            record.title = Some(title.as_str().to_string());
+        }
+        Ok(Some(record))
+    }
+
+    async fn thread_scope_has_pending_approval(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+    ) -> Result<bool, RebornServicesError> {
+        let pending = self
+            .approval_interactions
+            .list_pending(ListPendingApprovalsRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+            })
+            .await
+            .map_err(|error| map_adapter_error(error.into()))?;
+        Ok(!pending.approvals.is_empty())
+    }
+
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
         let key = thread_operation_key(scope);
         let mut locks = match self.thread_operation_locks.lock() {
@@ -4300,6 +5406,45 @@ impl RebornServices {
 
     async fn lock_thread_operation(&self, scope: &TurnScope) -> OwnedMutexGuard<()> {
         self.thread_operation_lock(scope).lock_owned().await
+    }
+
+    /// Per-tenant lock serializing admin mutations that affect the active-admin
+    /// count (role/status/delete). `ensure_not_last_admin` re-reads the count
+    /// then mutates; without serialization two concurrent demotions each see
+    /// "2 admins", both pass, and both land — stranding the tenant with zero
+    /// admins (a TOCTOU race). Holding this across the check+mutation makes the
+    /// count read authoritative. Reuses the same weak-ref keyed registry as
+    /// `thread_operation_lock`, namespaced so the keyspaces cannot collide.
+    ///
+    /// Scope of the guarantee: this lock lives in the current `RebornServices`
+    /// instance, so it serializes every admin mutation within one process. The
+    /// standalone `ironclaw-reborn serve` binary is single-process, so last-
+    /// admin protection is airtight there. It does NOT span multiple runtime
+    /// instances sharing one identity filesystem (a not-yet-supported multi-
+    /// replica deployment): two processes each hold their own lock and could
+    /// both read `active_admins > 1` before demoting different admins. Closing
+    /// that requires a durable per-tenant lease (a CAS-guarded lock record in
+    /// the identity store) shared by all instances — deferred until a multi-
+    /// replica deployment mode exists, since a hand-rolled filesystem lease adds
+    /// crash-recovery/stale-takeover risk that outweighs the bounded race it
+    /// would replace in the single-process product shipping today.
+    async fn lock_admin_mutation(&self, tenant: &TenantId) -> OwnedMutexGuard<()> {
+        let key = format!("admin-mutation:{}", tenant.as_str());
+        let lock = {
+            let mut locks = match self.thread_operation_locks.lock() {
+                Ok(locks) => locks,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     async fn reject_delete_with_active_run(
@@ -5460,6 +6605,10 @@ const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
 const THREAD_LIST_FILTER_MIN_FETCH_SIZE: usize = 50;
 const THREAD_LIST_FILTER_MAX_PAGES: usize = 20;
+const NOTIFICATION_APPROVAL_AUTOMATION_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_RUN_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_CANDIDATE_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
@@ -5484,6 +6633,34 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
     let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
+}
+
+fn parse_automation_name(
+    request: WebUiRenameAutomationRequest,
+) -> Result<AutomationName, RebornServicesError> {
+    let Some(raw_name) = request.name else {
+        return Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("name", WebUiInboundValidationCode::MissingField),
+        ));
+    };
+    AutomationName::new(raw_name).map_err(automation_name_validation_error)
+}
+
+impl From<AutomationNameError> for WebUiInboundValidationCode {
+    fn from(error: AutomationNameError) -> Self {
+        match error {
+            AutomationNameError::Empty => WebUiInboundValidationCode::Blank,
+            AutomationNameError::TooLong => WebUiInboundValidationCode::TooLong,
+        }
+    }
+}
+
+fn automation_name_validation_error(error: AutomationNameError) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError::new("name", error.into()))
+}
+
+fn notification_approval_timeout_error() -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
 }
 
 /// Wire shape of the opaque timeline cursor. The browser does not need
@@ -5577,6 +6754,21 @@ fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
     )
 }
 
+fn webui_retry_binding_id(
+    scope: &TurnScope,
+    run_id: TurnRunId,
+    client_action_id: &IdempotencyKey,
+) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("surface", "webui"),
+        segment("tenant", scope.tenant_id.as_str()),
+        segment("thread", scope.thread_id.as_str()),
+        segment("failed_run", run_id.as_uuid().to_string().as_str()),
+        segment("action", client_action_id.as_str())
+    )
+}
+
 fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
     gate_ref.as_str().to_string()
 }
@@ -5611,6 +6803,7 @@ fn map_timeline_probe_error(error: SessionThreadError) -> RebornServicesError {
     match error {
         SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::TimelineUnavailable,
@@ -5651,6 +6844,7 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => RebornServicesError::service_unavailable(true),
     }
 }
@@ -5665,6 +6859,14 @@ fn delete_thread_busy() -> RebornServicesError {
 }
 
 fn map_turn_error(error: TurnError) -> RebornServicesError {
+    if matches!(error, TurnError::RunNotRetryable { .. }) {
+        return RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+            false,
+        );
+    }
     let (code, kind, status_code, retryable) = match error.category() {
         ironclaw_turns::TurnErrorCategory::ThreadBusy => (
             RebornServicesErrorCode::Conflict,
@@ -5983,6 +7185,53 @@ fn generated_thread_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The WebUI settings/tools request enum must use the exact wire strings
+    /// the operator-config storage parser accepts and the entry writer emits.
+    /// This pins the type link so the request vocabulary cannot drift from
+    /// the approvals-owned resolved-state vocabulary (audit 2026-07, 6a).
+    #[test]
+    fn settings_tool_permission_state_wire_strings_stay_linked() {
+        let cases = [
+            (SettingsToolPermissionState::Default, "default", None),
+            (
+                SettingsToolPermissionState::AlwaysAllow,
+                "always_allow",
+                Some(ToolPermissionState::AlwaysAllow),
+            ),
+            (
+                SettingsToolPermissionState::AskEachTime,
+                "ask_each_time",
+                Some(ToolPermissionState::AskEachTime),
+            ),
+            (
+                SettingsToolPermissionState::Disabled,
+                "disabled",
+                Some(ToolPermissionState::Disabled),
+            ),
+        ];
+        for (state, wire, resolved) in cases {
+            let serialized = serde_json::to_value(state).unwrap();
+            assert_eq!(serialized, serde_json::Value::String(wire.to_string()));
+            assert_eq!(
+                serde_json::from_value::<SettingsToolPermissionState>(serialized).unwrap(),
+                state
+            );
+            // Round-trips through the storage parser the facade applies on set.
+            let update =
+                parse_tool_permission_state(&serde_json::json!({ "state": wire })).unwrap();
+            match (update, resolved) {
+                (ToolPermissionUpdate::Default, None) => {}
+                (ToolPermissionUpdate::State(parsed), Some(expected)) => {
+                    assert_eq!(parsed, expected);
+                    // The resolved states serialize to the same strings the
+                    // config entry writer emits.
+                    assert_eq!(tool_permission_state_wire(expected), wire);
+                }
+                _ => panic!("wire string {wire} no longer parses to the expected update"),
+            }
+        }
+    }
 
     /// Every `ProjectServiceError` variant projects to a sanitized facade error
     /// with the expected coarse code/status, and `InvalidInput`'s field name is

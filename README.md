@@ -204,16 +204,24 @@ the current branch.
 | Variable | Purpose |
 | --- | --- |
 | `IRONCLAW_REBORN_HOME` | Absolute Reborn state root. Defaults to `$HOME/.ironclaw/reborn`. The resolver rejects unsafe paths and v1 state-root aliases such as `$HOME/.ironclaw`. |
-| `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `production`, `migration-dry-run`. |
+| `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `hosted-single-tenant`, `hosted-single-tenant-volume`, `production`, `migration-dry-run`. |
 | `IRONCLAW_REBORN_POSTGRES_URL` | Production PostgreSQL storage URL when `[storage].backend = "postgres"` and `[storage].url_env` names this variable. Keep it out of `config.toml`; remote providers must use TLS. |
 | `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` | Optional override for the Reborn PostgreSQL client pool size. Use this when a managed provider enforces a small session-pool cap. |
+| `IRONCLAW_RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH` | Optional `true`/`1`/`yes`/`on` toggle that skips durable resource-governor reserve/reconcile/release writes when no finite limits are configured. Defaults to false so production keeps durable accounting unless this is explicitly enabled. |
 | `IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS` | Optional startup wait window for Postgres filesystem migration connection retries. Defaults to 300 seconds. |
 | `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
 | `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
 
-`run` and `repl` currently support `local-dev` and `local-dev-yolo` runtime
-composition. `local-dev-yolo` grants trusted-laptop host access and must be
-confirmed explicitly:
+`run` and `repl` currently support local-runtime composition through
+`local-dev`, `local-dev-yolo`, and `hosted-single-tenant-volume`.
+`hosted-single-tenant-volume` uses the local-runtime libSQL substrate under
+`$IRONCLAW_REBORN_HOME/hosted-single-tenant-volume`, resolves the hosted
+secure-default runtime policy, and disables process-backed tools such as shell.
+It is intended for single-tenant preview deployments on a persistent volume,
+not as the full PostgreSQL production composition.
+
+`local-dev-yolo` grants trusted-laptop host access and must be confirmed
+explicitly:
 
 ```bash
 export IRONCLAW_REBORN_PROFILE=local-dev-yolo
@@ -222,8 +230,10 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl --confirm-host
 
 ### WebUI service
 
-The Reborn WebUI is compiled behind the `webui-v2-beta` Cargo feature. Build or
-run the binary with that feature to enable the `serve` command:
+The Reborn WebUI is compiled behind the `webui-v2-beta` Cargo feature. Builds
+with this feature require Node.js 22 with Corepack/pnpm so Cargo can generate
+and embed the SPA bundle. Build or run the binary with that feature to enable the `serve`
+command:
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --help
@@ -413,8 +423,9 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Prerequisites
 
-- Rust 1.92+
+- Rust 1.96+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
+- Node.js 22+ with Corepack/pnpm for source builds that enable the `webui-v2-beta` feature
 - NEAR AI account (authentication handled via setup wizard)
 - `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 
@@ -622,9 +633,7 @@ External content passes through multiple security layers:
 | **Workspace** | Persistent memory with hybrid search |
 | **Safety Layer** | Prompt injection defense and content sanitization |
 
-## Legacy IronClaw Usage
-
-Engine v2 is opt-in right now. If you want to run the new engine instead of the legacy agent loop, start IronClaw with `ENGINE_V2=true`. See [Engine v2 architecture](docs/internal/engine-v2-architecture.md#enabling-engine-v2) for more details.
+## IronClaw Usage
 
 ```bash
 # First-time setup (configures database, auth, etc.)
@@ -633,11 +642,8 @@ ironclaw onboard
 # Start interactive REPL
 cargo run
 
-# Start interactive REPL with engine v2
-ENGINE_V2=true cargo run
-
-# Engine v2 with debug logging
-ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
+# REPL with debug logging
+RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## Development

@@ -86,6 +86,9 @@ pub enum LoopHostMilestoneKind {
     ModelReasoningDelta {
         safe_delta: String,
     },
+    ModelTextDelta {
+        safe_text: String,
+    },
     ModelFailed {
         reason_kind: AgentLoopHostErrorKind,
     },
@@ -106,6 +109,12 @@ pub enum LoopHostMilestoneKind {
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
+        /// Bounded, host-authored failure summary (e.g. a builtin's
+        /// `"invalid JSON: ..."` message). Additive; pre-existing producers
+        /// emit `None`. Product projections and durable runtime events must
+        /// re-sanitize this value before surfacing it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        safe_summary: Option<LoopSafeSummary>,
     },
     CapabilityBatchStarted {
         iteration: u32,
@@ -246,6 +255,7 @@ impl LoopHostMilestoneKind {
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
             Self::ModelReasoningDelta { .. } => "model_reasoning_delta",
+            Self::ModelTextDelta { .. } => "model_text_delta",
             Self::ModelFailed { .. } => "model_failed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
             Self::CapabilityCompleted { .. } => "capability_completed",
@@ -385,13 +395,24 @@ impl HookMilestoneSink for InMemoryHookMilestoneSink {
     }
 }
 
-#[derive(Clone)]
 pub struct LoopHostMilestoneEmitter<S>
 where
     S: LoopHostMilestoneSink + ?Sized,
 {
     context: LoopRunContext,
     sink: Arc<S>,
+}
+
+impl<S> Clone for LoopHostMilestoneEmitter<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            sink: Arc::clone(&self.sink),
+        }
+    }
 }
 
 impl<S> LoopHostMilestoneEmitter<S>
@@ -453,6 +474,11 @@ where
             .await
     }
 
+    pub async fn model_text_delta(&self, safe_text: String) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::ModelTextDelta { safe_text })
+            .await
+    }
+
     pub async fn model_failed(
         &self,
         reason_kind: AgentLoopHostErrorKind,
@@ -498,13 +524,16 @@ where
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
+        safe_summary: Option<String>,
     ) -> Result<(), AgentLoopHostError> {
+        let safe_summary = safe_summary.map(LoopSafeSummary::capability_failure_summary);
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
             capability_id,
             provider,
             runtime,
             reason_kind,
+            safe_summary,
         })
         .await
     }

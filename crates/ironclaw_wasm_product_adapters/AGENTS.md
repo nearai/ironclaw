@@ -6,13 +6,13 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_product_adapters/AGENTS.md`
-  - `crates/ironclaw_wasm_sandbox_core/CLAUDE.md`
+  - `crates/ironclaw_wasm/CLAUDE.md`
   - `crates/ironclaw_product_adapter_registry/AGENTS.md`
   - `docs/reborn/contracts/network.md`
 
 ## What This Crate Owns
 
-- WASM v2 host runtime for ProductAdapter components.
+- Product-layer WASM v2 host glue for ProductAdapter components.
 - Adapter-specific host control-plane glue: protocol-auth verification, manifest egress preflight, component runtime, runner, bindings, store, config.
 - ProductAdapter WIT/request shapes and parse/render-only component execution path.
 - Seams for host-runtime egress injection; current HTTP egress import fails closed until wired.

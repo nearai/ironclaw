@@ -188,6 +188,39 @@ pub async fn onboard(
     onboard_at_dir_with_sink(&dir, invite_url, consents, sink).await
 }
 
+/// Instance-wide enrollment: identical to [`onboard`] but writes the resulting
+/// `StandingTraceContributionPolicy` to the instance-level location
+/// (`trace_contribution_dir_for_scope(None)`), so all users without their own
+/// personal-invite enrollment inherit it via `resolve_trace_credentials`.
+///
+/// This is an admin-only operation at the call boundary (the caller must gate
+/// it: host-shell possession for the CLI, an admin identity for any future
+/// product surface); the function itself only knows it targets the base dir.
+pub async fn onboard_instance_with_sink(
+    invite_url: &str,
+    consents: OnboardConsents,
+    sink: &dyn OnboardingHttpSink,
+) -> Result<OnboardOutcome, OnboardError> {
+    let dir = trace_contribution_dir_for_scope(None);
+    onboard_at_dir_with_sink(&dir, invite_url, consents, sink).await
+}
+
+/// Base-dir-parameterised instance enrollment using the default
+/// direct-`reqwest` sink — the admin CLI path (`ironclaw-reborn traces
+/// enroll-instance`), where host-shell possession is the admin gate and there
+/// is no host egress pipeline to route through. Targets
+/// `<base>/trace_contributions/` (the scope-`None` location), so all users
+/// without a personal enrollment inherit it via `resolve_trace_credentials`.
+/// Tests supply an isolated tempdir base.
+pub async fn onboard_instance_at_base(
+    base_dir: &Path,
+    invite_url: &str,
+    consents: OnboardConsents,
+) -> Result<OnboardOutcome, OnboardError> {
+    let dir = crate::contribution::trace_contribution_dir_for_scope_at(base_dir, None);
+    onboard_at_dir(&dir, invite_url, consents).await
+}
+
 /// Dir-parameterised core using the default direct-`reqwest` sink —
 /// unit-testable with tempdirs (loopback mocks). Thin wrapper around
 /// [`onboard_at_dir_with_sink`].
@@ -440,32 +473,23 @@ fn write_policy_at_dir(
     response: &OnboardResponse,
     consents: OnboardConsents,
 ) -> Result<(), OnboardError> {
-    use std::collections::BTreeSet;
-
-    let policy = StandingTraceContributionPolicy {
-        enabled: true,
-        auth_mode: TraceUploadAuthMode::DeviceKey,
-        device_key_id: Some(key.device_key_id.clone()),
-        ingestion_endpoint: Some(response.ingest_url.clone()),
-        // upload_token_issuer_url must be the full claim endpoint that
-        // fetch_trace_upload_claim_from_issuer POSTs to as-is. The issuer
-        // serves upload claims at UPLOAD_CLAIM_PATH, same origin as /v1/onboard.
-        // Trust-anchoring still uses invite.origin (origin-only compare in step 5);
-        // the allowed-host check is path-independent.
-        upload_token_issuer_url: Some(format!("{}{UPLOAD_CLAIM_PATH}", invite.origin)),
-        upload_token_issuer_allowed_hosts: {
-            let mut s = BTreeSet::new();
-            s.insert(invite.issuer_host.clone());
-            s
-        },
-        upload_token_audience: Some(response.audience.clone()),
-        upload_token_tenant_id: Some(response.tenant_id.clone()),
-        include_message_text: consents.include_message_text,
-        include_tool_payloads: consents.include_tool_payloads,
-        // default_scope is already ConsentScope::DebuggingEvaluation in Default.
-        default_scope: ConsentScope::DebuggingEvaluation,
-        ..StandingTraceContributionPolicy::default()
-    };
+    // upload_token_issuer_url must be the full claim endpoint that
+    // fetch_trace_upload_claim_from_issuer POSTs to as-is. The issuer serves
+    // upload claims at UPLOAD_CLAIM_PATH, same origin as /v1/onboard.
+    // Trust-anchoring still uses invite.origin (origin-only compare in step 5);
+    // the allowed-host check is path-independent.
+    let policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+        .set_device_key_id(key.device_key_id.clone())
+        .set_ingestion_endpoint(response.ingest_url.clone())
+        .set_upload_token_issuer_url(format!("{}{UPLOAD_CLAIM_PATH}", invite.origin))
+        .set_upload_token_issuer_allowed_hosts([invite.issuer_host.clone()])
+        .set_upload_token_audience(response.audience.clone())
+        .set_upload_token_tenant_id(response.tenant_id.clone())
+        .set_include_message_text(consents.include_message_text)
+        .set_include_tool_payloads(consents.include_tool_payloads)
+        .set_default_scope(ConsentScope::DebuggingEvaluation);
 
     crate::contribution::write_json_file(&dir.join("policy.json"), &policy, "trace policy").map_err(
         |e| OnboardError::Persist {

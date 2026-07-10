@@ -171,6 +171,11 @@ pub struct ThreadLiveProjectionUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadLiveProjectionItem {
+    Text {
+        id: String,
+        run_id: TurnRunId,
+        body: String,
+    },
     Thinking {
         id: String,
         run_id: TurnRunId,
@@ -190,6 +195,11 @@ pub enum ThreadLiveProjectionItem {
         output_bytes: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<String>,
+        /// Bounded, sanitized failure summary for a failed activity (e.g. a
+        /// builtin's `"invalid JSON: ..."` message). Additive; absent for
+        /// non-failures and pre-existing producers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_detail: Option<String>,
     },
     WorkSummary {
         id: String,

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use deadpool_postgres::GenericClient;
+use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
@@ -23,6 +24,18 @@ const TRIGGER_COLUMNS: &str = "\
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at, schedule_at";
+const RENAME_SCOPED_TRIGGER_SQL: &str = "\
+    UPDATE trigger_records
+       SET name = $6
+     WHERE tenant_id = $1
+       AND creator_user_id = $2
+       AND agent_id IS NOT DISTINCT FROM $3
+       AND project_id IS NOT DISTINCT FROM $4
+       AND trigger_id = $5
+     RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+       name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
+       state, next_run_at, last_run_at, last_fired_slot, last_status,
+       active_fire_slot, active_run_ref, created_at, schedule_at";
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
 const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
@@ -88,9 +101,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let active_run_ref = record.active_run_ref.as_ref().map(ToString::to_string);
         let created_at = fmt_ts(&record.created_at);
 
-        client
-            .execute(
-                r#"
+        let sql = r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
@@ -120,32 +131,35 @@ impl TriggerRepository for PostgresTriggerRepository {
                     active_fire_slot = EXCLUDED.active_fire_slot,
                     active_run_ref = EXCLUDED.active_run_ref,
                     schedule_at = EXCLUDED.schedule_at
-                "#,
-                &[
-                    &trigger_id,
-                    &tenant_id,
-                    &creator_user_id,
-                    &agent_id,
-                    &project_id,
-                    &record.name,
-                    &source,
-                    &schedule_expression,
-                    &schedule_timezone,
-                    &schedule_kind,
-                    &record.prompt,
-                    &state,
-                    &next_run_at,
-                    &last_run_at,
-                    &last_fired_slot,
-                    &last_status,
-                    &active_fire_slot,
-                    &active_run_ref,
-                    &created_at,
-                    &schedule_at,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("upsert trigger record", error))?;
+                "#;
+        cached_execute(
+            &client,
+            sql,
+            &[
+                &trigger_id,
+                &tenant_id,
+                &creator_user_id,
+                &agent_id,
+                &project_id,
+                &record.name,
+                &source,
+                &schedule_expression,
+                &schedule_timezone,
+                &schedule_kind,
+                &record.prompt,
+                &state,
+                &next_run_at,
+                &last_run_at,
+                &last_fired_slot,
+                &last_status,
+                &active_fire_slot,
+                &active_run_ref,
+                &created_at,
+                &schedule_at,
+            ],
+        )
+        .await
+        .map_err(|error| backend_error("upsert trigger record", error))?;
         Ok(())
     }
 
@@ -176,16 +190,13 @@ impl TriggerRepository for PostgresTriggerRepository {
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
         let client = self.connect().await?;
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT {TRIGGER_COLUMNS}
+        let sql = format!(
+            "SELECT {TRIGGER_COLUMNS}
                      FROM {TRIGGER_TABLE}
                      WHERE tenant_id = $1
                      ORDER BY created_at, trigger_id"
-                ),
-                &[&tenant_id.as_str()],
-            )
+        );
+        let rows = cached_query(&client, &sql, &[&tenant_id.as_str()])
             .await
             .map_err(|error| backend_error("query tenant trigger records", error))?;
         rows.into_iter().map(|row| row_to_record(&row)).collect()
@@ -211,10 +222,8 @@ impl TriggerRepository for PostgresTriggerRepository {
             .iter()
             .map(|s| crate::state_text_codec(*s))
             .collect();
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT {TRIGGER_COLUMNS}
+        let sql = format!(
+            "SELECT {TRIGGER_COLUMNS}
                      FROM {TRIGGER_TABLE}
                      WHERE tenant_id = $1
                        AND creator_user_id = $2
@@ -223,22 +232,26 @@ impl TriggerRepository for PostgresTriggerRepository {
                        AND ($6::text[] IS NULL OR state != ALL($6))
                      ORDER BY created_at, trigger_id
                      LIMIT $5"
-                ),
-                &[
-                    &tenant_id.as_str(),
-                    &creator_user_id.as_str(),
-                    &agent_id,
-                    &project_id,
-                    &limit,
-                    &if excluded_texts.is_empty() {
-                        None::<Vec<&str>>
-                    } else {
-                        Some(excluded_texts)
-                    },
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("query scoped trigger records", error))?;
+        );
+        let excluded_texts = if excluded_texts.is_empty() {
+            None::<Vec<&str>>
+        } else {
+            Some(excluded_texts)
+        };
+        let rows = cached_query(
+            &client,
+            &sql,
+            &[
+                &tenant_id.as_str(),
+                &creator_user_id.as_str(),
+                &agent_id,
+                &project_id,
+                &limit,
+                &excluded_texts,
+            ],
+        )
+        .await
+        .map_err(|error| backend_error("query scoped trigger records", error))?;
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
 
@@ -346,6 +359,40 @@ impl TriggerRepository for PostgresTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("set scoped trigger state", error))?;
+        match row {
+            Some(row) => Ok(Some(row_to_record(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let client = self.connect().await?;
+        let trigger_id = trigger_id.to_string();
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let name = name.into_inner();
+        let row = client
+            .query_opt(
+                RENAME_SCOPED_TRIGGER_SQL,
+                &[
+                    &tenant_id.as_str(),
+                    &creator_user_id.as_str(),
+                    &agent_id,
+                    &project_id,
+                    &trigger_id,
+                    &name,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("rename scoped trigger", error))?;
         match row {
             Some(row) => Ok(Some(row_to_record(&row)?)),
             None => Ok(None),
@@ -520,29 +567,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             .await
             .map_err(|error| backend_error("begin accepted trigger fire update", error))?;
         let trigger_id = request.trigger_id.to_string();
-        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
-        else {
-            tx.rollback()
-                .await
-                .map_err(|error| backend_error("rollback terminal trigger fire failure", error))?;
-            return Ok(None);
-        };
-        if record.active_fire_slot != Some(request.fire_slot) {
-            tx.rollback()
-                .await
-                .map_err(|error| backend_error("rollback terminal trigger fire failure", error))?;
-            return Ok(None);
-        }
-        if let Some(active_run_ref) = record.active_run_ref {
-            reject_run_ref_rewrite(active_run_ref, request.run_id)?;
-            return Ok(Some(record));
-        }
-        let next_run_at = record.schedule.next_slot_after(request.fire_slot)?;
-        if let Some(nra) = next_run_at {
-            reject_non_future_next_run_at(request.fire_slot, nra)?;
-        }
-
-        let Some(record) = mark_successful_fire_result(
+        let record = match mark_successful_fire_result(
             &tx,
             SuccessfulFireResultUpdate {
                 tenant_id: request.tenant_id.as_str(),
@@ -550,16 +575,24 @@ impl TriggerRepository for PostgresTriggerRepository {
                 fire_slot: request.fire_slot,
                 run_id: request.run_id,
                 result_at: request.submitted_at,
-                next_run_at,
                 operation: "mark accepted trigger fire",
             },
         )
         .await?
-        else {
-            tx.rollback()
-                .await
-                .map_err(|error| backend_error("rollback accepted trigger fire", error))?;
-            return Ok(None);
+        {
+            SuccessfulFireResultOutcome::NewlyRecorded(record) => record,
+            SuccessfulFireResultOutcome::AlreadyRecorded(record) => {
+                tx.rollback()
+                    .await
+                    .map_err(|error| backend_error("rollback accepted trigger fire", error))?;
+                return Ok(Some(record));
+            }
+            SuccessfulFireResultOutcome::NotMatched => {
+                tx.rollback()
+                    .await
+                    .map_err(|error| backend_error("rollback accepted trigger fire", error))?;
+                return Ok(None);
+            }
         };
         let mut run_record = TriggerRunRecord::running(
             request.tenant_id.clone(),
@@ -586,23 +619,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             .await
             .map_err(|error| backend_error("begin replayed trigger fire update", error))?;
         let trigger_id = request.trigger_id.to_string();
-        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
-        else {
-            return Ok(None);
-        };
-        if record.active_fire_slot != Some(request.fire_slot) {
-            return Ok(None);
-        }
-        if let Some(active_run_ref) = record.active_run_ref {
-            reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
-            return Ok(Some(record));
-        }
-        let next_run_at = record.schedule.next_slot_after(request.fire_slot)?;
-        if let Some(nra) = next_run_at {
-            reject_non_future_next_run_at(request.fire_slot, nra)?;
-        }
-
-        let Some(record) = mark_successful_fire_result(
+        let record = match mark_successful_fire_result(
             &tx,
             SuccessfulFireResultUpdate {
                 tenant_id: request.tenant_id.as_str(),
@@ -610,16 +627,24 @@ impl TriggerRepository for PostgresTriggerRepository {
                 fire_slot: request.fire_slot,
                 run_id: request.original_run_id,
                 result_at: request.replayed_at,
-                next_run_at,
                 operation: "mark replayed trigger fire",
             },
         )
         .await?
-        else {
-            tx.rollback()
-                .await
-                .map_err(|error| backend_error("rollback replayed trigger fire", error))?;
-            return Ok(None);
+        {
+            SuccessfulFireResultOutcome::NewlyRecorded(record) => record,
+            SuccessfulFireResultOutcome::AlreadyRecorded(record) => {
+                tx.rollback()
+                    .await
+                    .map_err(|error| backend_error("rollback replayed trigger fire", error))?;
+                return Ok(Some(record));
+            }
+            SuccessfulFireResultOutcome::NotMatched => {
+                tx.rollback()
+                    .await
+                    .map_err(|error| backend_error("rollback replayed trigger fire", error))?;
+                return Ok(None);
+            }
         };
         let mut run_record = TriggerRunRecord::running(
             request.tenant_id.clone(),
@@ -1057,10 +1082,24 @@ async fn locked_record(
 async fn mark_successful_fire_result(
     tx: &tokio_postgres::Transaction<'_>,
     update: SuccessfulFireResultUpdate<'_>,
-) -> Result<Option<TriggerRecord>, TriggerError> {
+) -> Result<SuccessfulFireResultOutcome, TriggerError> {
+    let Some(current) = locked_record(tx, update.tenant_id, update.trigger_id).await? else {
+        return Ok(SuccessfulFireResultOutcome::NotMatched);
+    };
+    if current.active_fire_slot != Some(update.fire_slot) {
+        return Ok(SuccessfulFireResultOutcome::NotMatched);
+    }
+    if let Some(active_run_ref) = current.active_run_ref {
+        reject_run_ref_rewrite(active_run_ref, update.run_id)?;
+        return Ok(SuccessfulFireResultOutcome::AlreadyRecorded(current));
+    }
+    let next_run_at = current.schedule.next_slot_after(update.fire_slot)?;
+    if let Some(nra) = next_run_at {
+        reject_non_future_next_run_at(update.fire_slot, nra)?;
+    }
     let result_at = fmt_ts(&update.result_at);
     let fire_slot = fmt_ts(&update.fire_slot);
-    let next_run_at = update.next_run_at.as_ref().map(fmt_ts);
+    let next_run_at = next_run_at.as_ref().map(fmt_ts);
     let active_run_ref = update.run_id.to_string();
     let last_status = crate::status_text_codec(TriggerRunStatus::Ok);
     let row = tx
@@ -1075,9 +1114,6 @@ async fn mark_successful_fire_result(
                      active_run_ref = $7
                  WHERE tenant_id = $1
                    AND trigger_id = $2
-                   AND active_fire_slot = $4
-                   AND active_run_ref IS NULL
-                   AND ($6 IS NULL OR $6 > $4)
                  RETURNING {TRIGGER_COLUMNS}"
             ),
             &[
@@ -1092,7 +1128,13 @@ async fn mark_successful_fire_result(
         )
         .await
         .map_err(|error| backend_error(update.operation, error))?;
-    row.map(|row| row_to_record(&row)).transpose()
+    row.map(|row| row_to_record(&row))
+        .transpose()?
+        .map(SuccessfulFireResultOutcome::NewlyRecorded)
+        .ok_or_else(|| TriggerError::Backend {
+            reason: "locked trigger record disappeared while marking successful fire result"
+                .to_string(),
+        })
 }
 
 struct SuccessfulFireResultUpdate<'a> {
@@ -1101,8 +1143,13 @@ struct SuccessfulFireResultUpdate<'a> {
     fire_slot: Timestamp,
     run_id: TurnRunId,
     result_at: Timestamp,
-    next_run_at: Option<Timestamp>,
     operation: &'static str,
+}
+
+enum SuccessfulFireResultOutcome {
+    NewlyRecorded(TriggerRecord),
+    AlreadyRecorded(TriggerRecord),
+    NotMatched,
 }
 
 async fn upsert_run_history(
@@ -1348,6 +1395,24 @@ fn backend_error(operation: &str, error: impl std::fmt::Display) -> TriggerError
     TriggerError::Backend {
         reason: format!("{operation}: {error}"),
     }
+}
+
+async fn cached_query(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Vec<Row>, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query(&statement, params).await
+}
+
+async fn cached_execute(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<u64, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.execute(&statement, params).await
 }
 
 const POSTGRES_TRIGGER_SCHEMA: &str = r#"

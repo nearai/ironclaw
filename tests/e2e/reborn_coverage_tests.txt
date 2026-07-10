@@ -1,0 +1,30 @@
+# Reborn E2E coverage gate.
+#
+# Keep this list limited to tests that exercise the standalone
+# `ironclaw-reborn serve` binary and its Reborn WebChat v2 / OpenAI-compatible
+# API surface. Do not add legacy `ironclaw` gateway tests, even when they run
+# with ENGINE_V2=true; those belong in compatibility/runtime E2E jobs, not this
+# Reborn coverage gate.
+#
+# Direct Emulate provider-contract tests are useful QA, but they mostly validate
+# the provider fixture layer. Full-path hosted OAuth tests currently start the
+# legacy gateway binary, so they are intentionally excluded here too.
+#
+# Pytest node IDs are allowed. Use them when a scenario file contains broader
+# provider-fixture or model-tool-choice coverage that should stay in the normal
+# E2E suite but not in this Reborn binary coverage gate.
+tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_tool_permission_menu_persists_after_reload
+tests/e2e/scenarios/test_reborn_v2_file_download.py
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_shape
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_openai_compat_route_mounts_require_bearer_served
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_openai_compat_route_mounts_authenticated_aliases_served
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_non_streaming_served
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_idempotency_replay_and_conflict_served
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_streaming_raw_sse_served
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_auth_and_validation_served
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_v1_lists_configured_mock_model
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_api_v1_alias_matches_v1_models
+tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_requires_auth
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py
+tests/e2e/scenarios/test_admin_api.py

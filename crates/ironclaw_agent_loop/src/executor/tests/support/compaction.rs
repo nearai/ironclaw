@@ -14,6 +14,7 @@ pub(super) struct MockCompactionSupport {
     result: Arc<Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>>,
     delay: Arc<Mutex<Option<std::time::Duration>>>,
     cancel_after_success: Arc<Mutex<bool>>,
+    cancel_after_failure: Arc<Mutex<bool>>,
     cancel_on_start: Arc<Mutex<bool>>,
 }
 
@@ -24,6 +25,7 @@ impl MockCompactionSupport {
             result: Arc::new(Mutex::new(Err(LoopCompactionError::InputTooLarge))),
             delay: Arc::new(Mutex::new(None)),
             cancel_after_success: Arc::new(Mutex::new(false)),
+            cancel_after_failure: Arc::new(Mutex::new(false)),
             cancel_on_start: Arc::new(Mutex::new(false)),
         }
     }
@@ -60,6 +62,10 @@ impl MockCompactionSupport {
         *self.cancel_after_success.lock().expect("lock") = true;
     }
 
+    pub(super) fn set_cancel_after_failure(&self) {
+        *self.cancel_after_failure.lock().expect("lock") = true;
+    }
+
     pub(super) fn set_cancel_on_start(&self) {
         *self.cancel_on_start.lock().expect("lock") = true;
     }
@@ -70,6 +76,10 @@ impl MockCompactionSupport {
 
     pub(super) fn take_cancel_after_success(&self) -> bool {
         std::mem::take(&mut *self.cancel_after_success.lock().expect("lock"))
+    }
+
+    pub(super) fn take_cancel_after_failure(&self) -> bool {
+        std::mem::take(&mut *self.cancel_after_failure.lock().expect("lock"))
     }
 
     pub(super) async fn compact_loop_context(
@@ -130,6 +140,11 @@ impl MockHost {
         self
     }
 
+    pub(in crate::executor::tests) fn cancel_after_compaction_failure(self) -> Self {
+        self.compaction.set_cancel_after_failure();
+        self
+    }
+
     pub(in crate::executor::tests) fn cancel_on_compaction_start(self) -> Self {
         self.compaction.set_cancel_on_start();
         self
@@ -144,6 +159,9 @@ impl MockHost {
         }
         let result = self.compaction.compact_loop_context(request).await;
         if result.is_ok() && self.compaction.take_cancel_after_success() {
+            self.request_cancellation(LoopCancelReasonKind::UserRequested);
+        }
+        if result.is_err() && self.compaction.take_cancel_after_failure() {
             self.request_cancellation(LoopCancelReasonKind::UserRequested);
         }
         result

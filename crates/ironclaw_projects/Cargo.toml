@@ -2,9 +2,12 @@
 name = "ironclaw_projects"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "First-class Project entity, membership, and access control for IronClaw Reborn"
 publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
 
 [dependencies]
 async-trait = "0.1"

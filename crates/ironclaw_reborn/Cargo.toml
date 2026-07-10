@@ -2,7 +2,7 @@
 name = "ironclaw_reborn"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Standalone Reborn composition and adapters for IronClaw"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
@@ -10,9 +10,18 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "kernel"
+
 [features]
 default = []
 root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
+# Bare libSQL dependency toggle, mirroring the root `ironclaw` crate's `libsql`
+# feature. CI lints/builds the whole workspace with `--all --features libsql`
+# (e.g. code_style's `libsql-only` leg and platform-and-compat); without this,
+# feature resolution fails because `ironclaw_reborn` is the lone workspace
+# member that enables libSQL only through the more specific features below.
+libsql = ["dep:libsql"]
 libsql-secrets = [
     "dep:ironclaw_secrets",
     "dep:libsql",
@@ -41,6 +50,11 @@ libsql-restart-tests = [
 [dependencies]
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
+# Scope-roster shard-prefix hashing only (§4.5) — same version already used
+# by `ironclaw_filesystem` for the identical stable-hex-from-key pattern
+# (`db.rs`'s index-name collision suffixing); not a `[workspace.dependencies]`
+# entry, so this crate needs its own line.
+blake3 = "1"
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
@@ -50,12 +64,14 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support", version = "0.1.0" }
+ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+jsonschema = { version = "0.46", default-features = false }
+libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
 secrecy = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"] }

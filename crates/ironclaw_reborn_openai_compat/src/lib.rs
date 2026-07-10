@@ -19,6 +19,8 @@ mod content_parts;
 mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
+mod external_tools;
+#[cfg(feature = "openai-compat-beta")]
 mod handlers;
 #[cfg(feature = "openai-compat-beta")]
 mod identity;
@@ -30,6 +32,10 @@ mod models_catalog;
 #[cfg(feature = "openai-compat-beta")]
 mod projection_helpers;
 mod refs;
+// Durable filesystem-backed ref store. Gated behind `storage` so the
+// contract-only surface stays free of the `ironclaw_filesystem` dependency.
+#[cfg(feature = "storage")]
+mod refs_storage;
 mod responses;
 #[cfg(feature = "openai-compat-beta")]
 mod responses_workflow;
@@ -69,6 +75,11 @@ pub use error::{
     OpenAiCompatErrorType, OpenAiCompatHttpError,
 };
 #[cfg(feature = "openai-compat-beta")]
+pub use external_tools::{
+    OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
+    OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore,
+};
+#[cfg(feature = "openai-compat-beta")]
 pub use handlers::{
     chat_completions, models_list, responses_api_cancel, responses_api_create,
     responses_api_retrieve, responses_v1_cancel, responses_v1_create, responses_v1_retrieve,
@@ -83,13 +94,20 @@ pub use models_catalog::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 pub use refs::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,
     OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyConflict, OpenAiCompatIdempotencyKey,
-    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError,
-    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
-    OpenAiCompatResourceBinding, OpenAiCompatResourceKind, OpenAiCompatResourceMapping,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, unix_timestamp_now,
+    OpenAiCompatInternalRefs, OpenAiCompatMarkExternalToolResumeCompleted,
+    OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatPublicId,
+    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError, OpenAiCompatRefLookup,
+    OpenAiCompatRefOperation, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
+    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
+    OpenAiCompatResourceKind, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, unix_timestamp_now,
 };
+#[cfg(feature = "storage")]
+pub use refs_storage::FilesystemOpenAiCompatRefStore;
+#[cfg(feature = "libsql")]
+pub use refs_storage::RebornLibSqlOpenAiCompatRefStore;
+#[cfg(feature = "postgres")]
+pub use refs_storage::RebornPostgresOpenAiCompatRefStore;
 pub use responses::{
     OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,
     OpenAiResponseOutputItemStatus, OpenAiResponseStatus, OpenAiResponseUsage,

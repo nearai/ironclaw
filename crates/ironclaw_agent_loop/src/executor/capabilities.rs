@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
+use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
@@ -16,16 +17,17 @@ use crate::{
     state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
-        GateKind, RecoveryOutcome, SanitizedStrategySummary, TurnSummary,
+        GateKind, RecoveryOutcome, RetryAlteration, SanitizedStrategySummary, TurnSummary,
     },
 };
 
 use super::{
     AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
-    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, GateInput, GateStage,
-    MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
-    append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
-    cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
+    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, FailedExitDetails,
+    GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
+    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
+    attach_failure_explanation, batch_policy_kind, cancelled_exit, capability_batch_counts,
+    capability_call_signature, capability_error_class, capability_error_failure_category,
     capability_failure_kind, capability_host_error,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
@@ -38,6 +40,7 @@ use super::{
 pub(crate) struct CapabilityStage;
 
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;
+const STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY: &str = "input could not be encoded";
 
 pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
@@ -534,12 +537,21 @@ fn prefixed_capability_summary(
     prefix: String,
     safe_summary: String,
 ) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+    let safe_summary = strategy_safe_capability_summary_detail(safe_summary);
     let detail = sanitized_strategy_summary(safe_summary)?;
     let detail = truncate_summary_detail(
         detail.as_str(),
         MAX_SAFE_SUMMARY_BYTES.saturating_sub(prefix.len()),
     );
     sanitized_strategy_summary(format!("{prefix}{detail}"))
+}
+
+fn strategy_safe_capability_summary_detail(safe_summary: String) -> String {
+    if safe_summary == INPUT_ENCODE_HUMAN_SUMMARY {
+        STRATEGY_INPUT_COULD_NOT_BE_ENCODED_SUMMARY.to_string()
+    } else {
+        safe_summary
+    }
 }
 
 fn truncate_summary_detail(detail: &str, max_bytes: usize) -> &str {
@@ -883,6 +895,8 @@ impl CapabilityStage {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                     }
+                    let explanation_message_ref =
+                        attach_failure_explanation(ctx, &mut state, failure_kind).await?;
                     let checked = CheckpointStage
                         .write(ctx, state, CheckpointKind::Final)
                         .await?;
@@ -891,6 +905,11 @@ impl CapabilityStage {
                         checked.state,
                         failure_kind,
                         Some(checked.checkpoint_id),
+                        FailedExitDetails {
+                            diagnostic_ref: summary.diagnostic_ref.clone(),
+                            safe_summary: Some(capability_error_failure_category(summary.class)?),
+                            explanation_message_ref,
+                        },
                     )?));
                 }
                 RecoveryOutcome::Retry {
@@ -924,6 +943,11 @@ impl CapabilityStage {
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                    }
+                    if matches!(alter, Some(RetryAlteration::RepairInvalidModelOutput)) {
+                        return Err(AgentLoopExecutorError::PlannerContract {
+                            detail: "invalid model output repair retry is model-only",
+                        });
                     }
                     honor_retry_alteration(alter.as_ref())?;
                     CheckpointStage
@@ -1007,14 +1031,26 @@ impl CapabilityStage {
             capability_batch,
         )
         .await?;
+        // Route through the single failure-explanation chokepoint so the
+        // recent-failure-kind record and (when the kind is explainable) the
+        // explanation message ref are produced consistently with the other
+        // failed-exit sites instead of being pushed inline here.
+        let failure_kind = exhausted_capability_failure_kind(summary.class);
+        let explanation_message_ref =
+            attach_failure_explanation(ctx, &mut state, failure_kind).await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
         Ok(BatchStep::Exit(failed_exit(
             ctx.host,
             checked.state,
-            LoopFailureKind::DriverBug,
+            failure_kind,
             Some(checked.checkpoint_id),
+            FailedExitDetails {
+                diagnostic_ref: summary.diagnostic_ref.clone(),
+                safe_summary: Some(capability_error_failure_category(summary.class)?),
+                explanation_message_ref,
+            },
         )?))
     }
 
@@ -1032,6 +1068,9 @@ impl CapabilityStage {
             "capability process wait is not supported".to_string(),
         )
         .await?;
+        let explanation_message_ref =
+            attach_failure_explanation(ctx, &mut state, LoopFailureKind::CapabilityProtocolError)
+                .await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -1040,6 +1079,11 @@ impl CapabilityStage {
             checked.state,
             LoopFailureKind::CapabilityProtocolError,
             Some(checked.checkpoint_id),
+            FailedExitDetails {
+                diagnostic_ref: None,
+                safe_summary: None,
+                explanation_message_ref,
+            },
         )?))
     }
 
@@ -1117,6 +1161,9 @@ impl CapabilityStage {
                         activity_id: denied_activity_id,
                         capability_id: call.capability_id.clone(),
                         reason_kind: CapabilityFailureKind::GateDeclined,
+                        // Gate denial carries no host-authored message; the
+                        // model-visible text is produced separately below.
+                        safe_summary: None,
                     },
                 )
                 .await;
@@ -1172,6 +1219,18 @@ fn clear_matching_pending_approval_resume(
         .is_some_and(|resume| resume.capability_id == call.capability_id)
     {
         state.pending_approval_resume = None;
+    }
+}
+
+fn exhausted_capability_failure_kind(class: CapabilityErrorClass) -> LoopFailureKind {
+    match class {
+        CapabilityErrorClass::PolicyDenied => LoopFailureKind::PolicyDenied,
+        CapabilityErrorClass::InputInvalid => LoopFailureKind::ModelError,
+        CapabilityErrorClass::Transient
+        | CapabilityErrorClass::Permanent
+        | CapabilityErrorClass::OperationFailed
+        | CapabilityErrorClass::Unavailable
+        | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
     }
 }
 
@@ -1442,5 +1501,19 @@ mod tests {
             Err(AgentLoopExecutorError::PlannerContract { detail })
                 if detail == "host returned unsafe strategy summary"
         ));
+    }
+
+    #[test]
+    fn prefixed_capability_summary_rephrases_fixed_input_encode_summary() {
+        let summary = prefixed_capability_summary(
+            "capability failed with invalid_input: ".to_string(),
+            INPUT_ENCODE_HUMAN_SUMMARY.to_string(),
+        )
+        .expect("fixed input encode summary should be strategy-safe");
+
+        assert_eq!(
+            summary.as_str(),
+            "capability failed with invalid_input: input could not be encoded"
+        );
     }
 }

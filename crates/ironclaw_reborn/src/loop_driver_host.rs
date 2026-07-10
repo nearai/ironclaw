@@ -1,8 +1,9 @@
+// arch-exempt: large_file, loop host integration awaits dependency decomposition, plan #4088
 use std::{
     collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -15,7 +16,7 @@ use ironclaw_hooks::middleware::{
     HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
     HookedLoopTranscriptPort,
 };
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{CapabilityId, ExtensionId};
 use ironclaw_loop_support::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
@@ -53,6 +54,58 @@ const LEGACY_TEXT_ONLY_DRIVER_ID: &str = "lightweight_loop";
 const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
+const USER_PROFILE_WARMUP_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn should_fetch_communication_context(context: &LoopRunContext) -> bool {
+    !matches!(
+        context.product_context.as_ref().map(|ctx| ctx.origin),
+        Some(ironclaw_turns::TurnOriginKind::WebUi)
+    )
+}
+
+fn trace_host_factory_latency_ok(
+    operation: &'static str,
+    context: &LoopRunContext,
+    started_at: Option<Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "reborn_loop_host_factory",
+        operation,
+        started_at,
+        tenant_id = %context.scope.tenant_id,
+        agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = %context.thread_id,
+        owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
+        run_id = %context.run_id,
+        turn_id = %context.turn_id,
+        "reborn loop host factory operation completed",
+    );
+}
+
+fn trace_host_factory_latency_error<E: ?Sized>(
+    operation: &'static str,
+    context: &LoopRunContext,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    // Host errors can include backend-provided details. Keep latency traces
+    // cardinality-bounded and non-sensitive; `operation` identifies the stage.
+    ironclaw_observability::live_latency_trace_error!(
+        "reborn_loop_host_factory",
+        operation,
+        started_at,
+        "host_factory_error",
+        tenant_id = %context.scope.tenant_id,
+        agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = %context.thread_id,
+        owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
+        run_id = %context.run_id,
+        turn_id = %context.turn_id,
+        "reborn loop host factory operation failed",
+    );
+}
 
 use ironclaw_turns::{
     CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
@@ -69,14 +122,14 @@ use ironclaw_turns::{
         LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
         LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
-        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
+        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -158,6 +211,17 @@ impl CapabilitySurfaceState {
         Ok(())
     }
 
+    fn clear_current(&self) -> Result<(), AgentLoopHostError> {
+        let mut current = self.current.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "capability surface state is unavailable",
+            )
+        })?;
+        *current = None;
+        Ok(())
+    }
+
     fn current(&self) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
         self.current
             .lock()
@@ -185,10 +249,31 @@ impl SurfaceTrackingLoopCapabilityPort {
     }
 }
 
+fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
+    matches!(
+        capability_id.as_str(),
+        "builtin.extension_activate" | "builtin.extension_remove"
+    )
+}
+
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.inner.tool_definitions()
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::ProviderToolCallCapabilityIds, AgentLoopHostError>
+    {
+        // MUST delegate to inner. The LoopCapabilityPort default resolves a call by
+        // searching `self.tool_definitions()` (the disclosed/advertised surface),
+        // which rejects every deferred tool with "outside the visible capability
+        // surface" before the inner tool-disclosure forgiving path can resolve it.
+        // This is the model gateway's resolvability pre-check, so it must reach
+        // inner — same reason validate/register below already delegate.
+        self.inner.provider_tool_call_capability_ids(tool_call)
     }
 
     fn validate_provider_tool_call(
@@ -218,14 +303,27 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        self.inner.invoke_capability(request).await
+        let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
+        let outcome = self.inner.invoke_capability(request).await?;
+        if may_change_surface {
+            self.surface_state.clear_current()?;
+        }
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        self.inner.invoke_capability_batch(request).await
+        let may_change_surface = request
+            .invocations
+            .iter()
+            .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
+        let outcome = self.inner.invoke_capability_batch(request).await?;
+        if may_change_surface {
+            self.surface_state.clear_current()?;
+        }
+        Ok(outcome)
     }
 }
 
@@ -949,8 +1047,9 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    /// Per-run user agent-context profile source. Resolved once at loop start;
-    /// result is stamped into `LoopRuntimeContext.user_profile`. Defaults to
+    /// Per-run user agent-context profile source. Started once at loop start
+    /// and stamped into `LoopRuntimeContext.user_profile` only if it resolves
+    /// before prompt wiring reaches the profile handoff. Defaults to
     /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
     /// profile source degrade gracefully rather than failing.
     user_profile_source: Arc<dyn HostUserProfileSource>,
@@ -1060,11 +1159,24 @@ where
     }
 
     fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
+        // Two arms (not a shared `Arc<dyn _>` helper) because the host's
+        // `model_gateway: Arc<G>` is `G: ?Sized`: the resolved test gateway is
+        // `Arc<dyn HostManagedModelGateway>` while the production fallback keeps
+        // the host's own `Arc<G>`, and `Arc<G>` cannot be coerced to
+        // `Arc<dyn _>` for a `?Sized` G (E0277). Unifying would require dropping
+        // the gateway generic (the S1 seam the plan deliberately rejected).
         let direct_system_inference: Arc<dyn SystemInferencePort> =
-            Arc::new(ModelGatewayBackedSystemInferencePort::new(
-                Arc::clone(&self.model_gateway),
-                run_context.clone(),
-            ));
+            if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
+                Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                    gw,
+                    run_context.clone(),
+                ))
+            } else {
+                Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                    Arc::clone(&self.model_gateway),
+                    run_context.clone(),
+                ))
+            };
         let system_inference: Arc<dyn SystemInferencePort> =
             Arc::new(GuardedSystemInferencePort::new(
                 direct_system_inference,
@@ -1285,10 +1397,11 @@ where
         self
     }
 
-    /// Installs the per-user profile source. The source is resolved once at
-    /// loop start; its result is stamped into `LoopRuntimeContext.user_profile`
-    /// so the model sees the user's timezone/locale/location every turn.
-    /// When not called the factory defaults to `EmptyUserProfileSource`.
+    /// Installs the per-user profile source. Resolution starts once at loop
+    /// start, but chat prompt construction only consumes it if it is already
+    /// available by the prompt-port handoff; otherwise the advisory profile
+    /// read continues in the background and the turn proceeds without it. When
+    /// not called the factory defaults to `EmptyUserProfileSource`.
     pub fn with_user_profile_source(mut self, source: Arc<dyn HostUserProfileSource>) -> Self {
         self.user_profile_source = source;
         self
@@ -1391,20 +1504,44 @@ where
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
 
-        // Kick off the advisory communication-context fetch immediately so its
-        // latency + timeout budget overlaps the gate/dispatcher construction and
-        // capability-surface computation below, rather than blocking prompt
-        // construction. Joined (and stamped with `delivery_tools_visible`) at the
-        // prompt-build site once the surface is known.
-        let communication_fetch = self
-            .communication_context_provider
-            .as_ref()
-            .map(|provider| {
-                provider.begin_communication_context(
-                    run_context.scope.clone(),
-                    run_context.actor().cloned(),
-                )
-            });
+        // Kick off advisory communication-context fetches only for origins that
+        // can use delivery/channel context. WebUI chat renders its origin without
+        // touching the provider, so plain chat prompts avoid unrelated reads.
+        let communication_fetch = if should_fetch_communication_context(&run_context) {
+            self.communication_context_provider
+                .as_ref()
+                .map(|provider| {
+                    provider.begin_communication_context(
+                        run_context.scope.clone(),
+                        run_context.actor().cloned(),
+                    )
+                })
+        } else {
+            None
+        };
+        let user_profile_source = Arc::clone(&self.user_profile_source);
+        let user_profile_run_context = run_context.clone();
+        let user_profile_fetch = tokio::spawn(async move {
+            tokio::time::timeout(
+                USER_PROFILE_WARMUP_TIMEOUT,
+                user_profile_source.resolve_user_profile(&user_profile_run_context),
+            )
+            .await
+            .ok()
+            .flatten()
+        });
+        // Build the live cancellation handle in parallel with the rest of host
+        // setup. The claimed run state is already validated by the scheduler, so
+        // the turn-state-backed factory can avoid a synchronous durable seed
+        // read on the host construction path while still registering for wake
+        // flips and the polling fallback.
+        let cancellation_factory = Arc::clone(&self.cancellation_factory);
+        let cancellation_state = request.claimed_run.state.clone();
+        let cancellation_handle_fetch = tokio::spawn(async move {
+            cancellation_factory
+                .handle_for_claimed_run(&cancellation_state)
+                .await
+        });
 
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         let mut context_adapter = ThreadBackedLoopContextPort::new(
@@ -1437,6 +1574,7 @@ where
         // depending on the closure capturing the right context (which
         // would silently misattribute across reuses — henrypark133
         // Critical #4).
+        let dispatcher_started_at = ironclaw_observability::live_latency_started_at();
         let per_build_dispatcher = match (
             self.hook_dispatcher_builder_factory.as_ref(),
             self.hook_dispatcher_factory.as_ref(),
@@ -1456,6 +1594,9 @@ where
             (None, Some(factory)) => Some(factory()),
             (None, None) => None,
         };
+        trace_host_factory_latency_ok("dispatcher_setup", &run_context, dispatcher_started_at);
+
+        let event_subscription_started_at = ironclaw_observability::live_latency_started_at();
         let event_subscription = match (
             per_build_dispatcher.as_ref(),
             self.event_subscription.as_ref(),
@@ -1487,6 +1628,11 @@ where
             }
             _ => None,
         };
+        trace_host_factory_latency_ok(
+            "event_subscription_setup",
+            &run_context,
+            event_subscription_started_at,
+        );
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());
@@ -1538,12 +1684,32 @@ where
                 hooked
             };
         }
-        let visible_surface = capabilities
+        let visible_surface_started_at = ironclaw_observability::live_latency_started_at();
+        let visible_surface_result = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
-            })?;
+            });
+        let visible_surface = match visible_surface_result {
+            Ok(surface) => {
+                trace_host_factory_latency_ok(
+                    "visible_capabilities",
+                    &run_context,
+                    visible_surface_started_at,
+                );
+                surface
+            }
+            Err(error) => {
+                trace_host_factory_latency_error(
+                    "visible_capabilities",
+                    &run_context,
+                    visible_surface_started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         // The rendered guidance names BOTH the lister and the setter; require both
         // capabilities to be visible before setting the flag, so we never prompt
         // the model to call a tool that is not actually in the surface.
@@ -1559,20 +1725,41 @@ where
         // Join the fetch started at loop entry and stamp the surface-derived
         // `delivery_tools_visible` flag. In the common case the fetch has already
         // resolved during the work above, so this adds no critical-path latency.
+        let communication_started_at = ironclaw_observability::live_latency_started_at();
         let communication = match communication_fetch {
             Some(fetch) => fetch.resolve(delivery_tools_visible).await,
             None => None,
         };
-        // Resolve the per-user profile once at loop start (a single bounded
-        // memory read). Performance: acceptable here — the existing
-        // `communication` slice already does backend fetches at loop start.
-        // If this becomes a critical-path concern a follow-up can move it
-        // onto the same concurrent fetch budget as `CommunicationContextProvider`.
-        let user_profile = self
-            .user_profile_source
-            .resolve_user_profile(&run_context)
-            .await;
+        trace_host_factory_latency_ok(
+            "communication_context",
+            &run_context,
+            communication_started_at,
+        );
+        // Use the per-user profile only if the loop-start fetch has already
+        // finished. It is advisory context, so cold profile filesystem reads
+        // should warm the cache in the background instead of spending any
+        // prompt critical-path budget.
+        let user_profile_started_at = ironclaw_observability::live_latency_started_at();
+        tokio::task::yield_now().await;
+        let user_profile = match user_profile_fetch.now_or_never() {
+            Some(Ok(profile)) => profile,
+            Some(Err(error)) => {
+                tracing::debug!(
+                    error = %error,
+                    "user profile task failed; continuing without profile"
+                );
+                None
+            }
+            None => {
+                tracing::debug!(
+                    "user profile resolution was not ready at prompt handoff; continuing without profile"
+                );
+                None
+            }
+        };
+        trace_host_factory_latency_ok("user_profile", &run_context, user_profile_started_at);
         let prompt_authority = LoopPromptBundleAuthority::shared();
+        let prompt_ports_started_at = ironclaw_observability::live_latency_started_at();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt_port = HostManagedLoopPromptPort::new(
             run_context.clone(),
@@ -1613,6 +1800,7 @@ where
                 .with_bundle_authority(prompt_authority.clone(), run_context.clone()),
             );
         }
+        trace_host_factory_latency_ok("prompt_ports", &run_context, prompt_ports_started_at);
         if is_subagent_planned_run_profile(&run_context) {
             let Some(composer) = self.subagent_prompt_composer.clone() else {
                 return Err(RebornLoopDriverHostError::InvalidRequest {
@@ -1633,19 +1821,48 @@ where
             )),
             None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
         };
-        let model_gateway = Arc::new(ThreadResolvingLoopModelGateway {
-            thread_service: Arc::clone(&self.thread_service),
-            thread_scope: effective_scope.clone(),
-            host_gateway: Arc::clone(&self.model_gateway),
-            max_messages,
-            skill_context_source: self.skill_context_source.clone(),
-            identity_context_source: self.identity_context_source.clone(),
-            instruction_materialization_store: Some(Arc::clone(&instruction_materialization_store)),
-            capabilities: Some(Arc::clone(&capabilities)),
-            prompt_authority,
-            context_window_cache: Some(context_window_cache),
-            attachment_read_port: self.attachment_read_port.clone(),
-        });
+        // Resolve a scope-specific gateway when available (test harnesses override
+        // resolve_for_scope to route per-thread scripted gateways). Production
+        // gateways inherit the default-None impl → falls to Arc::clone, byte-identical.
+        // Two arms (rather than one literal over a shared gateway binding) because
+        // `host_gateway` is the resolved `Arc<dyn _>` in the Some arm but the host's
+        // own `Arc<G>` (G: ?Sized, not coercible to `Arc<dyn _>`) in the fallback —
+        // see `build_compaction_ports` above. Each arm moves its owned fields.
+        let model_gateway_ports_started_at = ironclaw_observability::live_latency_started_at();
+        let model_gateway: Arc<dyn LoopModelGateway> =
+            if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
+                Arc::new(ThreadResolvingLoopModelGateway {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: gw,
+                    max_messages,
+                    skill_context_source: self.skill_context_source.clone(),
+                    identity_context_source: self.identity_context_source.clone(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                })
+            } else {
+                Arc::new(ThreadResolvingLoopModelGateway {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: Arc::clone(&self.model_gateway),
+                    max_messages,
+                    skill_context_source: self.skill_context_source.clone(),
+                    identity_context_source: self.identity_context_source.clone(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                })
+            };
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
             model_gateway,
@@ -1684,18 +1901,44 @@ where
                 run_context.scope.tenant_id.clone(),
             ));
         }
+        trace_host_factory_latency_ok(
+            "model_checkpoint_transcript_ports",
+            &run_context,
+            model_gateway_ports_started_at,
+        );
         let progress: Arc<dyn LoopProgressPort> = Arc::new(HostManagedLoopProgressPort::new(
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
         let compaction = self.build_compaction_ports(&run_context);
-        let cancellation_handle = self
-            .cancellation_factory
-            .handle_for_run(&run_context.scope, run_context.run_id)
+        let cancellation_started_at = ironclaw_observability::live_latency_started_at();
+        let cancellation_handle_result = cancellation_handle_fetch
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
+                reason: format!("cancellation handle task failed: {error}"),
+            })?
+            .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
-            })?;
+            });
+        let cancellation_handle = match cancellation_handle_result {
+            Ok(handle) => {
+                trace_host_factory_latency_ok(
+                    "cancellation_handle",
+                    &run_context,
+                    cancellation_started_at,
+                );
+                handle
+            }
+            Err(error) => {
+                trace_host_factory_latency_error(
+                    "cancellation_handle",
+                    &run_context,
+                    cancellation_started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         let cancellation: Arc<dyn LoopCancellationPort> =
             Arc::new(RunStateLoopCancellationPort::new(cancellation_handle));
 
@@ -1707,6 +1950,7 @@ where
             model,
             checkpoint,
             capabilities,
+            surface_state,
             transcript,
             progress,
             compaction,
@@ -1774,6 +2018,7 @@ pub struct RebornLoopDriverHost {
     model: Arc<dyn LoopModelPort>,
     checkpoint: Arc<dyn LoopCheckpointPort>,
     capabilities: Arc<dyn LoopCapabilityPort>,
+    surface_state: Arc<CapabilitySurfaceState>,
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
     compaction: Arc<dyn LoopCompactionPort>,
@@ -1880,6 +2125,12 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         self.capabilities.visible_capabilities(request).await
+    }
+
+    fn current_visible_capabilities(
+        &self,
+    ) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
+        self.surface_state.current()
     }
 
     async fn invoke_capability(
@@ -2309,13 +2560,15 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             "checkpoint state scope was not found for this loop run",
             &error,
         ),
-        TurnError::Conflict { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "write",
-            AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state write conflicted with current turn state",
-            &error,
-        ),
+        TurnError::Conflict { .. } | TurnError::RunNotRetryable { .. } => {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "write",
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "checkpoint state write conflicted with current turn state",
+                &error,
+            )
+        }
         TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
@@ -2507,6 +2760,10 @@ mod hook_resolver_adapter_tests {
 #[cfg(test)]
 #[path = "loop_driver_host/tests.rs"]
 mod port_adapter_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/compaction_tests.rs"]
+mod compaction_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3262,7 +3519,7 @@ mod event_subscription_scope_tests {
 #[cfg(test)]
 mod turn_error_to_host_error_tests {
     use super::*;
-    use ironclaw_turns::{TurnCapacityResource, TurnError};
+    use ironclaw_turns::{TurnCapacityResource, TurnError, TurnRunId};
 
     #[test]
     fn capacity_exceeded_maps_to_unavailable() {
@@ -3277,6 +3534,14 @@ mod turn_error_to_host_error_tests {
     fn conflict_maps_to_checkpoint_rejected() {
         let error = turn_error_to_host_error(TurnError::Conflict {
             reason: "checkpoint conflict".to_string(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn run_not_retryable_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::RunNotRetryable {
+            run_id: TurnRunId::new(),
         });
         assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
     }

@@ -75,37 +75,25 @@ fn sample_record(
 
 #[test]
 fn worker_config_rejects_noop_or_unsupported_settings() {
-    let config = TriggerPollerWorkerConfig {
-        poll_interval: Duration::ZERO,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_poll_interval(Duration::ZERO);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
     ));
 
-    let config = TriggerPollerWorkerConfig {
-        fires_per_tick: 0,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_fires_per_tick(0);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
     ));
 
-    let config = TriggerPollerWorkerConfig {
-        max_concurrent_fires_per_trigger: 2,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_max_concurrent_fires_per_trigger(2);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
     ));
 
-    let config = TriggerPollerWorkerConfig {
-        claim_only_recovery_grace: Duration::ZERO,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_claim_only_recovery_grace(Duration::ZERO);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
@@ -114,10 +102,7 @@ fn worker_config_rejects_noop_or_unsupported_settings() {
 
 #[test]
 fn worker_new_rejects_invalid_config() {
-    let config = TriggerPollerWorkerConfig {
-        fires_per_tick: 0,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_fires_per_tick(0);
     let result = TriggerPollerWorker::new(
         config,
         TriggerPollerWorkerDeps {
@@ -126,6 +111,7 @@ fn worker_new_rejects_invalid_config() {
             materializer: Arc::new(RecordingMaterializer::success("content:trigger-fire")),
             trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
             active_run_lookup: Arc::new(RecordingActiveRunLookup::default()),
+            fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
         },
     );
 
@@ -183,6 +169,7 @@ fn worker_with_config(
             materializer,
             trusted_submitter: submitter,
             active_run_lookup: active_lookup,
+            fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
         },
     )
     .expect("valid worker")
@@ -306,6 +293,62 @@ async fn tick_processes_one_due_trigger_happy_path() {
     assert_eq!(persisted.active_fire_slot, Some(fire_slot));
     assert_eq!(persisted.active_run_ref, Some(run_id));
     assert_eq!(persisted.next_run_at, expected_next_run_at);
+}
+
+#[tokio::test]
+async fn tick_notifies_settlement_observer_after_accepted_fire_persists() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let tenant_id = tenant("tenant-settlement-observer");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+    repo.upsert_trigger(record.clone()).await.expect("insert");
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+    let turn_scope = test_turn_scope();
+    let observer = Arc::new(RecordingSettlementObserver::with_visibility_assertion(
+        repo.clone(),
+        tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        run_id,
+        turn_scope.thread_id.clone(),
+    ));
+    let worker = TriggerPollerWorker::new(
+        TriggerPollerWorkerConfig::default(),
+        TriggerPollerWorkerDeps {
+            repository: repo.clone(),
+            source_provider: Arc::new(crate::ScheduleTriggerSourceProvider),
+            materializer: Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+                TrustedTriggerFireSubmitOutcome::Accepted {
+                    run_id,
+                    submitted_at: ts(1_704_067_205),
+                    turn_scope: turn_scope.clone(),
+                },
+            )])),
+            active_run_lookup: Arc::new(RecordingActiveRunLookup::default()),
+            fire_settlement_observer: observer.clone(),
+        },
+    )
+    .expect("valid worker");
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::Submitted { run_id })
+    );
+    let events = observer.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "settlement observer must fire exactly once"
+    );
+    assert_eq!(events[0].run_id, run_id);
+    assert_eq!(events[0].turn_scope, turn_scope);
+    assert_eq!(events[0].fire.identity.trigger_id, trigger_id);
+    assert_eq!(events[0].fire.identity.fire_slot, fire_slot);
+    assert_eq!(events[0].fire.creator_user_id, record.creator_user_id);
 }
 
 #[tokio::test]
@@ -772,10 +815,7 @@ async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_report = worker.tick_once(first_slot).await.expect("first tick");
@@ -857,10 +897,7 @@ async fn tick_active_cleanup_cursor_wraps_to_start_when_page_is_empty() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_report = worker.tick_once(first_slot).await.expect("first tick");
@@ -907,10 +944,7 @@ async fn tick_active_cleanup_cursor_wraps_to_empty_page_succeeds_with_zero_activ
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Nonterminal,
         )),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 1,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
     );
 
     let first_report = worker.tick_once(fire_slot).await.expect("first tick");
@@ -943,10 +977,7 @@ async fn tick_fails_when_wrap_refetch_returns_backend_error() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Nonterminal,
         )),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 1,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
     );
 
     let first_report = worker.tick_once(fire_slot).await.expect("first tick");
@@ -1006,10 +1037,7 @@ async fn tick_retries_active_page_when_clear_fails_before_advancing_cursor() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup,
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_error = worker.tick_once(first_slot).await.expect_err("clear fails");
@@ -1213,10 +1241,7 @@ async fn tick_retries_active_lookup_error_before_advancing_cursor() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_report = worker.tick_once(failed_slot).await.expect("first tick");
@@ -1498,10 +1523,7 @@ async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
         materializer.clone(),
         submitter.clone(),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            claim_only_recovery_grace: Duration::from_secs(60),
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_claim_only_recovery_grace(Duration::from_secs(60)),
     );
 
     let report = worker
@@ -1571,10 +1593,7 @@ async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
         materializer,
         submitter,
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 1,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
     );
 
     let first_report = worker.tick_once(claim_only_slot).await.expect("first tick");
@@ -2780,6 +2799,78 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
             .expect("outcomes lock")
             .pop()
             .expect("submit outcome configured")
+    }
+}
+
+#[derive(Default)]
+struct RecordingSettlementObserver {
+    events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
+    visibility_assertion: Option<SettlementVisibilityAssertion>,
+}
+
+struct SettlementVisibilityAssertion {
+    repository: Arc<dyn TriggerRepository>,
+    tenant_id: TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+    run_id: TurnRunId,
+    thread_id: ThreadId,
+}
+
+impl RecordingSettlementObserver {
+    fn with_visibility_assertion(
+        repository: Arc<dyn TriggerRepository>,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        thread_id: ThreadId,
+    ) -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            visibility_assertion: Some(SettlementVisibilityAssertion {
+                repository,
+                tenant_id,
+                trigger_id,
+                fire_slot,
+                run_id,
+                thread_id,
+            }),
+        }
+    }
+
+    fn events(&self) -> Vec<TriggerAcceptedFireSettlement> {
+        self.events.lock().expect("events lock").clone()
+    }
+}
+
+#[async_trait]
+impl TriggerFireSettlementObserver for RecordingSettlementObserver {
+    async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
+        if let Some(assertion) = &self.visibility_assertion {
+            let persisted = assertion
+                .repository
+                .get_trigger(assertion.tenant_id.clone(), assertion.trigger_id)
+                .await
+                .expect("load trigger during settlement callback")
+                .expect("trigger must exist during settlement callback");
+            assert_eq!(persisted.active_fire_slot, Some(assertion.fire_slot));
+            assert_eq!(persisted.active_run_ref, Some(assertion.run_id));
+            let history = assertion
+                .repository
+                .list_trigger_run_history(assertion.tenant_id.clone(), assertion.trigger_id, 1)
+                .await
+                .expect("run history during settlement callback");
+            assert_eq!(
+                history.first().and_then(|run| run.run_id),
+                Some(assertion.run_id)
+            );
+            assert_eq!(
+                history.first().and_then(|run| run.thread_id.clone()),
+                Some(assertion.thread_id.clone())
+            );
+        }
+        self.events.lock().expect("events lock").push(event);
     }
 }
 

@@ -2,12 +2,15 @@
 name = "ironclaw_common"
 version = "0.4.2"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Shared types, paths, and platform helpers used across the IronClaw workspace"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.ironclaw]
+layer = "contracts"
 
 [package.metadata.dist]
 dist = false
@@ -17,9 +20,9 @@ base64 = "0.22"
 chrono-tz = "0.10"
 dirs = "6"
 hex = "0.4"
-rand = "0.8"
+rand = "0.10"
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"

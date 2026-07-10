@@ -22,7 +22,9 @@ use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{
+    IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
+};
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
@@ -39,6 +41,30 @@ const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
 const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+/// Lifetime of the one-time API bearer minted when an admin creates a user. A
+/// year: this is a long-lived programmatic credential, not a browser session.
+const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
+
+/// Mints the admin-created-user API bearer over a signed session store. The
+/// store is deterministic in its signing key (operator secret + tenant), so a
+/// token minted here validates under the SSO login surface's own store.
+struct SignedSessionTokenMinter {
+    session_store: Arc<dyn ironclaw_reborn_webui_ingress::SessionStore>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
+    async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
+        self.session_store
+            .create_session(
+                tenant.clone(),
+                user_id.clone(),
+                chrono::Duration::days(ADMIN_API_TOKEN_LIFETIME_DAYS),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 #[derive(Debug, Args)]
 pub(crate) struct ServeCommand {
@@ -75,13 +101,16 @@ impl ServeCommand {
         // the local-dev-yolo host-access disclosure gate fires before any
         // WebUI env-var resolution below; the owner is aligned to the
         // authenticated WebUI user once it is resolved (see `with_owner_id`).
-        let runtime_input = crate::runtime::build_runtime_input_with_options(
+        let built = crate::runtime::build_runtime_input_with_options(
             context.boot_config(),
             crate::runtime::RuntimeInputCaller::Serve,
             RuntimeInputOptions {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
+        #[cfg(feature = "slack-v2-host-beta")]
+        let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
+        let runtime_input = built.inner;
         let boot_config = context.boot_config();
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
@@ -131,8 +160,8 @@ impl ServeCommand {
         // HMAC before the value is moved into the env-bearer authenticator.
         // Held as `SecretString` so it is redacted in `Debug`/logs and
         // zeroed on drop — it doubles as the session-signing key. Capture
-        // its byte length first (for the SSO entropy floor below) since the
-        // value is consumed here.
+        // its byte length first (for the session-signing entropy floor below)
+        // since the value is consumed here.
         let token_byte_len = token_value.len();
         let session_signing_secret = SecretString::from(token_value.clone());
         let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
@@ -174,8 +203,21 @@ impl ServeCommand {
         if let Some(project_id) = default_project_id.clone() {
             runtime_input = runtime_input.with_default_project_id(project_id);
         }
-        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
-            config_file.as_ref().and_then(|file| file.slack.as_ref()),
+        // Admin user-management: mint the one-time API bearer on user create via
+        // a signed session store built from the same operator secret + tenant as
+        // the SSO login surface. The store is stateless and deterministic in its
+        // signing key, so this sibling instance (built before the login surface)
+        // mints tokens that validate under the login surface's own store.
+        let admin_session_store = ironclaw_reborn_webui_ingress::signed_session_store(
+            &session_signing_secret,
+            &tenant_id,
+        );
+        runtime_input =
+            runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
+                session_store: admin_session_store,
+            }));
+        let slack_host_beta_config = resolve_slack_host_beta_config_for_serve_command(
+            config_file.as_ref(),
             &tenant_id,
             &default_agent_id,
             default_project_id.as_ref(),
@@ -270,19 +312,27 @@ impl ServeCommand {
         // the login wiring are assembled inside the async runtime below,
         // because opening the libSQL user store is async.
         let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
-        // When SSO is enabled this same token keys the stateless session
-        // HMAC, so a weak value becomes an OFFLINE forgery target: an
-        // attacker who completes one legitimate login holds a
-        // `{payload}.{hmac}` pair and can brute-force a low-entropy key
-        // locally, then mint a session for any user/tenant. Pre-SSO the
-        // token only ever gated an online, rate-limited bearer guess.
-        // Require real entropy; fail closed rather than warn.
-        if sso_startup.is_some() && token_byte_len < 32 {
+        // This token keys the stateless session HMAC, so a weak value becomes
+        // an OFFLINE forgery target: an attacker who obtains one legitimate
+        // `{payload}.{hmac}` session pair can brute-force a low-entropy key
+        // locally, then mint a session for any user/tenant. Two paths mint
+        // such user-visible session tokens, so the floor is unconditional:
+        //   - SSO login (`sso_startup`) signs a session on every login, and
+        //   - admin user-management (wired above via
+        //     `with_admin_api_token_minter`) mints a one-time session bearer
+        //     on `POST /admin/users`.
+        // The admin minter is always installed, so a signed session token can
+        // always be produced regardless of whether SSO is configured. Pre-admin
+        // the token only ever gated an online, rate-limited bearer guess; now it
+        // signs offline-verifiable tokens, so require real entropy and fail
+        // closed rather than warn.
+        if token_byte_len < 32 {
             return Err(anyhow!(
-                "{env_token_var} is also the WebChat SSO session-signing key and must be at \
-                 least 32 bytes of high-entropy random material when an SSO provider is \
-                 configured (it signs stateless, user-visible session tokens). The current \
-                 value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
+                "{env_token_var} is also the WebChat session-signing key (it signs the \
+                 stateless, user-visible session tokens issued by SSO login and by admin \
+                 user creation) and must be at least 32 bytes of high-entropy random \
+                 material. The current value is {token_byte_len} bytes — generate one with \
+                 e.g. `openssl rand -hex 32`."
             ));
         }
         // Sidecar DB used by the local-runtime trigger-fire access checker. It
@@ -357,7 +407,7 @@ impl ServeCommand {
         rt.block_on(async move {
             let trigger_poller_enabled = runtime_input.trigger_poller.enabled;
             let sso_enabled = sso_startup.is_some();
-            let startup_serve = if profile == RebornProfile::HostedSingleTenant {
+            let startup_serve = if profile.starts_hosted_single_tenant_listener() {
                 Some(start_hosted_single_tenant_startup_listener(listen_addr).await?)
             } else {
                 None
@@ -395,7 +445,12 @@ impl ServeCommand {
                     .await
                     .context("failed to compose Slack host-beta routes")
                 {
-                    Ok(mounts) => Some(mounts),
+                    Ok(mounts) => {
+                        if let Some(slot) = &slack_personal_lazy_slot {
+                            mounts.fill_slack_personal_oauth_slot(slot);
+                        }
+                        Some(mounts)
+                    }
                     Err(error) => {
                         let shutdown_result = runtime.shutdown().await;
                         if let Err(shutdown_error) = shutdown_result {
@@ -507,6 +562,12 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
+            #[cfg(feature = "slack-v2-host-beta")]
+            {
+                if let Some(slot) = slack_personal_lazy_slot {
+                    serve_config = serve_config.with_slack_personal_oauth(slot);
+                }
+            }
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -520,9 +581,10 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
+                let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
+                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
             // Public NEAR AI login callback route (token redirect target). Built
@@ -551,7 +613,7 @@ impl ServeCommand {
                 serve_webui_v2(RebornWebuiServeOptions {
                     addr: listen_addr,
                     router,
-                    shutdown: webui_ctrl_c_shutdown(),
+                    shutdown: webui_shutdown_signal(),
                     bound_addr_tx: None,
                 })
                 .await
@@ -576,6 +638,44 @@ impl ServeCommand {
     }
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+fn resolve_slack_host_beta_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+    config_path: &std::path::Path,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::SlackHostBetaRuntimeConfig>> {
+    crate::commands::serve_slack::resolve_slack_config_for_serve(
+        config_file.and_then(|file| file.slack.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+fn resolve_slack_host_beta_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+    config_path: &std::path::Path,
+) -> anyhow::Result<Option<()>> {
+    crate::commands::serve_slack::resolve_slack_config_for_serve(
+        config_file.and_then(|file| file.slack.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
+}
+
 struct StartupServe {
     ready_handle: DeferredWebuiRouterHandle,
     serve_task: tokio::task::JoinHandle<Result<(), RebornWebuiServeError>>,
@@ -590,7 +690,7 @@ async fn start_hosted_single_tenant_startup_listener(
         serve_webui_v2(RebornWebuiServeOptions {
             addr: listen_addr,
             router,
-            shutdown: webui_ctrl_c_shutdown(),
+            shutdown: webui_shutdown_signal(),
             bound_addr_tx: Some(bound_tx),
         })
         .await
@@ -619,16 +719,44 @@ async fn start_hosted_single_tenant_startup_listener(
     })
 }
 
-fn webui_ctrl_c_shutdown() -> tokio::sync::oneshot::Receiver<()> {
+/// Resolve when a shutdown signal arrives: **SIGTERM** (what orchestrators —
+/// Railway, Kubernetes, systemd — send on a deploy/restart) or **SIGINT**
+/// (Ctrl-C). Handling SIGTERM is what lets the graceful path
+/// (`runtime.shutdown()`, including its in-memory turn-state flush) run on a
+/// deploy; without it the process is killed on SIGTERM and in-flight turns are
+/// lost. On non-unix, only Ctrl-C is available.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            // If the SIGTERM handler can't be installed, still honor Ctrl-C.
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn webui_shutdown_signal() -> tokio::sync::oneshot::Receiver<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!(
-                target = "ironclaw::reborn::cli::serve",
-                "ctrl-c received; signalling WebChat v2 graceful shutdown",
-            );
-            let _ = shutdown_tx.send(());
-        }
+        wait_for_shutdown_signal().await;
+        tracing::info!(
+            target = "ironclaw::reborn::cli::serve",
+            "shutdown signal (SIGTERM/SIGINT) received; signalling WebChat v2 graceful shutdown",
+        );
+        let _ = shutdown_tx.send(());
     });
     shutdown_rx
 }
@@ -882,10 +1010,7 @@ mod tests {
     #[test]
     fn webui_default_agent_uses_config_override() {
         let runtime_identity = RebornRuntimeIdentity::reborn_cli();
-        let identity = IdentitySection {
-            default_agent: Some("configured-agent".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_agent("configured-agent");
 
         assert_eq!(
             resolve_webui_default_agent(Some(&identity), &runtime_identity),
@@ -906,10 +1031,7 @@ mod tests {
 
     #[test]
     fn webui_runtime_owner_accepts_matching_config_owner() {
-        let identity = IdentitySection {
-            default_owner: Some("local-user".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("local-user");
 
         assert_eq!(
             resolve_webui_runtime_owner(Some(&identity), "local-user").unwrap(),
@@ -923,16 +1045,54 @@ mod tests {
         // the bug class that silently made every thread invisible: the facade
         // writes under `owners/local-user` while the loop host reads under
         // `owners/reborn-cli`. Fail loud at startup instead.
-        let identity = IdentitySection {
-            default_owner: Some("reborn-cli".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("reborn-cli");
 
         let error = resolve_webui_runtime_owner(Some(&identity), "local-user")
             .expect_err("divergent owner must be rejected");
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+api_version = "ironclaw.runtime/v1"
+
+[slack]
+enabled = true
+slack_user_id = "U123"
+"#,
+        )
+        .expect("write config");
+        let config_file = RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+
+        let error = resolve_slack_host_beta_config_for_serve_command(
+            Some(&config_file),
+            &TenantId::new("serve-slack-tenant").expect("tenant id"),
+            &AgentId::new("serve-slack-agent").expect("agent id"),
+            None,
+            &UserId::new("serve-slack-user").expect("user id"),
+            &config_path,
+        )
+        .expect_err("serve startup must reject legacy Slack config fields");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("[slack].slack_user_id"),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(&config_path.display().to_string()),
+            "message: {message}"
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

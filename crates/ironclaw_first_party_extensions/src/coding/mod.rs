@@ -20,9 +20,15 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, MountView, ResourceScope, RuntimeDispatchErrorKind,
+    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceScope,
+    RuntimeDispatchErrorKind,
 };
 use serde_json::Value;
+
+use crate::latency::{
+    FirstPartyToolLatencyFields, FirstPartyToolLatencyMetrics, json_bytes, started_at,
+    trace_tool_error, trace_tool_ok,
+};
 
 use state::SharedCodingEditLocks;
 
@@ -36,8 +42,22 @@ pub enum CodingCapabilityKind {
     ApplyPatch,
 }
 
+impl CodingCapabilityKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadFile => "read_file",
+            Self::WriteFile => "write_file",
+            Self::ListDir => "list_dir",
+            Self::Glob => "glob",
+            Self::Grep => "grep",
+            Self::ApplyPatch => "apply_patch",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CodingCapabilityRequest<'a> {
+    pub(crate) capability_id: &'a CapabilityId,
     pub(crate) kind: CodingCapabilityKind,
     pub(crate) scope: &'a ResourceScope,
     pub(crate) mounts: Option<&'a MountView>,
@@ -72,6 +92,7 @@ impl CodingCapabilityOutput {
 
 impl<'a> CodingCapabilityRequest<'a> {
     pub fn new(
+        capability_id: &'a CapabilityId,
         kind: CodingCapabilityKind,
         scope: &'a ResourceScope,
         mounts: Option<&'a MountView>,
@@ -79,6 +100,7 @@ impl<'a> CodingCapabilityRequest<'a> {
         input: &'a Value,
     ) -> Self {
         Self {
+            capability_id,
             kind,
             scope,
             mounts,
@@ -140,7 +162,13 @@ async fn dispatch(
     request: &CodingCapabilityRequest<'_>,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
-    match request.kind {
+    let started_at = started_at();
+    let latency_fields = FirstPartyToolLatencyFields::from_input(
+        request.capability_id,
+        request.scope,
+        request.input,
+    );
+    let result = match request.kind {
         CodingCapabilityKind::ReadFile => file::read_file(request)
             .await
             .map(CodingCapabilityOutput::new),
@@ -155,6 +183,45 @@ async fn dispatch(
             .await
             .map(CodingCapabilityOutput::new),
         CodingCapabilityKind::ApplyPatch => file::apply_patch(request, edit_locks).await,
+    };
+    trace_coding_latency(request, latency_fields.as_ref(), started_at, &result);
+    result
+}
+
+fn trace_coding_latency(
+    request: &CodingCapabilityRequest<'_>,
+    fields: Option<&FirstPartyToolLatencyFields>,
+    started_at: Option<std::time::Instant>,
+    result: &Result<CodingCapabilityOutput, CodingCapabilityError>,
+) {
+    let output_bytes = result
+        .as_ref()
+        .ok()
+        .map(|output| json_bytes(&output.output))
+        .unwrap_or(0);
+
+    match result {
+        Ok(_) => trace_tool_ok(
+            "first_party_coding_tool",
+            request.kind.as_str(),
+            fields,
+            started_at,
+            FirstPartyToolLatencyMetrics {
+                output_bytes,
+                ..FirstPartyToolLatencyMetrics::default()
+            },
+        ),
+        Err(error) => trace_tool_error(
+            "first_party_coding_tool",
+            request.kind.as_str(),
+            fields,
+            started_at,
+            error.kind().as_str(),
+            FirstPartyToolLatencyMetrics {
+                output_bytes,
+                ..FirstPartyToolLatencyMetrics::default()
+            },
+        ),
     }
 }
 
@@ -191,8 +258,8 @@ mod tests {
 
     use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
     use ironclaw_host_api::{
-        HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        RuntimeDispatchErrorKind, UserId, VirtualPath,
+        CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        ResourceScope, RuntimeDispatchErrorKind, UserId, VirtualPath,
     };
     use serde_json::json;
 
@@ -243,12 +310,15 @@ mod tests {
         )
         .expect("resource scope");
         let state = super::CodingCapabilityState::default();
+        let write_capability_id = CapabilityId::new("builtin.write_file").expect("capability id");
+        let read_capability_id = CapabilityId::new("builtin.read_file").expect("capability id");
 
         let write_input = json!({
             "path": "workspace/demo/a.txt",
             "content": "hello"
         });
         let write_request = super::CodingCapabilityRequest::new(
+            &write_capability_id,
             super::CodingCapabilityKind::WriteFile,
             &scope,
             Some(&mounts),
@@ -295,6 +365,7 @@ mod tests {
 
         let read_input = json!({ "path": "workspace/demo/a.txt" });
         let read_request = super::CodingCapabilityRequest::new(
+            &read_capability_id,
             super::CodingCapabilityKind::ReadFile,
             &scope,
             Some(&mounts),
@@ -317,6 +388,7 @@ mod tests {
             "content": "blocked"
         });
         let url_like_request = super::CodingCapabilityRequest::new(
+            &write_capability_id,
             super::CodingCapabilityKind::WriteFile,
             &scope,
             Some(&mounts),
@@ -342,6 +414,7 @@ mod tests {
             "content": "blocked"
         });
         let reserved_workspace_file_request = super::CodingCapabilityRequest::new(
+            &write_capability_id,
             super::CodingCapabilityKind::WriteFile,
             &scope,
             Some(&mounts),

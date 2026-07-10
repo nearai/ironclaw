@@ -19,9 +19,10 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
+use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
 use ironclaw_wasm::{
-    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolLimits, WitToolRequest,
-    WitToolRuntime, WitToolRuntimeConfig,
+    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -409,7 +410,7 @@ async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
     let adapter = WasmRuntimeAdapter::with_config(WitToolRuntimeConfig {
-        default_limits: WitToolLimits::default()
+        default_limits: SandboxLimits::default()
             .with_memory_bytes(64 * 1024)
             .with_fuel(100_000)
             .with_timeout(Duration::from_secs(5)),
@@ -483,7 +484,7 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
     let adapter = WasmRuntimeAdapter::with_host_and_config(
         WitToolHost::deny_all().with_http(wasm_http),
         WitToolRuntimeConfig {
-            default_limits: WitToolLimits::default()
+            default_limits: SandboxLimits::default()
                 .with_memory_bytes(1024 * 1024)
                 .with_fuel(100_000)
                 .with_timeout(Duration::from_millis(20)),
@@ -835,12 +836,10 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_process_count: Some(10),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_process_count(10)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
@@ -850,12 +849,10 @@ fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest
     CapabilityDispatchRequest {
         capability_id: CapabilityId::new(capability).unwrap(),
         scope: sample_scope(),
-        estimate: ResourceEstimate {
-            concurrency_slots: Some(1),
-            process_count: Some(1),
-            output_bytes: Some(10_000),
-            ..ResourceEstimate::default()
-        },
+        estimate: ResourceEstimate::default()
+            .set_concurrency_slots(1)
+            .set_process_count(1)
+            .set_output_bytes(10_000),
         mounts: None,
         resource_reservation: None,
         input,

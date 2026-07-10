@@ -1,18 +1,65 @@
 use std::collections::VecDeque;
 
+use chrono::{TimeZone, Utc};
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
     state::{CheckpointKind, LoopExecutionState},
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
-        ScriptedCapabilityOutcome, ScriptedModelResponse,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, capability_id, surface_version,
     },
 };
 use ironclaw_turns::{
-    LoopExit, LoopFailureKind,
-    run_profile::{ContentDigest, LoopRunInfoPort},
+    CapabilityActivityId, LoopExit, LoopFailureKind,
+    run_profile::{
+        AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityInputRef,
+        CapabilityInvocation, ContentDigest, LoopCancelReasonKind, LoopCancellationPort,
+        LoopCancellationSignal, LoopCapabilityPort, LoopRunInfoPort,
+    },
 };
+
+#[tokio::test]
+async fn cancel_after_capability_batch_is_consumed_once() {
+    let first_signal = LoopCancellationSignal {
+        reason_kind: LoopCancelReasonKind::UserRequested,
+        requested_at: Utc.with_ymd_and_hms(2026, 6, 12, 10, 0, 0).unwrap(),
+    };
+    let second_signal = LoopCancellationSignal {
+        reason_kind: LoopCancelReasonKind::Policy,
+        requested_at: Utc.with_ymd_and_hms(2026, 6, 12, 10, 1, 0).unwrap(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .script(ScenarioScript {
+            model_responses: VecDeque::new(),
+            capability_outcomes: VecDeque::from([
+                vec![ScriptedCapabilityOutcome::completed("result:first")],
+                vec![ScriptedCapabilityOutcome::completed("result:second")],
+            ]),
+            single_call_retry_outcomes: VecDeque::new(),
+            pending_inputs: VecDeque::new(),
+        })
+        .cancel_after_capability_batch(first_signal.clone())
+        .build();
+    let request = CapabilityBatchInvocation {
+        invocations: vec![CapabilityInvocation {
+            surface_version: surface_version(),
+            capability_id: capability_id("demo.echo"),
+            activity_id: CapabilityActivityId::new(),
+            input_ref: CapabilityInputRef::new("input:one-shot").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
+        }],
+        stop_on_first_suspension: false,
+    };
+
+    host.invoke_capability_batch(request.clone()).await.unwrap();
+    assert_eq!(host.observe_cancellation(), Some(first_signal));
+
+    host.set_cancellation_signal(second_signal.clone());
+    host.invoke_capability_batch(request).await.unwrap();
+    assert_eq!(host.observe_cancellation(), Some(second_signal));
+}
 
 #[tokio::test]
 async fn repeated_signature_warns_before_allowing_final_reply() {
@@ -386,6 +433,83 @@ async fn repeated_failure_kind_does_not_trigger_no_progress_escape() {
     assert!(
         host.model_call_count() > 3,
         "coarse repeated failure kinds must not stop the run at the old threshold"
+    );
+}
+
+#[tokio::test]
+async fn chaos_repeated_model_service_drops_report_model_error() {
+    let script = ScenarioScript {
+        model_responses: (0..8)
+            .map(|_| ScriptedModelResponse::Error {
+                kind: AgentLoopHostErrorKind::Unavailable,
+            })
+            .collect(),
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should produce controlled failed exit");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected model-error failed exit, got {other:?}"),
+    }
+    assert!(
+        host.model_call_count() >= 3,
+        "model recovery should retry before returning a controlled failure"
+    );
+    assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_model_output_is_retried_before_accepting_next_valid_reply() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::ErrorWithSummary {
+                kind: AgentLoopHostErrorKind::Unavailable,
+                safe_summary: "model output was structurally invalid",
+            },
+            ScriptedModelResponse::Reply {
+                text: "recovered after invalid model output".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should recover from retryable invalid model output");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected completion after retrying invalid model output, got {other:?}"),
+    }
+    assert_eq!(host.model_call_count(), 2);
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["recovered after invalid model output"]
+    );
+    assert_eq!(
+        host.prompt_requests().len(),
+        2,
+        "model recovery must rebuild the prompt before retrying"
     );
 }
 

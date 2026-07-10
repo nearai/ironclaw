@@ -1,14 +1,14 @@
 use std::{fs, path::Path, sync::Arc};
 
 use ironclaw_event_projections::{
-    AuditProjectionRequest, AuditProjectionService, AuditProjectionStage, DurableMemoryAuditSink,
-    ProjectionScope, ReplayAuditProjectionService,
+    AuditProjectionRequest, AuditProjectionService, DurableMemoryAuditSink, ProjectionScope,
+    ReplayAuditProjectionService,
 };
 use ironclaw_events::{AuditSink, DurableAuditSink};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{
-    AgentId, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId, VirtualPath,
+    AgentId, AuditStage, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope,
+    TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_memory_native::{
     ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository,
@@ -47,15 +47,15 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
     let backend = Arc::new(
         RepositoryMemoryBackend::new(Arc::clone(&repository))
             .without_prompt_write_safety_policy()
-            .with_capabilities(MemoryBackendCapabilities {
-                file_documents: true,
-                metadata: true,
-                versioning: true,
-                full_text_search: true,
-                vector_search: false,
-                embeddings: false,
-                ..MemoryBackendCapabilities::default()
-            })
+            .with_capabilities(
+                MemoryBackendCapabilities::default()
+                    .set_file_documents(true)
+                    .set_metadata(true)
+                    .set_versioning(true)
+                    .set_full_text_search(true)
+                    .set_vector_search(false)
+                    .set_embeddings(false),
+            )
             .with_indexer(indexer)
             .with_memory_event_sink(Arc::clone(&memory_events)),
     );
@@ -113,7 +113,7 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
         ]
     );
     for entry in &snapshot.entries {
-        assert_eq!(entry.stage, AuditProjectionStage::After);
+        assert_eq!(entry.stage, AuditStage::After);
         assert_eq!(entry.action_target, None);
         assert_eq!(entry.decision_kind, "memory_event_recorded");
     }

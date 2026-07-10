@@ -1,0 +1,159 @@
+name: IronClaw Stress
+
+on:
+  pull_request:
+    paths:
+      - "tools/ironclaw_stress/**"
+      - "crates/ironclaw_filesystem/**"
+      - "crates/ironclaw_threads/**"
+      - "crates/ironclaw_turns/**"
+      - "crates/ironclaw_resources/**"
+      - "crates/ironclaw_host_api/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ironclaw-stress.yml"
+  merge_group:
+    branches:
+      - main
+    types:
+      - checks_requested
+  schedule:
+    - cron: "30 3 * * *" # Daily libsql stress scan at 03:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ironclaw-stress-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+  IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+
+jobs:
+  libsql-bottleneck-suite:
+    name: libsql bottleneck suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ironclaw-stress-libsql
+          save-if: ${{ github.event_name == 'schedule' || github.event_name == 'merge_group' }}
+
+      - name: Run fast libsql bottleneck suite
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        run: |
+          mkdir -p target/ironclaw-stress
+          cargo run -p ironclaw_stress --release -- \
+            --backend libsql \
+            --suite bottleneck-finder \
+            --operations 2 \
+            --concurrency 1 \
+            --users 5 \
+            --progress-interval-seconds 0 \
+            --human-read \
+            --bottleneck-report \
+            --output-jsonl target/ironclaw-stress/pr-suite.jsonl \
+            --max-failure-rate 0.05 \
+            --max-p95-ms 3000 \
+            --max-rss-mb 1024 \
+            > target/ironclaw-stress/pr-suite-summary.json \
+            2> target/ironclaw-stress/pr-suite-report.txt
+
+      - name: Run nightly libsql bottleneck suite
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        # The suite-wide p95 ceiling must clear the model-tail case, which
+        # injects a synthetic 2.0s model wait by design — the previous 1500ms
+        # ceiling was structurally unsatisfiable and failed every nightly scan
+        # (the PR variant of this suite already runs with 3000ms). Per-case
+        # ceilings in ironclaw_stress would be the proper fix if the coarse
+        # global cap keeps biting.
+        run: |
+          mkdir -p target/ironclaw-stress
+          cargo run -p ironclaw_stress --release -- \
+            --backend libsql \
+            --suite bottleneck-finder \
+            --operations 20 \
+            --concurrency 4 \
+            --users 50 \
+            --progress-interval-seconds 0 \
+            --human-read \
+            --bottleneck-report \
+            --output-jsonl target/ironclaw-stress/nightly-suite.jsonl \
+            --max-failure-rate 0.02 \
+            --max-p95-ms 2500 \
+            --max-rss-mb 1024 \
+            > target/ironclaw-stress/nightly-suite-summary.json \
+            2> target/ironclaw-stress/nightly-suite-report.txt
+
+      - name: Upload stress suite artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ironclaw-stress-libsql-suite
+          path: |
+            target/ironclaw-stress/pr-suite.jsonl
+            target/ironclaw-stress/pr-suite-summary.json
+            target/ironclaw-stress/pr-suite-report.txt
+            target/ironclaw-stress/nightly-suite.jsonl
+            target/ironclaw-stress/nightly-suite-summary.json
+            target/ironclaw-stress/nightly-suite-report.txt
+          if-no-files-found: ignore
+
+  libsql-concurrency-ramp:
+    name: libsql concurrency ramp
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ironclaw-stress-ramp
+          save-if: ${{ github.event_name == 'schedule' }}
+
+      - name: Run libsql chat-baseline concurrency ramp
+        run: |
+          mkdir -p target/ironclaw-stress
+          cargo run -p ironclaw_stress --release -- \
+            --backend libsql \
+            --preset chat-baseline \
+            --concurrency 2 \
+            --ramp-concurrency 32 \
+            --operations 30 \
+            --users 100 \
+            --progress-interval-seconds 0 \
+            --human-read \
+            --bottleneck-report \
+            --max-failure-rate 0.01 \
+            --max-p95-ms 1000 \
+            > target/ironclaw-stress/concurrency-ramp-summary.json \
+            2> target/ironclaw-stress/concurrency-ramp-report.txt
+
+      - name: Upload stress ramp artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ironclaw-stress-libsql-ramp
+          path: |
+            target/ironclaw-stress/concurrency-ramp-summary.json
+            target/ironclaw-stress/concurrency-ramp-report.txt
+          if-no-files-found: ignore

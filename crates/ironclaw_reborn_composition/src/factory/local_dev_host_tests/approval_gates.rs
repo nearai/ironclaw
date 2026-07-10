@@ -27,27 +27,30 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use super::*;
 use crate::local_dev_capability_policy::local_dev_one_shot_lease_approval;
 
+use crate::approval_test_support::disable_global_auto_approve;
+
 #[tokio::test]
 async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one_shot_lease() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-approval-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
-    .expect("local-dev services build");
+    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate");
+        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services
         .host_runtime
         .as_ref()
-        .expect("local-dev host runtime");
-    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
+        .expect("local-dev host runtime"); // safety: test-only service fixture invariant.
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: constant capability id.
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo approved"});
     let context = shell_execution_context("local-dev-approval-owner", "thread-local-dev-approval");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let blocked = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -99,7 +102,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
 
 #[tokio::test]
 async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
     let transport = Arc::new(RecordingSandboxTransport::default());
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
         transport.clone(),
@@ -112,16 +115,17 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
             )),
     )
     .await
-    .expect("local-dev services build");
+    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate");
+        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services.host_runtime.as_ref().expect("host runtime");
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo composed sandbox", "timeout": 9});
     let context = shell_execution_context("sandbox-port-owner", "sandbox-port-thread");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let blocked = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -165,7 +169,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
 
 #[tokio::test]
 async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
     let services = build_reborn_services(
@@ -192,6 +196,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
         "local-dev-yolo-approval-owner",
         "thread-local-yolo-approval",
     );
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -225,11 +230,11 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
             .with_runtime_policy(local_dev_policy()),
     )
     .await
-    .expect("local-dev services build");
+    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate");
+        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services
         .host_runtime
         .as_ref()
@@ -273,6 +278,52 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
 }
 
 #[tokio::test]
+async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
+    // Caller-level proof of the PR's promise: a fresh user (auto-approve setting
+    // never written → defaults ON) has an eligible tool auto-approved at
+    // dispatch, with no approval gate. No disable call — the default must carry.
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-echo-default-on", dir.path().join("local-dev"))
+            .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime"); // safety: test-only service fixture invariant.
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: constant capability id.
+    let context =
+        echo_spawn_execution_context("local-dev-echo-default-on", "thread-echo-default-on");
+
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id,
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "auto approve echo"}),
+            trust_decision(echo_spawn_allowed_effects()),
+        ))
+        .await
+        .expect("echo invocation resolves"); // safety: test-only capability invocation assertion.
+
+    if !matches!(outcome, RuntimeCapabilityOutcome::Completed(_)) {
+        panic!(
+            "unset global auto-approve defaults ON, so eligible echo must auto-approve, got {outcome:?}"
+        );
+    }
+    let pending_count = pending_approval_count(local_runtime, &context).await;
+    if pending_count != 0 {
+        panic!("default-on auto-approve must not create a pending approval");
+    }
+}
+
+#[tokio::test]
 async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
@@ -291,6 +342,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
         .expect("local-dev host runtime");
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let context = echo_spawn_execution_context("local-dev-echo-default-ask", "thread-echo-ask");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -317,6 +369,135 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
 }
 
 #[tokio::test]
+async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-echo-ask-resume", dir.path().join("local-dev"))
+            .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime");
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
+    let estimate = ResourceEstimate::default();
+    let input = serde_json::json!({"message": "hello ask-each-time"});
+    let context = echo_spawn_execution_context("local-dev-echo-ask-resume", "thread-echo-resume");
+
+    local_runtime
+        .tool_permission_overrides
+        .set(ToolPermissionOverrideInput {
+            scope: operator_tool_permission_scope_for_test(&context.resource_scope),
+            capability_id: capability_id.clone(),
+            state: ToolPermissionOverride::AskEachTime,
+            updated_by: Principal::User(context.user_id.clone()),
+        })
+        .await
+        .expect("tool permission override update");
+
+    let blocked = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id.clone(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision(echo_dispatch_allowed_effects()),
+        ))
+        .await
+        .expect("echo invocation resolves");
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = blocked else {
+        panic!("explicit ask_each_time should gate builtin.echo, got {blocked:?}");
+    };
+    assert_eq!(gate.capability_id, capability_id);
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        1,
+        "explicit ask_each_time must create a pending approval"
+    );
+
+    let premature_resume = host_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            capability_id.clone(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision(echo_dispatch_allowed_effects()),
+        ))
+        .await
+        .expect("pending echo approval resume resolves to non-completion");
+    assert!(
+        !matches!(premature_resume, RuntimeCapabilityOutcome::Completed(_)),
+        "pending ask_each_time approval must not allow echo resume, got {premature_resume:?}"
+    );
+    assert!(
+        local_runtime
+            .capability_leases
+            .leases_for_scope(&context.resource_scope)
+            .await
+            .is_empty(),
+        "pending approval must not issue an approval lease"
+    );
+
+    let lease = ApprovalResolver::new(
+        local_runtime.approval_requests.as_ref(),
+        local_runtime.capability_leases.as_ref(),
+    )
+    .approve_dispatch(
+        &context.resource_scope,
+        gate.approval_request_id,
+        echo_dispatch_lease_approval(),
+    )
+    .await
+    .expect("approval issues echo lease");
+    let approved_record = local_runtime
+        .approval_requests
+        .get(&context.resource_scope, gate.approval_request_id)
+        .await
+        .expect("approval record lookup")
+        .expect("approval record exists");
+    assert_eq!(approved_record.status, ApprovalStatus::Approved);
+    assert!(
+        lease.invocation_fingerprint.is_some(),
+        "approval lease must be tied to the approved invocation fingerprint"
+    );
+    assert_eq!(
+        lease.invocation_fingerprint.as_ref(),
+        approved_record.request.invocation_fingerprint.as_ref(),
+        "approval lease fingerprint must match the approved request"
+    );
+
+    let resumed = host_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            capability_id,
+            estimate,
+            input,
+            trust_decision(echo_dispatch_allowed_effects()),
+        ))
+        .await
+        .expect("approved echo invocation resumes");
+    assert!(
+        matches!(resumed, RuntimeCapabilityOutcome::Completed(_)),
+        "approved ask_each_time one-shot lease should allow echo resume, got {resumed:?}"
+    );
+    let leases = local_runtime
+        .capability_leases
+        .leases_for_scope(&context.resource_scope)
+        .await;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].status, CapabilityLeaseStatus::Consumed);
+}
+
+#[tokio::test]
 async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
@@ -336,6 +517,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let context =
         echo_spawn_execution_context("local-dev-echo-legacy-grant", "thread-echo-legacy-grant");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     local_runtime
         .persistent_approval_policies
@@ -631,6 +813,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo denied"});
     let context = shell_execution_context("local-dev-deny-owner", "local-dev-deny-thread");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let blocked = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -802,6 +985,18 @@ fn shell_lease_approval() -> LeaseApproval {
     })
 }
 
+fn echo_dispatch_lease_approval() -> LeaseApproval {
+    local_dev_one_shot_lease_approval(GrantConstraints {
+        allowed_effects: echo_dispatch_allowed_effects(),
+        mounts: MountView::default(),
+        network: NetworkPolicy::default(),
+        secrets: Vec::new(),
+        resource_ceiling: None,
+        expires_at: None,
+        max_invocations: None,
+    })
+}
+
 fn trust_decision(allowed_effects: Vec<EffectKind>) -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
@@ -861,6 +1056,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
         .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = shell_execution_context("local-dev-minimal-owner", "thread-minimal-approval");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -903,6 +1099,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
         .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = shell_execution_context("ent-minimal-owner", "thread-ent-minimal");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -954,6 +1151,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     let input = serde_json::json!({"command": "echo spawn-approved"});
     let context =
         shell_execution_context("local-dev-spawn-approval-owner", "thread-spawn-approval");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let blocked = host_runtime
         .spawn_capability(RuntimeCapabilityRequest::new(
@@ -1017,12 +1215,17 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
     )
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
         .host_runtime
         .as_ref()
         .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = echo_spawn_execution_context("local-dev-echo-spawn-owner", "thread-echo-spawn");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     let outcome = host_runtime
         .spawn_capability(RuntimeCapabilityRequest::new(
@@ -1086,6 +1289,10 @@ fn echo_spawn_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess]
 }
 
+fn echo_dispatch_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability]
+}
+
 /// A capability invoked without a matching grant must be denied, not upgraded to
 /// RequireApproval. Verifies non-Allow pass-through in the profile approval
 /// authorizer.
@@ -1146,6 +1353,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo regate"});
     let context = shell_execution_context("local-dev-regate-owner", "thread-regate");
+    disable_global_auto_approve(local_runtime, &context).await;
 
     // First invocation — expect approval gate.
     let first_blocked = host_runtime

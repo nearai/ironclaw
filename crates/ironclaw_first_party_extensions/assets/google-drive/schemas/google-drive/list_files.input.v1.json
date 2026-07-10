@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Google Drive list_files",
-  "description": "Search or list files and folders.",
+  "description": "Search or list files and folders, including Google Sheets/spreadsheets by name or title.",
   "type": "object",
   "required": [],
   "properties": {
@@ -10,7 +10,7 @@
         "string",
         "null"
       ],
-      "description": "Drive search query."
+      "description": "Drive search query. To find a Google Sheet by exact title, use a query like name = '<spreadsheet title>' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false."
     },
     "page_size": {
       "type": "integer",

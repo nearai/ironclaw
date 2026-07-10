@@ -18,8 +18,9 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{
     CapabilityResultWrite, CapabilityWriteResult, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
+    HostManagedModelResponse, HostManagedModelStreamSink, HostManagedToolResultContent,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 
@@ -62,17 +63,26 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 #[cfg(test)]
-pub(crate) use crate::outbound_delivery_capability_surface::{
+pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
+
+/// Test-only bridges (E-PROJ / E-SKILL seams), co-located with the capability
+/// each wraps and re-exported here for the `runtime` caller.
+#[cfg(feature = "test-support")]
+pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use project_create::wrap_project_create_capability_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -86,7 +96,6 @@ pub(super) struct LocalDevCapabilityWiring {
 pub(super) fn capability_wiring(
     services: &RebornServices,
     thread_service: Arc<dyn SessionThreadService>,
-    thread_scope: ThreadScope,
     fallback_user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
     model_gateway: Arc<dyn HostManagedModelGateway>,
@@ -130,7 +139,7 @@ pub(super) fn capability_wiring(
         LocalDevCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
-            thread_scope,
+            fallback_user_id.clone(),
         )
         .with_observer(trajectory_observer.clone()),
     );
@@ -265,7 +274,11 @@ struct LocalDevCapabilityIo {
 #[derive(Clone)]
 struct DurableCapabilityDisplayPreviewSink {
     thread_service: Arc<dyn SessionThreadService>,
-    thread_scope: ThreadScope,
+    /// Fallback owner used only when a run scope carries no explicit owner.
+    /// The durable thread scope is otherwise derived per-append from the
+    /// run context so previews write under the SAME scope the run's thread
+    /// was registered under (see `local_dev_thread_scope_for_run`).
+    fallback_user_id: UserId,
 }
 
 impl Default for LocalDevCapabilityIo {
@@ -288,7 +301,7 @@ impl LocalDevCapabilityIo {
     fn new_with_durable_previews(
         display_previews: Arc<CapabilityDisplayPreviewStore>,
         thread_service: Arc<dyn SessionThreadService>,
-        thread_scope: ThreadScope,
+        fallback_user_id: UserId,
     ) -> Self {
         Self {
             inputs: StdMutex::new(StagedValueStore::default()),
@@ -296,7 +309,7 @@ impl LocalDevCapabilityIo {
             display_previews,
             durable_previews: Some(DurableCapabilityDisplayPreviewSink {
                 thread_service,
-                thread_scope,
+                fallback_user_id,
             }),
             observer: None,
         }
@@ -323,6 +336,7 @@ impl LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
+        status: CapabilityDisplayPreviewStatus,
     ) -> Option<ThreadMessageId> {
         let Some(durable_previews) = &self.durable_previews else {
             return None;
@@ -339,7 +353,7 @@ impl LocalDevCapabilityIo {
             match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
                 invocation_id,
                 capability_id: capability_id.clone(),
-                status: CapabilityDisplayPreviewStatus::Completed,
+                status,
                 title: record.title,
                 subtitle: record.subtitle,
                 input_summary: record.input_summary,
@@ -363,14 +377,24 @@ impl LocalDevCapabilityIo {
                     return None;
                 }
             };
+        // Derive the durable thread scope from the run context so the preview
+        // writes under the SAME scope the run's thread was registered under.
+        // A composition-time constant scope can mismatch the run's actual
+        // owner/project and surface as a spurious `UnknownThread` on append.
+        let Some(thread_scope) =
+            local_dev_thread_scope_for_run(run_context, &durable_previews.fallback_user_id)
+        else {
+            tracing::debug!(
+                invocation_id = %invocation_id,
+                capability_id = capability_id.as_str(),
+                "capability display preview skipped: run scope has no agent"
+            );
+            return None;
+        };
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
-                scope: ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn(
-                    &durable_previews.thread_scope,
-                    &run_context.scope,
-                    run_context.actor(),
-                ),
+                scope: thread_scope,
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
                 preview,
@@ -617,7 +641,12 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             }
         }
         if let Some(message_id) = self
-            .try_append_durable_display_preview(run_context, invocation_id, capability_id)
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Completed,
+            )
             .await
         {
             self.display_previews
@@ -638,6 +667,36 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
+    }
+
+    async fn stage_capability_failure_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+        summary: &str,
+    ) {
+        self.display_previews.record_failure_preview(
+            &run_context.run_id.to_string(),
+            invocation_id,
+            capability_id,
+            summary,
+        );
+        // Persist the failure preview to the durable timeline (status Failed)
+        // so the detail survives refresh/replay, mirroring the success path in
+        // `write_capability_result`.
+        if let Some(message_id) = self
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Failed,
+            )
+            .await
+        {
+            self.display_previews
+                .attach_timeline_message_id(invocation_id, message_id);
+        }
     }
 
     async fn update_capability_result(
@@ -726,6 +785,16 @@ impl HostManagedModelGateway for LocalDevResultHydratingModelGateway {
             .await
     }
 
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.inner
+            .stream_model_with_progress(self.hydrate_request(request)?, sink)
+            .await
+    }
+
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
@@ -733,6 +802,21 @@ impl HostManagedModelGateway for LocalDevResultHydratingModelGateway {
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.inner
             .stream_model_with_capabilities(self.hydrate_request(request)?, capabilities)
+            .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.inner
+            .stream_model_with_capabilities_and_progress(
+                self.hydrate_request(request)?,
+                capabilities,
+                sink,
+            )
             .await
     }
 }
@@ -864,6 +948,28 @@ fn local_dev_resource_scope_for_run(
         .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
         .unwrap_or_else(|| fallback_user_id.clone());
     scope
+}
+
+/// Build the per-run [`ThreadScope`] for durable display-preview appends.
+///
+/// Mirrors [`local_dev_resource_scope_for_run`] so the durable preview sink
+/// writes under the same scope the run's thread was registered under, rather
+/// than a composition-time constant that can drift from the run's actual
+/// owner/project and surface as a spurious `UnknownThread`. Returns `None`
+/// when the run scope carries no agent (durable previews are agent-scoped),
+/// in which case the caller skips the durable append.
+fn local_dev_thread_scope_for_run(
+    run_context: &LoopRunContext,
+    fallback_user_id: &UserId,
+) -> Option<ThreadScope> {
+    let resource = local_dev_resource_scope_for_run(run_context, fallback_user_id);
+    Some(ThreadScope {
+        tenant_id: resource.tenant_id,
+        agent_id: resource.agent_id?,
+        project_id: resource.project_id,
+        owner_user_id: Some(resource.user_id),
+        mission_id: resource.mission_id,
+    })
 }
 
 struct LocalDevVisibleCapabilityInputs<'a> {

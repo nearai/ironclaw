@@ -16,8 +16,8 @@ use ironclaw_authorization::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-    ExtensionId, InvocationFingerprint, InvocationId, MountView, NetworkPolicy, Principal,
-    ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
+    ExtensionId, GrantConstraints, InvocationFingerprint, InvocationId, MountView, NetworkPolicy,
+    Principal, ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionDecision,
@@ -186,13 +186,15 @@ impl ApprovalLeaseTermsProvider for RejectingPersistentLeaseTermsProvider {
 fn dispatch_lease_approval(issued_by: Principal) -> LeaseApproval {
     LeaseApproval {
         issued_by,
-        allowed_effects: vec![EffectKind::DispatchCapability],
-        mounts: MountView::default(),
-        network: NetworkPolicy::default(),
-        secrets: vec![],
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: Some(1),
+        constraints: GrantConstraints {
+            allowed_effects: vec![EffectKind::DispatchCapability],
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: vec![],
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: Some(1),
+        },
     }
 }
 
@@ -253,7 +255,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
             scope: scope.clone(),
             request_id,
             issued_by: approval.issued_by,
-            allowed_effects: approval.allowed_effects,
+            allowed_effects: approval.constraints.allowed_effects,
         });
         Ok(())
     }
@@ -271,7 +273,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
                 scope: scope.clone(),
                 request_id,
                 issued_by: approval.issued_by,
-                allowed_effects: approval.allowed_effects,
+                allowed_effects: approval.constraints.allowed_effects,
             });
         Ok(())
     }
@@ -289,7 +291,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
                 scope: scope.clone(),
                 request_id,
                 issued_by: approval.issued_by,
-                allowed_effects: approval.allowed_effects,
+                allowed_effects: approval.constraints.allowed_effects,
             });
         Ok(())
     }
@@ -307,7 +309,7 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
                 scope: scope.clone(),
                 request_id,
                 issued_by: approval.issued_by,
-                allowed_effects: approval.allowed_effects,
+                allowed_effects: approval.constraints.allowed_effects,
             });
         Ok(())
     }
@@ -557,6 +559,13 @@ impl TurnCoordinator for FakeTurnCoordinator {
             .expect("lock")
             .insert(cache_key, response.clone());
         Ok(response)
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("approval interactions must not retry a turn")
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -999,13 +1008,25 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
     );
     let (service, _resolver, _coordinator, run_id, gate_ref) = service_fixture_for_request(request);
     let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
+    overrides
+        .set(ToolPermissionOverrideInput {
+            scope: settings_scope(&policy_scope),
+            capability_id: capability.clone(),
+            state: ToolPermissionOverride::AskEachTime,
+            updated_by: Principal::User(UserId::new("user-alpha").expect("user")),
+        })
+        .await
+        .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let override_store: Arc<dyn ToolPermissionOverrideStore> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_persistent_grantee_resolver(Arc::new(StaticPersistentApprovalGranteeResolver {
-            capability_id: capability,
+            capability_id: capability.clone(),
             grantee: Principal::Extension(provider),
-        }));
+        }))
+        .with_tool_permission_override_store(override_store);
 
     service
         .resolve(ResolveApprovalInteractionRequest {
@@ -1025,6 +1046,17 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
         .expect("persistent policy lookup")
         .expect("provider-grantee persistent policy");
     assert!(policy.active_grant().is_some());
+    assert!(
+        overrides
+            .get(&ToolPermissionOverrideKey::new(
+                &settings_scope(&policy_scope),
+                capability.clone()
+            ))
+            .await
+            .expect("override lookup")
+            .is_none(),
+        "Approve & always allow should remove an older explicit per-tool override"
+    );
 }
 
 /// Drives the real `resolve(AlwaysAllow)` path: builds a service whose pending
@@ -1951,6 +1983,106 @@ async fn already_denied_replay_returns_stale_when_run_is_other_terminal_state() 
 }
 
 #[tokio::test]
+async fn discarded_gate_returns_stale_without_resolution() {
+    // A Discarded gate (e.g. discard_pending CAS tombstone) must behave like
+    // a stale gate for every resolution decision: approve_gate's status
+    // guard and match arm, and deny_gate's status match, all fold Discarded
+    // into the StaleGate rejection before any resolver/turn side effect
+    // runs. Regression coverage for PR #5234 review (Medium) — Discarded
+    // had no approval_interaction_contract fixture.
+    for (decision, key) in [
+        (
+            ApprovalInteractionDecision::ApproveOnce,
+            "discarded-approve-once",
+        ),
+        (
+            ApprovalInteractionDecision::AlwaysAllow,
+            "discarded-always-allow",
+        ),
+        (ApprovalInteractionDecision::Deny, "discarded-deny"),
+    ] {
+        let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+            approval_request("delete a file"),
+            ApprovalStatus::Discarded,
+        );
+
+        let error = service
+            .resolve(ResolveApprovalInteractionRequest {
+                scope: scope(),
+                actor: actor("user-alpha"),
+                run_id_hint: Some(run_id),
+                gate_ref,
+                decision,
+                idempotency_key: IdempotencyKey::new(key).expect("idempotency"),
+            })
+            .await
+            .expect_err("discarded gate must return StaleGate");
+
+        assert!(
+            matches!(
+                error,
+                ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+                    kind: ApprovalInteractionRejectionKind::StaleGate
+                }
+            ),
+            "decision {decision:?} did not return StaleGate: {error:?}"
+        );
+        assert_eq!(resolver.approval_count(), 0, "decision {decision:?}");
+        assert_eq!(resolver.denial_count(), 0, "decision {decision:?}");
+        assert_eq!(coordinator.resumption_count(), 0, "decision {decision:?}");
+    }
+}
+
+#[tokio::test]
+async fn expired_gate_returns_stale_without_resolution() {
+    // Same shape as discarded_gate_returns_stale_without_resolution: an
+    // Expired gate must also short-circuit to StaleGate for every decision
+    // without issuing a resolver side effect or a turn resume. Expired also
+    // had no approval_interaction_contract fixture.
+    for (decision, key) in [
+        (
+            ApprovalInteractionDecision::ApproveOnce,
+            "expired-approve-once",
+        ),
+        (
+            ApprovalInteractionDecision::AlwaysAllow,
+            "expired-always-allow",
+        ),
+        (ApprovalInteractionDecision::Deny, "expired-deny"),
+    ] {
+        let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+            approval_request("delete a file"),
+            ApprovalStatus::Expired,
+        );
+
+        let error = service
+            .resolve(ResolveApprovalInteractionRequest {
+                scope: scope(),
+                actor: actor("user-alpha"),
+                run_id_hint: Some(run_id),
+                gate_ref,
+                decision,
+                idempotency_key: IdempotencyKey::new(key).expect("idempotency"),
+            })
+            .await
+            .expect_err("expired gate must return StaleGate");
+
+        assert!(
+            matches!(
+                error,
+                ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+                    kind: ApprovalInteractionRejectionKind::StaleGate
+                }
+            ),
+            "decision {decision:?} did not return StaleGate: {error:?}"
+        );
+        assert_eq!(resolver.approval_count(), 0, "decision {decision:?}");
+        assert_eq!(resolver.denial_count(), 0, "decision {decision:?}");
+        assert_eq!(coordinator.resumption_count(), 0, "decision {decision:?}");
+    }
+}
+
+#[tokio::test]
 async fn deny_marks_pending_gate_denied_then_resumes_run_with_disposition() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
     let response = service
@@ -2592,7 +2724,10 @@ async fn approval_resolver_port_retries_missing_spawn_lease_for_approved_request
     let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
-    approval.allowed_effects.push(EffectKind::SpawnProcess);
+    approval
+        .constraints
+        .allowed_effects
+        .push(EffectKind::SpawnProcess);
 
     resolver
         .ensure_spawn_lease(&resource_scope, request_id, approval)
@@ -2725,7 +2860,10 @@ async fn approval_resolver_port_does_not_duplicate_existing_spawn_lease_for_appr
     let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
-    approval.allowed_effects.push(EffectKind::SpawnProcess);
+    approval
+        .constraints
+        .allowed_effects
+        .push(EffectKind::SpawnProcess);
     resolver
         .approve_spawn(&resource_scope, request_id, approval.clone())
         .await

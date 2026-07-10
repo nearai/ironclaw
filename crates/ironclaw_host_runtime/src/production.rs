@@ -13,7 +13,7 @@
 //! claims. The default fail-closed policy denies authority until composition
 //! supplies a concrete host policy.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -35,6 +35,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
@@ -48,6 +49,52 @@ use ironclaw_run_state::{
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 use ironclaw_turns::run_profile::LoopSafeSummary;
+
+fn trace_capability_latency_ok(
+    operation: &'static str,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    started_at: Option<Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "host_runtime",
+        operation,
+        started_at,
+        capability_id = %capability_id,
+        tenant_id = %scope.tenant_id,
+        user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %scope.invocation_id,
+        "host runtime capability operation completed",
+    );
+}
+
+fn trace_capability_latency_error<E: ?Sized>(
+    operation: &'static str,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "host_runtime",
+        operation,
+        started_at,
+        "error",
+        capability_id = %capability_id,
+        tenant_id = %scope.tenant_id,
+        user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %scope.invocation_id,
+        "host runtime capability operation failed",
+    );
+}
 
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
@@ -377,6 +424,7 @@ impl HostRuntime for DefaultHostRuntime {
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
+        let total_started_at = live_latency_started_at();
         // Forward the (currently advisory) idempotency key into spans for
         // audit/tracing only — dedupe enforcement is not yet implemented at
         // this layer (see `RuntimeCapabilityRequest::idempotency_key`).
@@ -395,6 +443,12 @@ impl HostRuntime for DefaultHostRuntime {
                 runtime_policy_error_kind = error.kind(),
                 "capability runtime policy rejected invocation before dispatch"
             );
+            trace_capability_latency_ok(
+                "invoke_capability_policy_rejected",
+                &capability_id,
+                &scope,
+                total_started_at,
+            );
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
@@ -405,6 +459,12 @@ impl HostRuntime for DefaultHostRuntime {
                     capability_id = %capability_id,
                     trust_error_kind = error.kind(),
                     "capability trust evaluation failed before dispatch"
+                );
+                trace_capability_latency_ok(
+                    "invoke_capability_trust_rejected",
+                    &capability_id,
+                    &scope,
+                    total_started_at,
                 );
                 return Ok(trust_evaluation_failure(capability_id, error));
             }
@@ -429,13 +489,33 @@ impl HostRuntime for DefaultHostRuntime {
         // before the authorizer and trust/authorization checks. The dispatch-time
         // obligation check (which runs after those checks) is the enforcing layer.
         // The pre-flight provides ordering only (credentials before approval gate).
+        let credential_preflight_started_at = live_latency_started_at();
         if let Some(auth_required) = self
             .credential_preflight_check(&capability_id, &scope, &registry)
             .await
         {
+            trace_capability_latency_ok(
+                "credential_preflight_check",
+                &capability_id,
+                &scope,
+                credential_preflight_started_at,
+            );
+            trace_capability_latency_ok(
+                "invoke_capability_auth_required",
+                &capability_id,
+                &scope,
+                total_started_at,
+            );
             return Ok(auth_required);
         }
+        trace_capability_latency_ok(
+            "credential_preflight_check",
+            &capability_id,
+            &scope,
+            credential_preflight_started_at,
+        );
 
+        let approval_started_at = live_latency_started_at();
         self.apply_persistent_approval_policy(
             &mut context,
             &registry,
@@ -445,6 +525,12 @@ impl HostRuntime for DefaultHostRuntime {
             &trust_decision,
         )
         .await;
+        trace_capability_latency_ok(
+            "persistent_approval_policy",
+            &capability_id,
+            &scope,
+            approval_started_at,
+        );
         let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
@@ -455,19 +541,63 @@ impl HostRuntime for DefaultHostRuntime {
             trust_decision,
         };
 
+        let dispatch_started_at = live_latency_started_at();
         match host.invoke_json(invocation).await {
-            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                completed_outcome_from(result, capability_id),
-            ))),
+            Ok(result) => {
+                trace_capability_latency_ok(
+                    "capability_host_invoke_json",
+                    &capability_id,
+                    &scope,
+                    dispatch_started_at,
+                );
+                trace_capability_latency_ok(
+                    "invoke_capability",
+                    &capability_id,
+                    &scope,
+                    total_started_at,
+                );
+                Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                    completed_outcome_from(result, capability_id),
+                )))
+            }
             Err(error) => {
+                trace_capability_latency_error(
+                    "capability_host_invoke_json",
+                    &capability_id,
+                    &scope,
+                    dispatch_started_at,
+                    &error,
+                );
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability invocation failed"
                 );
-                self.translate_invocation_error(error, capability_id, scope, invocation_id)
-                    .await
+                let translated = self
+                    .translate_invocation_error(
+                        error,
+                        capability_id.clone(),
+                        scope.clone(),
+                        invocation_id,
+                    )
+                    .await;
+                match &translated {
+                    Ok(_) => trace_capability_latency_ok(
+                        "invoke_capability",
+                        &capability_id,
+                        &scope,
+                        total_started_at,
+                    ),
+                    Err(error) => trace_capability_latency_error(
+                        "invoke_capability",
+                        &capability_id,
+                        &scope,
+                        total_started_at,
+                        error,
+                    ),
+                }
+                translated
             }
         }
     }
@@ -484,7 +614,16 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
-        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
+            SpawnInputPreparation::Ready(input) => input,
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    "process sandbox spawn rejected malformed model plan as recoverable tool error"
+                );
+                return Ok(RuntimeCapabilityOutcome::Failed(failure));
+            }
+        };
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
@@ -808,7 +947,16 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
-        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
+            SpawnInputPreparation::Ready(input) => input,
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    "process sandbox spawn resume rejected malformed model plan as recoverable tool error"
+                );
+                return Ok(RuntimeCapabilityOutcome::Failed(failure));
+            }
+        };
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
@@ -1980,26 +2128,64 @@ fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApp
     }
 }
 
+/// Outcome of preparing model-supplied spawn input for a capability.
+///
+/// A malformed or invalid process-sandbox plan is a *model-fixable* condition:
+/// the model chose bad arguments and can correct them on a retry. It must
+/// surface as a recoverable, model-visible tool error
+/// ([`RuntimeFailureKind::InvalidInput`] → `ModelVisibleToolError`), never as a
+/// terminal [`HostRuntimeError`] that ends the whole run. Genuine host-side
+/// faults (serializing the validated host struct back to JSON) remain errors.
+enum SpawnInputPreparation {
+    /// Input is ready to dispatch to the capability host.
+    Ready(serde_json::Value),
+    /// Model supplied an unparseable/invalid plan — recoverable, model-visible.
+    ModelInputRejected(RuntimeCapabilityFailure),
+}
+
 fn host_runtime_spawn_input_for_capability(
     capability_id: &CapabilityId,
     input: serde_json::Value,
-) -> Result<serde_json::Value, HostRuntimeError> {
+) -> Result<SpawnInputPreparation, HostRuntimeError> {
     if capability_id.as_str() != PROCESS_SANDBOX_CAPABILITY_ID {
-        return Ok(input);
+        return Ok(SpawnInputPreparation::Ready(input));
     }
-    let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|_| {
-        HostRuntimeError::invalid_request(
-            "process sandbox capability input must be a SandboxProcessPlan",
-        )
-    })?;
-    let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|_| {
-        HostRuntimeError::invalid_request(
-            "process sandbox capability input failed SandboxProcessPlan validation",
-        )
-    })?;
-    serde_json::to_value(plan.into_plan()).map_err(|_| {
+    let plan = match serde_json::from_value::<SandboxProcessPlan>(input) {
+        Ok(plan) => plan,
+        Err(_) => {
+            return Ok(SpawnInputPreparation::ModelInputRejected(
+                RuntimeCapabilityFailure::new(
+                    capability_id.clone(),
+                    RuntimeFailureKind::InvalidInput,
+                    Some(
+                        "process sandbox capability input must be a SandboxProcessPlan".to_string(),
+                    ),
+                ),
+            ));
+        }
+    };
+    let plan = match ValidatedSandboxProcessPlan::new(plan) {
+        Ok(plan) => plan,
+        Err(_) => {
+            return Ok(SpawnInputPreparation::ModelInputRejected(
+                RuntimeCapabilityFailure::new(
+                    capability_id.clone(),
+                    RuntimeFailureKind::InvalidInput,
+                    Some(
+                        "process sandbox capability input failed SandboxProcessPlan validation"
+                            .to_string(),
+                    ),
+                ),
+            ));
+        }
+    };
+    // Serializing the *validated host struct* back to JSON is a host-side
+    // operation, not model input. A failure here is a genuine internal fault,
+    // so it stays a terminal error rather than a model-visible tool error.
+    let value = serde_json::to_value(plan.into_plan()).map_err(|_| {
         HostRuntimeError::invalid_request("validated process sandbox plan could not be serialized")
-    })
+    })?;
+    Ok(SpawnInputPreparation::Ready(value))
 }
 
 fn failure_from(
@@ -2045,9 +2231,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
         | ResumeContextMismatch { .. } => Some(error.to_string()),
-        Dispatch { safe_summary, .. } => {
-            Some(dispatch_failure_message(safe_summary.as_deref(), error))
-        }
+        Dispatch {
+            safe_summary, kind, ..
+        } => Some(dispatch_failure_message(safe_summary.as_deref(), *kind)),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
         RunState(_) => Some("run-state store unavailable".to_string()),
@@ -2057,12 +2243,16 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 
 fn dispatch_failure_message(
     safe_summary: Option<&str>,
-    error: &CapabilityInvocationError,
+    kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
+    // Prefer a host-authored safe summary; otherwise fall back to a plain
+    // human sentence for the failure category rather than the stable category
+    // token (e.g. "the tool input could not be encoded" instead of
+    // "dispatch failed: InputEncode").
     safe_summary
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
-        .unwrap_or_else(|| error.to_string())
+        .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
@@ -2158,17 +2348,30 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
                 RuntimeFailureKind::OperationFailed
             }
+            // A method or capability the model named that does not exist is a
+            // model-fixable request error, not an infra fault: classify it as
+            // InvalidInput so it surfaces as an immediate model-visible tool
+            // error instead of burning the retry budget on a call that can
+            // never resolve by retrying.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
+                RuntimeFailureKind::InvalidInput
+            }
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
             }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Unknown,
+            // The fail-safe "uncategorized" redaction bucket collapses to a
+            // concrete internal failure rather than propagating a dedicated
+            // `Unknown` category downstream. `Internal` is retryable and
+            // surfaces to the model/user, so an unclassified dispatch error is
+            // no longer an opaque run-ending dead-end. See
+            // `docs/plans/2026-06-28-reborn-error-recoverability-audit.md`.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Internal,
         }
     }
 }
@@ -2356,7 +2559,7 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::MethodMissing,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::NetworkDenied,
@@ -2388,15 +2591,18 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::UndeclaredCapability,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::UnsupportedRunner,
                 RuntimeFailureKind::Backend,
             ),
+            // The fail-safe "uncategorized" redaction bucket collapses to a
+            // concrete, surfacing `Internal` rather than a dedicated `Unknown`
+            // category (which no longer exists on `RuntimeFailureKind`).
             (
                 RuntimeDispatchErrorKind::Unknown,
-                RuntimeFailureKind::Unknown,
+                RuntimeFailureKind::Internal,
             ),
         ];
         for (variant, expected) in cases {
@@ -2469,7 +2675,81 @@ output_schema_ref = "schemas/test.output.json"
         let output = host_runtime_spawn_input_for_capability(&cap(), input.clone())
             .expect("non-sandbox capability input should pass through");
 
-        assert_eq!(output, input);
+        match output {
+            SpawnInputPreparation::Ready(value) => assert_eq!(value, input),
+            SpawnInputPreparation::ModelInputRejected(_) => {
+                panic!("non-sandbox input must pass through unchanged")
+            }
+        }
+    }
+
+    fn process_sandbox_cap() -> CapabilityId {
+        CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID).expect("valid process sandbox capability")
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_rejects_malformed_plan_as_recoverable_invalid_input() {
+        // The model supplied JSON that is not a `SandboxProcessPlan` at all.
+        // This is model-fixable: it must surface as a recoverable, model-visible
+        // tool error (`InvalidInput`), never a terminal `HostRuntimeError`.
+        let input = serde_json::json!({ "not_run": true });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("malformed model plan must not be a terminal host error");
+
+        match output {
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.disposition(),
+                    crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+            }
+            SpawnInputPreparation::Ready(_) => {
+                panic!("malformed plan must be rejected as model-visible InvalidInput")
+            }
+        }
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_rejects_invalid_plan_as_recoverable_invalid_input() {
+        // The model supplied a structurally-parseable plan that fails
+        // `ValidatedSandboxProcessPlan` validation (empty command). Still
+        // model-fixable → recoverable `InvalidInput`, not terminal.
+        let input = serde_json::json!({ "run": { "command": "" } });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("invalid model plan must not be a terminal host error");
+
+        match output {
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.disposition(),
+                    crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+            }
+            SpawnInputPreparation::Ready(_) => {
+                panic!("invalid plan must be rejected as model-visible InvalidInput")
+            }
+        }
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_accepts_valid_plan() {
+        let input = serde_json::json!({ "run": { "command": "echo", "args": ["ok"] } });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("valid plan preparation must not error");
+
+        match output {
+            SpawnInputPreparation::Ready(value) => {
+                assert!(value.is_object(), "validated plan serializes to an object");
+            }
+            SpawnInputPreparation::ModelInputRejected(_) => {
+                panic!("valid plan must be accepted")
+            }
+        }
     }
 
     #[test]
@@ -2478,12 +2758,10 @@ output_schema_ref = "schemas/test.output.json"
             RuntimeDispatchErrorKind::NetworkDenied,
         ));
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        // Stable form: relies only on the redacted kind token, never on raw
-        // backend strings.
-        assert!(
-            message.contains("NetworkDenied"),
-            "sanitized dispatch message should expose the redacted kind, got {message:?}"
-        );
+        // With no host-authored safe_summary, the message is the fixed
+        // human-readable summary for the redacted kind — derived only from the
+        // category, never from raw backend strings.
+        assert_eq!(message, "the tool was denied network access");
     }
 
     #[test]
@@ -2512,7 +2790,9 @@ output_schema_ref = "schemas/test.output.json"
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        assert_eq!(message, "dispatch failed: OperationFailed");
+        // The unsafe safe_summary is rejected, so the message falls back to the
+        // host-authored human summary for the kind (not the raw category token).
+        assert_eq!(message, "the tool operation failed");
         assert!(!message.contains("api_key"));
     }
 
@@ -2574,7 +2854,6 @@ output_schema_ref = "schemas/test.output.json"
         assert_eq!(RuntimeFailureKind::Resource.as_str(), "resource");
         assert_eq!(RuntimeFailureKind::Transient.as_str(), "transient");
         assert_eq!(RuntimeFailureKind::Unavailable.as_str(), "unavailable");
-        assert_eq!(RuntimeFailureKind::Unknown.as_str(), "unknown");
     }
 
     #[test]
@@ -2598,7 +2877,6 @@ output_schema_ref = "schemas/test.output.json"
             (RuntimeFailureKind::Resource, ModelVisibleToolError),
             (RuntimeFailureKind::Transient, RetrySameCall),
             (RuntimeFailureKind::Unavailable, RetrySameCall),
-            (RuntimeFailureKind::Unknown, ModelVisibleToolError),
         ];
 
         for (kind, expected) in cases {

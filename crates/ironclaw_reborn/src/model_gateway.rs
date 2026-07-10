@@ -7,17 +7,18 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ProviderToolName, sha256_digest_token};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
@@ -25,10 +26,11 @@ use ironclaw_llm::{
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
-    ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadContextWindowCache,
+    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
+    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadContextWindowCache,
 };
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
@@ -40,10 +42,10 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
-        RegisterProviderToolCallRequest,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
+        LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
     },
 };
 use tracing::debug;
@@ -59,6 +61,49 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
+const PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX: &str =
+    "failed to parse tool-call arguments JSON:";
+const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid tool-call arguments";
+const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
+    "arguments omitted because the provider emitted malformed tool-call JSON";
+const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
+const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
+
+fn trace_model_latency_ok(
+    operation: &'static str,
+    replay_identity: &ProviderReplayIdentity,
+    provider_turn_scope: Option<&str>,
+    started_at: Option<Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "model_gateway",
+        operation,
+        started_at,
+        provider_id = %replay_identity.provider_id,
+        provider_model_id = %replay_identity.provider_model_id,
+        provider_turn_scope = provider_turn_scope.unwrap_or(""),
+        "model gateway operation completed",
+    );
+}
+
+fn trace_model_latency_error<E: ?Sized>(
+    operation: &'static str,
+    replay_identity: &ProviderReplayIdentity,
+    provider_turn_scope: Option<&str>,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "model_gateway",
+        operation,
+        started_at,
+        "model_gateway_error",
+        provider_id = %replay_identity.provider_id,
+        provider_model_id = %replay_identity.provider_model_id,
+        provider_turn_scope = provider_turn_scope.unwrap_or(""),
+        "model gateway operation failed",
+    );
+}
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -172,6 +217,28 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, None).await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model_inner(request, Some(progress_sink)).await
+    }
+}
+
+impl<S, G> ThreadBackedLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn stream_model_inner(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
@@ -182,7 +249,7 @@ where
             Arc::clone(&context_window_cache),
         )
         .await?;
-        ThreadBackedLoopModelPort::new(
+        let mut port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             request.context,
@@ -190,10 +257,26 @@ where
             self.max_messages,
         )
         .with_instruction_materialization_store(instruction_materialization_store)
-        .with_context_window_cache(context_window_cache)
-        .stream_model(request.request)
-        .await
-        .map_err(host_error_to_model_gateway_error)
+        .with_context_window_cache(context_window_cache);
+        if let Some(progress_sink) = progress_sink {
+            port = port.with_stream_sink(Arc::new(LoopProgressHostStreamSink {
+                inner: progress_sink,
+            }));
+        }
+        port.stream_model(request.request)
+            .await
+            .map_err(host_error_to_model_gateway_error)
+    }
+}
+
+struct LoopProgressHostStreamSink {
+    inner: Arc<dyn LoopModelProgressSink>,
+}
+
+#[async_trait]
+impl HostManagedModelStreamSink for LoopProgressHostStreamSink {
+    async fn safe_text_update(&self, safe_text: String) {
+        self.inner.model_text_update(safe_text).await;
     }
 }
 
@@ -232,7 +315,7 @@ where
                 surface_version: request.surface_version.clone(),
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
-                inline_messages: Vec::new(),
+                inline_messages: request.inline_messages.clone(),
                 capability_view: None,
             })
             .await
@@ -323,6 +406,42 @@ where
             completion,
             None,
             None,
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let route = self
+            .policy
+            .route_for(&request.model_profile_id)
+            .ok_or_else(|| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::PolicyDenied,
+                    "model profile is not permitted",
+                )
+            })?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(model_override);
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+
+        complete_model_request(
+            self.provider.as_ref(),
+            completion,
+            None,
+            None,
+            Some(sink),
             replay_identity,
         )
         .await
@@ -361,6 +480,47 @@ where
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let route = self
+            .policy
+            .route_for(&request.model_profile_id)
+            .ok_or_else(|| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::PolicyDenied,
+                    "model profile is not permitted",
+                )
+            })?;
+        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(model_override);
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+
+        let provider_turn_scope = format!(
+            "run={run_id}\nturn={turn_id}\nmodel_call={}",
+            self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
+        );
+        complete_model_request(
+            self.provider.as_ref(),
+            completion,
+            Some(capabilities),
+            Some(provider_turn_scope),
+            Some(sink),
             replay_identity,
         )
         .await
@@ -521,7 +681,53 @@ where
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
-        complete_model_request(provider.as_ref(), completion, None, None, replay_identity).await
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            None,
+            None,
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let slot = slot_for_model_profile(&request.model_profile_id)?;
+        let request_snapshot = request
+            .resolved_model_route
+            .as_ref()
+            .ok_or_else(missing_route_snapshot_error)?;
+        let policy_mode = self.validate_route_snapshot(slot, request_snapshot)?;
+        let snapshot = snapshot_from_host_request(slot, request_snapshot, policy_mode)?;
+        let provider = self.provider_pool.provider_for_route(&snapshot).await?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(
+            snapshot.route().provider_id(),
+            snapshot.route().model_id(),
+        )?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(snapshot.route().model_id().to_string());
+        validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_route_metadata(&mut completion, &snapshot);
+
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            None,
+            None,
+            Some(sink),
+            replay_identity,
+        )
+        .await
     }
 
     async fn stream_model_with_capabilities(
@@ -560,6 +766,50 @@ where
             completion,
             Some(capabilities),
             Some(provider_turn_scope),
+            None,
+            replay_identity,
+        )
+        .await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let slot = slot_for_model_profile(&request.model_profile_id)?;
+        let request_snapshot = request
+            .resolved_model_route
+            .as_ref()
+            .ok_or_else(missing_route_snapshot_error)?;
+        let policy_mode = self.validate_route_snapshot(slot, request_snapshot)?;
+        let snapshot = snapshot_from_host_request(slot, request_snapshot, policy_mode)?;
+        let provider = self.provider_pool.provider_for_route(&snapshot).await?;
+        let model_profile_id = request.model_profile_id.clone();
+        let run_id = request.run_id;
+        let turn_id = request.turn_id;
+        let replay_identity = ProviderReplayIdentity::new(
+            snapshot.route().provider_id(),
+            snapshot.route().model_id(),
+        )?;
+        let mut completion =
+            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
+        completion.model = Some(snapshot.route().model_id().to_string());
+        validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_route_metadata(&mut completion, &snapshot);
+
+        let provider_turn_scope = format!(
+            "run={run_id}\nturn={turn_id}\nmodel_call={}",
+            self.provider_turn_sequence.fetch_add(1, Ordering::Relaxed)
+        );
+        complete_model_request(
+            provider.as_ref(),
+            completion,
+            Some(capabilities),
+            Some(provider_turn_scope),
+            Some(sink),
             replay_identity,
         )
         .await
@@ -703,17 +953,22 @@ fn map_model_route_error(error: ModelRouteError) -> HostManagedModelError {
 fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
     let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
+    let gate_ref = error.gate_ref;
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
             kind: error.kind,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         },
     };
     if let Some(reason_kind) = reason_kind {
         converted = converted.with_reason_kind(reason_kind);
+    }
+    if let Some(gate_ref) = gate_ref {
+        converted = converted.with_gate_ref(gate_ref);
     }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
@@ -792,9 +1047,41 @@ fn validate_replay_identity_text(
     Ok(())
 }
 
+struct ProviderStreamSink {
+    inner: Arc<dyn HostManagedModelStreamSink>,
+    accumulated_text: Mutex<String>,
+}
+
+impl ProviderStreamSink {
+    fn new(inner: Arc<dyn HostManagedModelStreamSink>) -> Self {
+        Self {
+            inner,
+            accumulated_text: Mutex::new(String::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl CompletionStreamSink for ProviderStreamSink {
+    async fn text_delta(&self, delta: String) {
+        if delta.is_empty() {
+            return;
+        }
+        let safe_text = {
+            let mut guard = match self.accumulated_text.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.push_str(&delta);
+            sanitize_model_visible_text(guard.clone())
+        };
+        self.inner.safe_text_update(safe_text).await;
+    }
+}
+
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, replay_identity),
+    skip(provider, completion, capabilities, stream_sink, replay_identity),
     fields(
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
@@ -806,6 +1093,7 @@ async fn complete_model_request<P>(
     completion: CompletionRequest,
     capabilities: Option<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
+    stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     replay_identity: ProviderReplayIdentity,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
@@ -827,7 +1115,18 @@ where
                 "reborn model gateway resolved provider tool definitions"
             );
         }
+        if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+            let est_tool_schema_tokens = estimate_tool_schema_tokens(&tool_definitions);
+            debug!(
+                target: CONTEXT_SHADOW_TARGET,
+                tool_definition_count = tool_definitions.len(),
+                est_tool_schema_tokens,
+                "reborn tool surface shadow measurement"
+            );
+        }
         if !tool_definitions.is_empty() {
+            let unavailable_capability_guard =
+                unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
             let llm_tool_definitions = tool_definitions
                 .into_iter()
@@ -839,12 +1138,40 @@ where
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
-            let response = provider
-                .complete_with_tools(tool_request.clone())
-                .await
-                .map_err(map_provider_error)?;
+            let provider_started_at = live_latency_started_at();
+            let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+                provider
+                    .complete_with_tools_streaming(
+                        tool_request.clone(),
+                        Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+                    )
+                    .await
+            } else {
+                provider.complete_with_tools(tool_request.clone()).await
+            } {
+                Ok(response) => {
+                    trace_model_latency_ok(
+                        "provider_complete_with_tools",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        provider_started_at,
+                    );
+                    response
+                }
+                Err(error) => {
+                    trace_model_latency_error(
+                        "provider_complete_with_tools",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        provider_started_at,
+                        &error,
+                    );
+                    return Err(map_provider_error(error));
+                }
+            };
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
+            let host_response_started_at = live_latency_started_at();
             match tool_response_to_host(
                 response.clone(),
                 Arc::clone(&capabilities),
@@ -852,11 +1179,27 @@ where
                     .as_deref()
                     .unwrap_or("model_call=unknown"),
                 &replay_identity,
+                unavailable_capability_guard.as_ref(),
             )
             .await
             {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    trace_model_latency_ok(
+                        "tool_response_to_host",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        host_response_started_at,
+                    );
+                    return Ok(response);
+                }
                 Err(error) if is_repairable_provider_tool_output_error(&error) => {
+                    trace_model_latency_error(
+                        "tool_response_to_host",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        host_response_started_at,
+                        &error,
+                    );
                     debug!(
                         safe_summary = error.safe_summary.as_str(),
                         "reborn model gateway retrying after repairable provider tool output"
@@ -869,26 +1212,71 @@ where
                             error.safe_summary.as_str(),
                         ));
                     let rejected_response = response;
-                    let response = provider
-                        .complete_with_tools(repair_request)
-                        .await
-                        .map_err(map_provider_error)?;
+                    let retry_started_at = live_latency_started_at();
+                    let response = match provider.complete_with_tools(repair_request).await {
+                        Ok(response) => {
+                            trace_model_latency_ok(
+                                "provider_complete_with_tools_repair",
+                                &replay_identity,
+                                provider_turn_scope.as_deref(),
+                                retry_started_at,
+                            );
+                            response
+                        }
+                        Err(error) => {
+                            trace_model_latency_error(
+                                "provider_complete_with_tools_repair",
+                                &replay_identity,
+                                provider_turn_scope.as_deref(),
+                                retry_started_at,
+                                &error,
+                            );
+                            return Err(map_provider_error(error));
+                        }
+                    };
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
                     )?;
                     accumulate_tool_response_usage(&mut response, &rejected_response);
-                    return tool_response_to_host(
+                    let repair_host_started_at = live_latency_started_at();
+                    let result = tool_response_to_host(
                         response,
                         capabilities,
                         provider_turn_scope
                             .as_deref()
                             .unwrap_or("model_call=unknown"),
                         &replay_identity,
+                        unavailable_capability_guard.as_ref(),
                     )
                     .await;
+                    match &result {
+                        Ok(_) => trace_model_latency_ok(
+                            "tool_response_to_host_repair",
+                            &replay_identity,
+                            provider_turn_scope.as_deref(),
+                            repair_host_started_at,
+                        ),
+                        Err(error) => trace_model_latency_error(
+                            "tool_response_to_host_repair",
+                            &replay_identity,
+                            provider_turn_scope.as_deref(),
+                            repair_host_started_at,
+                            error,
+                        ),
+                    }
+                    return result;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    trace_model_latency_error(
+                        "tool_response_to_host",
+                        &replay_identity,
+                        provider_turn_scope.as_deref(),
+                        host_response_started_at,
+                        &error,
+                    );
+                    return Err(error);
+                }
             }
         }
         debug!(
@@ -900,10 +1288,37 @@ where
         );
     }
 
-    let response = provider
-        .complete(completion)
-        .await
-        .map_err(map_provider_error)?;
+    let provider_started_at = live_latency_started_at();
+    let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+        provider
+            .complete_streaming(
+                completion,
+                Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+            )
+            .await
+    } else {
+        provider.complete(completion).await
+    } {
+        Ok(response) => {
+            trace_model_latency_ok(
+                "provider_complete",
+                &replay_identity,
+                provider_turn_scope.as_deref(),
+                provider_started_at,
+            );
+            response
+        }
+        Err(error) => {
+            trace_model_latency_error(
+                "provider_complete",
+                &replay_identity,
+                provider_turn_scope.as_deref(),
+                provider_started_at,
+                &error,
+            );
+            return Err(map_provider_error(error));
+        }
+    };
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),
@@ -965,6 +1380,7 @@ fn recover_textual_tool_calls_from_tool_response(
         cache_read_input_tokens: response.cache_read_input_tokens,
         cache_creation_input_tokens: response.cache_creation_input_tokens,
         reasoning: response.reasoning,
+        reasoning_details: response.reasoning_details,
     })
 }
 
@@ -974,6 +1390,17 @@ fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDe
         description: definition.description,
         parameters: definition.parameters,
     }
+}
+
+fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
+    definitions.iter().fold(0_u32, |total, definition| {
+        let schema = serde_json::json!({
+            "name": definition.name.as_str(),
+            "description": definition.description.as_str(),
+            "parameters": &definition.parameters,
+        });
+        total.saturating_add(crate::context_shadow::estimate_tokens(&schema.to_string()))
+    })
 }
 
 #[tracing::instrument(
@@ -990,6 +1417,7 @@ async fn tool_response_to_host(
     capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     provider_turn_scope: &str,
     replay_identity: &ProviderReplayIdentity,
+    unavailable_capability_guard: Option<&UnavailableCapabilityGuard>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     if tracing::enabled!(tracing::Level::DEBUG) {
         let tool_call_name_sample = response
@@ -1012,6 +1440,21 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
+        if let Some(guard) = unavailable_capability_guard {
+            debug!(
+                requested_capability_id = %guard.capability_id,
+                tool_call_count = response.tool_calls.len(),
+                "reborn model gateway suppressed provider tool calls after unavailable named capability request"
+            );
+            return Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                UNAVAILABLE_CAPABILITY_REPLY,
+                response.reasoning,
+            )
+            .with_usage(LoopModelUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            }));
+        }
         let advertised_tool_names = capabilities
             .tool_definitions()
             .map_err(map_capability_host_error)?
@@ -1032,26 +1475,54 @@ async fn tool_response_to_host(
                 )
             })
             .collect::<Result<Vec<_>, HostManagedModelError>>()?;
-        if provider_calls
-            .iter()
-            .any(|provider_call| !advertised_tool_names.contains(&provider_call.name))
-        {
+        if !provider_calls_are_advertised_or_resolvable(
+            &advertised_tool_names,
+            capabilities.as_ref(),
+            &provider_calls,
+        ) {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
                 "model returned a tool call outside the advertised capability surface",
             ));
         }
         for provider_call in &provider_calls {
-            capabilities
-                .validate_provider_tool_call(provider_call)
-                .map_err(map_provider_tool_output_error)?;
+            if let Err(error) = capabilities.validate_provider_tool_call(provider_call) {
+                // Fail loud: this rejection otherwise discards the whole response
+                // (budget released, no dispatch) and the run eventually fails with
+                // no trace of which call or why. Log before mapping/propagating.
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    provider_call_id = provider_call.id.as_str(),
+                    error_kind = ?error.kind,
+                    // The safe_summary is layer-distinct ("outside the
+                    // model-visible capability view" = visible filter, "targets a
+                    // disabled capability" = deny filter, etc.), so it names which
+                    // port in the chain rejected the call.
+                    reason = error.safe_summary.as_str(),
+                    "reborn model gateway rejected provider tool call during validation"
+                );
+                return Err(map_provider_tool_output_error(error));
+            }
         }
         for provider_call in provider_calls {
-            let candidate = capabilities
+            let rejected_tool_name = provider_call.name.clone();
+            let rejected_provider_call_id = provider_call.id.clone();
+            match capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
                 .await
-                .map_err(map_provider_tool_output_error)?;
-            candidates.push(candidate);
+            {
+                Ok(candidate) => candidates.push(candidate),
+                Err(error) => {
+                    debug!(
+                        tool_name = rejected_tool_name.as_str(),
+                        provider_call_id = rejected_provider_call_id.as_str(),
+                        error_kind = ?error.kind,
+                        reason = error.safe_summary.as_str(),
+                        "reborn model gateway rejected provider tool call during registration"
+                    );
+                    return Err(map_provider_tool_output_error(error));
+                }
+            }
         }
         debug!(
             capability_call_count = candidates.len(),
@@ -1109,12 +1580,239 @@ async fn tool_response_to_host(
     }
 }
 
+fn provider_calls_are_advertised_or_resolvable(
+    advertised_tool_names: &HashSet<ProviderToolName>,
+    capabilities: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+    provider_calls: &[ProviderToolCall],
+) -> bool {
+    for provider_call in provider_calls {
+        if advertised_tool_names.contains(&provider_call.name) {
+            continue;
+        }
+        match capabilities.provider_tool_call_capability_ids(provider_call) {
+            Ok(ids) => {
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    provider_capability_id = ids.provider_capability_id.as_str(),
+                    "reborn model gateway accepted resolvable unadvertised provider tool call"
+                );
+            }
+            Err(error) => {
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    safe_summary = error.safe_summary.as_str(),
+                    "reborn model gateway rejected unresolved unadvertised provider tool call"
+                );
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnavailableCapabilityGuard {
+    capability_id: CapabilityId,
+}
+
+fn unavailable_requested_capability_guard(
+    messages: &[ChatMessage],
+    tool_definitions: &[ProviderToolDefinition],
+) -> Option<UnavailableCapabilityGuard> {
+    let latest_user = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)?;
+    let visible_capability_ids = tool_definitions
+        .iter()
+        .map(|definition| definition.capability_id.as_str())
+        .collect::<HashSet<_>>();
+    // Namespaces the agent actually has (a visible capability shares the prefix,
+    // e.g. `builtin`). Used only to rescue backticked references to REAL
+    // capability namespaces from the inline-code skip — a backticked `builtin.echo`
+    // is still a request, whereas a backticked `playwright.sync_api` (a library
+    // whose namespace this agent doesn't have) is a code reference.
+    let visible_namespaces = visible_capability_ids
+        .iter()
+        .filter_map(|id| id.split('.').next())
+        .collect::<HashSet<_>>();
+
+    extract_explicit_capability_request_ids(&latest_user.content, &visible_namespaces)
+        .into_iter()
+        .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
+        .map(|capability_id| UnavailableCapabilityGuard { capability_id })
+}
+
+fn extract_explicit_capability_request_ids(
+    content: &str,
+    visible_namespaces: &HashSet<&str>,
+) -> Vec<CapabilityId> {
+    let mut ids = Vec::new();
+    let mut token_start = None;
+    // Track Markdown inline-code parity (per line) in this same single pass so we
+    // never rescan the line for each token — one long user line with many
+    // capability-shaped tokens would otherwise be O(n^2).
+    let mut in_inline_code = false;
+    let mut token_in_code = false;
+    for (index, character) in content.char_indices() {
+        if is_capability_token_char(character) {
+            if token_start.is_none() {
+                token_start = Some(index);
+                token_in_code = in_inline_code;
+            }
+            continue;
+        }
+        if let Some(start) = token_start.take() {
+            push_explicit_capability_request_token(
+                content,
+                start,
+                index,
+                token_in_code,
+                visible_namespaces,
+                &mut ids,
+            );
+        }
+        match character {
+            '\n' => in_inline_code = false,
+            '`' => in_inline_code = !in_inline_code,
+            _ => {}
+        }
+    }
+    if let Some(start) = token_start {
+        push_explicit_capability_request_token(
+            content,
+            start,
+            content.len(),
+            token_in_code,
+            visible_namespaces,
+            &mut ids,
+        );
+    }
+    ids
+}
+
+fn is_capability_token_char(character: char) -> bool {
+    character.is_ascii_lowercase()
+        || character.is_ascii_digit()
+        || matches!(character, '_' | '-' | '.')
+}
+
+fn push_explicit_capability_request_token(
+    content: &str,
+    start: usize,
+    end: usize,
+    in_inline_code: bool,
+    visible_namespaces: &HashSet<&str>,
+    ids: &mut Vec<CapabilityId>,
+) {
+    let token = &content[start..end];
+    if !is_likely_capability_reference(token)
+        || !is_explicit_capability_request_token(content, start, end)
+    {
+        return;
+    }
+    // Tokens written in Markdown inline code (e.g. "use `playwright.sync_api`", a
+    // Python module) are code references, not capability requests — ignore them.
+    // Two exceptions keep genuine requests covered even when backticked:
+    //  - the prompt explicitly labels the token a tool/capability
+    //    ("use the `builtin.http` capability"), or
+    //  - the token names a real capability namespace this agent has
+    //    (`builtin.echo` — `builtin` is a live namespace, unlike `playwright`).
+    if in_inline_code
+        && !has_capability_noun_context(content, start, end)
+        && !token_namespace_is_visible(token, visible_namespaces)
+    {
+        return;
+    }
+    if let Ok(capability_id) = CapabilityId::new(token)
+        && !ids.iter().any(|existing| existing == &capability_id)
+    {
+        ids.push(capability_id);
+    }
+}
+
+fn is_likely_capability_reference(token: &str) -> bool {
+    // A decimal number lifted from prose (e.g. "use 0.95 in formulas") tokenizes
+    // as `digits.digits`, which satisfies the `namespace.name` shape below and is
+    // otherwise mistaken for an explicitly requested capability id. That trips the
+    // unavailable-capability guard and suppresses the entire turn's tool calls,
+    // stranding the model ("…will not route it through another tool"). A real
+    // capability id is never a bare number, so reject anything that parses as one.
+    if token.parse::<f64>().is_ok() {
+        return false;
+    }
+    token.starts_with("builtin.") || token.split('.').count() == 2
+}
+
+/// True when the token's namespace (its first dotted segment) is one the agent
+/// actually has — a backticked reference to a real capability namespace is still
+/// a request, unlike a library reference (`playwright.sync_api`).
+fn token_namespace_is_visible(token: &str, visible_namespaces: &HashSet<&str>) -> bool {
+    token
+        .split('.')
+        .next()
+        .is_some_and(|namespace| visible_namespaces.contains(namespace))
+}
+
+/// The request-word immediately before `start` (alphanumeric/`_`/`-` run).
+fn previous_request_word(content: &str, start: usize) -> Option<&str> {
+    content[..start]
+        .trim_end()
+        .rsplit(|character: char| !is_capability_request_word_char(character))
+        .find(|word| !word.is_empty())
+}
+
+/// True when the word right before or after the token is an explicit "tool" /
+/// "capability" noun — the prompt is calling the token out as a capability, so
+/// it's a genuine request even when written in backticks.
+fn has_capability_noun_context(content: &str, start: usize, end: usize) -> bool {
+    let next_word = content[end..]
+        .trim_start()
+        .split(|character: char| !is_capability_request_word_char(character))
+        .find(|word| !word.is_empty());
+    previous_request_word(content, start).is_some_and(is_capability_request_noun)
+        || next_word.is_some_and(is_capability_request_noun)
+}
+
+fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
+    previous_request_word(content, start).is_some_and(is_capability_request_verb)
+        || has_capability_noun_context(content, start, end)
+}
+
+fn is_capability_request_word_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
+fn is_capability_request_verb(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "use" | "using" | "call" | "run" | "execute" | "invoke"
+    )
+}
+
+fn is_capability_request_noun(word: &str) -> bool {
+    matches!(word.to_ascii_lowercase().as_str(), "tool" | "capability")
+}
+
 fn provider_tool_call_from_llm(
     tool_call: ToolCall,
     response_reasoning: Option<String>,
     provider_turn_id: String,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<ProviderToolCall, HostManagedModelError> {
+    if let Some(parse_error) = tool_call.arguments_parse_error.as_deref() {
+        let safe_summary = provider_tool_arguments_parse_error_summary(parse_error);
+        debug!(
+            provider_call_id = tool_call.id.as_str(),
+            tool_name = tool_call.name.as_str(),
+            safe_summary = safe_summary.as_str(),
+            "reborn model gateway rejected malformed provider tool arguments"
+        );
+        return Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            safe_summary,
+        ));
+    }
     let name = ProviderToolName::new(tool_call.name).map_err(|error| {
         debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
@@ -1133,6 +1831,19 @@ fn provider_tool_call_from_llm(
         reasoning: tool_call.reasoning,
         signature: tool_call.signature,
     })
+}
+
+fn provider_tool_arguments_parse_error_summary(parse_error: &str) -> String {
+    let summary_line = parse_error.lines().next().unwrap_or(parse_error);
+    let sanitized = sanitize_model_visible_text(summary_line.to_string());
+    let sanitized = sanitized.trim();
+    if sanitized.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        && LoopSafeSummary::new(sanitized).is_ok()
+    {
+        sanitized.to_string()
+    } else {
+        PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY.to_string()
+    }
 }
 
 fn provider_turn_id(provider_turn_scope: &str, tool_calls: &[ToolCall]) -> String {
@@ -1201,10 +1912,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded
-        | AgentLoopHostErrorKind::BudgetApprovalRequired
-        | AgentLoopHostErrorKind::BudgetAccountingFailed => {
+        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetAccountingFailed => {
             HostManagedModelErrorKind::BudgetExceeded
+        }
+        AgentLoopHostErrorKind::BudgetApprovalRequired => {
+            HostManagedModelErrorKind::BudgetApprovalRequired
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
@@ -1212,28 +1924,39 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::InvalidRequest,
         AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::InvalidOutput
         | AgentLoopHostErrorKind::CheckpointRejected
         | AgentLoopHostErrorKind::TranscriptWriteFailed
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
     };
-    HostManagedModelError::safe(kind, error.safe_summary)
+    let mut converted = HostManagedModelError::safe(kind, error.safe_summary);
+    if let Some(gate_ref) = error.gate_ref {
+        converted = converted.with_gate_ref(gate_ref);
+    }
+    converted
 }
 
 fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
     match error.kind {
-        AgentLoopHostErrorKind::Invalid | AgentLoopHostErrorKind::InvalidInvocation => {
-            HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidOutput,
-                error.safe_summary,
-            )
-        }
+        AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::InvalidOutput => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            error.safe_summary,
+        ),
         _ => map_capability_host_error(error),
     }
 }
 
 fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bool {
     error.kind == HostManagedModelErrorKind::InvalidOutput
-        && is_provider_arguments_too_large_summary(&error.safe_summary)
+        && (is_provider_arguments_too_large_summary(&error.safe_summary)
+            || is_provider_tool_arguments_parse_error_summary(&error.safe_summary))
+}
+
+fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
+    safe_summary.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        || safe_summary == PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY
 }
 
 fn provider_tool_repair_messages(
@@ -1252,22 +1975,37 @@ fn provider_tool_repair_messages(
             .map(provider_tool_call_for_repair)
             .collect(),
     )
+    .with_reasoning_details(response.reasoning_details.clone())
     .with_reasoning(response.reasoning.clone());
     std::iter::once(assistant)
         .chain(response.tool_calls.iter().map(|tool_call| {
             ChatMessage::tool_result(
                 tool_call.id.clone(),
                 tool_call.name.clone(),
-                format!(
-                    "Tool call batch rejected by host: {safe_summary}. None of this response's tool calls were executed. Retry with smaller arguments or answer directly without this tool if it is not needed."
-                ),
+                provider_tool_repair_result_content(tool_call, safe_summary),
             )
         }))
         .collect()
 }
 
+fn provider_tool_repair_result_content(tool_call: &ToolCall, safe_summary: &str) -> String {
+    let mut content = format!("Tool call batch rejected by host: {safe_summary}.");
+    if let Some(parse_error) = tool_call.arguments_parse_error.as_deref() {
+        content.push_str("\n\nMalformed tool-call argument details for this rejected call:\n");
+        content.push_str(parse_error);
+    }
+    content.push_str(
+        "\n\nNone of this response's tool calls were executed. Retry with valid JSON arguments or answer directly without this tool if it is not needed.",
+    );
+    content
+}
+
 fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
-    let arguments = if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
+    let arguments = if tool_call.arguments_parse_error.is_some() {
+        serde_json::json!({
+            "error": PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER,
+        })
+    } else if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
         serde_json::json!({
             "error": PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER,
         })
@@ -1281,7 +2019,7 @@ fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
         arguments,
         reasoning: tool_call.reasoning.clone(),
         signature: tool_call.signature.clone(),
-        arguments_parse_error: tool_call.arguments_parse_error.clone(),
+        arguments_parse_error: None,
     }
 }
 
@@ -1297,10 +2035,80 @@ fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
     )
 }
 
+/// Env flag gating [`collapse_repeated_failure_observations`].
+///
+/// Defaults **off**: unset / empty / unrecognized leaves the replayed context
+/// byte-identical to the pre-feature path. An operator opts in with `on`, `1`,
+/// or `true`. Kept as a separate knob from `REBORN_TOOL_DISCLOSURE` because this
+/// context-dedup pass runs in the shared `convert_messages` path independently of
+/// tool disclosure.
+pub const REBORN_COLLAPSE_REPEATED_FAILURES_ENV: &str = "REBORN_COLLAPSE_REPEATED_FAILURES";
+
+fn collapse_repeated_failures_enabled() -> bool {
+    collapse_repeated_failures_from_raw(std::env::var(REBORN_COLLAPSE_REPEATED_FAILURES_ENV).ok())
+}
+
+/// Pure resolution of the collapse flag from a raw env value, so the default-off
+/// contract is testable without mutating process env.
+fn collapse_repeated_failures_from_raw(raw: Option<impl AsRef<str>>) -> bool {
+    match raw {
+        Some(value) => {
+            let value = value.as_ref().trim();
+            value.eq_ignore_ascii_case("on")
+                || value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+        }
+        None => false,
+    }
+}
+
+/// Collapse runs of identical *error* tool observations in the replayed context.
+///
+/// A model that repeats the same failing call accumulates byte-for-byte identical
+/// error observations — one per attempt — and every one is replayed into every
+/// later prompt. That both bloats context and drowns the model in copies of its
+/// own failure so it cannot tell it is looping. Keep the FIRST and LAST occurrence
+/// of each identical error intact (first for original detail, last because it is
+/// most recent and carries any repair hints) and replace the ones in between with
+/// a compact marker. Nothing is dropped — every tool-result message stays, so
+/// provider tool-call/result pairing is preserved; only the observation *content*
+/// of interior duplicates shrinks. Success observations and a lone repeat are
+/// never touched (the 3+ threshold leaves the first/last-only case alone).
+fn collapse_repeated_failure_observations(messages: &mut [HostManagedModelMessage]) {
+    let mut occurrences: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if let Some(HostManagedToolResultContent::Reference { envelope }) =
+            message.tool_result_content.as_ref()
+            && let Some(fingerprint) = envelope.error_observation_fingerprint()
+        {
+            occurrences.entry(fingerprint).or_default().push(index);
+        }
+    }
+    for indices in occurrences.values() {
+        if indices.len() < 3 {
+            continue;
+        }
+        for &index in &indices[1..indices.len() - 1] {
+            if let Some(HostManagedToolResultContent::Reference { envelope }) =
+                messages[index].tool_result_content.as_mut()
+            {
+                envelope.collapse_to_repeated_error_marker();
+            }
+        }
+    }
+}
+
 fn convert_messages(
-    messages: Vec<HostManagedModelMessage>,
+    mut messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<Vec<ChatMessage>, HostManagedModelError> {
+    // Off by default (see REBORN_COLLAPSE_REPEATED_FAILURES_ENV): only collapse
+    // interior duplicate error observations when an operator opts in, so the
+    // replayed context is otherwise byte-identical to the pre-feature path.
+    if collapse_repeated_failures_enabled() {
+        collapse_repeated_failure_observations(&mut messages);
+    }
     let mut converted = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
@@ -1549,12 +2357,19 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    // Tier 2b: carry the provider's real message (status line + body snippet)
+    // on the model-visible detail channel so the failure explainer can describe
+    // the actual fault. `safe_with_detail` scrubs credential-looking tokens
+    // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
+    // summary stays a fixed host-authored category string.
+    let provider_detail = error.to_string();
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             MODEL_CREDITS_EXHAUSTED_SUMMARY,
         )
-        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
+        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+        .safe_with_detail(provider_detail.clone());
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
@@ -1576,6 +2391,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             "model service is unavailable",
         ),
     }
+    .safe_with_detail(provider_detail)
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
@@ -1603,6 +2419,83 @@ mod tests {
             provider: "test_provider".to_string(),
             reason: reason.to_string(),
         }
+    }
+
+    fn tool_def(capability_id: &str, name: &str) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: CapabilityId::new(capability_id).unwrap(),
+            name: ProviderToolName::new(name).unwrap(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn guard_ignores_incidental_code_references() {
+        // The playwright/browser tasks literally instruct: "use `playwright.sync_api`"
+        // — a Python module named right after a request verb. That is NOT a
+        // capability request; the guard must not fire and suppress the model's
+        // legitimate write_file calls.
+        let messages = vec![ChatMessage::user(
+            "Read form.html, then use `playwright.sync_api` (Python sync API) to \
+             write an end-to-end test saved as test_form.py.",
+        )];
+        let tools = vec![
+            tool_def("builtin.write_file", "builtin__write_file"),
+            tool_def("builtin.read_file", "builtin__read_file"),
+        ];
+        assert!(
+            unavailable_requested_capability_guard(&messages, &tools).is_none(),
+            "guard must not misfire on the code reference `playwright.sync_api`"
+        );
+    }
+
+    #[test]
+    fn guard_still_fires_on_real_disabled_capability() {
+        // A genuine, un-backticked request for a capability that isn't visible must
+        // still fire (`builtin.http` is gated off here).
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the builtin.http capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "guard should still fire for a real builtin capability that is disabled"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_capability_with_explicit_noun() {
+        // Backticks alone don't excuse a request the prompt explicitly labels a
+        // capability/tool — the inline-code skip must not swallow a genuine
+        // request. Here `builtin.http` is backticked but called a "capability".
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the `builtin.http` capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "explicitly-labeled capability must still fire even when backticked"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_known_namespace_capability() {
+        // A backticked reference to a REAL capability namespace this agent has
+        // (`builtin`) is still a request, even with only a request verb and no
+        // tool/capability noun — unlike a library ref such as `playwright.sync_api`.
+        let messages = vec![ChatMessage::user("Use `builtin.echo` to print the banner.")];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "backticked known-namespace capability must still fire"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
     }
 
     #[test]
@@ -1707,6 +2600,119 @@ mod tests {
         );
     }
 
+    fn error_tool_result_message(
+        result_ref: &str,
+        observation: serde_json::Value,
+    ) -> HostManagedModelMessage {
+        let envelope = ironclaw_threads::ToolResultReferenceEnvelope::with_model_observation(
+            result_ref,
+            ironclaw_threads::ToolResultSafeSummary::new("tool failed").expect("safe summary"),
+            observation,
+        )
+        .expect("valid observation envelope");
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: "tool failed".to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
+        }
+    }
+
+    fn tool_result_observation(message: &HostManagedModelMessage) -> serde_json::Value {
+        match message
+            .tool_result_content
+            .as_ref()
+            .expect("tool result content")
+        {
+            HostManagedToolResultContent::Reference { envelope } => envelope
+                .model_observation
+                .clone()
+                .expect("model observation"),
+            other => panic!("expected reference, got {other:?}"),
+        }
+    }
+
+    fn generic_error_observation() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with invalid_input.",
+            "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
+            "trust": "untrusted_tool_output",
+        })
+    }
+
+    #[test]
+    fn collapse_repeated_failures_flag_defaults_off_and_opts_in_explicitly() {
+        // Unset / empty / unrecognized => off (byte-identical replayed context).
+        assert!(!collapse_repeated_failures_from_raw(None::<&str>));
+        assert!(!collapse_repeated_failures_from_raw(Some("")));
+        assert!(!collapse_repeated_failures_from_raw(Some("off")));
+        assert!(!collapse_repeated_failures_from_raw(Some("garbage")));
+        // Explicit truthy values opt in.
+        assert!(collapse_repeated_failures_from_raw(Some("on")));
+        assert!(collapse_repeated_failures_from_raw(Some("1")));
+        assert!(collapse_repeated_failures_from_raw(Some("true")));
+        assert!(collapse_repeated_failures_from_raw(Some(" TRUE ")));
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_keeps_first_and_last_only() {
+        let error_obs = generic_error_observation();
+        let success_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "ok",
+            "detail": {"kind": "generic_failure", "failure_kind": "none"},
+            "trust": "untrusted_tool_output",
+        });
+        // Four identical failures (each its own result_ref) plus a success.
+        let mut messages = vec![
+            error_tool_result_message("result:err_1.1", error_obs.clone()),
+            error_tool_result_message("result:err_1.2", error_obs.clone()),
+            error_tool_result_message("result:err_1.3", error_obs.clone()),
+            error_tool_result_message("result:err_1.4", error_obs.clone()),
+            error_tool_result_message("result:ok_1.5", success_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // First and last identical errors keep full detail.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[3]), error_obs);
+        // Interior duplicates collapse to the compact, schema-valid marker.
+        for index in [1usize, 2] {
+            let failure_kind = tool_result_observation(&messages[index])
+                .get("detail")
+                .and_then(|detail| detail.get("failure_kind"))
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string);
+            assert_eq!(failure_kind.as_deref(), Some("repeated_error_elided"));
+        }
+        // Success observation is never touched.
+        assert_eq!(tool_result_observation(&messages[4]), success_obs);
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_leaves_a_single_repeat_alone() {
+        let error_obs = generic_error_observation();
+        let mut messages = vec![
+            error_tool_result_message("result:err_2.1", error_obs.clone()),
+            error_tool_result_message("result:err_2.2", error_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // Below the 3+ threshold: both copies stay intact.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[1]), error_obs);
+    }
+
     fn user_message_with_images(
         content: &str,
         image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
@@ -1784,6 +2790,159 @@ mod tests {
         assert!(
             converted[0].content_parts.is_empty(),
             "a non-vision model must not receive image parts"
+        );
+    }
+
+    #[test]
+    fn gateway_recovers_capability_calls_from_textual_tool_syntax_preserves_reasoning_details() {
+        use ironclaw_llm::{ReasoningDetail, ReasoningDetails};
+
+        let expected_reasoning = ReasoningDetails {
+            id: Some("thinking_123".to_string()),
+            content: vec![ReasoningDetail::Text {
+                text: "Let me call the echo tool.".to_string(),
+                signature: Some("sig_abc".to_string()),
+            }],
+        };
+
+        let response = ToolCompletionResponse {
+            content: Some(
+                "Searching now.\nto=demo__echo weirdjson\n{\"message\":\"hello\"}".to_string(),
+            ),
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("text reasoning".to_string()),
+            reasoning_details: Some(expected_reasoning.clone()),
+        };
+
+        let recovered =
+            recover_textual_tool_calls_from_tool_response(response, &["demo__echo".to_string()])
+                .expect("textual tool call recovery succeeded");
+
+        assert_eq!(
+            recovered.tool_calls.len(),
+            1,
+            "recovery must extract the textual tool call"
+        );
+        assert_eq!(recovered.tool_calls[0].name, "demo__echo");
+        assert_eq!(
+            recovered.reasoning_details,
+            Some(expected_reasoning),
+            "recovery must preserve typed reasoning_details onto the recovered response"
+        );
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_falls_back_for_unknown_metadata() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "raw_provider_secret api_key=sk-live-secret malformed payload",
+        );
+
+        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_drops_raw_repair_detail() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3\nRaw malformed tool-call arguments (verbatim, 42 bytes):\n{\"api_key\":\"sk-live-secret\"",
+        );
+
+        assert_eq!(
+            summary,
+            "failed to parse tool-call arguments JSON: trailing characters at line 1 column 3"
+        );
+    }
+
+    #[test]
+    fn provider_tool_arguments_parse_error_summary_rejects_unsafe_parser_detail() {
+        let summary = provider_tool_arguments_parse_error_summary(
+            "failed to parse tool-call arguments JSON: expected `,` or `}` at line 1 column 2",
+        );
+
+        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+    }
+
+    #[test]
+    fn provider_tool_repair_messages_preserves_reasoning_details_on_assistant_message() {
+        use ironclaw_llm::{ReasoningDetail, ReasoningDetails};
+
+        let expected_reasoning = ReasoningDetails {
+            id: Some("thinking_456".to_string()),
+            content: vec![ReasoningDetail::Encrypted(
+                "encrypted_thinking_data".to_string(),
+            )],
+        };
+
+        let response = ToolCompletionResponse {
+            content: Some("Calling tool.".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "demo__echo".to_string(),
+                arguments: serde_json::json!({"message": "hello"}),
+                reasoning: None,
+                signature: None,
+                arguments_parse_error: None,
+            }],
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("text reasoning".to_string()),
+            reasoning_details: Some(expected_reasoning.clone()),
+        };
+
+        let messages = provider_tool_repair_messages(&response, "tool arguments exceeded limit");
+
+        let repair_assistant = messages
+            .iter()
+            .find(|m| m.role == Role::Assistant && m.tool_calls.is_some())
+            .expect("repair messages must include an assistant tool call replay");
+
+        assert_eq!(
+            repair_assistant.reasoning_details,
+            Some(expected_reasoning),
+            "repaired assistant message must preserve typed reasoning_details"
+        );
+    }
+
+    #[test]
+    fn is_likely_capability_reference_rejects_decimal_numbers() {
+        // Decimals from prose ("use 0.95 in formulas") tokenize as `digits.digits`
+        // and must NOT be treated as capability references — that false positive
+        // trips the unavailable-capability guard and suppresses the whole turn.
+        for token in ["0.95", "1.5", "95.0", "3.524", "0.0158"] {
+            assert!(
+                !is_likely_capability_reference(token),
+                "decimal {token} must not look like a capability reference"
+            );
+        }
+        // Real capability ids are still recognized.
+        for token in ["builtin.shell", "builtin.read_file", "gmail.send"] {
+            assert!(
+                is_likely_capability_reference(token),
+                "{token} should be a capability reference"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_ignores_decimal_in_prose() {
+        // Regression for OfficeQA UID0242: the prompt "compute the
+        // correlation-adjusted 95% = 0.95 (use 0.95 in formulas)" previously had
+        // "0.95" extracted as an explicitly requested (but unavailable) capability,
+        // suppressing every tool call so the model gave up.
+        let messages = vec![ChatMessage::user(
+            "compute the correlation-adjusted 95% = 0.95 (use 0.95 in formulas)",
+        )];
+        let tools = vec![tool_def("builtin.shell", "builtin__shell")];
+        assert!(
+            unavailable_requested_capability_guard(&messages, &tools).is_none(),
+            "guard must not misfire on the decimal `0.95`"
         );
     }
 }

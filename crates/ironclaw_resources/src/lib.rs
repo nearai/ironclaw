@@ -20,6 +20,7 @@
 
 mod cas_snapshot;
 mod event;
+mod filesystem_governor;
 mod filesystem_store;
 mod gate;
 mod period;
@@ -28,6 +29,7 @@ pub use event::{
     BroadcastBudgetEventSink, BudgetEvent, BudgetEventSink, CompositeBudgetEventSink,
     InMemoryBudgetEventSink, NoOpBudgetEventSink,
 };
+pub use filesystem_governor::FilesystemResourceGovernor;
 pub use filesystem_store::{FilesystemBudgetGateStore, FilesystemResourceGovernorStore};
 pub use gate::{
     BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
@@ -37,11 +39,11 @@ pub use period::{
     BudgetPeriod, BudgetThresholds, BudgetThresholdsError, PeriodUnit, period_bounds,
     period_has_rolled_over,
 };
-
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Duration, Utc};
@@ -56,6 +58,68 @@ pub use ironclaw_host_api::{ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod decimal_string_or_legacy_number {
+    use super::*;
+
+    pub(crate) fn serialize<S>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        rust_decimal::serde::str::serialize(value, serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        decimal_from_value(serde_json::Value::deserialize(deserializer)?)
+    }
+
+    fn decimal_from_value<E>(value: serde_json::Value) -> Result<Decimal, E>
+    where
+        E: serde::de::Error,
+    {
+        match value {
+            serde_json::Value::String(raw) => parse_decimal(&raw),
+            serde_json::Value::Number(raw) => parse_decimal(&raw.to_string()),
+            other => Err(E::custom(format!(
+                "expected decimal string or legacy numeric JSON, got {other}"
+            ))),
+        }
+    }
+
+    fn parse_decimal<E>(raw: &str) -> Result<Decimal, E>
+    where
+        E: serde::de::Error,
+    {
+        Decimal::from_str(raw).map_err(E::custom)
+    }
+
+    pub(crate) mod option {
+        use super::*;
+
+        pub(crate) fn serialize<S>(
+            value: &Option<Decimal>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            rust_decimal::serde::str_option::serialize(value, serializer)
+        }
+
+        pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            match serde_json::Value::deserialize(deserializer)? {
+                serde_json::Value::Null => Ok(None),
+                value => super::decimal_from_value(value).map(Some),
+            }
+        }
+    }
+}
 
 /// Source of `now` for governor period accounting.
 ///
@@ -343,6 +407,7 @@ impl std::fmt::Display for ResourceAccount {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
+    #[serde(default, with = "decimal_string_or_legacy_number::option")]
     pub max_usd: Option<Decimal>,
     pub max_input_tokens: Option<u64>,
     pub max_output_tokens: Option<u64>,
@@ -364,6 +429,56 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
+    pub fn set_max_usd(mut self, max_usd: Decimal) -> Self {
+        self.max_usd = Some(max_usd);
+        self
+    }
+
+    pub fn set_max_input_tokens(mut self, max_input_tokens: u64) -> Self {
+        self.max_input_tokens = Some(max_input_tokens);
+        self
+    }
+
+    pub fn set_max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    pub fn set_max_wall_clock_ms(mut self, max_wall_clock_ms: u64) -> Self {
+        self.max_wall_clock_ms = Some(max_wall_clock_ms);
+        self
+    }
+
+    pub fn set_max_output_bytes(mut self, max_output_bytes: u64) -> Self {
+        self.max_output_bytes = Some(max_output_bytes);
+        self
+    }
+
+    pub fn set_max_network_egress_bytes(mut self, max_network_egress_bytes: u64) -> Self {
+        self.max_network_egress_bytes = Some(max_network_egress_bytes);
+        self
+    }
+
+    pub fn set_max_process_count(mut self, max_process_count: u32) -> Self {
+        self.max_process_count = Some(max_process_count);
+        self
+    }
+
+    pub fn set_max_concurrency_slots(mut self, max_concurrency_slots: u32) -> Self {
+        self.max_concurrency_slots = Some(max_concurrency_slots);
+        self
+    }
+
+    pub fn set_period(mut self, period: BudgetPeriod) -> Self {
+        self.period = period;
+        self
+    }
+
+    pub fn set_thresholds(mut self, thresholds: BudgetThresholds) -> Self {
+        self.thresholds = thresholds;
+        self
+    }
+
     /// True when every dimension is unbounded (None or explicit zero).
     pub fn is_unlimited(&self) -> bool {
         is_decimal_unlimited(self.max_usd)
@@ -426,7 +541,7 @@ impl std::fmt::Display for ResourceDimension {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ResourceValue {
-    Decimal(Decimal),
+    Decimal(#[serde(with = "decimal_string_or_legacy_number")] Decimal),
     Integer(u64),
 }
 
@@ -524,6 +639,7 @@ pub enum ResourceError {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceTally {
+    #[serde(with = "decimal_string_or_legacy_number")]
     pub usd: Decimal,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -535,7 +651,7 @@ pub struct ResourceTally {
 }
 
 impl ResourceTally {
-    fn from_estimate(estimate: &ResourceEstimate) -> Self {
+    pub(crate) fn from_estimate(estimate: &ResourceEstimate) -> Self {
         Self {
             usd: estimate.usd.unwrap_or_default(),
             input_tokens: estimate.input_tokens.unwrap_or_default(),
@@ -548,7 +664,7 @@ impl ResourceTally {
         }
     }
 
-    fn from_usage(usage: &ResourceUsage) -> Self {
+    pub(crate) fn from_usage(usage: &ResourceUsage) -> Self {
         Self {
             usd: usage.usd,
             input_tokens: usage.input_tokens,
@@ -561,7 +677,7 @@ impl ResourceTally {
         }
     }
 
-    fn add_assign(&mut self, other: &Self) {
+    pub(crate) fn add_assign(&mut self, other: &Self) {
         self.usd = self.usd.checked_add(other.usd).unwrap_or(Decimal::MAX);
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
@@ -576,7 +692,7 @@ impl ResourceTally {
             .saturating_add(other.concurrency_slots);
     }
 
-    fn sub_assign(&mut self, other: &Self) {
+    pub(crate) fn sub_assign(&mut self, other: &Self) {
         self.usd = self
             .usd
             .checked_sub(other.usd)
@@ -712,22 +828,27 @@ pub trait ResourceGovernor: Send + Sync {
 ///
 /// **v1** (deprecated, read-only-compat) — `usage_by_account` and
 /// `reserved_by_account` HashMaps with no period concept.
-/// **v2** (current) — adds `ResourceLimits::period` and
+/// **v2** (deprecated, read-only-compat) — adds `ResourceLimits::period` and
 /// `ResourceLimits::thresholds`, plus per-account `period_anchors` carrying
 /// the current period's end instant for rollover.
+/// **v3** (current) — adds `journal_seq`, the durable delta-log cursor used
+/// by [`FilesystemResourceGovernor`] snapshot compaction.
 ///
-/// Migration: v1 snapshots are accepted on read. The first write rewrites
-/// them in v2 shape. v1 entries are treated as `PerInvocation` with
-/// `BudgetThresholds::DISABLED` — no behavior change unless callers
-/// explicitly install new-shape limits.
-const RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// Migration: v1 and v2 snapshots are accepted on read. The first write
+/// rewrites them in v3 shape. v1 entries are treated as `PerInvocation` with
+/// `BudgetThresholds::DISABLED` — no behavior change unless callers explicitly
+/// install new-shape limits. v1/v2 snapshots start with `journal_seq = 0`.
+pub(crate) const RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 const RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V1_ACCEPTED: u32 = 1;
+const RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V2_ACCEPTED: u32 = 2;
 
 /// Serializable governor snapshot stored by durable stores.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResourceGovernorSnapshot {
-    schema_version: u32,
-    state: ResourceState,
+    pub(crate) schema_version: u32,
+    pub(crate) state: ResourceState,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) journal_seq: u64,
 }
 
 impl Default for ResourceGovernorSnapshot {
@@ -735,11 +856,14 @@ impl Default for ResourceGovernorSnapshot {
         Self {
             schema_version: RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION,
             state: ResourceState::default(),
+            journal_seq: 0,
         }
     }
 }
 
 impl crate::cas_snapshot::Snapshot for ResourceGovernorSnapshot {
+    const RECORD_KIND: &'static str = "resource_governor_snapshot";
+
     fn fresh() -> Self {
         Self::default()
     }
@@ -757,6 +881,8 @@ struct ResourceGovernorSnapshotSerde {
     #[serde(default = "current_resource_governor_snapshot_schema_version")]
     schema_version: u32,
     state: ResourceState,
+    #[serde(default)]
+    journal_seq: u64,
 }
 
 impl<'de> Deserialize<'de> for ResourceGovernorSnapshot {
@@ -769,21 +895,27 @@ impl<'de> Deserialize<'de> for ResourceGovernorSnapshot {
             RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION => Ok(Self {
                 schema_version: snapshot.schema_version,
                 state: snapshot.state,
+                journal_seq: snapshot.journal_seq,
             }),
-            RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V1_ACCEPTED => {
+            RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V1_ACCEPTED
+            | RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V2_ACCEPTED => {
                 // v1 → v2 in-place: existing `usage_by_account` /
                 // `reserved_by_account` entries keep their values; period
                 // anchors are absent so accounts fall back to
                 // `PerInvocation` semantics until callers explicitly
-                // install a new-shape limit. Rewritten as v2 on next save.
+                // install a new-shape limit. v2 snapshots predate the
+                // journal cursor used by filesystem governor compaction.
+                // Both old shapes are rewritten as v3 on next save.
                 Ok(Self {
                     schema_version: RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION,
                     state: snapshot.state,
+                    journal_seq: 0,
                 })
             }
             other => Err(serde::de::Error::custom(format!(
-                "unsupported resource governor snapshot schema version {other}; expected {} (current) or {} (v1, migrated on first write)",
+                "unsupported resource governor snapshot schema version {other}; expected {} (current), {} (v2, migrated on first write), or {} (v1, migrated on first write)",
                 RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION,
+                RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V2_ACCEPTED,
                 RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V1_ACCEPTED
             ))),
         }
@@ -794,16 +926,35 @@ fn current_resource_governor_snapshot_schema_version() -> u32 {
     RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 /// Transactional storage primitive for [`PersistentResourceGovernor`].
 ///
-/// Implementations must serialize the whole closure with any other readers or
-/// writers over the same account-wide ledger before writing the updated
-/// snapshot back durably.
+/// Implementations must keep the account-wide snapshot durably consistent
+/// under concurrent writers — typically via optimistic compare-and-swap
+/// rather than a mandatory exclusive lock — and re-run `update`'s closure
+/// against a fresh snapshot on each retry.
 pub trait ResourceGovernorStore: Send + Sync + 'static {
+    /// Run a read-modify-write transaction against the governor snapshot.
+    ///
+    /// The closure is `FnMut`, not `FnOnce`: filesystem-backed stores route
+    /// through the shared `cas_update` helper, which re-runs the closure
+    /// against a freshly read snapshot on every CAS retry. Closures must
+    /// therefore be re-runnable (idempotent / no move-out of captures).
     fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
-        F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
+        F: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
+
+    /// Lock-free read of the governor snapshot. Implementations should skip
+    /// the write path's CAS/retry overhead where possible — this is a
+    /// read-only lookup, not a read-modify-write transaction.
+    fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
 }
 
 /// File-backed resource-governor store using a stable sidecar lock file around
@@ -825,7 +976,7 @@ impl ResourceGovernorStore for JsonFileResourceGovernorStore {
     fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
-        F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+        F: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
     {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
@@ -842,6 +993,33 @@ impl ResourceGovernorStore for JsonFileResourceGovernorStore {
         lock_file.lock_exclusive().map_err(storage_error)?;
 
         let result = update_file_snapshot(&self.path, update);
+        let unlock_result = lock_file.unlock().map_err(storage_error);
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn inspect<T, F>(&self, inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        let lock_path = lock_path_for(&self.path);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(storage_error)?;
+        }
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .map_err(storage_error)?;
+        lock_file.lock_shared().map_err(storage_error)?;
+
+        let result = read_file_snapshot(&self.path).and_then(|snapshot| inspect(&snapshot));
         let unlock_result = lock_file.unlock().map_err(storage_error);
         match (result, unlock_result) {
             (Ok(value), Ok(())) => Ok(value),
@@ -1065,6 +1243,8 @@ where
 {
     store: S,
     clock: Arc<dyn Clock>,
+    unlimited_fast_path: bool,
+    unlimited_state: Mutex<UnlimitedFastPathState>,
     /// Optional sink that receives `BudgetEvent`s as reservations,
     /// reconciliations, warnings, and denials happen. Wired by
     /// composition; defaults to [`NoOpBudgetEventSink`] so the
@@ -1081,6 +1261,8 @@ where
         Self {
             store,
             clock: Arc::new(SystemClock),
+            unlimited_fast_path: false,
+            unlimited_state: Mutex::new(UnlimitedFastPathState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
@@ -1092,8 +1274,23 @@ where
         Self {
             store,
             clock,
+            unlimited_fast_path: false,
+            unlimited_state: Mutex::new(UnlimitedFastPathState::default()),
             event_sink: Arc::new(NoOpBudgetEventSink),
         }
+    }
+
+    /// Keep unlimited/no-quota reservation bookkeeping process-local.
+    ///
+    /// When no finite resource limits are configured, the persistent governor
+    /// does not need durable snapshot writes to enforce limits. This opt-in
+    /// path preserves same-process reservation lifecycle checks while avoiding
+    /// synchronous writes on reserve/reconcile/release. As soon as any finite
+    /// limit is present in the durable snapshot, new reservations use the
+    /// durable path again.
+    pub fn with_unlimited_fast_path(mut self) -> Self {
+        self.unlimited_fast_path = true;
+        self
     }
 
     /// Plug in an audit/SSE sink. Every `reserve`, `reconcile`,
@@ -1113,8 +1310,38 @@ where
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
         let now = self.clock.now();
+        // Clone per invocation: the store may re-run this closure on a CAS
+        // retry, so it must not move `account`/`limits`/`local_state` out of
+        // its capture.
+        if self.unlimited_fast_path {
+            let mut local = self.lock_unlimited_state()?;
+            let local_state = local.state.clone();
+            let local_initialized = local.initialized;
+            let setting_finite_limit = !limits.is_unlimited();
+            let local_account = account.clone();
+            let local_limits = limits.clone();
+            let updated_state = self.store.update(move |snapshot| {
+                if local_initialized
+                    && setting_finite_limit
+                    && !resource_state_has_finite_limits(&snapshot.state)
+                {
+                    merge_unlimited_fast_path_state(&mut snapshot.state, &local_state);
+                }
+                set_limit_in_state(&mut snapshot.state, account.clone(), limits.clone(), now);
+                Ok(snapshot.state.clone())
+            })?;
+            if resource_state_has_finite_limits(&updated_state) {
+                local.state = updated_state;
+            } else if local_initialized {
+                set_limit_in_state(&mut local.state, local_account, local_limits, now);
+            } else {
+                local.state = sanitized_unlimited_fast_path_state(updated_state);
+            };
+            local.initialized = true;
+            return Ok(());
+        }
         self.store.update(move |snapshot| {
-            set_limit_in_state(&mut snapshot.state, account, limits, now);
+            set_limit_in_state(&mut snapshot.state, account.clone(), limits.clone(), now);
             Ok(())
         })
     }
@@ -1122,10 +1349,9 @@ where
     pub fn reserved_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
-            advance_period_if_rolled_over(&mut snapshot.state, &account, now);
-            Ok(snapshot
-                .state
+        self.update_active_state(move |state| {
+            advance_period_if_rolled_over(state, &account, now);
+            Ok(state
                 .reserved_by_account
                 .get(&account)
                 .cloned()
@@ -1136,15 +1362,88 @@ where
     pub fn usage_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
-            advance_period_if_rolled_over(&mut snapshot.state, &account, now);
-            Ok(snapshot
-                .state
+        self.update_active_state(move |state| {
+            advance_period_if_rolled_over(state, &account, now);
+            Ok(state
                 .usage_by_account
                 .get(&account)
                 .cloned()
                 .unwrap_or_default())
         })
+    }
+
+    fn unlimited_fast_path_seed(&self) -> Result<Option<ResourceState>, ResourceError> {
+        if !self.unlimited_fast_path {
+            return Ok(None);
+        }
+        self.store.inspect(|snapshot| {
+            if resource_state_has_finite_limits(&snapshot.state) {
+                Ok(None)
+            } else {
+                Ok(Some(sanitized_unlimited_fast_path_state(
+                    snapshot.state.clone(),
+                )))
+            }
+        })
+    }
+
+    /// `update` is `FnMut`, not `FnOnce`: when the fast path is inactive this
+    /// forwards straight into `ResourceGovernorStore::update`, which may
+    /// re-run the closure on a CAS retry. Callers must clone captures rather
+    /// than move them out (see `ResourceGovernorStore::update` docs).
+    fn update_active_state<T, F>(&self, mut update: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnMut(&mut ResourceState) -> Result<T, ResourceError> + Send + 'static,
+    {
+        if let Some(seed) = self.unlimited_fast_path_seed()? {
+            let mut local = self.lock_unlimited_state()?;
+            if !local.initialized {
+                local.state = seed;
+                local.initialized = true;
+            }
+            return update(&mut local.state);
+        }
+        self.store
+            .update(move |snapshot| update(&mut snapshot.state))
+    }
+
+    /// `durable_close` is `FnMut` for the same CAS-retry reason as
+    /// `update_active_state`; `local_close` runs at most once against the
+    /// process-local fast-path state so it stays `FnOnce`.
+    fn close_fast_path_or_durable<T, L, D>(
+        &self,
+        local_close: L,
+        durable_close: D,
+    ) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        L: FnOnce(&mut ResourceState) -> Result<T, ResourceError>,
+        D: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        if let Some(seed) = self.unlimited_fast_path_seed()? {
+            let mut local = self.lock_unlimited_state()?;
+            if !local.initialized {
+                local.state = seed;
+                local.initialized = true;
+            }
+            match local_close(&mut local.state) {
+                Ok(value) => return Ok(value),
+                Err(ResourceError::UnknownReservation { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.store.update(durable_close)
+    }
+
+    fn lock_unlimited_state(
+        &self,
+    ) -> Result<MutexGuard<'_, UnlimitedFastPathState>, ResourceError> {
+        self.unlimited_state
+            .lock()
+            .map_err(|_| ResourceError::Storage {
+                reason: "resource governor unlimited fast-path state lock poisoned".to_string(),
+            })
     }
 }
 
@@ -1181,8 +1480,15 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ReservationOutcome, ResourceError> {
         let now = self.clock.now();
-        let result = self.store.update(move |snapshot| {
-            reserve_with_outcome_in_state(&mut snapshot.state, scope, estimate, reservation_id, now)
+        // Clone per invocation: this closure may be re-run on a CAS retry.
+        let result = self.update_active_state(move |state| {
+            reserve_with_outcome_in_state(
+                state,
+                scope.clone(),
+                estimate.clone(),
+                reservation_id,
+                now,
+            )
         });
         emit_reserve_events(self.event_sink.as_ref(), &result, now);
         result
@@ -1194,9 +1500,15 @@ where
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        let result = self.store.update(move |snapshot| {
-            reconcile_in_state(&mut snapshot.state, reservation_id, actual, now)
-        });
+        // Clone per invocation: the durable closure may be re-run on a CAS
+        // retry, so it must not move `actual` out of its capture.
+        let local_actual = actual.clone();
+        let result = self.close_fast_path_or_durable(
+            move |state| reconcile_in_state(state, reservation_id, local_actual, now),
+            move |snapshot| {
+                reconcile_in_state(&mut snapshot.state, reservation_id, actual.clone(), now)
+            },
+        );
         if let Ok(receipt) = &result {
             self.event_sink.emit(BudgetEvent::Reconciled {
                 account: most_specific_account(&receipt.scope),
@@ -1212,9 +1524,10 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        let result = self
-            .store
-            .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now));
+        let result = self.close_fast_path_or_durable(
+            move |state| release_in_state(state, reservation_id, now),
+            move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now),
+        );
         if let Ok(receipt) = &result {
             self.event_sink.emit(BudgetEvent::Released {
                 account: most_specific_account(&receipt.scope),
@@ -1231,13 +1544,7 @@ where
     ) -> Result<Option<AccountSnapshot>, ResourceError> {
         let account = account.clone();
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
-            Ok(account_snapshot_in_state(
-                &mut snapshot.state,
-                &account,
-                now,
-            ))
-        })
+        self.update_active_state(move |state| Ok(account_snapshot_in_state(state, &account, now)))
     }
 }
 
@@ -1264,11 +1571,11 @@ impl Default for InMemoryResourceGovernor {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-struct ResourceState {
-    limits: HashMap<ResourceAccount, ResourceLimits>,
-    reserved_by_account: HashMap<ResourceAccount, ResourceTally>,
-    usage_by_account: HashMap<ResourceAccount, ResourceTally>,
-    reservations: HashMap<ResourceReservationId, ReservationRecord>,
+pub(crate) struct ResourceState {
+    pub(crate) limits: HashMap<ResourceAccount, ResourceLimits>,
+    pub(crate) reserved_by_account: HashMap<ResourceAccount, ResourceTally>,
+    pub(crate) usage_by_account: HashMap<ResourceAccount, ResourceTally>,
+    pub(crate) reservations: HashMap<ResourceReservationId, ReservationRecord>,
     /// Per-account period anchors. `period_end_at_anchor[acc]` is the UTC
     /// instant at which `usage_by_account[acc]` was last advanced; any
     /// `now >= period_end_at_anchor[acc]` triggers a fresh window before the
@@ -1276,7 +1583,47 @@ struct ResourceState {
     /// (no carry-over). Storage is best-effort and recomputed from
     /// `ResourceLimits::period` on each mutation; v1 snapshots that lack
     /// this field migrate transparently.
-    period_anchors: HashMap<ResourceAccount, DateTime<Utc>>,
+    pub(crate) period_anchors: HashMap<ResourceAccount, DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct UnlimitedFastPathState {
+    state: ResourceState,
+    initialized: bool,
+}
+
+pub(crate) fn resource_state_has_finite_limits(state: &ResourceState) -> bool {
+    state.limits.values().any(|limits| !limits.is_unlimited())
+}
+
+fn sanitized_unlimited_fast_path_state(mut state: ResourceState) -> ResourceState {
+    state.reserved_by_account.clear();
+    state.usage_by_account.clear();
+    state.reservations.clear();
+    state
+}
+
+fn merge_unlimited_fast_path_state(target: &mut ResourceState, local: &ResourceState) {
+    for (account, tally) in &local.reserved_by_account {
+        target
+            .reserved_by_account
+            .entry(account.clone())
+            .or_default()
+            .add_assign(tally);
+    }
+    for (account, tally) in &local.usage_by_account {
+        target
+            .usage_by_account
+            .entry(account.clone())
+            .or_default()
+            .add_assign(tally);
+    }
+    for (id, record) in &local.reservations {
+        target.reservations.insert(*id, record.clone());
+    }
+    for (account, anchor) in &local.period_anchors {
+        target.period_anchors.insert(account.clone(), *anchor);
+    }
 }
 
 /// Snapshot of accumulated period-scoped spend + reserved.
@@ -1292,12 +1639,12 @@ pub struct PeriodLedger {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ReservationRecord {
-    reservation: ResourceReservation,
-    accounts: Vec<ResourceAccount>,
-    tally: ResourceTally,
-    status: ReservationStatus,
-    actual: Option<ResourceUsage>,
+pub(crate) struct ReservationRecord {
+    pub(crate) reservation: ResourceReservation,
+    pub(crate) accounts: Vec<ResourceAccount>,
+    pub(crate) tally: ResourceTally,
+    pub(crate) status: ReservationStatus,
+    pub(crate) actual: Option<ResourceUsage>,
 }
 
 #[derive(Deserialize)]
@@ -1319,7 +1666,7 @@ struct StrictResourceScope {
 #[derive(Deserialize)]
 #[serde(remote = "ResourceEstimate", deny_unknown_fields)]
 struct StrictResourceEstimate {
-    #[serde(default)]
+    #[serde(default, with = "decimal_string_or_legacy_number::option")]
     usd: Option<Decimal>,
     #[serde(default)]
     input_tokens: Option<u64>,
@@ -1340,6 +1687,7 @@ struct StrictResourceEstimate {
 #[derive(Deserialize)]
 #[serde(remote = "ResourceUsage", deny_unknown_fields)]
 struct StrictResourceUsage {
+    #[serde(with = "decimal_string_or_legacy_number")]
     usd: Decimal,
     input_tokens: u64,
     output_tokens: u64,
@@ -1617,7 +1965,7 @@ impl ResourceGovernor for InMemoryResourceGovernor {
 /// `BudgetEvent`s. Emits `Warned` for every warning regardless of the
 /// terminal outcome, then either `Reserved` (success), `ApprovalRequested`
 /// (pause), or `Denied` (hard cap).
-fn emit_reserve_events(
+pub(crate) fn emit_reserve_events(
     sink: &dyn BudgetEventSink,
     result: &Result<ReservationOutcome, ResourceError>,
     at: DateTime<Utc>,
@@ -1662,14 +2010,14 @@ fn emit_reserve_events(
 /// The deepest account in the cascade — the one whose limits are the
 /// "owning" cap for this reservation. Used for `Reserved`/`Reconciled`/
 /// `Released` events so subscribers can route per-thread/per-project.
-fn most_specific_account(scope: &ResourceScope) -> ResourceAccount {
+pub(crate) fn most_specific_account(scope: &ResourceScope) -> ResourceAccount {
     ResourceAccount::cascade(scope)
         .into_iter()
         .next_back()
         .unwrap_or_else(|| ResourceAccount::tenant(scope.tenant_id.clone()))
 }
 
-fn set_limit_in_state(
+pub(crate) fn set_limit_in_state(
     state: &mut ResourceState,
     account: ResourceAccount,
     limits: ResourceLimits,
@@ -1690,7 +2038,7 @@ fn set_limit_in_state(
     state.period_anchors.insert(account, period_end);
 }
 
-fn advance_period_if_rolled_over(
+pub(crate) fn advance_period_if_rolled_over(
     state: &mut ResourceState,
     account: &ResourceAccount,
     now: DateTime<Utc>,
@@ -1715,7 +2063,7 @@ fn advance_period_if_rolled_over(
     }
 }
 
-fn reserve_with_outcome_in_state(
+pub(crate) fn reserve_with_outcome_in_state(
     state: &mut ResourceState,
     scope: ResourceScope,
     estimate: ResourceEstimate,
@@ -1808,7 +2156,7 @@ fn reserve_with_outcome_in_state(
     })
 }
 
-fn reconcile_in_state(
+pub(crate) fn reconcile_in_state(
     state: &mut ResourceState,
     reservation_id: ResourceReservationId,
     actual: ResourceUsage,
@@ -1860,7 +2208,7 @@ fn reconcile_in_state(
     Ok(receipt)
 }
 
-fn release_in_state(
+pub(crate) fn release_in_state(
     state: &mut ResourceState,
     reservation_id: ResourceReservationId,
     now: DateTime<Utc>,
@@ -1900,7 +2248,7 @@ fn release_in_state(
     Ok(receipt)
 }
 
-fn account_snapshot_in_state(
+pub(crate) fn account_snapshot_in_state(
     state: &mut ResourceState,
     account: &ResourceAccount,
     now: DateTime<Utc>,
@@ -2396,6 +2744,97 @@ fn decimal_to_f64(d: Decimal) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_value_decimal_uses_stable_string_json() {
+        let value = ResourceValue::Decimal(Decimal::new(125, 2));
+        let encoded = serde_json::to_value(&value).unwrap();
+
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "kind": "decimal",
+                "value": "1.25"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ResourceValue>(encoded).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn resource_tally_usd_uses_stable_string_json() {
+        let tally = ResourceTally {
+            usd: Decimal::new(625, 2),
+            ..ResourceTally::default()
+        };
+        let encoded = serde_json::to_value(&tally).unwrap();
+
+        assert_eq!(encoded["usd"], "6.25");
+        assert_eq!(
+            serde_json::from_value::<ResourceTally>(encoded).unwrap(),
+            tally
+        );
+    }
+
+    #[test]
+    fn legacy_numeric_decimal_json_still_decodes() {
+        let value = serde_json::from_value::<ResourceValue>(serde_json::json!({
+            "kind": "decimal",
+            "value": 1.25
+        }))
+        .unwrap();
+        assert_eq!(value, ResourceValue::Decimal(Decimal::new(125, 2)));
+
+        let tally = serde_json::from_value::<ResourceTally>(serde_json::json!({
+            "usd": 6.25,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "wall_clock_ms": 0,
+            "output_bytes": 0,
+            "network_egress_bytes": 0,
+            "process_count": 0,
+            "concurrency_slots": 0
+        }))
+        .unwrap();
+        assert_eq!(tally.usd, Decimal::new(625, 2));
+
+        let limits = serde_json::from_value::<ResourceLimits>(serde_json::json!({
+            "max_usd": 1000.0,
+            "max_input_tokens": null,
+            "max_output_tokens": null,
+            "max_wall_clock_ms": null,
+            "max_output_bytes": null,
+            "max_network_egress_bytes": null,
+            "max_process_count": null,
+            "max_concurrency_slots": null,
+            "period": { "kind": "rolling24h" },
+            "thresholds": {
+                "warn_at": 1.0,
+                "pause_at": 1.0
+            }
+        }))
+        .unwrap();
+        assert_eq!(limits.max_usd, Some(Decimal::from(1000)));
+
+        let limits_without_usd = serde_json::from_value::<ResourceLimits>(serde_json::json!({
+            "max_input_tokens": null,
+            "max_output_tokens": null,
+            "max_wall_clock_ms": null,
+            "max_output_bytes": null,
+            "max_network_egress_bytes": null,
+            "max_process_count": null,
+            "max_concurrency_slots": null,
+            "period": { "kind": "rolling24h" },
+            "thresholds": {
+                "warn_at": 1.0,
+                "pause_at": 1.0
+            }
+        }))
+        .unwrap();
+        assert_eq!(limits_without_usd.max_usd, None);
+    }
 
     #[test]
     fn atomic_snapshot_replace_overwrites_existing_file() {

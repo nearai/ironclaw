@@ -72,7 +72,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
     GsuiteCapabilitySpec {
         id: "google-calendar.list_events",
         short_name: "list_events",
-        description: "List Google Calendar events.",
+        description: "List Google Calendar events. Defaults to upcoming expanded events ordered by start time; use include_all_calendars or calendar_ids to cover more than the primary calendar.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
         required_scopes: CALENDAR_READONLY_SCOPES,
@@ -283,12 +283,10 @@ pub const fn gmail_package_spec() -> GsuitePackageSpec {
 
 pub fn gsuite_resource_profile() -> ResourceProfile {
     ResourceProfile {
-        default_estimate: ResourceEstimate {
-            wall_clock_ms: Some(u64::from(GSUITE_TIMEOUT_MS)),
-            output_bytes: Some(GSUITE_OUTPUT_BYTES_LIMIT),
-            network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
-            ..ResourceEstimate::default()
-        },
+        default_estimate: ResourceEstimate::default()
+            .set_wall_clock_ms(u64::from(GSUITE_TIMEOUT_MS))
+            .set_output_bytes(GSUITE_OUTPUT_BYTES_LIMIT)
+            .set_network_egress_bytes(DEFAULT_NETWORK_EGRESS_BYTES),
         hard_ceiling: Some(ResourceCeiling {
             max_usd: None,
             max_input_tokens: None,

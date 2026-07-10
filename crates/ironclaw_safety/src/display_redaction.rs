@@ -494,18 +494,36 @@ fn token_contains_absolute_posix_path(token: &str) -> bool {
         return false;
     }
     let mut previous = None;
-    let mut characters = token.chars().peekable();
-    while let Some(character) = characters.next() {
+    let mut characters = token.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
         if character == '/'
             && previous.is_none_or(token_boundary_punctuation)
             && !matches!(previous, Some('/'))
-            && !matches!(characters.peek(), Some('/'))
+            && !matches!(characters.peek(), Some((_, '/')))
+            && absolute_posix_segment_looks_like_path(&token[index + 1..])
         {
             return true;
         }
         previous = Some(character);
     }
     false
+}
+
+// A slash opening a single bare-word segment ("/help", "/status") is a slash
+// command or route, not a filesystem leak. Treat the slash as a path only when
+// it opens real path shape: a second segment ("/tmp/x") or a dotted, file-like
+// first segment ("/secrets.env"). Trailing sentence punctuation does not count
+// as a segment dot ("run /help." stays a command).
+fn absolute_posix_segment_looks_like_path(rest: &str) -> bool {
+    let segment_end = rest.find('/').unwrap_or(rest.len());
+    if segment_end < rest.len() {
+        return true;
+    }
+    rest[..segment_end]
+        .trim_end_matches(|character: char| {
+            matches!(character, '.' | ',' | '!' | '?') || token_boundary_punctuation(character)
+        })
+        .contains('.')
 }
 
 fn token_boundary_punctuation(character: char) -> bool {
@@ -536,6 +554,26 @@ fn truncate_display_text(text: &str, max_bytes: usize) -> SafeDisplayText {
 #[cfg(test)]
 mod tests {
     use super::{sanitize_display_text, shell_command_display_text};
+
+    #[test]
+    fn sanitize_display_text_keeps_slash_commands_but_redacts_paths() {
+        // A single bare-word slash token is a command/route, not a filesystem
+        // leak. Real paths (a second segment, or a dotted file-like first
+        // segment) must stay redacted.
+        assert_eq!(
+            sanitize_display_text("Run /help in the chat surface for available commands."),
+            "Run /help in the chat surface for available commands.",
+        );
+        // Trailing sentence punctuation does not turn a command into a path.
+        assert_eq!(sanitize_display_text("Run /help."), "Run /help.");
+
+        assert_eq!(sanitize_display_text("cat /etc/passwd"), "cat [redacted]");
+        assert_eq!(sanitize_display_text("see /tmp/x"), "see [redacted]");
+        assert_eq!(
+            sanitize_display_text("read /secrets.env"),
+            "read [redacted]"
+        );
+    }
 
     #[test]
     fn shell_command_display_text_redacts_auth_and_url_query() {

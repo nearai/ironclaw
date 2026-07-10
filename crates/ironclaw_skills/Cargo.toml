@@ -2,12 +2,15 @@
 name = "ironclaw_skills"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Skill selection, scoring, and management for IronClaw"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.ironclaw]
+layer = "loops"
 
 [package.metadata.dist]
 dist = false
@@ -20,14 +23,15 @@ catalog = ["dep:reqwest", "dep:urlencoding", "dep:futures"]
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 libc = "0.2"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "0.0.12"
-sha2 = "0.10"
+serde_norway = "0.9"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "process", "fs"] }
 tracing = "0.1"

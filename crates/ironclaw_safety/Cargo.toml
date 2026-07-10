@@ -2,12 +2,15 @@
 name = "ironclaw_safety"
 version = "0.2.2"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Prompt injection defense, input validation, secret leak detection, and safety policy enforcement"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.ironclaw]
+layer = "substrates"
 
 [package.metadata.dist]
 dist = false
@@ -22,7 +25,7 @@ url = "2"
 urlencoding = "2"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "safety_check"

@@ -13,13 +13,14 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
     ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
-use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_events::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
+    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
+    ProductWorkSummaryPhase,
 };
 use ironclaw_turns::{
     TurnRunId, TurnScope,
@@ -49,7 +50,9 @@ pub(super) struct LiveSkillActivationObserver {
 pub(crate) struct LiveProjectionPublisher {
     update_source: Arc<InMemoryProjectionUpdateSource>,
     actor_user_id: UserId,
-    next_sequence: AtomicU64,
+    // Shared by publishers from the same projection services so live cursors
+    // stay monotonic across progress, skill, and other projection updates.
+    next_sequence: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for LiveProjectionPublisher {
@@ -80,11 +83,12 @@ impl LiveProjectionPublisher {
     pub(super) fn new(
         update_source: Arc<InMemoryProjectionUpdateSource>,
         actor_user_id: UserId,
+        next_sequence: Arc<AtomicU64>,
     ) -> Self {
         Self {
             update_source,
             actor_user_id,
-            next_sequence: AtomicU64::new(0),
+            next_sequence,
         }
     }
 
@@ -196,6 +200,13 @@ pub(super) fn product_items_for_live_update(
         .items
         .iter()
         .filter_map(|item| match item {
+            ThreadLiveProjectionItem::Text { id, run_id, body } => {
+                Some(ProductProjectionItem::Text {
+                    id: id.clone(),
+                    run_id: Some(*run_id),
+                    body: body.clone(),
+                })
+            }
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
                 Some(ProductProjectionItem::Thinking {
                     id: id.clone(),
@@ -212,6 +223,7 @@ pub(super) fn product_items_for_live_update(
                 runtime,
                 output_bytes,
                 error_kind,
+                error_detail,
             } => {
                 let running = display_previews.running_input(*invocation_id);
                 match CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -225,6 +237,7 @@ pub(super) fn product_items_for_live_update(
                     process_id: None,
                     output_bytes: *output_bytes,
                     error_kind: error_kind.clone(),
+                    error_detail: error_detail.clone(),
                     subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                     input_summary: running.and_then(|input| input.input_summary),
                     updated_at: Utc::now(),
@@ -280,6 +293,26 @@ fn live_work_summary_phase_to_product_phase(
 }
 
 impl LiveProgressMilestoneSink {
+    fn publish_text_delta(&self, milestone: &LoopHostMilestone, safe_text: &str) {
+        // The model port already sanitizes chunks before milestone emission.
+        // Re-sanitize and bound here because this path is browser-facing.
+        let body = sanitize_bounded_projection_text(safe_text, PROJECTION_TEXT_MAX_BYTES);
+        if body.is_empty() {
+            return;
+        }
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
+            &milestone.scope,
+            sequence,
+            ThreadLiveProjectionItem::Text {
+                id: text_id(milestone.run_id),
+                run_id: milestone.run_id,
+                body,
+            },
+        );
+    }
+
     fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
         // The delta is already model-visible sanitized upstream. Re-sanitize at
         // the product projection boundary so this publish path has its own
@@ -323,6 +356,7 @@ impl LiveProgressMilestoneSink {
                 runtime: terminal.runtime,
                 output_bytes: terminal.output_bytes,
                 error_kind: terminal.error_kind,
+                error_detail: terminal.error_detail,
             },
         );
     }
@@ -412,6 +446,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
     ) -> Result<(), AgentLoopHostError> {
         self.inner.publish_loop_milestone(milestone.clone()).await?;
         match &milestone.kind {
+            LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
+                self.publish_text_delta(&milestone, safe_text);
+            }
             LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
                 self.publish_reasoning_delta(&milestone, safe_delta);
             }
@@ -444,6 +481,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: Some(*runtime),
                         output_bytes: Some(*output_bytes),
                         error_kind: None,
+                        error_detail: None,
                     },
                 );
             }
@@ -453,6 +491,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                safe_summary,
             } => {
                 self.publish_capability_activity(
                     &milestone,
@@ -464,6 +503,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: *runtime,
                         output_bytes: None,
                         error_kind: Some(reason_kind.as_str().to_string()),
+                        error_detail: sanitized_capability_error_detail(
+                            safe_summary.as_ref().map(LoopSafeSummary::as_str),
+                        ),
                     },
                 );
             }
@@ -476,12 +518,22 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
     }
 }
 
+/// Sanitize and bound a host-authored capability failure summary for the live
+/// activity card. Returns `None` for absent/empty input so the card falls back
+/// to the bare error kind. The product-adapter boundary re-validates length and
+/// control chars.
+fn sanitized_capability_error_detail(safe_summary: Option<&str>) -> Option<String> {
+    let summary = safe_summary?;
+    sanitize_error_summary(summary)
+}
+
 #[derive(Default)]
 struct TerminalCapabilityActivity {
     provider: Option<ExtensionId>,
     runtime: Option<RuntimeKind>,
     output_bytes: Option<u64>,
     error_kind: Option<String>,
+    error_detail: Option<String>,
 }
 
 fn live_capability_activity_status(
@@ -498,6 +550,10 @@ fn live_capability_activity_status(
 
 fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("thinking:{run_id}:{sequence}")
+}
+
+fn text_id(run_id: TurnRunId) -> String {
+    format!("text:{run_id}")
 }
 
 fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
@@ -519,6 +575,18 @@ fn sanitize_bounded_model_visible_text(value: &str, max_bytes: usize) -> String 
         end -= 1;
     }
     trimmed[..end].trim_end().to_string()
+}
+
+fn sanitize_bounded_projection_text(value: &str, max_bytes: usize) -> String {
+    let sanitized = sanitize_model_visible_text(value);
+    if sanitized.len() <= max_bytes {
+        return sanitized;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    sanitized[..end].to_string()
 }
 
 fn driver_note_kind_to_live_work_summary_phase(

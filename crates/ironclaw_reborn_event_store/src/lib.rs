@@ -291,6 +291,19 @@ pub async fn build_reborn_event_stores(
 /// `/events`. Production composition reuses this on top of a libSQL /
 /// PostgreSQL `RootFilesystem` so the backend choice is a property of the
 /// filesystem rather than of the durable-log impl.
+///
+/// The caller must run any backend schema migrations before calling this
+/// helper. Config-based builders perform their own migration step.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub fn build_reborn_event_stores_from_root_filesystem<F>(
+    root: Arc<F>,
+) -> Result<RebornEventStores, RebornEventStoreError>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    wrap_root_filesystem_as_event_stores(root)
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn wrap_root_filesystem_as_event_stores<F>(
     root: Arc<F>,
@@ -669,6 +682,10 @@ mod postgres_backed {
 
         for host in hosts {
             match host {
+                // `Host::Unix` only exists on unix in tokio-postgres; on Windows
+                // the enum has just `Tcp`, so gating this arm keeps the match
+                // exhaustive on both platforms (a Unix socket host is local).
+                #[cfg(unix)]
                 Host::Unix(_) => continue,
                 Host::Tcp(name) => {
                     if !is_local_host_literal(name) {

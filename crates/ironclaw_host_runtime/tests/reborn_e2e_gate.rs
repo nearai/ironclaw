@@ -116,10 +116,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             script_capability_id(),
-            ResourceEstimate {
-                output_bytes: Some(4096),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_output_bytes(4096),
             input.clone(),
             trust_decision_with_dispatch_authority(),
         ))
@@ -713,13 +710,15 @@ async fn approve_dispatch_for_services(
             approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await

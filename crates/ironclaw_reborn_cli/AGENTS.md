@@ -44,6 +44,20 @@ should not hide normal CLI surface area behind non-default features. If a route
 or integration is present in the shipped binary, prefer runtime enablement and
 config validation over compile-time omission.
 
+The beta WebUI static crate runs the frontend bundler from Cargo build scripts,
+so default, `webui-v2-beta`, and `--all-features` builds need Node.js/npm
+available even though the generated `static/dist/` bundle is not committed.
+
+With `--no-default-features`, `ironclaw-reborn --help` does not list `serve`
+and `ironclaw-reborn serve …` returns `error: unrecognized subcommand`.
+This is verified by `help_mentions_reborn_commands` in `tests/smoke.rs`,
+which only asserts on the `serve` line under `#[cfg(feature =
+"webui-v2-beta")]`. WebUI smoke tests (`serve_help_mentions_host_and_port`,
+`serve_fails_closed_when_env_bearer_token_var_is_unset`, etc.) are
+themselves feature-gated so default `cargo test -p ironclaw_reborn_cli`
+runs include them while `--no-default-features` runs do not regress on a
+missing feature flag.
+
 The descriptor-level "all v2 routes are actually mounted" regression
 lives at the composition layer in
 `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`

@@ -2,8 +2,9 @@
 //!
 //! This module hosts both filesystem-backed stores this crate exposes:
 //!
-//! - [`FilesystemResourceGovernorStore`] — the single resource-governor
-//!   snapshot at `/resources/snapshot.json`.
+//! - [`FilesystemResourceGovernorStore`] — the resource-governor compaction
+//!   snapshot at `/resources/snapshot.json` (and the legacy transactional
+//!   store used by snapshot-focused contract tests).
 //! - [`FilesystemBudgetGateStore`] — the budget-approval gate snapshot
 //!   at `/resources/budget-gates.json`.
 //!
@@ -12,9 +13,17 @@
 //! read-modify-write transaction through
 //! [`crate::cas_snapshot::CasSnapshotStore`], which provides:
 //!
-//! - In-process per-path async lock so same-process writers serialize.
-//! - `CasExpectation::Version` precondition for cross-process safety,
-//!   with `CasExpectation::Any` fallback for byte-only backends.
+//! - The shared, lock-free
+//!   [`cas_update`](ironclaw_filesystem::cas_update) helper: an optimistic
+//!   CAS-retry loop (`CasExpectation::Version` precondition) with bounded
+//!   retries, jittered backoff, and an overall timeout. No per-record
+//!   `tokio::sync::Mutex` is held across the backend awaits, so cross-process
+//!   contention on one scope's snapshot is resolved lock-free rather than
+//!   convoyed. Same-process writers sharing a cloned store handle still
+//!   serialize one job at a time on the dedicated `AsyncStorageWorker`
+//!   below — #5470 tracks making the store async so they can overlap too.
+//!   The helper fails closed on a non-CAS backend rather than
+//!   blind-overwriting.
 //! - A dedicated current-thread tokio worker bridging the sync trait
 //!   surface to the async [`ScopedFilesystem`] API.
 //!
@@ -64,12 +73,22 @@ const GATES_SNAPSHOT_PATH: &str = "/resources/budget-gates.json";
 /// under [`ResourceScope::system`] rather than a tenant scope —
 /// tenant-scoped resource accounting is a future capability that would
 /// change the [`ResourceGovernorStore`] trait surface.
-#[derive(Clone)]
 pub struct FilesystemResourceGovernorStore<F>
 where
     F: RootFilesystem,
 {
     store: CasSnapshotStore<F>,
+}
+
+impl<F> Clone for FilesystemResourceGovernorStore<F>
+where
+    F: RootFilesystem,
+{
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+        }
+    }
 }
 
 impl<F> FilesystemResourceGovernorStore<F>
@@ -95,10 +114,19 @@ where
     fn update<T, U>(&self, update: U) -> Result<T, ResourceError>
     where
         T: Send + 'static,
-        U: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+        U: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
     {
         self.store
             .update::<ResourceGovernorSnapshot, T, ResourceError, _>(update)
+    }
+
+    fn inspect<T, U>(&self, inspect: U) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        U: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        self.store
+            .inspect::<ResourceGovernorSnapshot, T, ResourceError, _>(inspect)
     }
 }
 
@@ -177,15 +205,22 @@ where
         self
     }
 
-    fn with_snapshot<T, U>(&self, scope: &ResourceScope, update: U) -> Result<T, BudgetGateError>
+    fn with_snapshot<T, U>(
+        &self,
+        scope: &ResourceScope,
+        mut update: U,
+    ) -> Result<T, BudgetGateError>
     where
         T: Send + 'static,
-        U: FnOnce(&mut BudgetGateSnapshot) -> Result<T, BudgetGateError> + Send + 'static,
+        U: FnMut(&mut BudgetGateSnapshot) -> Result<T, BudgetGateError> + Send + 'static,
     {
         let retention = self.terminal_retention;
-        // The outer caller's `update` runs first, then we apply
-        // retention pruning so the result of the user's update is
-        // never re-pruned (`get` should return what was just written).
+        // The outer caller's `update` runs first, then we apply retention
+        // pruning so the result of the user's update is never re-pruned
+        // (`get` should return what was just written). The closure is
+        // re-runnable: `cas_update` re-invokes it against a freshly read
+        // snapshot on every CAS retry, so it must not consume captured
+        // state by move (leaf closures clone any captured value per call).
         let wrapped = move |snapshot: &mut BudgetGateSnapshot| -> Result<T, BudgetGateError> {
             snapshot.ensure_current()?;
             let value = update(snapshot)?;
@@ -205,7 +240,10 @@ where
     F: RootFilesystem + 'static,
 {
     fn open(&self, scope: &ResourceScope, gate: BudgetApprovalGate) -> Result<(), BudgetGateError> {
+        // Clone per invocation: `with_snapshot` may re-run this closure on a
+        // CAS retry, so it must not move `gate` out of its capture.
         self.with_snapshot(scope, move |snapshot| {
+            let gate = gate.clone();
             snapshot.gates.insert(gate.id, gate);
             Ok(())
         })
@@ -218,6 +256,8 @@ where
         outcome: BudgetGateOutcome,
         at: DateTime<Utc>,
     ) -> Result<BudgetApprovalGate, BudgetGateError> {
+        // Clone per invocation: this closure may be re-run on a CAS retry,
+        // so match on a fresh clone of `outcome` rather than moving it out.
         self.with_snapshot(scope, move |snapshot| {
             let gate = snapshot
                 .gates
@@ -226,7 +266,7 @@ where
             if gate.status.is_terminal() {
                 return Err(BudgetGateError::AlreadyResolved { id });
             }
-            gate.status = match outcome {
+            gate.status = match outcome.clone() {
                 BudgetGateOutcome::Approve {
                     increased_limit,
                     by,
@@ -281,7 +321,7 @@ where
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BudgetGateSnapshot {
     /// Schema version. Bump when the on-disk shape changes; today
@@ -315,6 +355,8 @@ impl BudgetGateSnapshot {
 }
 
 impl Snapshot for BudgetGateSnapshot {
+    const RECORD_KIND: &'static str = "budget_gate_snapshot";
+
     fn fresh() -> Self {
         Self {
             schema_version: Self::CURRENT_SCHEMA,
@@ -395,20 +437,15 @@ mod tests {
         governor
             .try_set_limit(
                 account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(1.00)),
-                    max_concurrency_slots: Some(1),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default()
+                    .set_max_usd(dec!(1.00))
+                    .set_max_concurrency_slots(1),
             )
             .unwrap();
         let reservation = governor
             .reserve(
                 scope.clone(),
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                ResourceEstimate::default().set_concurrency_slots(1),
             )
             .unwrap();
 
@@ -425,13 +462,7 @@ mod tests {
         // must be denied even though it goes through a fresh store
         // handle.
         let denied = reloaded
-            .reserve(
-                scope,
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
-            )
+            .reserve(scope, ResourceEstimate::default().set_concurrency_slots(1))
             .unwrap_err();
         assert!(matches!(denied, ResourceError::LimitExceeded { .. }));
 
@@ -462,19 +493,13 @@ mod tests {
         governor_a
             .try_set_limit(
                 account_a.clone(),
-                ResourceLimits {
-                    max_concurrency_slots: Some(1),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_concurrency_slots(1),
             )
             .unwrap();
         governor_a
             .reserve(
                 scope_a,
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                ResourceEstimate::default().set_concurrency_slots(1),
             )
             .unwrap();
         assert_eq!(
@@ -495,19 +520,13 @@ mod tests {
         governor_b
             .try_set_limit(
                 account_b.clone(),
-                ResourceLimits {
-                    max_concurrency_slots: Some(1),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_concurrency_slots(1),
             )
             .unwrap();
         let reservation = governor_b
             .reserve(
                 scope_b,
-                ResourceEstimate {
-                    concurrency_slots: Some(1),
-                    ..ResourceEstimate::default()
-                },
+                ResourceEstimate::default().set_concurrency_slots(1),
             )
             .unwrap();
         assert_eq!(
@@ -637,6 +656,41 @@ mod tests {
             BudgetGateStatus::Cancelled { .. }
         ));
         assert!(store2.list_pending(&scope).unwrap().is_empty());
+    }
+
+    #[test]
+    fn approved_gate_with_increased_decimal_limit_reloads() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scope = gate_scope("tenant-fs", "alice");
+        let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
+        let store = FilesystemBudgetGateStore::new(scoped);
+        let gate = sample_gate();
+        let id = gate.id;
+        let increased_limit = ResourceLimits::default().set_max_usd(dec!(1000.00));
+
+        store.open(&scope, gate).unwrap();
+        store
+            .resolve(
+                &scope,
+                id,
+                BudgetGateOutcome::Approve {
+                    increased_limit: increased_limit.clone(),
+                    by: UserId::new("alice").unwrap(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+
+        let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
+        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let reloaded = store2.get(&scope, id).unwrap().unwrap();
+        assert!(matches!(
+            reloaded.status,
+            BudgetGateStatus::Approved {
+                increased_limit: ref reloaded_limit,
+                ..
+            } if reloaded_limit == &increased_limit
+        ));
     }
 
     #[test]

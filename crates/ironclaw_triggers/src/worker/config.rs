@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{TriggerError, TriggerPromptMaterializer, TriggerRepository, TriggerSourceProvider};
 
-use super::{TriggerActiveRunLookup, TrustedTriggerFireSubmitter};
+use super::{TriggerActiveRunLookup, TriggerFireSettlementObserver, TrustedTriggerFireSubmitter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerPollerWorkerConfig {
@@ -24,6 +24,29 @@ impl Default for TriggerPollerWorkerConfig {
 }
 
 impl TriggerPollerWorkerConfig {
+    pub fn set_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    pub fn set_fires_per_tick(mut self, fires_per_tick: usize) -> Self {
+        self.fires_per_tick = fires_per_tick;
+        self
+    }
+
+    pub fn set_max_concurrent_fires_per_trigger(
+        mut self,
+        max_concurrent_fires_per_trigger: usize,
+    ) -> Self {
+        self.max_concurrent_fires_per_trigger = max_concurrent_fires_per_trigger;
+        self
+    }
+
+    pub fn set_claim_only_recovery_grace(mut self, claim_only_recovery_grace: Duration) -> Self {
+        self.claim_only_recovery_grace = claim_only_recovery_grace;
+        self
+    }
+
     pub fn validate(&self) -> Result<(), TriggerError> {
         if self.poll_interval.is_zero() {
             return Err(TriggerError::InvalidPollerConfig {
@@ -56,4 +79,5 @@ pub struct TriggerPollerWorkerDeps {
     pub materializer: Arc<dyn TriggerPromptMaterializer>,
     pub trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    pub fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver>,
 }

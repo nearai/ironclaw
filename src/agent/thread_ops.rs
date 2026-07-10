@@ -3245,6 +3245,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 })
             }
         }
@@ -3322,7 +3323,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             channels,
@@ -3397,6 +3397,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 });
             }
 
@@ -3411,6 +3412,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -3815,7 +3817,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             channels,
@@ -3899,7 +3900,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             channels,
@@ -4749,7 +4749,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             Arc::new(manager),
@@ -5280,8 +5279,6 @@ mod tests {
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
     }
-
-    // Approval persistence is tested via e2e_builtin_tool_coverage integration tests.
 
     // Helper function to extract the approval message without needing a full Agent instance
     fn extract_approval_message(

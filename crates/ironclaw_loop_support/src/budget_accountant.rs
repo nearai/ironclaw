@@ -25,12 +25,12 @@ use ironclaw_resources::{
     BudgetGateStore, NoOpBudgetEventSink, ResourceAccount, ResourceApprovalNeeded, ResourceError,
     ResourceGovernor, ResourceLimits,
 };
-use ironclaw_turns::TurnRunId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
     LoopModelResponse, LoopRunContext, ModelCallOutcome, ModelProfileId, ModelWorkOutcome,
     ModelWorkRequest,
 };
+use ironclaw_turns::{LoopGateRef, TurnRunId};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 
@@ -365,12 +365,18 @@ impl GovernorBackedAccountant {
                 // the store can route the gate to the right tenant
                 // path (review feedback Thermo-Nuclear #2).
                 let scope = self.resource_scope(context);
-                let _ = self.open_approval_gate(&scope, needed.as_ref());
-                Err(LoopModelGatewayError::new(
+                let gate_ref = self
+                    .open_approval_gate(&scope, needed.as_ref())
+                    .and_then(budget_gate_ref);
+                let mut error = LoopModelGatewayError::new(
                     AgentLoopHostErrorKind::BudgetApprovalRequired,
                     format!("budget approval required for {}", needed.dimension),
                 )
-                .map_err(internal_summary_error)?)
+                .map_err(internal_summary_error)?;
+                if let Some(gate_ref) = gate_ref {
+                    error = error.with_gate_ref(gate_ref);
+                }
+                Err(error)
             }
             Err(ResourceError::LimitExceeded { denial, .. }) => Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
@@ -654,6 +660,10 @@ fn internal_summary_error(reason: String) -> LoopModelGatewayError {
     .unwrap_or_else(|_| panic!("internal budget-accountant invariant: {reason}"))
 }
 
+fn budget_gate_ref(gate_id: BudgetGateId) -> Option<LoopGateRef> {
+    LoopGateRef::new(format!("gate:budget-{gate_id}")).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,6 +754,7 @@ mod tests {
 
     fn sample_request() -> LoopModelRequest {
         LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
             model_preference: None,
@@ -797,10 +808,7 @@ mod tests {
         governor
             .set_limit(
                 account,
-                ResourceLimits {
-                    max_usd: Some(dec!(0.000001)),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_usd(dec!(0.000001)),
             )
             .unwrap();
         let cost = ModelCost {
@@ -828,15 +836,13 @@ mod tests {
         governor
             .set_limit(
                 account,
-                ResourceLimits {
-                    max_usd: Some(dec!(10.00)),
-                    period: BudgetPeriod::Rolling24h,
-                    thresholds: BudgetThresholds {
+                ResourceLimits::default()
+                    .set_max_usd(dec!(10.00))
+                    .set_period(BudgetPeriod::Rolling24h)
+                    .set_thresholds(BudgetThresholds {
                         warn_at: 0.75,
                         pause_at: 0.90,
-                    },
-                    ..ResourceLimits::default()
-                },
+                    }),
             )
             .unwrap();
         let cost = ModelCost {
@@ -974,10 +980,7 @@ mod tests {
         governor
             .set_limit(
                 user_account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(100.00)),
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default().set_max_usd(dec!(100.00)),
             )
             .unwrap();
 
@@ -1011,11 +1014,9 @@ mod tests {
         governor
             .set_limit(
                 user_account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(100.00)),
-                    period: BudgetPeriod::Rolling24h,
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default()
+                    .set_max_usd(dec!(100.00))
+                    .set_period(BudgetPeriod::Rolling24h),
             )
             .unwrap();
         let cost = ModelCost {
@@ -1065,11 +1066,9 @@ mod tests {
         governor
             .set_limit(
                 user_account.clone(),
-                ResourceLimits {
-                    max_usd: Some(dec!(10_000.00)),
-                    period: BudgetPeriod::Rolling24h,
-                    ..ResourceLimits::default()
-                },
+                ResourceLimits::default()
+                    .set_max_usd(dec!(10_000.00))
+                    .set_period(BudgetPeriod::Rolling24h),
             )
             .unwrap();
         let cost = ModelCost {

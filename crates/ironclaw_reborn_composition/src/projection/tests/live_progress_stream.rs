@@ -4,7 +4,7 @@ use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
         CapabilityFailureKind, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopSafeSummary,
     },
 };
 use std::sync::Arc;
@@ -92,6 +92,77 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
                     ))
         )
     }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_drains_live_assistant_text_projection_from_update_source() {
+    let fixture = live_projection_fixture("webui-text");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let secret_like_token = "sk-proj-abcdefghijklmnopqrstuvwxyz123456";
+
+    for safe_text in [
+        "partial answer".to_string(),
+        format!("partial answer with {secret_like_token}"),
+    ] {
+        fixture
+            .sink
+            .publish_loop_milestone(LoopHostMilestone {
+                scope: scope.clone(),
+                actor: None,
+                turn_id: TurnId::new(),
+                run_id,
+                loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+                kind: LoopHostMilestoneKind::ModelTextDelta { safe_text },
+            })
+            .await
+            .unwrap();
+    }
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let expected_id = format!("text:{run_id}");
+    let text_bodies = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string() =>
+            {
+                state.items.iter().find_map(|item| match item {
+                    ProductProjectionItem::Text {
+                        id,
+                        run_id: observed_run_id,
+                        body,
+                    } if id == &expected_id && *observed_run_id == Some(run_id) => {
+                        Some(body.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        text_bodies,
+        vec![
+            "partial answer".to_string(),
+            "partial answer with [redacted]".to_string()
+        ],
+        "assistant text should drain as incremental updates to one stable text item"
+    );
+    let wire = serde_json::to_string(&events).unwrap();
+    assert!(!wire.contains(secret_like_token));
 }
 
 // The post-run skill-learning notifier publishes a learned-skill bubble
@@ -284,6 +355,95 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
     );
 }
 
+// Regression: multiple `LiveProjectionPublisher` instances created from the
+// same `RebornProjectionServices` over a run's lifetime (e.g. the milestone
+// sink's publisher plus the post-run skill-learning publisher, created seconds
+// later) must SHARE one monotonic live sequence counter. If each publisher
+// owned its own counter, two live items published by different publishers would
+// collide on the same projection cursor (both starting at sequence 1), and an
+// SSE client resuming from the first item's cursor would silently skip the
+// second. Guards the shared `Arc<AtomicU64>` wiring across
+// `build_reborn_projection_services` and `live_projection_publisher` — a
+// revert to a per-publisher `AtomicU64::new(0)` passes every other live-progress
+// test but fails this one.
+#[tokio::test]
+async fn live_publishers_from_same_services_share_monotonic_sequence() {
+    let fixture = live_projection_fixture("webui-shared-sequence");
+    let user_id = fixture.user_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+
+    let reasoning = |body: &str| LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: body.to_string(),
+        },
+    };
+
+    // Publisher A (the fixture's) emits one live reasoning item.
+    fixture
+        .sink
+        .publish_loop_milestone(reasoning("from publisher A"))
+        .await
+        .unwrap();
+
+    // A second, independently created publisher emits another. In production
+    // this is a fresh publisher minted later in the run's lifetime.
+    let sink_b = fixture
+        .services
+        .with_live_progress_milestone_sink_for_publisher(
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            fixture.services.live_projection_publisher(user_id.clone()),
+        );
+    sink_b
+        .publish_loop_milestone(reasoning("from publisher B"))
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let thinking_cursors = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Thinking { body, .. }
+                            if body == "from publisher A" || body == "from publisher B"
+                    ))
+            )
+        })
+        .map(|event| event.projection_cursor().clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thinking_cursors.len(),
+        2,
+        "both publishers' live reasoning items must reach the stream on their \
+         own cursor: {events:#?}"
+    );
+    assert_ne!(
+        thinking_cursors[0], thinking_cursors[1],
+        "independently created publishers must share one monotonic sequence, so \
+         their live items land on distinct projection cursors"
+    );
+}
+
 #[tokio::test]
 async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
     let fixture = live_projection_fixture("webui-live-order");
@@ -402,7 +562,11 @@ async fn webui_event_stream_projects_live_tool_failure() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: CapabilityFailureKind::Authorization,
+                reason_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary: Some(
+                    LoopSafeSummary::new("invalid JSON: expected value at line 1")
+                        .expect("safe summary"),
+                ),
             },
         })
         .await
@@ -440,5 +604,152 @@ async fn webui_event_stream_projects_live_tool_failure() {
     assert_eq!(&activity.capability_id, &capability_id);
     assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
     assert_eq!(activity.runtime.as_ref(), Some(&RuntimeKind::FirstParty));
-    assert_eq!(activity.error_kind.as_deref(), Some("authorization"));
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    // Regression: the sanitized failure summary on the milestone must reach the
+    // live activity view's `error_detail`, so the per-tool UI card shows the
+    // real reason instead of only the bare kind.
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some("invalid JSON: expected value at line 1")
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_redacts_live_tool_failure_filename_detail() {
+    let fixture = live_projection_fixture("webui-live-tool-failed-redacted");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.read_file").unwrap();
+    let activity_id = CapabilityActivityId::new();
+
+    fixture
+        .sink
+        .publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityFailed {
+                activity_id,
+                capability_id: capability_id.clone(),
+                provider: None,
+                runtime: Some(RuntimeKind::FirstParty),
+                reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: Some(
+                    LoopSafeSummary::new("failed to read AGENTS.md").expect("safe summary"),
+                ),
+            },
+        })
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let activity = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => Some(state.items.iter()),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|item| match item {
+            ProductProjectionItem::CapabilityActivity(activity) => Some(activity),
+            _ => None,
+        })
+        .expect("live failed activity");
+
+    assert_eq!(
+        activity.invocation_id,
+        InvocationId::from_uuid(activity_id.as_uuid())
+    );
+    assert_eq!(activity.thread_id.as_ref(), Some(&thread_id));
+    assert_eq!(&activity.capability_id, &capability_id);
+    assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("operation_failed"));
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some("can't access your workspace file")
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_preserves_redacted_loop_safe_failure_detail() {
+    let fixture = live_projection_fixture("webui-live-tool-failed-redacted-safe-summary");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.http").unwrap();
+    let activity_id = CapabilityActivityId::new();
+
+    fixture
+        .sink
+        .publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityFailed {
+                activity_id,
+                capability_id: capability_id.clone(),
+                provider: None,
+                runtime: Some(RuntimeKind::FirstParty),
+                reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: Some(LoopSafeSummary::capability_failure_summary(
+                    "provider returned ghp_live_secret",
+                )),
+            },
+        })
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let activity = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => Some(state.items.iter()),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|item| match item {
+            ProductProjectionItem::CapabilityActivity(activity) => Some(activity),
+            _ => None,
+        })
+        .expect("live failed activity");
+
+    assert_eq!(
+        activity.invocation_id,
+        InvocationId::from_uuid(activity_id.as_uuid())
+    );
+    assert_eq!(activity.thread_id.as_ref(), Some(&thread_id));
+    assert_eq!(&activity.capability_id, &capability_id);
+    assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+    assert_eq!(activity.error_kind.as_deref(), Some("operation_failed"));
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some("the tool failure details were redacted")
+    );
 }

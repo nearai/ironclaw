@@ -44,6 +44,7 @@ mod first_party;
 mod first_party_tools;
 mod http_body;
 mod invocation_services;
+mod latency;
 pub mod memory_context;
 mod obligations;
 mod planner;
@@ -70,7 +71,8 @@ pub use egress::{
 };
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,
-    discover_extensions_tolerant_bounded, discover_extensions_with_default_host_api_contracts,
+    discover_extensions_tolerant_bounded, discover_extensions_tolerant_bounded_with_contracts,
+    discover_extensions_with_default_host_api_contracts,
     discover_extensions_with_default_host_api_contracts_and_catalog,
 };
 pub use first_party::{
@@ -84,7 +86,8 @@ pub use first_party_tools::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
@@ -693,8 +696,14 @@ mod raw_http_diagnostic_policy_tests {
 }
 
 /// Stable, sanitized failure categories.
+///
+// Deliberately NOT `#[non_exhaustive]`: the `Unknown` variant is the open-set
+// escape hatch for unrecognized runtime failures, so the attribute would only
+// force classifiers to keep a wildcard arm that silently buckets a new named
+// variant. Without it, disposition/classification matches are exhaustive and a
+// new named variant fails to compile until classified. See
+// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RuntimeFailureKind {
     Authorization,
     Backend,
@@ -712,7 +721,6 @@ pub enum RuntimeFailureKind {
     Resource,
     Transient,
     Unavailable,
-    Unknown,
 }
 
 impl RuntimeFailureKind {
@@ -735,7 +743,6 @@ impl RuntimeFailureKind {
             Self::Resource => "resource",
             Self::Transient => "transient",
             Self::Unavailable => "unavailable",
-            Self::Unknown => "unknown",
         }
     }
 }
