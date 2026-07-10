@@ -338,34 +338,25 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
             "capability_internal",
             "The run failed because a tool returned an internal error. Retry the run, and check the tool integration if it keeps happening.",
         ),
-        (
-            "compaction_invalid_cut_point",
-            "The run failed because context compaction selected an invalid cut point. Retry the run, and contact support if it keeps happening.",
-        ),
-        (
-            "compaction_unsupported_mode",
-            "The run failed because the requested context compaction mode is unsupported. Retry with a shorter request or start a new thread.",
-        ),
-        (
-            "compaction_input_too_large",
-            "The run failed because context compaction input was too large. Retry with a shorter request or start a new thread.",
-        ),
-        (
-            "compaction_security_rejected",
-            "The run failed because context compaction was rejected by a safety check. Change the request and try again.",
-        ),
-        (
-            "compaction_inference_failed",
-            "The run failed because context compaction could not complete. Retry with a shorter request or start a new thread.",
-        ),
-        (
-            "compaction_cancelled",
-            "The run stopped while context compaction was being cancelled. Retry the run if you still need a response.",
-        ),
-        (
-            "compaction_persistence_failed",
-            "The run failed while saving compacted context. Retry the run, and contact support if saving still fails.",
-        ),
+        // Note: the granular `compaction_*` categories
+        // (compaction_invalid_cut_point, compaction_unsupported_mode,
+        // compaction_input_too_large, compaction_security_rejected,
+        // compaction_inference_failed, compaction_cancelled,
+        // compaction_persistence_failed) are deliberately absent from this
+        // table. They used to be minted by
+        // `ironclaw_agent_loop::executor::prompt::compaction_failure_category`
+        // for a terminal `CompactionUnavailable` exit. Issue #5838 / PR #5895
+        // ("fix: continue after compaction failure") changed non-cancellation
+        // compaction failures from a terminal exit to a deferred candidate
+        // path that continues the run (see
+        // `.issue-work/5838-compaction-robustness-design.md` section 5,
+        // "Correct Non-Terminal Continuation") and deleted
+        // `compaction_failure_category` entirely — the agent loop no longer
+        // mints these categories. `crate::failure_summary` keeps display
+        // support for them so historical terminal-failure records written
+        // before this fix still render correctly, but the source-parity
+        // guard in this test must track only what the agent loop can mint
+        // today.
     ];
 
     // Parity guard: the hardcoded table above must stay exhaustive against the
