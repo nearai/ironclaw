@@ -37,7 +37,7 @@ export function ToastViewport() {
             key={item.id}
             role="status"
             className={[
-              "pointer-events-auto flex items-center gap-2 rounded-xl border bg-[var(--v2-surface)] px-3.5 py-2.5 text-sm shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]",
+              "pointer-events-auto flex items-center gap-2 rounded-xl border bg-[var(--v2-surface)] px-3.5 py-2.5 text-sm shadow-[var(--v2-shadow-menu)]",
               TONE[item.tone] || TONE.info,
             ].join(" ")}
           >

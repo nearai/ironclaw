@@ -228,6 +228,56 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         })
     }
 
+    async fn get_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        run_limit: usize,
+    ) -> Result<Option<RebornAutomationInfo>, RebornServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        // Direct id lookup — O(1), and (unlike the list) NOT filtered by state
+        // or a page cap, so completed one-shots and automations past the list
+        // page resolve for their owner.
+        let record = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository
+                .get_trigger(caller.tenant_id.clone(), trigger_id),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        // `get_trigger` scopes by tenant + id only. Apply the same caller
+        // ownership predicate `list_scoped_triggers` enforces (tenant + user +
+        // agent + project) so a caller cannot read another user's automation by
+        // id. A visibility miss is `Ok(None)` → 404, indistinguishable from a
+        // nonexistent id.
+        if !trigger_is_caller_visible(&record, &caller) {
+            return Ok(None);
+        }
+        let runs = if run_limit == 0 {
+            Vec::new()
+        } else {
+            tokio::time::timeout_at(
+                deadline,
+                self.trigger_repository.list_trigger_run_history_batch(
+                    caller.tenant_id.clone(),
+                    &[record.trigger_id],
+                    run_limit,
+                ),
+            )
+            .await
+            .map_err(|_| backend_timeout_error())?
+            .map_err(map_trigger_error)?
+            .remove(&record.trigger_id)
+            .unwrap_or_default()
+        };
+        Ok(Some(automation_info_from_record(record, &runs)))
+    }
+
     async fn resolve_run_thread_scope(
         &self,
         caller: ProductAgentBoundCaller,

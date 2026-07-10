@@ -775,7 +775,20 @@ registerPack("en", {
   "automations.eyebrow": "Scheduled work",
   "automations.title": "Automations",
   "automations.description": "Scheduled automations only.",
+  "automations.subtext.all":
+    "Scheduled jobs that watch, summarize, and act for you in the background.",
+  "automations.subtext.active":
+    "Live schedules, armed and waiting for their next run.",
+  "automations.subtext.running":
+    "Automations doing work right now — each run opens as a chat you can inspect.",
+  "automations.subtext.failures":
+    "Automations whose recent runs hit errors and may need your attention.",
+  "automations.subtext.paused":
+    "Schedules on hold — they keep their setup but won't fire until resumed.",
+  "automations.subtext.completed":
+    "One-time automations that did their job and retired.",
   "automations.filterLabel": "Automation status filter",
+  "automations.filter.prefix": "Filter",
   "automations.filter.all": "All",
   "automations.filter.active": "Active",
   "automations.filter.running": "Running",
@@ -817,7 +830,7 @@ registerPack("en", {
   "automations.lastStatus.error": "Error",
   "automations.lastStatus.running": "Running",
   "automations.lastStatus.none": "No result",
-  "automations.runStatus.ok": "OK",
+  "automations.runStatus.ok": "Success",
   "automations.runStatus.error": "Error",
   "automations.runStatus.running": "Running",
   "automations.runStatus.unknown": "Unknown",
@@ -831,6 +844,7 @@ registerPack("en", {
   "automations.successRate.none": "No completed runs",
   "automations.successRate.visible": "{percent}% visible runs",
   "automations.delivery.eyebrow": "Delivery defaults",
+  "automations.delivery.setDefaults": "Set defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer":
     "Choose where automation results are delivered when a triggered run finishes.",
@@ -838,7 +852,7 @@ registerPack("en", {
   "automations.delivery.changeTarget": "Change target",
   "automations.delivery.availableTargets": "Available targets",
   "automations.delivery.none": "None",
-  "automations.delivery.webOption": "Web app only (no external delivery)",
+  "automations.delivery.webOption": "Web app only",
   "automations.delivery.webOptionDesc":
     "Results are stored in the run history. No DM or notification is sent.",
   "automations.delivery.unavailableNotice": "Slack DM — not available",
@@ -872,6 +886,7 @@ registerPack("en", {
   "automations.summary.filterAction": "Show {label}",
   "automations.summary.nextRun": "Next run",
   "automations.summary.none": "None",
+  "automations.summary.nextRunDue": "Due now",
   "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",
   "automations.empty.matchingTitle": "No matching automations",
   "automations.empty.matchingDescription": "Try a different status filter.",
@@ -899,13 +914,13 @@ registerPack("en", {
   "automations.table.noRuns": "No runs",
   "automations.table.status": "Status",
   "automations.runs.total": "Recent runs: {count}",
-  "automations.runs.ok": "OK: {count}",
+  "automations.runs.ok": "Success: {count}",
   "automations.runs.error": "Failed: {count}",
   "automations.runs.running": "Running: {count}",
   "automations.runs.unknown": "Unknown: {count}",
   "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.status.running": "Running",
-  "automations.status.needsReview": "Needs review",
+  "automations.status.needsReview": "To review",
   "automations.detail.emptyTitle": "Select an automation",
   "automations.detail.emptyDescription":
     "Choose a schedule to inspect recent runs.",
@@ -917,9 +932,20 @@ registerPack("en", {
   "automations.detail.recentRuns": "Recent runs",
   "automations.detail.noRuns": "This automation has not produced any visible runs yet.",
   "automations.detail.openRun": "Open run",
+  "automations.detail.openFullView": "Open full view",
+  "automations.detail.backToList": "Back to automations",
+  "automations.detail.viewLogs": "View logs",
+  "automations.detail.notFoundTitle": "Automation not found",
+  "automations.detail.notFoundDescription":
+    "This automation is no longer available, or you don't have access to it.",
   "automations.detail.thread": "thread",
   "automations.detail.run": "run",
   "automations.detail.noThread": "No thread attached",
+  "automations.row.lastRun": "Last run",
+  "automations.sort.label": "Sort",
+  "automations.runs.countLabel": "recent runs",
+  "automations.detail.idLabel": "ID",
+  "automations.detail.copyId": "Copy ID",
 
   // Routines page
   "routines.explorer": "Tasks",

@@ -121,7 +121,7 @@ export function NotificationCenter({ state }) {
             tabIndex={-1}
             className={cn(
               "fixed inset-x-0 bottom-0 z-[9999] max-h-[78dvh] overflow-hidden",
-              "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_24px_70px_-24px_rgba(0,0,0,0.8)]",
+              "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-menu)]",
               "lg:inset-auto lg:right-12 lg:top-16 lg:w-[24rem] lg:max-h-[min(70vh,32rem)] lg:rounded-[12px]"
             )}
           >

@@ -26,55 +26,66 @@
    ════════════════════════════════════════════════════════════════════ */
 
 /* ── Light theme ─────────────────────────────────────────────────── */
+/* Values follow the design-system neutral zinc palette (PR #5563):
+   surfaces are achromatic — the previous blue-tinted washes read as
+   "everything is selected" — and status/accent colors come from the
+   nux light ramps so chips stay legible on white. */
 :root {
   color-scheme: light;
 
   /* Canvas / surfaces */
-  --v2-canvas:        #f4f7fb;
+  --v2-canvas:        #f5f5f7;
   --v2-canvas-strong: #ffffff;
   --v2-surface:       #ffffff;
-  --v2-surface-soft:  #eef4fa;
-  --v2-surface-muted: #e4edf5;
+  --v2-surface-soft:  #f5f5f7;
+  --v2-surface-muted: #ebebed;
 
   /* Card tokens — used by Card component */
-  --v2-card-bg:     rgba(255, 255, 255, 0.92);
-  --v2-card-border: rgba(19, 45, 68, 0.12);
-  --v2-card-shadow: none;
+  --v2-card-bg:     #ffffff;
+  --v2-card-border: rgba(0, 0, 0, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+
+  /* Elevation scale for floating surfaces. Deliberately restrained
+     (Linear/Vercel-style): a hairline border does most of the separation
+     work and the shadow only lifts the surface slightly. Menus/popovers/
+     tooltips share --v2-shadow-menu; modal dialogs sit a step higher. */
+  --v2-shadow-menu:  0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --v2-shadow-modal: 0 16px 40px -8px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
 
   /* Panel border (nav items, dividers, form borders) */
-  --v2-panel-border: rgba(19, 45, 68, 0.12);
+  --v2-panel-border: rgba(0, 0, 0, 0.08);
 
   /* Rail (input bg in dark) */
-  --v2-rail:    #edf3f8;
+  --v2-rail:    #f5f5f7;
   --v2-input-bg: #ffffff;
 
   /* Typography */
-  --v2-text:        #243244;
-  --v2-text-strong: #0f1720;
-  --v2-text-muted:  #5f7183;
-  --v2-text-faint:  #8a9aab;
+  --v2-text:        #1a1a2e;
+  --v2-text-strong: #090909;
+  --v2-text-muted:  #555555;
+  --v2-text-faint:  #999999;
   --v2-inverse:     #ffffff;
-  --v2-ink:         #0f1720;
+  --v2-ink:         #090909;
   --v2-chat-readable-max-width: 85%;
 
   /* Controls */
-  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%235f7183%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23555555%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
 
-  /* Accent — signal blue */
-  --v2-accent:       #2e9de2;
-  --v2-accent-strong:#1678bd;
-  --v2-accent-soft:  rgba(76, 167, 230, 0.12);
-  --v2-accent-text:  #146fae;
+  /* Accent — IronClaw brand blue (nux light ramp) */
+  --v2-accent:       #2882c8;
+  --v2-accent-strong:#1f6ca8;
+  --v2-accent-soft:  rgba(40, 130, 200, 0.1);
+  --v2-accent-text:  #2882c8;
 
-  /* Semantic colours */
-  --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: #087a5d;
-  --v2-warning-soft:  rgba(245, 193, 91, 0.18);
-  --v2-warning-text:  #8b5b00;
-  --v2-danger-soft:   rgba(255, 100, 128, 0.12);
-  --v2-danger-text:   #b42342;
-  --v2-info-soft:     rgba(76, 167, 230, 0.12);
-  --v2-info-text:     #146fae;
+  /* Semantic colours — nux light status set */
+  --v2-positive-soft: rgba(5, 150, 105, 0.1);
+  --v2-positive-text: #059669;
+  --v2-warning-soft:  rgba(217, 119, 6, 0.1);
+  --v2-warning-text:  #d97706;
+  --v2-danger-soft:   rgba(220, 38, 38, 0.1);
+  --v2-danger-text:   #dc2626;
+  --v2-info-soft:     rgba(37, 99, 235, 0.1);
+  --v2-info-text:     #2563eb;
 
   background: var(--v2-canvas);
 }
@@ -89,10 +100,18 @@
   --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.03));
   --v2-surface-muted: rgba(255, 255, 255, 0.07);
 
-  /* Card tokens in dark: transparent border + drop shadow */
+  /* Card tokens in dark: a hairline border does the separation work and
+     the shadow stays minimal — dark surfaces read through contrast, not
+     large blurs. */
   --v2-card-bg:     #1b1b1f;
-  --v2-card-border: rgba(255, 255, 255, 0);
-  --v2-card-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  --v2-card-border: rgba(255, 255, 255, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+
+  /* Elevation scale in dark: shadows barely register on a near-black
+     canvas, so floating surfaces lean on their border + lighter fill and
+     keep only a soft, tight shadow for depth. */
+  --v2-shadow-menu:  0 4px 16px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --v2-shadow-modal: 0 16px 48px -8px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
 
   --v2-panel-border: rgba(255, 255, 255, 0.1);
 
@@ -127,6 +146,68 @@
   color-scheme: light;
 }
 
+/* ── Structural tokens (theme-independent) ───────────────────────── */
+/* Control density + radii from the design system (PR #5563, commit
+   2f8da38de): compact Linear-like control heights shared by buttons
+   and toolbar controls so mixed rows align. `--v2-on-accent` is the
+   text colour on accent fills — a token (not the `text-white` utility,
+   which the compat shim below remaps to theme ink). */
+:root {
+  /* Full nux radius ramp (mirrors the design-system branch): xs inline
+     chips, sm compact controls, md default controls, lg cards + hero
+     CTAs, xl large cards, 2xl modals/sheets, full pills. */
+  --v2-radius-xs:   6px;
+  --v2-radius-sm:   8px;
+  --v2-radius-md:   10px;
+  --v2-radius-lg:   16px;
+  --v2-radius-xl:   20px;
+  --v2-radius-2xl:  24px;
+  --v2-radius-full: 9999px;
+
+  --v2-control-h-sm: 28px;  /* toolbars, table rows, chips */
+  --v2-control-h-md: 32px;  /* default controls */
+  --v2-control-h-lg: 36px;  /* prominent CTAs, hero forms */
+  --v2-control-px-sm: 10px;
+  --v2-control-px-md: 12px;
+  --v2-control-px-lg: 16px;
+
+  --v2-on-accent: #ffffff;
+
+  /* Tokens consumed by the shared design-system components
+     (button.tsx / input.tsx adopted verbatim from the design-system
+     branch, PR #5563). Values mirror that branch's app.css exactly so
+     the shared files render identically on both branches. */
+  --v2-font-size-label:      0.6875rem;  /* 11px  tags, badges, eyebrows */
+  --v2-font-size-caption:    0.75rem;    /* 12px  hints, meta, errors */
+  --v2-font-size-body-sm:    0.8125rem;  /* 13px  controls + body (mobile) */
+  --v2-font-size-body:       0.875rem;   /* 14px  controls + body (desktop) */
+
+  --v2-duration-instant: 100ms;  /* hover fills, color shifts */
+  --v2-duration-exit:    120ms;  /* menu/overlay exits — quicker than entry */
+  --v2-duration-fast:    150ms;  /* borders, small transforms, press */
+  --v2-duration-menu:    180ms;  /* dropdown/popover entrances */
+  --v2-duration-base:    250ms;  /* panel/sheet/modal entrances */
+  --v2-duration-slow:    400ms;  /* large surface transitions */
+
+  /* Scrims — consumed by the shared Modal (design-system branch parity). */
+  --v2-scrim:      rgba(0, 0, 0, 0.55);
+  --v2-scrim-soft: rgba(0, 0, 0, 0.3);
+  --v2-ease-standard:     ease;
+  --v2-ease-in-out:       cubic-bezier(0.4, 0, 0.2, 1);
+  --v2-ease-out-expo:     cubic-bezier(0.16, 1, 0.3, 1);   /* entrances */
+
+  --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+
+  /* Action-button language (ironclaw.com / nux parity). */
+  --v2-btn-primary-bg:
+    radial-gradient(ellipse 100% 100% at 50% 130%, #4ca7e6 0%, #2882c8 65%);
+  --v2-btn-primary-bg-hover:
+    radial-gradient(ellipse 200% 220% at 50% 110%, #5bbaf5 0%, #2882c8 60%);
+  --v2-btn-primary-border: rgba(76, 167, 230, 0.72);
+  --v2-btn-secondary-border: rgba(76, 167, 230, 0.6);
+  --v2-btn-secondary-bg: rgba(76, 167, 230, 0.05);
+}
+
 /* ── Global resets ───────────────────────────────────────────────── */
 
 *, *::before, *::after {
@@ -151,9 +232,16 @@ body {
   color: var(--v2-text);
 }
 
-/* Font inheritance for form elements */
-button, input, select, textarea {
-  font: inherit;
+/* Font inheritance for form elements.
+   IMPORTANT: layered as `base` — unlayered author CSS outranks every
+   Tailwind layer (v4 emits utilities inside @layer utilities), so an
+   unlayered `font: inherit` here silently vetoed the design-system
+   font-size/weight utilities on <button>/<input> (buttons rendered at
+   the inherited 15px/400 instead of their tokenized control scale). */
+@layer base {
+  button, input, select, textarea {
+    font: inherit;
+  }
 }
 
 button {

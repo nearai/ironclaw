@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import {
+  automationDescription,
   automationSummary,
   filterAutomations,
   normalizeAutomations as normalizeAutomationsRaw,
@@ -390,7 +391,8 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.equal(automations[0].last_status_label, "Error");
   assert.equal(automations[0].last_status_tone, "danger");
   assert.equal(automations[0].primary_status_label, "Running");
-  assert.equal(automations[0].primary_status_tone, "info");
+  // Running is presented as live/healthy green (signal), not info blue.
+  assert.equal(automations[0].primary_status_tone, "signal");
   // Post-acceptance statuses (running/ok/error) must produce a chat_path.
   assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
   assert.equal(automations[0].recent_runs[1].chat_path, "/chat/thread-error");
@@ -781,4 +783,33 @@ test("once label reflects source timezone wall-clock, not UTC", () => {
 
   // LA label must carry the LA tz parenthetical
   assert.match(laLabel, /\(America\/Los_Angeles\)/);
+});
+
+test("automationDescription strips schedule clauses and sentence-cases the rest", () => {
+  assert.equal(
+    automationDescription({
+      prompt: "Ping the health endpoint every minute and alert on failures.",
+    }),
+    "Ping the health endpoint and alert on failures"
+  );
+  assert.equal(
+    automationDescription({
+      prompt:
+        "Every weekday at 9am, send me a digest of overnight mentions, tickets, and calendar changes.",
+    }),
+    "Send me a digest of overnight mentions, tickets, and calendar changes"
+  );
+});
+
+test("automationDescription returns null instead of raw prompts when unparseable", () => {
+  // No prompt attached (the wire payload does not carry one today).
+  assert.equal(automationDescription({}), null);
+  assert.equal(automationDescription({ prompt: "   " }), null);
+  // Nothing left once the schedule clause is stripped.
+  assert.equal(automationDescription({ prompt: "every 5 minutes" }), null);
+  // A paragraph-length first sentence is not a one-line summary.
+  assert.equal(
+    automationDescription({ prompt: `${"very ".repeat(40)}long prompt` }),
+    null
+  );
 });

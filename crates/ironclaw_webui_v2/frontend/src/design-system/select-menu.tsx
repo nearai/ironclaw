@@ -1,7 +1,9 @@
 // @ts-nocheck
 import React from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { cn } from "../utils/cn";
 import { Icon } from "./icons";
+import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
 
 let nextSelectMenuId = 0;
 const openSelectMenuEntries = new Set();
@@ -19,6 +21,13 @@ const toneDotClasses = {
 const alignClasses = {
   left: "left-0",
   right: "right-0",
+};
+
+/* Origin-aware entrance: the menu grows out of the trigger's corner, not
+   its own center (Emil Kowalski: popovers scale from their trigger). */
+const alignOriginClasses = {
+  left: "origin-top-left",
+  right: "origin-top-right",
 };
 
 function createSelectMenuId() {
@@ -153,6 +162,10 @@ function ToneDot({ tone }) {
  * `onChange` receives the selected option value. Root passthrough props are
  * limited to `id`, `title`, `data-*`, and `aria-*`; event handlers are
  * intentionally not spread.
+ *
+ * `prefix` renders a muted inline label inside the trigger, before the
+ * selected value (e.g. "Sort  Next run") — use it instead of an external
+ * label so the control stays self-describing in dense toolbars.
  */
 export function SelectMenu({
   value,
@@ -168,12 +181,14 @@ export function SelectMenu({
   optionClassName = "",
   align = "right",
   placeholder = "",
+  prefix = "",
   ...rest
 }) {
   const [open, setOpen] = React.useState(false);
   const [activeIndex, setActiveIndex] = React.useState(() =>
     selectedOptionIndex(options, value)
   );
+  const reducedMotion = useReducedMotion();
   const rootRef = React.useRef(null);
   const buttonRef = React.useRef(null);
   const idRef = React.useRef("");
@@ -310,7 +325,7 @@ export function SelectMenu({
         className={cn(
           "inline-flex h-8 w-full items-center justify-between gap-2 rounded-[8px] border",
           "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5",
-          "font-mono text-xs text-[var(--v2-text-strong)] shadow-none transition-colors",
+          "font-mono text-[11px] text-[var(--v2-text-strong)] shadow-none transition-colors",
           "hover:bg-[var(--v2-surface-muted)]",
           "focus-visible:outline-none focus-visible:ring-2",
           "focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_32%,transparent)]",
@@ -319,6 +334,9 @@ export function SelectMenu({
         )}
       >
         <span className="flex min-w-0 items-center gap-2">
+          {prefix && (
+            <span className="shrink-0 text-[var(--v2-text-faint)]">{prefix}</span>
+          )}
           <ToneDot tone={selectedOption?.tone} />
           <span className="truncate">{selectedLabel}</span>
         </span>
@@ -331,17 +349,32 @@ export function SelectMenu({
         />
       </button>
 
+      <AnimatePresence>
       {open && (
-        <div
+        <motion.div
           id={listboxId}
           role="listbox"
+          // Menu vocabulary: slight scale (0.96 → 1, never from 0) + fade
+          // from the trigger's corner; exit is quicker than entry. Under
+          // prefers-reduced-motion the movement drops and only the fade
+          // remains (gentler, not zero).
+          initial={reducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96 }}
+          animate={reducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1 }}
+          exit={{
+            opacity: 0,
+            ...(reducedMotion ? {} : { scale: 0.98 }),
+            transition: { duration: MOTION_DURATION.exit, ease: MOTION_EASE_OUT },
+          }}
+          transition={{ duration: MOTION_DURATION.menu, ease: MOTION_EASE_OUT }}
           className={cn(
             "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-[10px]",
             "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))]",
             "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_92%,var(--v2-surface))] p-1",
-            "shadow-[0_30px_72px_-18px_rgba(0,0,0,0.86),0_10px_24px_-18px_rgba(0,0,0,0.68)]",
-            "ring-1 ring-[color-mix(in_srgb,var(--v2-text-strong)_8%,transparent)]",
+            // Elevation comes from the shared menu token: the hairline border
+            // above does the separation, the shadow only lifts the surface.
+            "shadow-[var(--v2-shadow-menu)]",
             alignClasses[effectiveAlign],
+            alignOriginClasses[effectiveAlign],
             menuClassName
           )}
         >
@@ -361,7 +394,7 @@ export function SelectMenu({
                 onClick={() => chooseOption(option)}
                 className={cn(
                   "flex w-full items-center justify-between gap-3 rounded-[7px] px-2.5 py-2",
-                  "text-left font-mono text-xs text-[var(--v2-text)] transition-colors",
+                  "text-left font-mono text-[11px] text-[var(--v2-text)] transition-colors",
                   "focus-visible:outline-none",
                   "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",
                   "disabled:cursor-not-allowed disabled:opacity-50",
@@ -386,8 +419,9 @@ export function SelectMenu({
               </button>
             );
           })}
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </div>
   );
 }

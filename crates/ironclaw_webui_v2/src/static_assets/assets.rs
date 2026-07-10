@@ -417,29 +417,46 @@ mod tests {
         assert!(api.contains("/outbound/targets"));
 
         let page = source_text("pages/automations/automations-page.tsx");
-        assert!(page.contains("AutomationsSummaryStrip"));
-        assert!(page.contains("AutomationDeliveryDefaultsPanel"));
         assert!(page.contains("useOutboundDeliveryDefaults"));
+        // Delivery defaults moved off the page into a modal opened from the list
+        // header; the page now threads the hook state down as `deliveryState`.
+        assert!(page.contains("deliveryState"));
         assert!(page.contains("AutomationsList"));
 
+        // The list owns the summary strip (rendered under the header), plus the
+        // delivery entrypoint + modal.
+        let list = source_text("pages/automations/components/automations-list.tsx");
+        assert!(list.contains("AutomationsSummaryStrip"));
+        assert!(list.contains("AutomationDeliveryDefaultsModal"));
+
+        // The delivery modal renders the shared delivery form content.
+        let defaults_modal =
+            source_text("pages/automations/components/automation-delivery-defaults-modal.tsx");
+        assert!(defaults_modal.contains("DeliveryDefaultsContent"));
+
+        // Smart-refetch wiring lives in the hook.
         let automations_hook = source_text("pages/automations/hooks/useAutomations.ts");
         assert!(automations_hook.contains("AUTOMATIONS_BASE_REFETCH_MS"));
         assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
         assert!(automations_hook.contains("query.refetch()"));
 
-        let list = source_text("pages/automations/components/automations-list.tsx");
-        assert!(list.contains("primary_status_label"));
-        assert!(list.contains("primary_status_tone"));
+        // List rows render the unified status pill from the presenter fields.
+        let row = source_text("pages/automations/components/automation-row.tsx");
+        assert!(row.contains("primary_status_label"));
+        assert!(row.contains("primary_status_tone"));
 
-        let detail_panel = source_text("pages/automations/components/automation-detail-panel.tsx");
-        assert!(detail_panel.contains("onPauseAutomation"));
-        assert!(detail_panel.contains("onResumeAutomation"));
-        assert!(detail_panel.contains("onDeleteAutomation"));
-        assert!(detail_panel.contains("automation.state === \"active\""));
-        assert!(detail_panel.contains("automation.state === \"scheduled\""));
-        assert!(detail_panel.contains("primary_status_label"));
-        assert!(detail_panel.contains("primary_status_tone"));
-        assert!(detail_panel.contains("window.confirm"));
+        // The redesign surfaces pause/resume/delete from the per-automation
+        // detail modal (the legacy side panel was replaced by the modal +
+        // full-page detail view).
+        let detail_modal = source_text("pages/automations/components/automation-detail-modal.tsx");
+        assert!(detail_modal.contains("onPauseAutomation"));
+        assert!(detail_modal.contains("onResumeAutomation"));
+        assert!(detail_modal.contains("onDeleteAutomation"));
+        assert!(detail_modal.contains("automation.state === \"active\""));
+        assert!(detail_modal.contains("automation.state === \"scheduled\""));
+        assert!(detail_modal.contains("primary_status_label"));
+        assert!(detail_modal.contains("primary_status_tone"));
+        assert!(detail_modal.contains("window.confirm"));
 
         let app_bundle = bundled_javascript();
         let app_bundle_contains_encoded_automation_route = |suffix: &str| {

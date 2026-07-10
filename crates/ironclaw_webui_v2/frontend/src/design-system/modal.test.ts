@@ -13,6 +13,13 @@ function setupModalContext(translate = (key) => key) {
     cn: (...classes) => classes.filter(Boolean).join(" "),
     Icon() {},
     useT: () => translate,
+    // motion/react + ./motion stubs (imports are stripped by the vm
+    // harness; the identifiers must exist).
+    motion: { div: "motion.div", span: "motion.span" },
+    AnimatePresence: function AnimatePresence() {},
+    useReducedMotion: () => false,
+    MOTION_DURATION: { instant: 0.1, exit: 0.12, fast: 0.15, menu: 0.18, base: 0.25 },
+    MOTION_EASE_OUT: [0.16, 1, 0.3, 1],
     document: { body: { style: {} } },
     window: {
       addEventListener() {},

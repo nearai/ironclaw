@@ -123,6 +123,7 @@ export function App() {
           <Route path="routines" element={(<RoutinesPage />)} />
           <Route path="routines/:routineId" element={(<RoutinesPage />)} />
           <Route path="automations" element={(<AutomationsPage />)} />
+          <Route path="automations/:automationId" element={(<AutomationsPage />)} />
           <Route path="extensions" element={(<ExtensionsPage />)} />
           <Route path="extensions/:tab" element={(<ExtensionsPage />)} />
           <Route path="logs" element={(<LogsPage />)} />

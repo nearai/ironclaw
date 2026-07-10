@@ -1099,6 +1099,26 @@ impl<'de> Deserialize<'de> for RebornAutomationState {
 /// This deliberately exposes source, state, run timestamps, sanitized status,
 /// and bounded recent-run history; trigger repository internals remain behind
 /// the product facade.
+/// Response for a single automation looked up by id
+/// (`GET /api/webchat/v2/automations/{automation_id}`).
+///
+/// Unlike [`RebornListAutomationsResponse`], this resolves one automation
+/// directly by id with **no listing filter** — completed one-shots and
+/// automations beyond the list page cap are returned so a deep link to the
+/// full-screen detail page always resolves an automation the caller owns.
+/// Authorization is caller ownership (tenant + user + agent + project), the
+/// same model the list uses; an id the caller does not own is a 404, not a
+/// filtered-out row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornGetAutomationResponse {
+    pub automation: RebornAutomationInfo,
+    /// Whether the background trigger poller (scheduler) is running — same
+    /// semantics as [`RebornListAutomationsResponse::scheduler_enabled`], so
+    /// the detail view can surface the "scheduling is off" notice.
+    #[serde(default = "default_scheduler_enabled")]
+    pub scheduler_enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationInfo {
     pub automation_id: String,

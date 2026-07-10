@@ -33,6 +33,7 @@ pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_GET_AUTOMATION: &str = "webui.v2.get_automation";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
@@ -130,9 +131,11 @@ pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
 pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/resume";
-// Intentional dual-method resource path: POST renames an automation and DELETE
-// removes it. Keep the route ids separate so host policy/audit stays action-specific.
+// Intentional multi-method resource path: GET fetches a single automation for
+// the detail view / deep link, POST renames it, and DELETE removes it. Keep
+// the route ids separate so host policy/audit stays action-specific.
 pub const WEBUI_V2_PATTERN_AUTOMATION_DETAIL: &str = "/api/webchat/v2/automations/{automation_id}";
+pub const WEBUI_V2_PATTERN_GET_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
@@ -226,6 +229,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         resolve_gate_descriptor(),
         retry_run_descriptor(),
         list_automations_descriptor(),
+        get_automation_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
         rename_automation_descriptor(),
@@ -846,6 +850,20 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn get_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_AUTOMATION,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_GET_AUTOMATION,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

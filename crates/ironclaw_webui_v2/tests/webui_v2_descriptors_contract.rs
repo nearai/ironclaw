@@ -28,7 +28,7 @@ use ironclaw_webui_v2::{
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_PROJECT,
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_DELETE_AUTOMATION,
     WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_DELETE_PROJECT,
-    WEBUI_V2_ROUTE_DELETE_THREAD, WEBUI_V2_ROUTE_GET_ATTACHMENT,
+    WEBUI_V2_ROUTE_DELETE_THREAD, WEBUI_V2_ROUTE_GET_ATTACHMENT, WEBUI_V2_ROUTE_GET_AUTOMATION,
     WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG,
     WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_GET_PROJECT,
     WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL, WEBUI_V2_ROUTE_GET_TIMELINE,
@@ -316,6 +316,23 @@ fn expected_table() -> Vec<Expected> {
             route_id: WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
             method: NetworkMethod::Get,
             pattern: "/api/webchat/v2/automations",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_GET_AUTOMATION,
+            method: NetworkMethod::Get,
+            pattern: "/api/webchat/v2/automations/{automation_id}",
             listener_class: ListenerClass::LocalGateway,
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,
@@ -1615,7 +1632,10 @@ fn route_lookup() -> HashMap<String, IngressRouteDescriptor> {
 }
 
 #[test]
-fn automation_resource_descriptor_pattern_is_dual_method_only() {
+fn automation_resource_descriptor_pattern_is_multi_method_only() {
+    // The shared automation resource path deliberately carries exactly three
+    // methods — GET (detail fetch), POST (rename), DELETE (remove) — each with
+    // its own route id so host policy/audit stays action-specific.
     let mut matching_routes = Vec::new();
     for route in webui_v2_routes() {
         if route.route_pattern().as_str() == "/api/webchat/v2/automations/{automation_id}" {
@@ -1630,6 +1650,10 @@ fn automation_resource_descriptor_pattern_is_dual_method_only() {
             (
                 WEBUI_V2_ROUTE_DELETE_AUTOMATION.to_string(),
                 NetworkMethod::Delete,
+            ),
+            (
+                WEBUI_V2_ROUTE_GET_AUTOMATION.to_string(),
+                NetworkMethod::Get,
             ),
             (
                 WEBUI_V2_ROUTE_RENAME_AUTOMATION.to_string(),

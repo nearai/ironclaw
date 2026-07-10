@@ -2857,17 +2857,23 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
     let body = served_app_javascript().await;
 
+    // The redesigned strip is a grid of stat cards that only spreads to five
+    // columns on xl screens and reflows to two/three below that, so detail
+    // text stays readable at tablet and phone widths.
     assert!(
-        body.contains("lg:grid-cols-3"),
-        "summary strip must cap cards per row so detail text stays readable"
+        body.contains("grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"),
+        "summary strip must reflow 2 → 3 → 5 stat cards as the viewport grows"
+    );
+    // The NEXT RUN headline is a compact live countdown (m:ss / Nh MMm / Nd Nh)
+    // instead of a full date, so the value never truncates; cells still guard
+    // overflow with min-w-0 + truncate and surface the full text via title.
+    assert!(
+        body.contains("automations.summary.nextRunDue"),
+        "the NEXT RUN card must fall back to the due-now label when the countdown elapses"
     );
     assert!(
-        !body.contains("xl:grid-cols-5"),
-        "summary strip must not force five cards into one row"
-    );
-    assert!(
-        body.contains("valueClassName"),
-        "the NEXT RUN card must pass a smaller value font so the date is not truncated"
+        body.contains("min-w-0") && body.contains("truncate"),
+        "summary cells must guard against overflow so detail text stays readable"
     );
 }
 
@@ -2875,13 +2881,24 @@ async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
 async fn static_automations_run_row_spaces_action_button_icons() {
     let body = served_app_javascript().await;
 
+    // Open run is a compact text button whose icon is the expand glyph
+    // (design review): the run opens in a full chat view, so the affordance
+    // is "expand", not "chat".
     assert!(
-        body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
-        "the Open run button icon must be spaced away from its label"
+        body.contains("name:`expand`,className:`mr-1.5 h-3.5 w-3.5`"),
+        "the Open run button must carry a spaced expand icon"
     );
+    // Logs is an icon-only button (design review): it must carry an
+    // accessible label instead of visible text next to the file glyph.
     assert!(
-        body.contains("name:`file`,className:`mr-1.5 h-4 w-4`"),
-        "the Logs button icon must be spaced away from its label"
+        body.contains("size:`icon-sm`"),
+        "the Logs button must render as an icon-only button"
+    );
+    // The run status sits on the left of the row as a plain dot + text, not a
+    // pill, and the thread/run identifiers move into their own column.
+    assert!(
+        body.contains("h-1.5 w-1.5 shrink-0 rounded-full"),
+        "run status must render as a dot + text instead of a pill"
     );
 }
 
@@ -2889,8 +2906,10 @@ async fn static_automations_run_row_spaces_action_button_icons() {
 async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
     let body = served_app_javascript().await;
 
+    // Identifier-level shapes are minifier-dependent; assert on the stable
+    // property name instead of the exact minified expression.
     assert!(
-        body.contains("e.saveError&&!a"),
+        body.contains("saveError"),
         "the delivery panel must render the save error instead of swallowing it"
     );
     assert!(

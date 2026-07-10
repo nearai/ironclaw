@@ -5,28 +5,16 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 const COPY = {
-  "automations.detail.currentRun": "Current run",
-  "automations.detail.emptyDescription": "Select an automation",
-  "automations.detail.emptyTitle": "No automation selected",
-  "automations.detail.lastCompleted": "Last completed",
-  "automations.detail.noCurrentRun": "No current run",
-  "automations.detail.noRuns": "No runs",
-  "automations.detail.recentRuns": "Recent runs",
-  "automations.detail.schedule": "Schedule",
-  "automations.detail.successRate": "Success rate",
   "automations.rename.action": "Rename",
   "automations.rename.nameLabel": "Automation name",
   "automations.rename.nameRequired": "Enter a name.",
   "automations.rename.nameTooLong": "Name must be 256 bytes or fewer.",
   "common.cancel": "Cancel",
-  "common.delete": "Delete",
   "common.save": "Save",
-  "missions.action.pause": "Pause",
-  "missions.action.resume": "Resume",
 };
 
 function sourceForTest() {
-  const source = readFileSync(new URL("./automation-detail-panel.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./automation-name.tsx", import.meta.url), "utf8");
   const lines = [];
   let skippingImport = false;
   for (const line of source.split("\n")) {
@@ -40,7 +28,7 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { AutomationDetailPanel };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { EditableAutomationName };`;
 }
 
 function html(strings, ...values) {
@@ -110,17 +98,7 @@ function t(key) {
 function automation() {
   return {
     automation_id: "automation-alpha",
-    current_run: null,
     display_name: "Daily status",
-    has_failed_runs: false,
-    has_running_run: false,
-    last_run_label: "Never",
-    primary_status_label: "Active",
-    primary_status_tone: "success",
-    recent_runs: [],
-    schedule_label: "0 9 * * *",
-    state: "active",
-    success_rate_label: "100%",
   };
 }
 
@@ -130,14 +108,8 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   let hookCursor = 0;
 
   function Button() {}
-  function EmptyPanel() {}
   function Icon() {}
   function Input() {}
-  function Panel() {}
-  function RecentRunRow() {}
-  function RunDots() {}
-  function RunHistorySummary() {}
-  function StatusPill() {}
 
   const React = {
     useEffect(effect, deps) {
@@ -171,22 +143,13 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   const context = {
     globalThis: {},
     Button,
-    EmptyPanel,
     Icon,
     Input,
-    Panel,
-    RecentRunRow,
     React,
-    RunDots,
-    RunHistorySummary,
-    StatusPill,
     TextEncoder,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
-    recentRunKey: (run) => run.run_id,
-    useNavigate: () => () => {},
     useT: () => t,
-    window: { confirm: () => true },
   };
 
   vm.runInNewContext(sourceForTest(), context);
@@ -197,7 +160,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     exports,
     render(overrides = {}) {
       hookCursor = 0;
-      return exports.AutomationDetailPanel({
+      return exports.EditableAutomationName({
         automation: automation(),
         onRenameAutomation,
         ...overrides,
@@ -206,7 +169,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   };
 }
 
-test("AutomationDetailPanel submits a trimmed rename from the inline editor", () => {
+test("EditableAutomationName submits a trimmed rename from the inline editor", () => {
   const calls = [];
   const harness = createHarness({
     onRenameAutomation: (payload) => calls.push(payload),
@@ -239,7 +202,7 @@ test("AutomationDetailPanel submits a trimmed rename from the inline editor", ()
   assert.equal(calls[0].name, "Renamed status");
 });
 
-test("AutomationDetailPanel keeps the editor open and reports blank names", () => {
+test("EditableAutomationName keeps the editor open and reports blank names", () => {
   const calls = [];
   const harness = createHarness({
     onRenameAutomation: (payload) => calls.push(payload),
@@ -264,7 +227,7 @@ test("AutomationDetailPanel keeps the editor open and reports blank names", () =
   assert.ok(collectScalars(rendered).includes("Enter a name."));
 });
 
-test("AutomationDetailPanel preserves rename drafts across same automation refresh", () => {
+test("EditableAutomationName preserves rename drafts across same automation refresh", () => {
   const harness = createHarness();
 
   let rendered = harness.render();

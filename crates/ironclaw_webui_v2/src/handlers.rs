@@ -38,30 +38,30 @@ use ironclaw_product_workflow::{
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
-    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetAutomationResponse,
+    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
+    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1286,6 +1286,23 @@ pub async fn list_automations(
         include_completed: query.include_completed,
     };
     let response = state.services().list_automations(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/automations/:automation_id`
+///
+/// Resolves a single automation by id for the full-screen detail view / deep
+/// link, with no completed-state or page-cap filter (unlike list). A missing or
+/// non-caller-owned id returns `404`.
+pub async fn get_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornGetAutomationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .get_automation(caller, automation_id)
+        .await?;
     Ok(Json(response))
 }
 
