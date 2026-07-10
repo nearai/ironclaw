@@ -1079,6 +1079,13 @@ registerPack("fr", {
   "admin.dashboard.jobs": "Emplois",
   "admin.dashboard.lastActive": "Dernière activité",
 
+  // Admin — relative time
+  "admin.relative.never": "Jamais",
+  "admin.relative.justNow": "à l’instant",
+  "admin.relative.minutesAgo": "il y a {count} min",
+  "admin.relative.hoursAgo": "il y a {count} h",
+  "admin.relative.daysAgo": "il y a {count} j",
+
   // Admin — users list
   "admin.users.user": "utilisateur",
   "admin.users.userFallback": "utilisateur",
@@ -1089,6 +1096,8 @@ registerPack("fr", {
   "admin.users.filter.active": "Actifs",
   "admin.users.filter.suspended": "Suspendus",
   "admin.users.filter.admins": "Administrateurs",
+  "admin.users.status.active": "Actif",
+  "admin.users.status.suspended": "Suspendu",
   "admin.users.newUser": "Nouvel utilisateur",
   "admin.users.createUser": "Créer un utilisateur",
   "admin.users.creating": "Création…",

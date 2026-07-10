@@ -3,22 +3,19 @@
 //! This module adapts the Reborn-owned Slack OAuth identity lookup to the
 //! product workflow's actor-to-user resolver contract.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
+use ironclaw_conversations::ExternalActorBindingEpoch;
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
+    ResolvedProductActorUser,
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
 
 pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
-const SLACK_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum RebornUserIdentityLookupError {
@@ -35,6 +32,32 @@ pub trait RebornUserIdentityLookup: Send + Sync {
         provider: &str,
         provider_user_id: &str,
     ) -> Result<Option<UserId>, RebornUserIdentityLookupError>;
+
+    async fn resolve_user_identity_with_binding_epoch(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<(UserId, Option<ExternalActorBindingEpoch>)>, RebornUserIdentityLookupError>
+    {
+        self.resolve_user_identity(provider, provider_user_id)
+            .await
+            .map(|resolved| resolved.map(|user_id| (user_id, None)))
+    }
+
+    async fn user_identity_binding_epoch_is_current(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        expected_user_id: &UserId,
+        expected_epoch: &ExternalActorBindingEpoch,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        Ok(self
+            .resolve_user_identity_with_binding_epoch(provider, provider_user_id)
+            .await?
+            .is_some_and(|(user_id, epoch)| {
+                user_id == *expected_user_id && epoch.as_ref() == Some(expected_epoch)
+            }))
+    }
 
     /// Whether the given IronClaw user has any binding for `provider` — the
     /// reverse of [`resolve_user_identity`]. Used to tell whether the calling
@@ -67,60 +90,12 @@ pub trait RebornUserIdentityLookup: Send + Sync {
 #[derive(Clone)]
 pub struct SlackUserIdentityActorResolver {
     lookup: Arc<dyn RebornUserIdentityLookup>,
-    resolved_user_cache: Arc<Mutex<HashMap<String, CachedSlackUserIdentity>>>,
-    cache_ttl: Duration,
 }
 
 impl SlackUserIdentityActorResolver {
     pub fn new(lookup: Arc<dyn RebornUserIdentityLookup>) -> Self {
-        Self {
-            lookup,
-            resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
-            cache_ttl: SLACK_IDENTITY_CACHE_TTL,
-        }
+        Self { lookup }
     }
-
-    fn cached_user(&self, provider_user_id: &str) -> Result<Option<UserId>, ProductWorkflowError> {
-        let mut cache = self.resolved_user_cache.lock().map_err(|_| {
-            ProductWorkflowError::BindingResolutionFailed {
-                reason: "slack actor identity cache lock poisoned".into(),
-            }
-        })?;
-        let Some(cached) = cache.get(provider_user_id) else {
-            return Ok(None);
-        };
-        if cached.expires_at <= Instant::now() {
-            cache.remove(provider_user_id);
-            return Ok(None);
-        }
-        Ok(Some(cached.user_id.clone()))
-    }
-
-    fn cache_user(
-        &self,
-        provider_user_id: String,
-        user_id: UserId,
-    ) -> Result<(), ProductWorkflowError> {
-        self.resolved_user_cache
-            .lock()
-            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
-                reason: "slack actor identity cache lock poisoned".into(),
-            })?
-            .insert(
-                provider_user_id,
-                CachedSlackUserIdentity {
-                    user_id,
-                    expires_at: Instant::now() + self.cache_ttl,
-                },
-            );
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CachedSlackUserIdentity {
-    user_id: UserId,
-    expires_at: Instant,
 }
 
 impl std::fmt::Debug for SlackUserIdentityActorResolver {
@@ -134,7 +109,7 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
         if request.adapter_id.as_str() != SLACK_V2_ADAPTER_ID {
             return Ok(None);
         }
@@ -145,20 +120,54 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
             &request.installation_id,
             request.external_actor_ref.id(),
         );
-        if let Some(user_id) = self.cached_user(&provider_user_id)? {
-            return Ok(Some(user_id));
+        self.lookup
+            .resolve_user_identity_with_binding_epoch(SLACK_IDENTITY_PROVIDER, &provider_user_id)
+            .await
+            .map(|resolved| {
+                resolved.map(|(user_id, binding_epoch)| match binding_epoch {
+                    Some(binding_epoch) => {
+                        ResolvedProductActorUser::with_binding_epoch(user_id, binding_epoch)
+                    }
+                    None => ResolvedProductActorUser::new(user_id),
+                })
+            })
+            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+                reason: error.to_string(),
+            })
+    }
+
+    async fn resolved_product_actor_user_is_current(
+        &self,
+        request: &ProductActorUserResolutionRequest,
+        expected: &ResolvedProductActorUser,
+    ) -> Result<bool, ProductWorkflowError> {
+        if request.adapter_id.as_str() != SLACK_V2_ADAPTER_ID
+            || request.external_actor_ref.kind() != SLACK_USER_ACTOR_KIND
+        {
+            return Ok(false);
         }
-        let resolved = self
-            .lookup
-            .resolve_user_identity(SLACK_IDENTITY_PROVIDER, &provider_user_id)
+        let Some(expected_epoch) = expected.binding_epoch.as_ref() else {
+            return Ok(self
+                .resolve_product_actor_user(request.clone())
+                .await?
+                .as_ref()
+                == Some(expected));
+        };
+        let provider_user_id = slack_user_identity_provider_user_id(
+            &request.installation_id,
+            request.external_actor_ref.id(),
+        );
+        self.lookup
+            .user_identity_binding_epoch_is_current(
+                SLACK_IDENTITY_PROVIDER,
+                &provider_user_id,
+                &expected.user_id,
+                expected_epoch,
+            )
             .await
             .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
                 reason: error.to_string(),
-            })?;
-        if let Some(user_id) = resolved.as_ref() {
-            self.cache_user(provider_user_id, user_id.clone())?;
-        }
-        Ok(resolved)
+            })
     }
 }
 
@@ -169,8 +178,23 @@ pub fn slack_user_identity_provider_user_id(
     format!("{}:{slack_user_id}", installation_id.as_str())
 }
 
+pub(crate) fn parse_slack_user_identity_provider_user_id(
+    provider_user_id: &str,
+) -> Option<(AdapterInstallationId, &str)> {
+    let (installation_id, slack_user_id) = provider_user_id.rsplit_once(':')?;
+    if slack_user_id.is_empty() {
+        return None;
+    }
+    Some((
+        AdapterInstallationId::new(installation_id.to_string()).ok()?,
+        slack_user_id,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 
     use super::*;
@@ -189,7 +213,10 @@ mod tests {
             .await
             .expect("resolution succeeds");
 
-        assert_eq!(resolved, Some(user("user:alice")));
+        assert_eq!(
+            resolved,
+            Some(ResolvedProductActorUser::new(user("user:alice")))
+        );
         assert_eq!(
             lookup.calls(),
             vec![("slack".to_string(), "install-alpha:U123".to_string())]
@@ -273,10 +300,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_actor_identity_resolver_caches_positive_user_resolution() {
+    async fn slack_actor_identity_resolver_rereads_after_revocation() {
         let installation_id = installation("install-alpha");
+        let provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
         let lookup = Arc::new(RecordingLookup::new([(
-            slack_user_identity_provider_user_id(&installation_id, "U123"),
+            provider_user_id.clone(),
             user("user:alice"),
         )]));
         let resolver = SlackUserIdentityActorResolver::new(lookup.clone());
@@ -286,17 +314,79 @@ mod tests {
             .resolve_product_actor_user(request.clone())
             .await
             .expect("first resolution succeeds");
+        lookup.remove_binding(&provider_user_id);
         let second = resolver
             .resolve_product_actor_user(request)
             .await
             .expect("second resolution succeeds");
 
-        assert_eq!(first, Some(user("user:alice")));
-        assert_eq!(second, Some(user("user:alice")));
+        assert_eq!(
+            first,
+            Some(ResolvedProductActorUser::new(user("user:alice")))
+        );
+        assert_eq!(second, None);
         assert_eq!(
             lookup.calls(),
-            vec![("slack".to_string(), "install-alpha:U123".to_string())]
+            vec![
+                ("slack".to_string(), "install-alpha:U123".to_string()),
+                ("slack".to_string(), "install-alpha:U123".to_string()),
+            ],
+            "Slack identity resolution must observe a freshly revoked binding on the next message"
         );
+    }
+
+    #[tokio::test]
+    async fn slack_actor_epoch_recheck_avoids_a_second_canonical_identity_read() {
+        let lookup = Arc::new(RecordingLookup::new([(
+            "install-alpha:U123".to_string(),
+            user("user:alice"),
+        )]));
+        let resolver = SlackUserIdentityActorResolver::new(lookup.clone());
+        let request = request(
+            "slack_v2",
+            installation("install-alpha"),
+            "slack_user",
+            "U123",
+        );
+        let expected = ResolvedProductActorUser::with_binding_epoch(
+            user("user:alice"),
+            ExternalActorBindingEpoch::new("epoch-1").expect("epoch"),
+        );
+
+        assert!(
+            resolver
+                .resolved_product_actor_user_is_current(&request, &expected)
+                .await
+                .expect("epoch validation")
+        );
+        assert!(
+            lookup.calls().is_empty(),
+            "generation recheck must validate owner authority without rereading the identity record"
+        );
+        assert_eq!(lookup.epoch_check_calls(), 1);
+    }
+
+    #[test]
+    fn slack_user_identity_provider_user_id_parser_is_reversible_for_delimited_installation_ids() {
+        let installation_id = installation("org:install-alpha");
+        let provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+
+        let (parsed_installation_id, slack_user_id) =
+            parse_slack_user_identity_provider_user_id(&provider_user_id)
+                .expect("provider user id parses");
+
+        assert_eq!(parsed_installation_id, installation_id);
+        assert_eq!(slack_user_id, "U123");
+    }
+
+    #[test]
+    fn slack_user_identity_provider_user_id_parser_rejects_malformed_values() {
+        assert_eq!(parse_slack_user_identity_provider_user_id("U123"), None);
+        assert_eq!(
+            parse_slack_user_identity_provider_user_id("install-alpha:"),
+            None
+        );
+        assert_eq!(parse_slack_user_identity_provider_user_id(":U123"), None);
     }
 
     fn request(
@@ -322,15 +412,17 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct RecordingLookup {
-        bindings: HashMap<String, UserId>,
+        bindings: std::sync::Mutex<HashMap<String, UserId>>,
         calls: std::sync::Mutex<Vec<(String, String)>>,
+        epoch_check_calls: std::sync::Mutex<usize>,
     }
 
     impl RecordingLookup {
         fn new(bindings: impl IntoIterator<Item = (String, UserId)>) -> Self {
             Self {
-                bindings: bindings.into_iter().collect(),
+                bindings: std::sync::Mutex::new(bindings.into_iter().collect()),
                 calls: std::sync::Mutex::default(),
+                epoch_check_calls: std::sync::Mutex::default(),
             }
         }
 
@@ -339,6 +431,20 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
+        }
+
+        fn remove_binding(&self, provider_user_id: &str) {
+            self.bindings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(provider_user_id);
+        }
+
+        fn epoch_check_calls(&self) -> usize {
+            *self
+                .epoch_check_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
         }
     }
 
@@ -353,7 +459,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push((provider.to_string(), provider_user_id.to_string()));
-            Ok(self.bindings.get(provider_user_id).cloned())
+            Ok(self
+                .bindings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(provider_user_id)
+                .cloned())
         }
 
         async fn user_has_provider_binding(
@@ -361,7 +472,26 @@ mod tests {
             _provider: &str,
             user_id: &UserId,
         ) -> Result<bool, RebornUserIdentityLookupError> {
-            Ok(self.bindings.values().any(|bound| bound == user_id))
+            Ok(self
+                .bindings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .values()
+                .any(|bound| bound == user_id))
+        }
+
+        async fn user_identity_binding_epoch_is_current(
+            &self,
+            _provider: &str,
+            _provider_user_id: &str,
+            _expected_user_id: &UserId,
+            _expected_epoch: &ExternalActorBindingEpoch,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            *self
+                .epoch_check_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+            Ok(true)
         }
     }
 

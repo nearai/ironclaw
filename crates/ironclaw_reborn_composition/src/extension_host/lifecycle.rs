@@ -441,15 +441,10 @@ impl RebornLocalLifecycleFacade {
                 };
                 // Thread the caller scope so the port can revoke the removed
                 // extension's exclusive credential (the convergence point shared
-                // with the agent capability path). A command-context auth claim
-                // carries no tenant/agent scope to build one from, so
-                // command-path removals (#5525) skip the best-effort revocation
-                // instead of being rejected outright — the caller still comes
-                // from the verified claim via `lifecycle_caller`.
-                let scope = lifecycle_resource_scope(&context).ok();
-                let caller = lifecycle_caller(&context)?;
+                // with the agent capability path).
+                let scope = lifecycle_resource_scope(&context)?;
                 extension_management
-                    .remove(package_ref, scope.as_ref(), &caller)
+                    .remove(package_ref, &scope, Some(&scope.user_id))
                     .await
             }
             LifecycleProductAction::ExtensionAuth { package_ref }
