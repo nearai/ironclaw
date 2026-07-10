@@ -56,7 +56,7 @@ export function AutomationsPage() {
           ${automationsState.error &&
           html`
             <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              className="rounded-[14px] border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             >
               ${t("automations.error.loadFailed")}
             </div>
@@ -64,7 +64,7 @@ export function AutomationsPage() {
           ${automationsState.actionError &&
           html`
             <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              className="rounded-[14px] border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             >
               ${automationsState.actionError.message}
             </div>
@@ -78,12 +78,14 @@ export function AutomationsPage() {
                 html`
                   <div
                     role="status"
-                    className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3"
+                    className="rounded-[14px] border border-[color-mix(in_srgb,var(--v2-warning-text)_34%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-4 py-3"
                   >
-                    <div className="text-sm font-semibold text-amber-200">
+                    <div className="text-sm font-semibold text-[var(--v2-warning-text)]">
                       ${t("automations.schedulerOff.title")}
                     </div>
-                    <div className="mt-0.5 text-xs leading-5 text-amber-200/80">
+                    <div
+                      className="mt-0.5 text-xs leading-5 text-[color-mix(in_srgb,var(--v2-warning-text)_80%,var(--v2-text))]"
+                    >
                       ${t("automations.schedulerOff.description")}
                     </div>
                   </div>
@@ -95,7 +97,7 @@ export function AutomationsPage() {
                           (index) =>
                             html`<div
                               key=${index}
-                              className="v2-skeleton h-28 rounded-[18px]"
+                              className="v2-skeleton h-28 rounded-[1.25rem]"
                             />`
                         )}
                       </div>

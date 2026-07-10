@@ -1,3 +1,4 @@
+import { Card } from "../../../design-system/card.js";
 import { Badge } from "../../../design-system/primitives.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
@@ -30,9 +31,11 @@ function formatCountdown(ms) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-// A static, read-only stats strip. Deliberately styled as a single recessed
-// (inset) bar with hairline-separated cells so it reads as ambient context —
-// distinct from the interactive filter pills that actually drive the list.
+// Read-only stat cards summarising the list. Each cell is a proper DS Card
+// (default variant, small radius) so the strip shares surface, radius, and
+// shadow semantics with every other card in the app. The grid reflows
+// 2 → 3 → 5 columns as the viewport grows; the next-run card spans the full
+// row on the 2-column layout so the countdown gets room to breathe.
 export function AutomationsSummaryStrip({ summary, nextRunAt }) {
   const t = useT();
   const now = useNow();
@@ -94,38 +97,47 @@ export function AutomationsSummaryStrip({ summary, nextRunAt }) {
       tone: "info",
       badgeLabel: t("automations.badge.info"),
       detail: nextRunDetail,
+      span: "col-span-2 md:col-span-1",
     },
   ];
 
   return html`
-    <div
-      className="overflow-hidden rounded-[14px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)]"
-    >
-      <div
-        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 lg:divide-x lg:divide-[var(--v2-panel-border)]"
-      >
-        ${cells.map(
-          (cell) => html`
-            <div key=${cell.key} className="flex min-w-0 flex-col px-4 py-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
-                  ${cell.label}
-                </span>
-                <${Badge} tone=${cell.tone} label=${cell.badgeLabel} size="sm" />
-              </div>
-              <div className="mt-1.5 truncate text-2xl font-medium tracking-[-0.03em] tabular-nums text-iron-100">
-                ${cell.value}
-              </div>
-              <div
-                className="mt-0.5 truncate text-xs leading-[1.3] text-iron-400"
-                title=${cell.detail}
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+      ${cells.map(
+        (cell) => html`
+          <${Card}
+            key=${cell.key}
+            radius="sm"
+            className=${cn("flex min-w-0 flex-col p-4", cell.span)}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className="truncate font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]"
+                title=${cell.label}
               >
-                ${cell.detail}
-              </div>
+                ${cell.label}
+              </span>
+              <!-- The tone chip is decorative context; below sm it would
+                   crowd the label into truncation, so it steps aside. -->
+              <span className="hidden shrink-0 sm:block">
+                <${Badge} tone=${cell.tone} label=${cell.badgeLabel} size="sm" />
+              </span>
             </div>
-          `
-        )}
-      </div>
+            <div
+              className="mt-2.5 truncate text-[1.5rem] font-semibold leading-none tracking-[-0.02em] tabular-nums text-[var(--v2-text-strong)]"
+              title=${String(cell.value)}
+            >
+              ${cell.value}
+            </div>
+            <div
+              className="mt-1.5 overflow-hidden text-xs leading-snug text-[var(--v2-text-muted)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]"
+              title=${cell.detail}
+            >
+              ${cell.detail}
+            </div>
+          <//>
+        `
+      )}
     </div>
   `;
 }

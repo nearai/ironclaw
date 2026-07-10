@@ -218,7 +218,7 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
         </div>
         ${run.run_id &&
         html`
-          <div className="mt-1 truncate font-mono text-[11px] text-iron-500">
+          <div className="mt-1 truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
             ${t("automations.detail.run")} ${run.run_id}
           </div>
         `}

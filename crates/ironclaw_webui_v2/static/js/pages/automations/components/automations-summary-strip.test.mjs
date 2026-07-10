@@ -93,6 +93,7 @@ function t(key, vars = {}) {
 
 function loadComponent() {
   function Badge() {}
+  function Card() {}
   const React = {
     useState: (init) => [typeof init === "function" ? init() : init, () => {}],
     useEffect: () => {},
@@ -100,6 +101,7 @@ function loadComponent() {
   const context = {
     globalThis: {},
     Badge,
+    Card,
     React,
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
@@ -119,7 +121,7 @@ test("strip reflows two/three/five columns and renders every summary cell", () =
 
   const markup = collectStrings(rendered);
   assert.ok(
-    markup.includes("grid-cols-2 sm:grid-cols-3 lg:grid-cols-5"),
+    markup.includes("grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"),
     "cells must reflow to fewer columns below large screens"
   );
 

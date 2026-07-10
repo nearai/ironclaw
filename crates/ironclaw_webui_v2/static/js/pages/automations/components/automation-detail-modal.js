@@ -29,11 +29,11 @@ function AutomationId({ id }) {
 
   return html`
     <div className="mt-2 flex items-center gap-2">
-      <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.16em] text-iron-500">
+      <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-faint)]">
         ${t("automations.detail.idLabel")}
       </span>
       <span
-        className="truncate font-mono text-[11px] tracking-[0.04em] text-iron-400"
+        className="truncate font-mono text-[11px] tracking-[0.04em] text-[var(--v2-text-muted)]"
         title=${id}
       >
         ${id}
@@ -44,8 +44,8 @@ function AutomationId({ id }) {
         aria-label=${copied ? t("automations.empty.copied") : t("automations.detail.copyId")}
         title=${copied ? t("automations.empty.copied") : t("automations.detail.copyId")}
         className=${cn(
-          "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-[var(--v2-panel-border)] text-iron-400",
-          "hover:border-white/20 hover:text-iron-200",
+          "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)]",
+          "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)]",
           copied &&
             "border-[color-mix(in_srgb,var(--v2-positive-text)_40%,transparent)] text-[var(--v2-positive-text)]"
         )}
@@ -104,11 +104,14 @@ export function AutomationDetailModal({
         <div className="min-w-0">
           <div className="flex items-center gap-3">
             <span
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-[12px] border border-[color-mix(in_srgb,var(--v2-accent)_25%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--v2-radius-md)] border border-[color-mix(in_srgb,var(--v2-accent)_25%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
             >
-              <${Icon} name=${automation.icon} className="h-[1.4rem] w-[1.4rem]" />
+              <${Icon} name=${automation.icon} className="h-5 w-5" />
             </span>
-            <h2 className="truncate text-2xl font-semibold tracking-[-0.02em] text-iron-100">
+            <h2
+              className="truncate text-lg font-semibold tracking-[-0.02em] text-[var(--v2-text-strong)] md:text-2xl"
+              title=${automation.display_name}
+            >
               ${automation.display_name}
             </h2>
           </div>
