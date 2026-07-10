@@ -502,6 +502,7 @@ where
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
+            authenticated_actor_user_id: request.authenticated_actor_user_id,
             estimate: request.estimate,
             mounts: request.mounts,
             services,

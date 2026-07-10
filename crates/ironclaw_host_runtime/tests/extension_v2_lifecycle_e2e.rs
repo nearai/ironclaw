@@ -101,6 +101,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
         .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
             estimate: estimate.clone(),
             mounts: None,
             resource_reservation: Some(reservation),

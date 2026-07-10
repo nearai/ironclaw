@@ -1667,6 +1667,7 @@ fn sample_context() -> ExecutionContext {
         parent_process_id: None,
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: None,
         project_id: Some(project_id.clone()),
         mission_id: None,

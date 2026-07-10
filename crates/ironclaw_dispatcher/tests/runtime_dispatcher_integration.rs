@@ -55,11 +55,14 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
     .with_event_sink_arc(Arc::new(events.clone()));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
+    let authenticated_actor_user_id =
+        UserId::new("slack-alice").expect("valid authenticated actor user id");
 
     let result = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: Some(authenticated_actor_user_id.clone()),
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_output_bytes(10_000),
@@ -88,6 +91,10 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
     assert_eq!(requests[0].network_mode, NetworkMode::Deny);
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(
+        requests[0].authenticated_actor_user_id,
+        Some(authenticated_actor_user_id)
+    );
     assert_eq!(requests[0].mounts, Some(mounts));
     assert_eq!(
         requests[0].input,
@@ -124,6 +131,7 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -154,6 +162,7 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1),
@@ -228,6 +237,7 @@ struct RecordedAdapterRequest {
     runtime: RuntimeKind,
     network_mode: NetworkMode,
     scope: ResourceScope,
+    authenticated_actor_user_id: Option<UserId>,
     mounts: Option<MountView>,
     input: Value,
 }
@@ -244,6 +254,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             runtime: request.descriptor.runtime,
             network_mode: request.runtime_policy.network_mode,
             scope: request.scope.clone(),
+            authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             mounts: request.mounts.clone(),
             input: request.input.clone(),
         });

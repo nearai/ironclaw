@@ -1598,6 +1598,7 @@ mod tests {
         let resolution = ConversationBindingResolution {
             tenant_id: tenant_id.clone(),
             actor: TurnActor::new(actor_user_id.clone()),
+            binding_epoch: None,
             turn_scope,
             source_binding_ref: source_binding_ref.clone(),
             reply_target_binding_ref: reply_target_binding_ref.clone(),

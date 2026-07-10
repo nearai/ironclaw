@@ -8,7 +8,7 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager,
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, AuthProductError,
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, NewAuthFlow,
-    OAuthCallbackState, OAuthCallbackStateKind, PkceVerifierSecret, ProviderScope,
+    OAuthCallbackState, OAuthCallbackStateKind, PkceVerifierSecret, ProviderScope, Timestamp,
     TurnGateAuthFlowQuery, TurnRunRef, build_google_authorization_url, opaque_state_hash,
     pkce_s256_challenge, pkce_verifier_hash,
 };
@@ -41,6 +41,19 @@ pub(crate) trait OAuthGateProvider: Send + Sync + fmt::Debug {
     /// `-{flow_id}` to build the full handle.
     fn pkce_secret_handle_label(&self) -> &'static str;
 
+    /// Select the provider-owned flow that this blocked turn may reuse.
+    ///
+    /// Most providers accept the exact turn-gate candidate. Slack overrides
+    /// this to validate the connection epoch and join its caller-wide flow.
+    async fn select_reusable_flow(
+        &self,
+        _scope: &AuthProductScope,
+        exact: Option<AuthFlowRecord>,
+        _flow_source: &dyn AuthFlowRecordSource,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        Ok(exact)
+    }
+
     /// Build the authorization URL + hashed state/PKCE material for a new flow.
     ///
     /// The only provider-specific step: Google emits `scope=` + offline-consent
@@ -51,7 +64,26 @@ pub(crate) trait OAuthGateProvider: Send + Sync + fmt::Debug {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
         scopes: Vec<ProviderScope>,
+        expires_at: Timestamp,
     ) -> Result<PreparedOAuthGateFlow, AuthProductError>;
+
+    /// Claim provider-owned lifecycle state only after the shared driver has
+    /// durably published both the flow and its PKCE material. This ordering
+    /// guarantees that a provider lifecycle epoch can always be joined by a
+    /// competing process; a crash before this hook leaves only an adoptable
+    /// flow, never an owner-wide lifecycle wedge.
+    async fn publish_flow(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _expires_at: Timestamp,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+
+    /// Undo provider-owned state acquired by [`Self::prepare_flow`] when the
+    /// shared gate driver cannot publish or later retires the auth flow.
+    async fn abandon_flow(&self, _scope: &AuthProductScope, _flow_id: AuthFlowId) {}
 }
 
 /// One generic registry over every OAuth gate provider (Google, Slack personal).
@@ -198,26 +230,41 @@ impl OAuthGateFlowDriver {
         let query = turn_gate_query(&auth_scope, request.scope, &turn_run_ref, request.gate_ref);
 
         let _setup_guard = self.setup_lock.lock().await;
-        if let Some(existing) = self
+        let exact = self
             .reusable_flow_for_query(request.flow_manager, request.flow_source, query.clone())
+            .await?;
+        if let Some(existing) = self
+            .provider
+            .select_reusable_flow(&auth_scope, exact.clone(), request.flow_source.as_ref())
             .await?
         {
+            if let Some(rejected_exact) = exact.filter(|flow| flow.id != existing.id) {
+                self.retire_flow(request.flow_manager, rejected_exact).await;
+            }
             return challenge_view_from_flow(&existing);
+        }
+        if let Some(rejected_exact) = exact {
+            self.retire_flow(request.flow_manager, rejected_exact).await;
         }
 
         let flow_id = AuthFlowId::new();
         let scopes = provider_scopes(&requirement.provider_scopes)?;
+        let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
         let prepared = self
             .provider
-            .prepare_flow(&auth_scope, flow_id, scopes)
+            .prepare_flow(&auth_scope, flow_id, scopes, expires_at)
             .await?;
-        let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
-        self.store_pkce_verifier(
-            &auth_scope.resource,
-            flow_id,
-            prepared.pkce_verifier.clone(),
-        )
-        .await?;
+        if let Err(error) = self
+            .store_pkce_verifier(
+                &auth_scope.resource,
+                flow_id,
+                prepared.pkce_verifier.clone(),
+            )
+            .await
+        {
+            self.provider.abandon_flow(&auth_scope, flow_id).await;
+            return Err(error);
+        }
         let flow = match request
             .flow_manager
             .create_flow(NewAuthFlow {
@@ -244,18 +291,57 @@ impl OAuthGateFlowDriver {
             Err(AuthProductError::BackendConflict) => {
                 self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
                     .await;
-                self.reusable_flow_for_query(request.flow_manager, request.flow_source, query)
+                self.provider.abandon_flow(&auth_scope, flow_id).await;
+                let existing = self
+                    .reusable_flow_for_query(request.flow_manager, request.flow_source, query)
+                    .await?
+                    .ok_or(AuthProductError::BackendConflict)?;
+                self.provider
+                    .publish_flow(&auth_scope, existing.id, existing.expires_at)
+                    .await?;
+                self.provider
+                    .select_reusable_flow(&auth_scope, Some(existing), request.flow_source.as_ref())
                     .await?
                     .ok_or(AuthProductError::BackendConflict)?
             }
             Err(error) => {
                 self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
                     .await;
+                self.provider.abandon_flow(&auth_scope, flow_id).await;
                 return Err(error);
             }
         };
 
-        challenge_view_from_flow(&flow)
+        if let Err(error) = self
+            .provider
+            .publish_flow(&auth_scope, flow.id, flow.expires_at)
+            .await
+        {
+            self.cleanup_pkce_verifier(&auth_scope.resource, flow.id)
+                .await;
+            let _ = request.flow_manager.cancel_flow(&flow.scope, flow.id).await;
+            self.provider.abandon_flow(&auth_scope, flow.id).await;
+            if error == AuthProductError::BackendConflict
+                && let Some(existing) = self
+                    .provider
+                    .select_reusable_flow(&auth_scope, None, request.flow_source.as_ref())
+                    .await?
+            {
+                return challenge_view_from_flow(&existing);
+            }
+            return Err(error);
+        }
+
+        match challenge_view_from_flow(&flow) {
+            Ok(challenge) => Ok(challenge),
+            Err(error) => {
+                self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
+                    .await;
+                self.provider.abandon_flow(&auth_scope, flow_id).await;
+                let _ = request.flow_manager.cancel_flow(&auth_scope, flow_id).await;
+                Err(error)
+            }
+        }
     }
 
     async fn reusable_flow_for_query(
@@ -274,10 +360,20 @@ impl OAuthGateFlowDriver {
         // now-defunct PKCE verifier so it does not linger in the secret store.
         self.cleanup_pkce_verifier(&existing.scope.resource, existing.id)
             .await;
-        flow_manager
+        let canceled = flow_manager
             .cancel_flow(&existing.scope, existing.id)
-            .await
-            .map(|_| None)
+            .await?;
+        self.provider
+            .abandon_flow(&canceled.scope, canceled.id)
+            .await;
+        Ok(None)
+    }
+
+    async fn retire_flow(&self, flow_manager: &Arc<dyn AuthFlowManager>, flow: AuthFlowRecord) {
+        self.cleanup_pkce_verifier(&flow.scope.resource, flow.id)
+            .await;
+        let _ = flow_manager.cancel_flow(&flow.scope, flow.id).await;
+        self.provider.abandon_flow(&flow.scope, flow.id).await;
     }
 
     async fn store_pkce_verifier(
@@ -393,6 +489,7 @@ impl OAuthGateProvider for GoogleOAuthGateProvider {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
         scopes: Vec<ProviderScope>,
+        _expires_at: Timestamp,
     ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
         let account_label = CredentialAccountLabel::new("google")?;
         let state = OAuthCallbackState::new(
@@ -513,6 +610,10 @@ pub(crate) fn challenge_view_from_flow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
     use ironclaw_auth::{
         AuthFlowStatus, GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices,
         OAuthAuthorizationUrl,
@@ -521,6 +622,8 @@ mod tests {
         AgentId, ExtensionId, RuntimeCredentialAccountProviderId, TenantId, ThreadId, UserId,
     };
     use ironclaw_secrets::InMemorySecretStore;
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
 
     #[tokio::test]
     async fn google_oauth_gate_replaces_expired_turn_gate_flow() {
@@ -579,6 +682,159 @@ mod tests {
 
         assert_eq!(left, right);
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn owner_flow_reuse_converges_when_first_publisher_is_delayed() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let state = Arc::new(RaceOAuthProviderState::default());
+        state.block_first_publish.store(true, Ordering::SeqCst);
+        let provider = Arc::new(RaceOAuthProvider {
+            state: state.clone(),
+        });
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let winner_driver = Arc::new(OAuthGateFlowDriver::new(
+            provider.clone(),
+            secret_store.clone(),
+        ));
+        let loser_driver = Arc::new(OAuthGateFlowDriver::new(provider, secret_store));
+        let owner_user_id = UserId::new("user-race").unwrap();
+        let winner_scope = race_scope("thread-race-winner");
+        let loser_scope = race_scope("thread-race-loser");
+        let winner_run_id = TurnRunId::new();
+        let loser_run_id = TurnRunId::new();
+        let winner_gate_ref = AuthGateRef::new("gate:race-winner").unwrap();
+        let loser_gate_ref = AuthGateRef::new("gate:race-loser").unwrap();
+        let requirement = race_requirement();
+
+        let winner = tokio::spawn(race_challenge(
+            winner_driver,
+            shared.clone(),
+            winner_scope.clone(),
+            owner_user_id.clone(),
+            winner_run_id,
+            winner_gate_ref.clone(),
+            requirement.clone(),
+        ));
+        timeout(
+            Duration::from_secs(2),
+            state.first_publish_entered.notified(),
+        )
+        .await
+        .expect("first publisher must reach the post-publication claim hook");
+
+        // This is intentionally longer than the deleted 40 ms polling window:
+        // the loser no longer waits for an unpublished lifecycle winner.
+        tokio::time::sleep(Duration::from_millis(75)).await;
+
+        let loser = tokio::spawn(race_challenge(
+            loser_driver,
+            shared.clone(),
+            loser_scope.clone(),
+            owner_user_id.clone(),
+            loser_run_id,
+            loser_gate_ref.clone(),
+            requirement,
+        ));
+        let loser_challenge = timeout(Duration::from_secs(2), loser)
+            .await
+            .expect("second publisher challenge timed out")
+            .expect("second publisher task")
+            .expect("second publisher challenge");
+        state.release_first_publish.notify_one();
+        let winner_challenge = timeout(Duration::from_secs(2), winner)
+            .await
+            .expect("delayed publisher challenge timed out")
+            .expect("delayed publisher task")
+            .expect("delayed publisher challenge");
+
+        assert_eq!(
+            winner_challenge.authorization_url, loser_challenge.authorization_url,
+            "both processes must converge on the lifecycle winner's published flow"
+        );
+        assert_eq!(state.prepare_calls.load(Ordering::SeqCst), 2);
+        let active = shared
+            .flow_records_snapshot()
+            .into_iter()
+            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .collect::<Vec<_>>();
+        assert_eq!(active.len(), 1, "the race must publish one auth flow");
+        assert_eq!(active[0].id, state.current_epoch().unwrap());
+        assert_eq!(
+            active[0].continuation,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(loser_run_id.to_string()).unwrap(),
+                gate_ref: loser_gate_ref,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_adopts_flow_when_publisher_dies_before_lifecycle_claim() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let state = Arc::new(RaceOAuthProviderState::default());
+        state.block_first_publish.store(true, Ordering::SeqCst);
+        let provider = Arc::new(RaceOAuthProvider {
+            state: state.clone(),
+        });
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let crashed_driver = Arc::new(OAuthGateFlowDriver::new(
+            provider.clone(),
+            secret_store.clone(),
+        ));
+        let retry_driver = Arc::new(OAuthGateFlowDriver::new(provider, secret_store));
+        let owner_user_id = UserId::new("user-race").unwrap();
+        let scope = race_scope("thread-publisher-crash");
+        let run_id = TurnRunId::new();
+        let gate_ref = AuthGateRef::new("gate:publisher-crash").unwrap();
+        let requirement = race_requirement();
+
+        let crashed = tokio::spawn(race_challenge(
+            crashed_driver,
+            shared.clone(),
+            scope.clone(),
+            owner_user_id.clone(),
+            run_id,
+            gate_ref.clone(),
+            requirement.clone(),
+        ));
+        timeout(
+            Duration::from_secs(2),
+            state.first_publish_entered.notified(),
+        )
+        .await
+        .expect("flow must be durable before the claim hook blocks");
+        crashed.abort();
+        let _ = crashed.await;
+        assert!(
+            state.current_epoch().is_none(),
+            "crashed publisher never claimed lifecycle"
+        );
+
+        let challenge = race_challenge(
+            retry_driver,
+            shared.clone(),
+            scope,
+            owner_user_id,
+            run_id,
+            gate_ref,
+            requirement,
+        )
+        .await
+        .expect("retry adopts the exact durable flow");
+        let active = shared
+            .flow_records_snapshot()
+            .into_iter()
+            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .collect::<Vec<_>>();
+        assert_eq!(active.len(), 1);
+        assert_eq!(state.current_epoch(), Some(active[0].id));
+        assert_eq!(
+            challenge.authorization_url,
+            challenge_view_from_flow(&active[0])
+                .unwrap()
+                .authorization_url
+        );
     }
 
     #[tokio::test]
@@ -676,6 +932,156 @@ mod tests {
             challenge.provider.as_str(),
             ironclaw_auth::GOOGLE_PROVIDER_ID
         );
+    }
+
+    #[derive(Default)]
+    struct RaceOAuthProviderState {
+        current_epoch: Mutex<Option<AuthFlowId>>,
+        block_first_publish: AtomicBool,
+        prepare_calls: AtomicUsize,
+        publish_calls: AtomicUsize,
+        first_publish_entered: Notify,
+        release_first_publish: Notify,
+    }
+
+    impl RaceOAuthProviderState {
+        fn current_epoch(&self) -> Option<AuthFlowId> {
+            *self.current_epoch.lock().expect("race epoch lock")
+        }
+    }
+
+    struct RaceOAuthProvider {
+        state: Arc<RaceOAuthProviderState>,
+    }
+
+    impl fmt::Debug for RaceOAuthProvider {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("RaceOAuthProvider")
+                .finish_non_exhaustive()
+        }
+    }
+
+    #[async_trait]
+    impl OAuthGateProvider for RaceOAuthProvider {
+        fn provider_id(&self) -> &'static str {
+            "race_oauth"
+        }
+
+        fn pkce_secret_handle_label(&self) -> &'static str {
+            "race-oauth-pkce"
+        }
+
+        async fn select_reusable_flow(
+            &self,
+            scope: &AuthProductScope,
+            exact: Option<AuthFlowRecord>,
+            flow_source: &dyn AuthFlowRecordSource,
+        ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+            if let Some(epoch) = self.state.current_epoch() {
+                return flow_source.flow_for_owner_by_id(scope, epoch).await;
+            }
+            if let Some(exact) = exact {
+                let mut epoch = self.state.current_epoch.lock().expect("race epoch lock");
+                if epoch.is_none() {
+                    *epoch = Some(exact.id);
+                }
+                return Ok((*epoch == Some(exact.id)).then_some(exact));
+            }
+            Ok(None)
+        }
+
+        async fn prepare_flow(
+            &self,
+            _scope: &AuthProductScope,
+            flow_id: AuthFlowId,
+            _scopes: Vec<ProviderScope>,
+            _expires_at: Timestamp,
+        ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
+            self.state.prepare_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(race_prepared_flow(flow_id))
+        }
+
+        async fn publish_flow(
+            &self,
+            _scope: &AuthProductScope,
+            flow_id: AuthFlowId,
+            _expires_at: Timestamp,
+        ) -> Result<(), AuthProductError> {
+            let publish_call = self.state.publish_calls.fetch_add(1, Ordering::SeqCst);
+            if publish_call == 0 && self.state.block_first_publish.load(Ordering::SeqCst) {
+                self.state.first_publish_entered.notify_one();
+                self.state.release_first_publish.notified().await;
+            }
+            let mut epoch = self.state.current_epoch.lock().expect("race epoch lock");
+            match *epoch {
+                Some(current) if current == flow_id => Ok(()),
+                Some(_) => Err(AuthProductError::BackendConflict),
+                None => {
+                    *epoch = Some(flow_id);
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn race_prepared_flow(flow_id: AuthFlowId) -> PreparedOAuthGateFlow {
+        let pkce_verifier = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
+        let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone()).unwrap();
+        PreparedOAuthGateFlow {
+            authorization_url: OAuthAuthorizationUrl::new(format!(
+                "https://provider.example/oauth?flow_id={flow_id}"
+            ))
+            .unwrap(),
+            opaque_state_hash: opaque_state_hash(format!("state-{flow_id}").as_str()).unwrap(),
+            pkce_verifier_hash: pkce_verifier_hash(&pkce_secret).unwrap(),
+            pkce_verifier,
+        }
+    }
+
+    fn race_scope(thread_id: &str) -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant-race").unwrap(),
+            Some(AgentId::new("agent-race").unwrap()),
+            None,
+            ThreadId::new(thread_id).unwrap(),
+        )
+    }
+
+    fn race_requirement() -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("race_oauth").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            requester_extension: ExtensionId::new("race-extension").unwrap(),
+            provider_scopes: Vec::new(),
+        }
+    }
+
+    async fn race_challenge(
+        driver: Arc<OAuthGateFlowDriver>,
+        shared: Arc<InMemoryAuthProductServices>,
+        scope: TurnScope,
+        owner_user_id: UserId,
+        run_id: TurnRunId,
+        gate_ref: AuthGateRef,
+        requirement: RuntimeCredentialAuthRequirement,
+    ) -> Result<AuthChallengeView, AuthProductError> {
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let flow_source: Arc<dyn AuthFlowRecordSource> = shared;
+        driver
+            .challenge_for_blocked_gate(
+                OAuthGateChallengeRequest {
+                    flow_manager: &flow_manager,
+                    flow_source: &flow_source,
+                    requirements: std::slice::from_ref(&requirement),
+                    scope: &scope,
+                    owner_user_id: &owner_user_id,
+                    run_id,
+                    gate_ref: &gate_ref,
+                },
+                &requirement,
+            )
+            .await
     }
 
     struct GateFixture {

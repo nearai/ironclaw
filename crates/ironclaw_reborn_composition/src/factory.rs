@@ -1822,14 +1822,19 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
-    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        extension_filesystem,
-        available_extensions,
-        extension_installation_store,
-        extension_lifecycle_service,
-        active_extensions,
-        Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
-    ));
+    let extension_management = Arc::new(
+        RebornLocalExtensionManagementPort::new(
+            extension_filesystem,
+            available_extensions,
+            extension_installation_store,
+            extension_lifecycle_service,
+            active_extensions,
+            Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
+        )
+        .with_channel_connection_facade_slot(Arc::clone(
+            &store_graph.local_runtime.channel_connection_facade_slot,
+        )),
+    );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
@@ -1884,7 +1889,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         &mut first_party_registry,
         extension_management,
         product_auth.runtime_credential_account_selection_service(),
-        Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
@@ -4885,11 +4889,10 @@ where
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
-        // No blocked-auth fan-out here yet: this builder's turn state is the
-        // generic filesystem store, not the local-dev alias the snapshot
-        // source is implemented for. Completions resume only their own run,
-        // exactly this builder's prior behavior.
-        None,
+        Some(Arc::clone(&turn_state)
+            as Arc<
+                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+            >),
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),
@@ -5281,6 +5284,48 @@ mod tests {
             _external_actor_ref: ExternalActorRef,
             _user_id: UserId,
         ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
+        async fn pair_external_actor_with_epoch(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+            _binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
+        async fn unpair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
+        async fn unpair_external_actor_if_owned_by(
+            &self,
+            _tenant_id: &TenantId,
+            _adapter_kind: &AdapterKind,
+            _adapter_installation_id: &AdapterInstallationId,
+            _external_actor_ref: &ExternalActorRef,
+            _expected: &ironclaw_conversations::ExpectedExternalActorOwner,
+        ) -> Result<
+            ironclaw_conversations::ConditionalUnpairOutcome,
+            ironclaw_conversations::InboundTurnError,
+        > {
             Err(ironclaw_conversations::InboundTurnError::DurableState {
                 reason: "raw durable store error".to_string(),
             })
@@ -7011,14 +7056,16 @@ mod tests {
             .extension_management
             .as_ref()
             .expect("extension management");
+        let removal_scope = ironclaw_host_api::ResourceScope::local_default(
+            ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("valid scope");
         extension_management
             .remove(
                 nearai_ref.clone(),
-                &ironclaw_host_api::ResourceScope::local_default(
-                    ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
-                    ironclaw_host_api::InvocationId::new(),
-                )
-                .expect("valid scope"),
+                &removal_scope,
+                Some(&removal_scope.user_id),
             )
             .await
             .expect("disable NEAR AI MCP extension");

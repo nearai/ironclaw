@@ -869,6 +869,7 @@ fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest
     CapabilityDispatchRequest {
         capability_id: CapabilityId::new(capability).unwrap(),
         scope: sample_scope(),
+        authenticated_actor_user_id: None,
         estimate: ResourceEstimate::default()
             .set_concurrency_slots(1)
             .set_process_count(1)

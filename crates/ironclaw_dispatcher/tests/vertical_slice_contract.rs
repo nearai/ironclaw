@@ -32,6 +32,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: wasm_scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_output_bytes(10_000),
@@ -57,6 +58,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: script_scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1)
@@ -85,6 +87,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
             scope: mcp_scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1)

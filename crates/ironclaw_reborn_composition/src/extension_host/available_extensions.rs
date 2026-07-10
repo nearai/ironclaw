@@ -76,7 +76,6 @@ const SLACK_BOT_MANIFEST: &str =
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";

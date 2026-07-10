@@ -30,6 +30,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_output_bytes(10_000),
@@ -44,6 +45,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1)
@@ -100,6 +102,7 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_output_bytes(10_000),
@@ -125,6 +128,7 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1),
@@ -163,6 +167,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1),
@@ -204,6 +209,7 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1),
@@ -245,6 +251,7 @@ async fn dispatcher_emits_events_for_mcp_success() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1)
@@ -283,6 +290,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1),
