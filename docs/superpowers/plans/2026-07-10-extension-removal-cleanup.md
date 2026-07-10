@@ -37,15 +37,13 @@
 - [ ] Run each new focused test against current production code and record the expected failures in the task report. Keep this task compileable and do not modify production behavior.
 - [ ] Commit the red tests as `test(reborn): specify explicit extension removal cleanup`.
 
-## Task 2: Implement explicit cleanup and delete obsolete channel logic
+## Task 2: Build the typed cleanup contract and trusted catalog metadata
 
 **Files:**
 
 - Modify: `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`
 - Create: `crates/ironclaw_reborn_composition/src/extension_host/extension_removal_cleanup.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/extension_host/mod.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
 
 ### Steps
 
@@ -54,9 +52,21 @@
 - [ ] Define validated typed adapter/channel ids, `ExtensionRemovalCleanupBinding`, and `ExtensionRemovalCleanupRequirement`.
 - [ ] Add cleanup requirements to `AvailableExtensionPackage`, defaulting to empty for filesystem and ordinary bundled packages.
 - [ ] Attach Slack personal cleanup only in `slack_package()`; do not infer it inside removal.
-- [ ] Implement an adapter trait/registry that rejects duplicates and unknown required adapters. Its cleanup call receives trusted `ResourceScope` plus the authenticated actor.
-- [ ] Add lifecycle tests for exact adapter dispatch, unrelated-adapter non-invocation, missing adapter fail-closed behavior, adapter-error fail-closed behavior, authenticated-actor scoping, and cleanup-before-file-deletion ordering before implementing the registry wiring.
+- [ ] Implement an adapter trait/registry with unit tests for deterministic dispatch, duplicate-adapter rejection, unknown required adapters, wrong binding rejection, and sanitized adapter errors. Its cleanup call receives trusted `ResourceScope` plus the authenticated actor.
 - [ ] Implement the Slack adapter over the existing late-bound channel facade. Call `disconnect_channel_for_caller` directly; never call `caller_channel_connections`.
+- [ ] Run the new cleanup-module and catalog tests green, then commit as `feat(reborn): declare extension removal cleanup`.
+
+## Task 3: Wire removal callers and delete obsolete channel logic
+
+**Files:**
+
+- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
+- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle_capabilities.rs`
+- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
+
+### Steps
+
+- [ ] Before production wiring, add and run lifecycle tests for exact adapter dispatch, unrelated-adapter non-invocation, missing adapter fail-closed behavior, adapter-error fail-closed behavior, authenticated-actor scoping, and cleanup-before-file-deletion ordering. Record each RED result.
 - [ ] Extend the production-shaped caller test before wiring the final path so WebUI and `builtin.extension_remove` each remove a generic channel and never call Slack cleanup.
 - [ ] Rewire `RebornLocalExtensionManagementPort::remove` to resolve explicit requirements, execute them in deterministic order, then run the existing local and credential cleanup behavior.
 - [ ] Delete every legacy channel-removal item named in the design spec, including credential-based channel probing and the management-port channel-facade field/builder.
@@ -64,7 +74,7 @@
 - [ ] Run existing extension removal and credential-sharing tests to prove preserved behavior.
 - [ ] Commit as `fix(reborn): use explicit extension removal cleanup`.
 
-## Task 3: Verify callers, regressions, and code quality
+## Task 4: Verify callers, regressions, and code quality
 
 **Files:**
 
