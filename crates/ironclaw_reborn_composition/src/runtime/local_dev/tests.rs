@@ -203,6 +203,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn local_dev_durable_thread_scope_preserves_owner_resolution_precedence() {
+        let explicit_owner = UserId::new("durable-explicit-owner").expect("explicit owner");
+        let explicit_context = run_context_with_scope(TurnScope::new_with_owner(
+            TenantId::new("tenant-durable-scope").expect("tenant id"),
+            Some(AgentId::new("agent-durable-scope").expect("agent id")),
+            Some(ProjectId::new("project-durable-scope").expect("project id")),
+            ThreadId::new("thread-durable-scope").expect("thread id"),
+            Some(explicit_owner.clone()),
+        ))
+        .await
+        .with_actor(TurnActor::new(
+            UserId::new("durable-run-actor").expect("actor user id"),
+        ));
+        let fallback_user_id = UserId::new("durable-fallback-owner").expect("fallback user id");
+
+        let scope = local_dev_thread_scope_for_run(&explicit_context, &fallback_user_id)
+            .expect("agent-scoped run produces a thread scope");
+
+        assert_eq!(scope.owner_user_id, Some(explicit_owner));
+
+        let actor_owner = UserId::new("durable-run-actor-only").expect("actor user id");
+        let actor_context = run_context("durable-actor-scope")
+            .await
+            .with_actor(TurnActor::new(actor_owner.clone()));
+        let actor_scope = local_dev_thread_scope_for_run(&actor_context, &fallback_user_id)
+            .expect("agent-scoped run produces a thread scope");
+        assert_eq!(actor_scope.owner_user_id, Some(actor_owner));
+
+        let fallback_context = run_context("durable-fallback-scope").await;
+        let fallback_scope = local_dev_thread_scope_for_run(&fallback_context, &fallback_user_id)
+            .expect("agent-scoped run produces a thread scope");
+        assert_eq!(fallback_scope.owner_user_id, Some(fallback_user_id));
+    }
+
     fn visible_request_for_runtime_scope(
         run_context: &LoopRunContext,
         fallback_user_id: &UserId,
@@ -1046,17 +1081,19 @@ mod tests {
     #[test]
     fn result_store_evicts_oldest_entries_to_stay_under_byte_cap() {
         let mut store = StagedValueStore::default();
+        let first = serde_json::Value::String("a".repeat(3 * 1024 * 1024));
+        let first_bytes = serialized_result_output(&first)
+            .expect("first result serializes")
+            .len();
         store
-            .insert_with_oldest_eviction(
-                "result:first".to_string(),
-                serde_json::Value::String("a".repeat(3 * 1024 * 1024)),
-            )
+            .insert_with_oldest_eviction("result:first".to_string(), first, first_bytes)
             .expect("first result stages");
+        let second = serde_json::Value::String("b".repeat(2 * 1024 * 1024));
+        let second_bytes = serialized_result_output(&second)
+            .expect("second result serializes")
+            .len();
         store
-            .insert_with_oldest_eviction(
-                "result:second".to_string(),
-                serde_json::Value::String("b".repeat(2 * 1024 * 1024)),
-            )
+            .insert_with_oldest_eviction("result:second".to_string(), second, second_bytes)
             .expect("second result stages");
 
         assert!(store.get("result:first").is_none());

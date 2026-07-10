@@ -21,6 +21,7 @@ use ironclaw_loop_support::{
     loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_reborn::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
@@ -399,16 +400,23 @@ impl LocalDevCapabilityIo {
         Ok(Some((durable_previews, scope)))
     }
 
-    fn stage_result_best_effort(&self, result_ref: &LoopResultRef, output: serde_json::Value) {
+    fn stage_result_best_effort(
+        &self,
+        result_ref: &LoopResultRef,
+        output: serde_json::Value,
+        serialized_bytes: usize,
+    ) {
         let Ok(mut results) = self.results.lock() else {
             tracing::warn!(
                 "local-dev capability result staging lock failed; using durable result only"
             );
             return;
         };
-        if let Err(error) =
-            results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output)
-        {
+        if let Err(error) = results.insert_with_oldest_eviction(
+            result_ref.as_str().to_string(),
+            output,
+            serialized_bytes,
+        ) {
             tracing::debug!(
                 result_ref = result_ref.as_str(),
                 error = %error.safe_summary,
@@ -543,8 +551,8 @@ impl StagedValueStore {
         &mut self,
         reference: String,
         value: serde_json::Value,
+        bytes: usize,
     ) -> Result<(), AgentLoopHostError> {
-        let bytes = staged_value_bytes(&value)?;
         if bytes > LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
@@ -696,10 +704,11 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                     )
                 })?;
         let output_content = serialized_result_output(&output)?;
-        let output_bytes = output_content.len().try_into().unwrap_or(u64::MAX);
+        let serialized_bytes = output_content.len();
+        let output_bytes = serialized_bytes.try_into().unwrap_or(u64::MAX);
         self.persist_tool_result(run_context, &result_ref, output_content)
             .await?;
-        self.stage_result_best_effort(&result_ref, output.clone());
+        self.stage_result_best_effort(&result_ref, output.clone(), serialized_bytes);
         self.display_previews.record_result_with_preview(
             CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
@@ -798,7 +807,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         let bytes = content.len();
         self.update_persisted_tool_result(run_context, result_ref, content)
             .await?;
-        self.stage_result_best_effort(result_ref, output);
+        self.stage_result_best_effort(result_ref, output, bytes);
         Ok(bytes as u64)
     }
 
@@ -891,24 +900,28 @@ fn local_dev_resource_scope_for_run(
 
 /// Build the per-run [`ThreadScope`] for durable display-preview appends.
 ///
-/// Mirrors [`local_dev_resource_scope_for_run`] so the durable preview sink
-/// writes under the same scope the run's thread was registered under, rather
-/// than a composition-time constant that can drift from the run's actual
-/// owner/project and surface as a spurious `UnknownThread`. Returns `None`
-/// when the run scope carries no agent (durable previews are agent-scoped),
-/// in which case the caller skips the durable append.
+/// Seeds the LocalDev fallback owner into the run's tenant/agent/project scope,
+/// then delegates owner selection to the canonical resolver. This keeps durable
+/// operations on the same per-turn scope as the production loop host. Returns
+/// `None` when the run scope carries no agent (durable previews are
+/// agent-scoped), in which case the caller skips the durable append.
 fn local_dev_thread_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
 ) -> Option<ThreadScope> {
-    let resource = local_dev_resource_scope_for_run(run_context, fallback_user_id);
-    Some(ThreadScope {
+    let resource = run_context.scope.to_resource_scope();
+    let base = ThreadScope {
         tenant_id: resource.tenant_id,
         agent_id: resource.agent_id?,
         project_id: resource.project_id,
-        owner_user_id: Some(resource.user_id),
+        owner_user_id: Some(fallback_user_id.clone()),
         mission_id: resource.mission_id,
-    })
+    };
+    Some(ThreadScopeResolver::resolve_for_turn(
+        &base,
+        &run_context.scope,
+        run_context.actor(),
+    ))
 }
 
 struct LocalDevVisibleCapabilityInputs<'a> {
