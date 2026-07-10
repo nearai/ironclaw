@@ -220,12 +220,23 @@ fn ensure_scoped_workdir_is_mounted(
     else {
         return Ok(());
     };
-    let scoped_path = mounts
-        .scoped_path(workdir.to_string())
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
-    let (_virtual_path, grant) = mounts
-        .resolve_with_grant(&scoped_path)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Client))?;
+    let scoped_path = mounts.scoped_path(workdir.to_string()).map_err(|error| {
+        tracing::debug!(
+            workdir,
+            %error,
+            "rejecting shell workdir because it is not a valid scoped path"
+        );
+        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+    })?;
+    let (_virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).map_err(|error| {
+        tracing::debug!(
+            workdir,
+            scoped_path = scoped_path.as_str(),
+            %error,
+            "rejecting shell workdir because it is not backed by the authorized mount view"
+        );
+        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Client)
+    })?;
     if !(grant.permissions.read
         || grant.permissions.write
         || grant.permissions.list

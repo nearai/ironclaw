@@ -43,7 +43,9 @@ use crate::local_dev_authorization::{
     StoreApprovalSettingsProvider, local_dev_effects_require_approval,
 };
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
-use crate::local_dev_mounts::{scoped_skill_management_mount_view, scoped_workspace_mount_view};
+use crate::local_dev_mounts::{
+    WORKSPACE_ALIAS, scoped_skill_management_mount_view, scoped_workspace_mount_view,
+};
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{
     RebornServices,
@@ -223,8 +225,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         let workspace_mounts = if resource_scope.user_id == self.fallback_user_id {
             self.workspace_mounts.clone()
         } else {
-            scoped_workspace_mount_view(&resource_scope, MountPermissions::read_write())
-                .map_err(host_api_agent_loop_error)?
+            scoped_workspace_mount_view(
+                &resource_scope,
+                configured_workspace_permissions(&self.workspace_mounts)?,
+            )
+            .map_err(host_api_agent_loop_error)?
         };
         create_refreshing_local_dev_capability_port(RefreshingLocalDevCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
@@ -1080,15 +1085,33 @@ fn capability_io_error() -> AgentLoopHostError {
     )
 }
 
+fn configured_workspace_permissions(
+    workspace_mounts: &MountView,
+) -> Result<MountPermissions, AgentLoopHostError> {
+    workspace_mounts
+        .mounts
+        .iter()
+        .find(|grant| grant.alias.as_str() == WORKSPACE_ALIAS)
+        .map(|grant| grant.permissions.clone())
+        .ok_or_else(|| {
+            tracing::error!(
+                "local-dev capability port workspace mounts are unavailable: workspace mount is missing"
+            );
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "local-dev workspace mount is unavailable",
+            )
+        })
+}
+
 fn host_api_agent_loop_error(
     error: impl std::fmt::Debug + std::fmt::Display,
 ) -> AgentLoopHostError {
-    let safe_summary = error.to_string();
     ironclaw_loop_support::raw_agent_loop_host_error(
         "local_dev_host_api",
         "validate_local_dev_runtime_input",
         AgentLoopHostErrorKind::InvalidInvocation,
-        safe_summary,
+        "local-dev runtime input is invalid",
         format!("{error:?}"),
     )
 }

@@ -390,6 +390,7 @@ impl LocalHostProcessPort {
         validate_mount_source_path(cwd, &guards, "working directory")?;
         validate_raw_mount_source_paths(command, &guards)?;
         validate_relative_mount_source_paths(command, cwd, &guards)?;
+        validate_mount_sensitive_shell_expansions(command, &guards)?;
         Ok(())
     }
 
@@ -601,6 +602,75 @@ fn validate_relative_mount_source_paths(
         search_start = token_end;
     }
     Ok(())
+}
+
+fn validate_mount_sensitive_shell_expansions(
+    command: &str,
+    guards: &[LocalHostMountSourceGuard],
+) -> Result<(), RuntimeProcessError> {
+    if !guards.iter().any(LocalHostMountSourceGuard::is_scoped) {
+        return Ok(());
+    }
+    if command.contains('`') || command.contains("$(") {
+        return Err(disallowed_mount_source_path("command expansion"));
+    }
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let Some(next) = bytes.get(index + 1).copied() else {
+            break;
+        };
+        if next == b'{' {
+            let Some(relative_end) = command[index + 2..].find('}') else {
+                return Err(disallowed_mount_source_path("command expansion"));
+            };
+            let name_start = index + 2;
+            let name_end = name_start + relative_end;
+            let variable = &command[name_start..name_end];
+            if variable != "PWD"
+                || command[name_end + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '/' || ch == '\\')
+            {
+                return Err(disallowed_mount_source_path("command expansion"));
+            }
+            index = name_end + 2;
+            continue;
+        }
+        if shell_variable_start(next) {
+            let name_start = index + 1;
+            let mut name_end = name_start + 1;
+            while name_end < bytes.len() && shell_variable_char(bytes[name_end]) {
+                name_end += 1;
+            }
+            let variable = &command[name_start..name_end];
+            if variable != "PWD"
+                || command[name_end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '/' || ch == '\\')
+            {
+                return Err(disallowed_mount_source_path("command expansion"));
+            }
+            index = name_end;
+            continue;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn shell_variable_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn shell_variable_char(byte: u8) -> bool {
+    shell_variable_start(byte) || byte.is_ascii_digit()
 }
 
 fn scoped_allowed_root_for_path<'a>(
@@ -1444,6 +1514,51 @@ mod tests {
 
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.output, "..");
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_rejects_mount_sensitive_shell_expansion() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let scoped_user_root = workspace_root.join("tenants/tenant-a/users/user-a");
+        std::fs::create_dir_all(&scoped_user_root).expect("scoped user dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root);
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        for command in [
+            "printf '%s' \"$(pwd)\"",
+            "printf '%s' `pwd`",
+            "printf '%s' \"$HOME\"",
+            "printf hacked > \"$PWD/../user-b/pwned.md\"",
+        ] {
+            let error = port
+                .run_command(CommandExecutionRequest {
+                    scope: ResourceScope::system(),
+                    mounts: Some(mounts.clone()),
+                    command: command.to_string(),
+                    workdir: Some("/workspace".to_string()),
+                    timeout_secs: Some(5),
+                    extra_env: HashMap::new(),
+                })
+                .await
+                .expect_err("mount-sensitive shell expansion should be rejected");
+
+            assert!(
+                matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace")),
+                "unexpected error for {command:?}: {error:?}"
+            );
+        }
     }
 
     #[cfg(windows)]

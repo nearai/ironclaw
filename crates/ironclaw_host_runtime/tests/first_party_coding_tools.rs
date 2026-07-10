@@ -80,6 +80,36 @@ async fn builtin_coding_grep_skips_oversized_files_like_resilient_v1_search() {
 }
 
 #[tokio::test]
+async fn builtin_coding_grep_rejects_unmaterialized_mount_root_without_list_permission() {
+    let permissions = MountPermissions {
+        read: true,
+        write: false,
+        delete: false,
+        list: false,
+        execute: false,
+    };
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/coding-pack").unwrap(),
+        permissions,
+    )])
+    .unwrap();
+    let runtime = runtime_with_filesystem(MissingMountRootFilesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let error = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/workspace", "pattern": "needle"}),
+        context,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
 async fn builtin_coding_grep_reports_scan_budget_truncation_for_all_output_modes() {
     let temp = tempfile::tempdir().unwrap();
     for index in 0..50 {
@@ -1219,6 +1249,49 @@ impl RootFilesystem for ManySkippedEntriesFilesystem {
             path: path.clone(),
             operation: FilesystemOperation::Stat,
             reason: "injected stat failure".to_string(),
+        })
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ReadFile,
+            reason: "unexpected read".to_string(),
+        })
+    }
+
+    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "unexpected write".to_string(),
+        })
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::CreateDirAll,
+            reason: "unexpected mkdir".to_string(),
+        })
+    }
+}
+
+struct MissingMountRootFilesystem;
+
+#[async_trait]
+impl RootFilesystem for MissingMountRootFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: FilesystemOperation::ListDir,
+        })
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: FilesystemOperation::Stat,
         })
     }
 

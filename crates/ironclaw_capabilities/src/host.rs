@@ -1371,10 +1371,11 @@ where
                 return Err(error);
             }
         };
-        let effective_mounts = obligation_outcome
-            .mounts
-            .clone()
-            .unwrap_or_else(|| authorized_context.mounts.clone());
+        let effective_mounts = effective_dispatch_mounts(
+            obligation_outcome.mounts.clone(),
+            &authorized_context.mounts,
+        )
+        .unwrap_or_default();
         let resource_reservation_id = obligation_outcome
             .resource_reservation
             .as_ref()
@@ -1684,10 +1685,9 @@ where
             }
         }
 
-        let effective_mounts = obligation_outcome
-            .mounts
-            .clone()
-            .unwrap_or_else(|| request.context.mounts.clone());
+        let effective_mounts =
+            effective_dispatch_mounts(obligation_outcome.mounts.clone(), &request.context.mounts)
+                .unwrap_or_default();
         let resource_reservation_id = obligation_outcome
             .resource_reservation
             .as_ref()

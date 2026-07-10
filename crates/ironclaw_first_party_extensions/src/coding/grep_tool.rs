@@ -45,9 +45,11 @@ pub(super) async fn grep(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    if root_stat
+    let root_is_directory = root_stat
         .as_ref()
-        .is_some_and(|stat| stat.file_type == FileType::Directory)
+        .map(|stat| stat.file_type == FileType::Directory)
+        .unwrap_or(true);
+    if root_is_directory
         && !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ListDir)
     {
         return Err(CodingCapabilityError::new(

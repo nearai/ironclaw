@@ -71,6 +71,49 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
     }
 }
 
+fn local_dev_shell_factory(
+    services: &crate::RebornServices,
+    fallback_user_id: &str,
+    capability_io: Arc<LocalDevCapabilityIo>,
+) -> LocalDevLoopCapabilityPortFactory {
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+    let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+    LocalDevLoopCapabilityPortFactory {
+        runtime: services.host_runtime.clone().expect("host runtime"),
+        fallback_user_id: UserId::new(fallback_user_id).expect("user id"),
+        policy: Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        ),
+        workspace_mounts: local_runtime.workspace_mounts.clone(),
+        memory_mounts: local_runtime.memory_mounts.clone(),
+        system_extensions_lifecycle_mounts: local_runtime
+            .system_extensions_lifecycle_mounts
+            .clone(),
+        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+        input_resolver,
+        result_writer,
+        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        skill_activation_source: None,
+        project_service: Arc::clone(&local_runtime.project_service),
+        trajectory_observer: None,
+        outbound_preferences_facade: None,
+        outbound_delivery_target_set_requires_approval: false,
+        approval_settings: Arc::new(
+            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+        ),
+        approval_requests: local_runtime.approval_requests.clone(),
+        capability_leases: local_runtime.capability_leases.clone(),
+        external_tool_catalog: std::sync::Arc::new(
+            ironclaw_turns::InMemoryExternalToolCatalog::new(),
+        ),
+    }
+}
+
 #[tokio::test]
 async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -95,46 +138,16 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     )
     .await
     .expect("local-dev services build");
-    let runtime = services.host_runtime.clone().expect("host runtime");
     let local_runtime = services
         .local_runtime
         .as_ref()
         .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-    let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let memory_mounts = local_runtime.memory_mounts.clone();
-    let policy = Arc::new(
-        crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
-    );
     let capability_io = Arc::new(LocalDevCapabilityIo::default());
-    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
-    let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let factory = LocalDevLoopCapabilityPortFactory {
-        runtime,
-        fallback_user_id: UserId::new("local-dev-shell-user").expect("user id"),
-        policy,
-        workspace_mounts,
-        memory_mounts,
-        system_extensions_lifecycle_mounts: local_runtime
-            .system_extensions_lifecycle_mounts
-            .clone(),
-        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
-        input_resolver,
-        result_writer,
-        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        skill_activation_source: None,
-        project_service: Arc::clone(&local_runtime.project_service),
-        trajectory_observer: None,
-        outbound_preferences_facade: None,
-        outbound_delivery_target_set_requires_approval: false,
-        approval_settings: Arc::new(
-            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-        ),
-        approval_requests: local_runtime.approval_requests.clone(),
-        capability_leases: local_runtime.capability_leases.clone(),
-        external_tool_catalog: std::sync::Arc::new(
-            ironclaw_turns::InMemoryExternalToolCatalog::new(),
-        ),
-    };
+    let factory = local_dev_shell_factory(
+        &services,
+        "local-dev-shell-user",
+        Arc::clone(&capability_io),
+    );
     let run_context = run_context("shell-workdir").await;
     // Turn on the global auto-approve switch for this run's actor scope so the
     // scripted shell call exercises the dispatch path instead of stopping at the
@@ -226,46 +239,16 @@ async fn local_dev_shell_scopes_non_owner_workspace_writes() {
     )
     .await
     .expect("local-dev services build");
-    let runtime = services.host_runtime.clone().expect("host runtime");
     let local_runtime = services
         .local_runtime
         .as_ref()
         .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-    let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let memory_mounts = local_runtime.memory_mounts.clone();
-    let policy = Arc::new(
-        crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
-    );
     let capability_io = Arc::new(LocalDevCapabilityIo::default());
-    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
-    let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let factory = LocalDevLoopCapabilityPortFactory {
-        runtime,
-        fallback_user_id: UserId::new("local-dev-shell-owner").expect("user id"),
-        policy,
-        workspace_mounts,
-        memory_mounts,
-        system_extensions_lifecycle_mounts: local_runtime
-            .system_extensions_lifecycle_mounts
-            .clone(),
-        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
-        input_resolver,
-        result_writer,
-        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        skill_activation_source: None,
-        project_service: Arc::clone(&local_runtime.project_service),
-        trajectory_observer: None,
-        outbound_preferences_facade: None,
-        outbound_delivery_target_set_requires_approval: false,
-        approval_settings: Arc::new(
-            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-        ),
-        approval_requests: local_runtime.approval_requests.clone(),
-        capability_leases: local_runtime.capability_leases.clone(),
-        external_tool_catalog: std::sync::Arc::new(
-            ironclaw_turns::InMemoryExternalToolCatalog::new(),
-        ),
-    };
+    let factory = local_dev_shell_factory(
+        &services,
+        "local-dev-shell-owner",
+        Arc::clone(&capability_io),
+    );
     let run_context = owned_run_context("sso-shell-workspace", "sso-shell-user").await;
     {
         let mut scope = run_context.scope.to_resource_scope();
@@ -360,46 +343,16 @@ async fn local_dev_shell_rejects_non_owner_raw_workspace_escape() {
         workspace_root.join("tenants/tenant-raw-shell-workspace/users/other-shell-user/pwned.md");
     std::fs::create_dir_all(other_user_file.parent().expect("other user parent"))
         .expect("other user dir");
-    let runtime = services.host_runtime.clone().expect("host runtime");
     let local_runtime = services
         .local_runtime
         .as_ref()
         .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-    let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let memory_mounts = local_runtime.memory_mounts.clone();
-    let policy = Arc::new(
-        crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
-    );
     let capability_io = Arc::new(LocalDevCapabilityIo::default());
-    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
-    let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let factory = LocalDevLoopCapabilityPortFactory {
-        runtime,
-        fallback_user_id: UserId::new("local-dev-shell-owner").expect("user id"),
-        policy,
-        workspace_mounts,
-        memory_mounts,
-        system_extensions_lifecycle_mounts: local_runtime
-            .system_extensions_lifecycle_mounts
-            .clone(),
-        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
-        input_resolver,
-        result_writer,
-        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        skill_activation_source: None,
-        project_service: Arc::clone(&local_runtime.project_service),
-        trajectory_observer: None,
-        outbound_preferences_facade: None,
-        outbound_delivery_target_set_requires_approval: false,
-        approval_settings: Arc::new(
-            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-        ),
-        approval_requests: local_runtime.approval_requests.clone(),
-        capability_leases: local_runtime.capability_leases.clone(),
-        external_tool_catalog: std::sync::Arc::new(
-            ironclaw_turns::InMemoryExternalToolCatalog::new(),
-        ),
-    };
+    let factory = local_dev_shell_factory(
+        &services,
+        "local-dev-shell-owner",
+        Arc::clone(&capability_io),
+    );
     let run_context = owned_run_context("raw-shell-workspace", "sso-shell-user").await;
     {
         let mut scope = run_context.scope.to_resource_scope();
