@@ -424,7 +424,9 @@ async fn trigger_create_display_preview_hides_internal_configuration() {
     assert_eq!(preview.output_summary.as_deref(), Some("Routine created"));
     assert_eq!(
         preview.output_preview.as_deref(),
-        Some("Routine created: Kansas weather check\nSchedule: recurring\nNext run: 2026-07-11 13:00 UTC")
+        Some(
+            "Routine created: Kansas weather check\nSchedule: recurring\nNext run: 2026-07-11 13:00 UTC"
+        )
     );
 
     let rendered = serde_json::to_string(&preview).unwrap();
@@ -435,6 +437,39 @@ async fn trigger_create_display_preview_hides_internal_configuration() {
     assert!(!rendered.contains("0 8 * * *"));
     assert!(!rendered.contains("builtin.weather.lookup"));
     assert!(!rendered.contains("created_at"));
+}
+
+#[tokio::test]
+async fn trigger_create_display_preview_uses_safe_input_summary_for_wrapped_inputs() {
+    let preview = completed_preview_for_input(
+        "builtin__trigger_create",
+        "builtin.trigger_create",
+        serde_json::json!({
+            "operation": "parse",
+            "data": {
+                "name": "Kansas weather check",
+                "prompt": "Call builtin.weather.lookup for Kansas and report the forecast.",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "0 8 * * *",
+                    "timezone": "America/Chicago"
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(preview.title, "Routine");
+    assert_eq!(
+        preview.input_summary.as_deref(),
+        Some("routine: create request")
+    );
+
+    let rendered = serde_json::to_string(&preview).unwrap();
+    assert!(!rendered.contains("builtin.weather.lookup"));
+    assert!(!rendered.contains("0 8 * * *"));
+    assert!(!rendered.contains("America/Chicago"));
+    assert!(!rendered.contains("operation"));
 }
 
 #[tokio::test]

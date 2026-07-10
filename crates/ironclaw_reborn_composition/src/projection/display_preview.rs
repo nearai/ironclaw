@@ -246,9 +246,7 @@ impl CapabilityDisplayPreviewStore {
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
-            .unwrap_or_else(|| {
-                capability_display_title(result.capability_id.as_str()).to_string()
-            });
+            .unwrap_or_else(|| capability_display_title(result.capability_id.as_str()).to_string());
         let output = display_preview
             .map(output_preview_from_display)
             .unwrap_or_else(|| {
@@ -588,10 +586,11 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
 }
 
 fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<CapabilityDisplayText> {
-    if capability_matches(capability_id, "trigger_create")
-        && let Some(summary) = trigger_create_input_summary(value)
-    {
-        return Some(summary);
+    if capability_matches(capability_id, "trigger_create") {
+        return Some(
+            trigger_create_input_summary(value)
+                .unwrap_or_else(generic_trigger_create_input_summary),
+        );
     }
 
     if capability_matches(capability_id, "shell")
@@ -910,6 +909,13 @@ fn trigger_create_input_summary(value: &serde_json::Value) -> Option<CapabilityD
     summary.finish()
 }
 
+fn generic_trigger_create_input_summary() -> CapabilityDisplayText {
+    bounded_display_text(
+        "routine: create request",
+        CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    )
+}
+
 fn trigger_create_output_preview(value: &serde_json::Value) -> Option<OutputPreview> {
     let trigger = value.get("trigger")?;
     let name = trigger
@@ -942,9 +948,7 @@ fn trigger_create_output_preview(value: &serde_json::Value) -> Option<OutputPrev
 }
 
 fn trigger_schedule_label(schedule: Option<&serde_json::Value>) -> Option<&'static str> {
-    let kind = schedule?
-        .get("kind")
-        .and_then(serde_json::Value::as_str)?;
+    let kind = schedule?.get("kind").and_then(serde_json::Value::as_str)?;
     match kind {
         "cron" => Some("recurring"),
         "once" => Some("one-time"),
