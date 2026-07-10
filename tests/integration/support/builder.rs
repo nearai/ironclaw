@@ -630,8 +630,11 @@ impl RebornIntegrationHarness {
         self._shared.planned_runtime_parts_shape
     }
 
-    /// Loop host milestones emitted after this harness was built.
-    pub fn loop_milestones(&self) -> Vec<LoopHostMilestone> {
+    /// Loop host milestones emitted after this harness was built. Scoped to
+    /// `support` (not `pub`) — tests must read milestones through a named
+    /// `assert_*` helper in `assertions.rs`, not by pattern-matching raw
+    /// `LoopHostMilestoneKind` variants at the call site.
+    pub(super) fn loop_milestones(&self) -> Vec<LoopHostMilestone> {
         self._shared
             .milestone_sink
             .milestones()
