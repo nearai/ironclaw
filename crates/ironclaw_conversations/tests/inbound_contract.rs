@@ -314,6 +314,28 @@ async fn trusted_owner_is_persisted_on_first_bind() {
 }
 
 #[tokio::test]
+async fn trusted_owner_does_not_self_pair_non_trigger_adapter() {
+    let services = InMemoryConversationServices::default();
+
+    let err = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-owner-unpaired", None),
+                "telegram-event-trusted-owner-unpaired",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            Some(user("owner-alpha")),
+        )
+        .await
+        .expect_err("non-trigger trusted owner must still require actor pairing");
+
+    assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
+}
+
+#[tokio::test]
 async fn trusted_scope_rejects_existing_unscoped_binding() {
     let services = InMemoryConversationServices::default();
     services
