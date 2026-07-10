@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_extensions::{ExtensionInstallationStore, SharedExtensionRegistry};
 use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -43,37 +43,79 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
 
 #[derive(Clone)]
-struct ActiveRegistryOperatorToolCatalog {
+pub(crate) struct ActiveRegistryOperatorToolCatalog {
     registry: Arc<SharedExtensionRegistry>,
+    // T3-iso (correction 10): `None` only for compositions with no local-dev
+    // extension management wired (e.g. the Echo backend) — those never
+    // publish `UserRegistered` extensions, so no owner/enabled filtering is
+    // possible or needed and every registry capability stays visible.
+    installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
     synthetic_tools: Arc<[RebornOperatorToolInfo]>,
 }
 
 impl ActiveRegistryOperatorToolCatalog {
-    fn new(
+    // `pub(crate)`: also constructed by `RebornServices::local_dev_operator_tool_catalog_for_test`
+    // (factory.rs) so integration tests can drive the REAL owner/enabled
+    // filter through `RebornServicesApi` without duplicating it in a double.
+    pub(crate) fn new(
         registry: Arc<SharedExtensionRegistry>,
+        installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
         synthetic_tools: Vec<RebornOperatorToolInfo>,
     ) -> Self {
         Self {
             registry,
+            installation_store,
             synthetic_tools: Arc::from(synthetic_tools),
         }
     }
 }
 
+#[async_trait]
 impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
-        let mut tools = self
-            .registry
-            .snapshot()
-            .capabilities()
-            .map(|descriptor| RebornOperatorToolInfo {
-                capability_id: descriptor.id.clone(),
-                provider: descriptor.provider.clone(),
-                description: Arc::<str>::from(descriptor.description.as_str()),
-                default_permission: descriptor.default_permission,
-                effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
-            })
-            .collect::<Vec<_>>();
+    async fn list_operator_tools(&self, caller: &ResourceScope) -> Vec<RebornOperatorToolInfo> {
+        // Correction 10: default-ALLOW exclusion (never-installation-tracked
+        // capabilities like `builtin.*` stay visible), unlike AC2's
+        // default-deny intersection — see `operator_config_excluded_extension_ids`.
+        let mut tools = match &self.installation_store {
+            Some(store) => match crate::extension_host::registered_extension_store::operator_config_excluded_extension_ids(
+                store.as_ref(),
+                caller,
+            )
+            .await
+            {
+                Ok(excluded_ids) => self
+                    .registry
+                    .snapshot()
+                    .capabilities()
+                    .filter(|descriptor| !excluded_ids.contains(&descriptor.provider))
+                    .map(|descriptor| RebornOperatorToolInfo {
+                        capability_id: descriptor.id.clone(),
+                        provider: descriptor.provider.clone(),
+                        description: Arc::<str>::from(descriptor.description.as_str()),
+                        default_permission: descriptor.default_permission,
+                        effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    tracing::debug!(%error, "operator tool catalog store unavailable; hiding registry tools");
+                    Vec::new()
+                }
+            },
+            // No installation store means this composition cannot publish
+            // registered extensions, so the registry is safe to expose.
+            None => self
+                .registry
+                .snapshot()
+                .capabilities()
+                .map(|descriptor| RebornOperatorToolInfo {
+                    capability_id: descriptor.id.clone(),
+                    provider: descriptor.provider.clone(),
+                    description: Arc::<str>::from(descriptor.description.as_str()),
+                    default_permission: descriptor.default_permission,
+                    effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
+                })
+                .collect::<Vec<_>>(),
+        };
         tools.extend(self.synthetic_tools.iter().cloned());
         tools
     }
@@ -242,12 +284,17 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 })?,
             ]
         };
+        let operator_tool_installation_store = local_runtime
+            .extension_management
+            .as_ref()
+            .map(|extension_management| extension_management.installation_store());
         api = api.with_operator_approval_config(
             tool_permission_overrides,
             auto_approve_settings,
             persistent_approval_policies,
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
+                operator_tool_installation_store,
                 synthetic_operator_tools,
             )),
         );
@@ -256,6 +303,10 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         if let Some(extension_management) = &local_runtime.extension_management {
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
+        }
+        if let Some(host_runtime_http_egress) = &local_runtime.host_runtime_http_egress {
+            lifecycle_facade =
+                lifecycle_facade.with_host_runtime_http_egress(host_runtime_http_egress.clone());
         }
         if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
             lifecycle_facade =
@@ -972,34 +1023,51 @@ fn status_check(
 mod tests {
     use super::*;
     use ironclaw_extensions::{
-        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+        ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
+        ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifest, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
+        ExtensionRegistry, InMemoryExtensionInstallationStore, ManifestSource,
     };
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
-        UserId, VirtualPath,
+        ExtensionId, HostPath, HostPortCatalog, InvocationId, MountAlias, MountGrant,
+        MountPermissions, MountView, ResourceScope, TenantId, UserId, VirtualPath,
     };
     use std::{path::Path, time::Duration};
 
-    #[test]
-    fn operator_tool_catalog_reads_shared_registry_updates() {
+    #[tokio::test]
+    async fn operator_tool_catalog_reads_shared_registry_updates() {
         let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let synthetic_provider =
             outbound_delivery_synthetic_provider().expect("synthetic provider id");
         let catalog = ActiveRegistryOperatorToolCatalog::new(
             Arc::clone(&registry),
+            // No installation store: this fixture never registers a
+            // `UserRegistered` extension, so no owner/enabled filtering is
+            // under test here (see `owner_visible_enabled_extension_ids_for_scope`
+            // coverage in `registered_extension_store.rs` for that).
+            None,
             vec![
                 outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
                     .expect("synthetic tool info"),
             ],
         );
+        let caller = ResourceScope::local_default(
+            UserId::new("operator-tool-catalog-test-caller").expect("valid user id"),
+            InvocationId::new(),
+        )
+        .expect("valid caller scope");
 
         assert!(
-            catalog.list_operator_tools().iter().any(|tool| {
-                tool.capability_id.as_str()
-                    == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
-                    && tool.provider == synthetic_provider
-            }),
+            catalog
+                .list_operator_tools(&caller)
+                .await
+                .iter()
+                .any(|tool| {
+                    tool.capability_id.as_str()
+                        == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                        && tool.provider == synthetic_provider
+                }),
             "synthetic outbound delivery capability must use the Settings > Tools provider key"
         );
 
@@ -1007,7 +1075,7 @@ mod tests {
             .insert(test_extension_package("dynamic-tools", "echo"))
             .expect("insert dynamic extension");
 
-        let tools = catalog.list_operator_tools();
+        let tools = catalog.list_operator_tools(&caller).await;
 
         assert!(
             tools
@@ -1015,6 +1083,255 @@ mod tests {
                 .any(|tool| tool.capability_id.as_str() == "dynamic-tools.echo"),
             "catalog must read the shared registry at list time so lifecycle updates are visible"
         );
+    }
+
+    struct FailingOperatorCatalogStore;
+
+    #[async_trait::async_trait]
+    impl ExtensionInstallationStore for FailingOperatorCatalogStore {
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            Err(ExtensionInstallationError::InvalidInstallation {
+                reason: "injected catalog store failure".to_string(),
+            })
+        }
+
+        async fn get_manifest(
+            &self,
+            _extension_id: &ironclaw_host_api::ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            Err(ExtensionInstallationError::InvalidInstallation {
+                reason: "injected catalog store failure".to_string(),
+            })
+        }
+
+        async fn upsert_manifest(
+            &self,
+            _manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            unreachable!()
+        }
+
+        async fn upsert_manifest_and_installation(
+            &self,
+            _manifest: ExtensionManifestRecord,
+            _installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            unreachable!()
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            Err(ExtensionInstallationError::InvalidInstallation {
+                reason: "injected catalog store failure".to_string(),
+            })
+        }
+
+        async fn list_enabled_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            Err(ExtensionInstallationError::InvalidInstallation {
+                reason: "injected catalog store failure".to_string(),
+            })
+        }
+
+        async fn get_installation(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            unreachable!()
+        }
+
+        async fn upsert_installation(
+            &self,
+            _installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            unreachable!()
+        }
+
+        async fn set_activation_state(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+            _state: ExtensionActivationState,
+        ) -> Result<(), ExtensionInstallationError> {
+            unreachable!()
+        }
+
+        async fn delete_installation(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            unreachable!()
+        }
+
+        async fn delete_manifest(
+            &self,
+            _extension_id: &ironclaw_host_api::ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            unreachable!()
+        }
+
+        async fn update_health(
+            &self,
+            _installation_id: &ExtensionInstallationId,
+            _health: ExtensionHealthSnapshot,
+        ) -> Result<(), ExtensionInstallationError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_tool_catalog_store_failure_hides_registry_tools_but_keeps_synthetic() {
+        let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        registry
+            .insert(test_extension_package("store-failure-tools", "echo"))
+            .expect("insert dynamic extension");
+        let synthetic_provider = outbound_delivery_synthetic_provider().expect("provider id");
+        let catalog = ActiveRegistryOperatorToolCatalog::new(
+            registry,
+            Some(Arc::new(FailingOperatorCatalogStore)),
+            vec![
+                outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
+                    .expect("synthetic tool info"),
+            ],
+        );
+        let caller = ResourceScope::local_default(
+            UserId::new("operator-store-failure-user").expect("user"),
+            InvocationId::new(),
+        )
+        .expect("scope");
+        let tools = catalog.list_operator_tools(&caller).await;
+        assert!(tools.iter().any(|tool| tool.provider == synthetic_provider));
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool.capability_id.as_str() == "store-failure-tools.echo")
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_tool_catalog_same_user_different_tenants_hides_registered_schema() {
+        let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let owner = UserId::new("same-user").expect("user");
+        let mut tenant_a =
+            ResourceScope::local_default(owner.clone(), InvocationId::new()).expect("scope");
+        tenant_a.tenant_id = TenantId::new("tenant-alpha").expect("tenant alpha");
+        let mut tenant_b = tenant_a.clone();
+        tenant_b.tenant_id = TenantId::new("tenant-beta").expect("tenant beta");
+
+        for (tenant, extension_id, capability_id) in [
+            (
+                &tenant_a.tenant_id,
+                "tenant-alpha-extension",
+                "tenant-alpha-extension.tool",
+            ),
+            (
+                &tenant_b.tenant_id,
+                "tenant-beta-extension",
+                "tenant-beta-extension.tool",
+            ),
+        ] {
+            let source = ManifestSource::UserRegistered {
+                tenant_id: tenant.clone(),
+                owner: owner.clone(),
+            };
+            let registry_raw_toml = format!(
+                r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "tenant-scoped operator test extension"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://93.184.216.34/{extension_id}"
+
+[[capabilities]]
+id = "{capability_id}"
+description = "tenant-scoped capability schema"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/input.json"
+output_schema_ref = "schemas/output.json"
+"#
+            );
+            let manifest = ExtensionManifest::parse(
+                &registry_raw_toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+            )
+            .expect("manifest parses");
+            registry
+                .insert(
+                    ExtensionPackage::from_manifest(
+                        manifest,
+                        VirtualPath::new(format!("/system/extensions/{extension_id}"))
+                            .expect("package root"),
+                    )
+                    .expect("package builds"),
+                )
+                .expect("registry insert");
+            let record_raw_toml = format!(
+                r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "tenant-scoped operator test registration"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://93.184.216.34/{extension_id}"
+"#
+            );
+            let record = ExtensionManifestRecord::from_toml(
+                record_raw_toml,
+                source,
+                &HostPortCatalog::empty(),
+                None,
+            )
+            .expect("manifest record");
+            let extension_id = ExtensionId::new(extension_id).expect("extension id");
+            let installation = ExtensionInstallation::new(
+                ExtensionInstallationId::new(extension_id.as_str()).expect("installation id"),
+                extension_id.clone(),
+                ExtensionActivationState::Enabled,
+                ExtensionManifestRef::new(extension_id, None),
+                Vec::new(),
+                Utc::now(),
+            )
+            .expect("installation");
+            installation_store
+                .upsert_manifest_and_installation(record, installation)
+                .await
+                .expect("seed installation");
+        }
+
+        let catalog =
+            ActiveRegistryOperatorToolCatalog::new(registry, Some(installation_store), Vec::new());
+        let alpha_ids = catalog
+            .list_operator_tools(&tenant_a)
+            .await
+            .into_iter()
+            .map(|tool| tool.capability_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let beta_ids = catalog
+            .list_operator_tools(&tenant_b)
+            .await
+            .into_iter()
+            .map(|tool| tool.capability_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(alpha_ids, vec!["tenant-alpha-extension.tool"]);
+        assert_eq!(beta_ids, vec!["tenant-beta-extension.tool"]);
     }
 
     #[tokio::test]

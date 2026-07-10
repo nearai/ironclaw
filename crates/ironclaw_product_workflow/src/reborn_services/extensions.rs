@@ -13,7 +13,8 @@ use crate::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
     RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    RebornRegisterExtensionRequest, RebornRegisterExtensionResponse, RebornServicesError,
+    WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -114,6 +115,30 @@ pub(super) async fn install_extension(
     Ok(action_response(&lifecycle, None, projection.as_ref()))
 }
 
+pub(super) async fn register_extension(
+    facade: &dyn LifecycleProductFacade,
+    caller: WebUiAuthenticatedCaller,
+    request: RebornRegisterExtensionRequest,
+) -> Result<RebornRegisterExtensionResponse, RebornServicesError> {
+    let context = lifecycle_surface_context(caller);
+    let lifecycle = execute_lifecycle(
+        facade,
+        context,
+        LifecycleProductAction::ExtensionRegister {
+            name: request.name,
+            url: request.url,
+        },
+    )
+    .await?;
+    let package_ref = lifecycle.package_ref.ok_or_else(|| {
+        RebornServicesError::internal_from("extension register did not return a package ref")
+    })?;
+    Ok(RebornRegisterExtensionResponse {
+        extension_id: package_ref.id.as_str().to_string(),
+        package_ref,
+    })
+}
+
 pub(super) async fn activate_extension(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
@@ -162,6 +187,21 @@ pub(super) async fn remove_extension(
         facade,
         context,
         LifecycleProductAction::ExtensionRemove { package_ref },
+    )
+    .await?;
+    Ok(action_response(&lifecycle, None, None))
+}
+
+pub(super) async fn unregister_extension(
+    facade: &dyn LifecycleProductFacade,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: LifecyclePackageRef,
+) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    let context = lifecycle_surface_context(caller);
+    let lifecycle = execute_lifecycle(
+        facade,
+        context,
+        LifecycleProductAction::ExtensionUnregister { package_ref },
     )
     .await?;
     Ok(action_response(&lifecycle, None, None))
@@ -547,6 +587,56 @@ mod tests {
 
     fn channel_connections(entries: &[(&str, bool)]) -> Arc<dyn ChannelConnectionFacade> {
         Arc::new(TestConnections::with_connections(entries))
+    }
+
+    struct MissingRegisterPackageRefFacade;
+
+    #[async_trait]
+    impl LifecycleProductFacade for MissingRegisterPackageRefFacade {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            assert!(matches!(
+                action,
+                LifecycleProductAction::ExtensionRegister { .. }
+            ));
+            Ok(LifecycleProductResponse {
+                package_ref: None,
+                phase: LifecyclePhase::Installed,
+                blockers: Vec::new(),
+                message: None,
+                payload: None,
+            })
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            panic!("register_extension should not project a package");
+        }
+    }
+
+    #[tokio::test]
+    async fn register_extension_rejects_lifecycle_response_without_package_ref() {
+        let error = register_extension(
+            &MissingRegisterPackageRefFacade,
+            caller(),
+            RebornRegisterExtensionRequest {
+                name: "fixture".to_string(),
+                url: "https://example.com/mcp".to_string(),
+            },
+        )
+        .await
+        .expect_err("missing package ref must be an internal adapter error");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Internal);
+        assert_eq!(error.kind, RebornServicesErrorKind::Internal);
+        assert_eq!(error.status_code, 500);
+        assert!(!error.retryable);
     }
 
     #[tokio::test]

@@ -49,7 +49,8 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornProjectResponse, RebornRegisterExtensionRequest, RebornRegisterExtensionResponse,
+    RebornRemoveMemberRequest, RebornResolveGateResponse,
     RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
@@ -1598,6 +1599,16 @@ pub async fn install_extension(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/extensions/register`
+pub async fn register_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornRegisterExtensionRequest>,
+) -> Result<Json<RebornRegisterExtensionResponse>, WebUiV2HttpError> {
+    let response = state.services().register_extension(caller, body).await?;
+    Ok(Json(response))
+}
+
 /// `POST /api/webchat/v2/extensions/{package_id}/activate`
 pub async fn activate_extension(
     State(state): State<WebUiV2State>,
@@ -1628,6 +1639,23 @@ pub async fn remove_extension(
     let response = state
         .services()
         .remove_extension(caller, package_ref)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/extensions/{package_id}/unregister`
+pub async fn unregister_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    let package_ref = extension_package_ref_for_request(
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
+        "package_id",
+    )?;
+    let response = state
+        .services()
+        .unregister_extension(caller, package_ref)
         .await?;
     Ok(Json(response))
 }

@@ -19,8 +19,8 @@ use ironclaw_host_runtime::{
     ToolCallHttpEgress,
 };
 use ironclaw_mcp::{
-    McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpRuntimeHttpAdapter,
-    StaticMcpHostHttpEgressPlanner,
+    McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpRequestAuthority,
+    McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -2270,7 +2270,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
     let output = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
-            capability_id: capability_id.clone(),
+            authority: McpRequestAuthority::Capability(capability_id.clone()),
             scope: scope.clone(),
             transport: "http".to_string(),
             command: None,
@@ -2341,7 +2341,7 @@ async fn mcp_http_client_reuses_staged_credential_for_json_rpc_session() {
     let output = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
-            capability_id: capability_id.clone(),
+            authority: McpRequestAuthority::Capability(capability_id.clone()),
             scope: scope.clone(),
             transport: "http".to_string(),
             command: None,
@@ -2524,7 +2524,7 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
     let output = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
-            capability_id: capability_id.clone(),
+            authority: McpRequestAuthority::Capability(capability_id.clone()),
             scope: runtime_scope,
             transport: "http".to_string(),
             command: None,
@@ -2598,7 +2598,7 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
     let error = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
-            capability_id,
+            authority: McpRequestAuthority::Capability(capability_id),
             scope,
             transport: "http".to_string(),
             command: None,

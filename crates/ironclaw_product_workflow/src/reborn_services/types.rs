@@ -1294,6 +1294,18 @@ pub struct RebornExtensionActionResponse {
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRegisterExtensionRequest {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRegisterExtensionResponse {
+    pub package_ref: LifecyclePackageRef,
+    pub extension_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornExtensionOnboardingState {

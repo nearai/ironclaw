@@ -153,7 +153,8 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornRegisterExtensionRequest, RebornRegisterExtensionResponse, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornRetryRunResponse,
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
@@ -180,8 +181,12 @@ pub struct RebornOperatorToolInfo {
     pub effects: Arc<[EffectKind]>,
 }
 
+#[async_trait]
 pub trait RebornOperatorToolCatalog: Send + Sync {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo>;
+    /// T3-iso (correction 10): the trusted resource scope scopes the returned
+    /// list to tools the caller may see — a `UserRegistered` extension's
+    /// capabilities must never surface in another tenant's Settings > Tools.
+    async fn list_operator_tools(&self, caller: &ResourceScope) -> Vec<RebornOperatorToolInfo>;
 }
 
 #[derive(Clone)]
@@ -1087,13 +1092,15 @@ async fn auto_approve_config_entry(
     })
 }
 
-fn find_operator_tool(
+async fn find_operator_tool(
     config: &RebornOperatorApprovalConfig,
     raw_capability_id: &str,
+    caller: &ResourceScope,
 ) -> Result<RebornOperatorToolInfo, RebornServicesError> {
     config
         .tool_catalog
-        .list_operator_tools()
+        .list_operator_tools(caller)
+        .await
         .into_iter()
         .find(|tool| tool.capability_id.as_str() == raw_capability_id)
         .ok_or_else(|| operator_config_unknown_key_error("key"))
@@ -2287,6 +2294,15 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
 
+    async fn register_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRegisterExtensionRequest,
+    ) -> Result<RebornRegisterExtensionResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2298,6 +2314,15 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
+
+    async fn unregister_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        let _ = (caller, package_ref);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     /// Run a step in a v2-native extension onboarding flow. Today the
     /// facade returns
@@ -3428,13 +3453,14 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let _ = caller;
         let Some(config) = &self.operator_approval_config else {
             return Ok(operator_config_not_wired_response());
         };
         let scope = caller_resource_scope(&caller);
         let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        let tools = config.tool_catalog.list_operator_tools();
+        // Pass the trusted resource scope through the catalog so equal user
+        // ids in different tenants cannot share registered tools or schemas.
+        let tools = config.tool_catalog.list_operator_tools(&scope).await;
         let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
         entries.extend(
             try_join_all(
@@ -3469,7 +3495,7 @@ impl RebornServicesApi for RebornServices {
         let entry = if key == AUTO_APPROVE_CONFIG_KEY {
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id)?;
+            let tool = find_operator_tool(config, capability_id, &scope).await?;
             tool_config_entry(config, &scope, &tool).await?
         } else {
             return Err(operator_config_unknown_key_error("key"));
@@ -3506,7 +3532,7 @@ impl RebornServicesApi for RebornServices {
                 .map_err(operator_config_store_error)?;
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id)?;
+            let tool = find_operator_tool(config, capability_id, &scope).await?;
             if tool_permission_locked(&tool) {
                 return Err(operator_config_invalid_value("state"));
             }
@@ -4745,6 +4771,14 @@ impl RebornServicesApi for RebornServices {
         extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
+    async fn register_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRegisterExtensionRequest,
+    ) -> Result<RebornRegisterExtensionResponse, RebornServicesError> {
+        extensions::register_extension(self.lifecycle_facade.as_ref(), caller, request).await
+    }
+
     async fn activate_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4765,6 +4799,14 @@ impl RebornServicesApi for RebornServices {
             package_ref,
         )
         .await
+    }
+
+    async fn unregister_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::unregister_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
     async fn setup_extension(

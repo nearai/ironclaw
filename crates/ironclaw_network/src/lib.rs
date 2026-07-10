@@ -18,7 +18,7 @@ mod url_target;
 pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgress};
 pub use error::NetworkHttpError;
 pub use policy::{StaticNetworkPolicyEnforcer, target_matches_pattern};
-pub use resolver::NetworkResolver;
+pub use resolver::{NetworkResolver, SystemNetworkResolver, resolve_public_ips};
 pub use transport::ReqwestNetworkTransport;
 pub use types::{
     DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpRequest, NetworkHttpResponse, NetworkRequest,

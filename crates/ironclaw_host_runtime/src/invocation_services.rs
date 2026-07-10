@@ -28,7 +28,9 @@ use ironclaw_host_api::{
 use ironclaw_secrets::SecretStore;
 use thiserror::Error;
 
-use crate::{ExecutionPlan, RuntimeProcessPort, RuntimeSecretMaterialStager};
+use crate::{
+    ExecutionPlan, HostRuntimeHttpEgressPort, RuntimeProcessPort, RuntimeSecretMaterialStager,
+};
 
 /// Concrete host API bindings for an already-authorized invocation.
 ///
@@ -39,6 +41,10 @@ use crate::{ExecutionPlan, RuntimeProcessPort, RuntimeSecretMaterialStager};
 pub struct InvocationServices {
     pub filesystem: Arc<dyn RootFilesystem>,
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    /// Host-owned egress authorization/staging port. Exposed only to
+    /// already-authorized first-party handlers that must narrow a parent
+    /// network obligation before delegating to canonical runtime egress.
+    pub host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     /// One-shot stager for host-held/host-minted credential material.
     ///
@@ -63,6 +69,10 @@ impl fmt::Debug for InvocationServices {
             .field(
                 "runtime_http_egress",
                 &self.runtime_http_egress.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "host_runtime_http_egress",
+                &self.host_runtime_http_egress.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
                 "tool_call_http_egress",
@@ -161,6 +171,7 @@ impl InvocationServicesError {
 pub struct LocalInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
     runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     process: Arc<dyn RuntimeProcessPort>,
@@ -179,6 +190,7 @@ impl LocalInvocationServicesResolver {
         Self {
             filesystem,
             runtime_http_egress,
+            host_runtime_http_egress: None,
             tool_call_http_egress: None,
             runtime_secret_material_stager: None,
             process,
@@ -198,6 +210,14 @@ impl LocalInvocationServicesResolver {
         stager: Option<RuntimeSecretMaterialStager>,
     ) -> Self {
         self.runtime_secret_material_stager = stager;
+        self
+    }
+
+    pub fn with_host_runtime_http_egress(
+        mut self,
+        egress: Option<HostRuntimeHttpEgressPort>,
+    ) -> Self {
+        self.host_runtime_http_egress = egress;
         self
     }
 
@@ -266,6 +286,10 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
             runtime_http_egress: plan
                 .requires_network
                 .then(|| self.runtime_http_egress.clone())
+                .flatten(),
+            host_runtime_http_egress: plan
+                .requires_network
+                .then(|| self.host_runtime_http_egress.clone())
                 .flatten(),
             tool_call_http_egress: plan
                 .requires_network

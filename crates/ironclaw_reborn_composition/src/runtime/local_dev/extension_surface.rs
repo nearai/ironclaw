@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use chrono::Utc;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, EffectKind, ExtensionId, GrantConstraints,
-    MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
+    MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -44,6 +44,7 @@ impl LocalDevExtensionSurfaceSource {
 
     pub(in crate::runtime) async fn snapshot(
         &self,
+        scope: &ResourceScope,
     ) -> Result<LocalDevExtensionSurface, ProductWorkflowError> {
         #[cfg(test)]
         if let Some(surface) = &self.static_surface {
@@ -52,7 +53,7 @@ impl LocalDevExtensionSurfaceSource {
         let Some(extension_management) = self.extension_management.as_deref() else {
             return Ok(LocalDevExtensionSurface::default());
         };
-        LocalDevExtensionSurface::from_extension_management(extension_management).await
+        LocalDevExtensionSurface::from_extension_management(extension_management, scope).await
     }
 }
 
@@ -73,10 +74,11 @@ impl LocalDevExtensionSurface {
 
     pub(super) async fn from_extension_management(
         extension_management: &RebornLocalExtensionManagementPort,
+        scope: &ResourceScope,
     ) -> Result<Self, ProductWorkflowError> {
         Ok(Self {
             active_capabilities: extension_management
-                .active_model_visible_capabilities()
+                .active_model_visible_capabilities(scope)
                 .await?,
         })
     }
@@ -157,6 +159,9 @@ impl LocalDevExtensionSurface {
 }
 
 fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
+    if let Some(policy) = &capability.network_policy {
+        return policy.clone();
+    }
     if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
         return policy;
     }
@@ -204,6 +209,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_policy: None,
         };
 
         let policy = extension_network_policy(&capability);
@@ -228,6 +234,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_policy: None,
         };
 
         let policy = extension_network_policy(&capability);
@@ -266,6 +273,7 @@ mod tests {
                 },
                 required: true,
             }],
+            network_policy: None,
         };
 
         let policy = extension_network_policy(&capability);
@@ -287,6 +295,7 @@ mod tests {
             ],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_policy: None,
         };
 
         let policy = extension_network_policy(&capability);
@@ -307,10 +316,34 @@ mod tests {
             ],
             default_permission: PermissionMode::Allow,
             runtime_credentials: Vec::new(),
+            network_policy: None,
         };
 
         let policy = extension_network_policy(&capability);
 
         assert_eq!(policy, google_api_network_policy());
+    }
+
+    #[test]
+    fn credential_free_hosted_mcp_uses_exact_validated_endpoint_policy() {
+        let exact_policy = NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "mcp.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(NETWORK_EGRESS_LIMIT),
+        };
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("registered.read-records").unwrap(),
+            provider: ExtensionId::new("registered").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Ask,
+            runtime_credentials: Vec::new(),
+            network_policy: Some(exact_policy.clone()),
+        };
+
+        assert_eq!(extension_network_policy(&capability), exact_policy);
     }
 }

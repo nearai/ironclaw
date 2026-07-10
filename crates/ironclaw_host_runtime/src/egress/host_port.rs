@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
@@ -11,7 +12,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_secrets::SecretMaterial;
 
-use crate::obligations::RuntimeSecretInjectionStore;
+use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
 /// Canonical host-runtime one-shot secret material staging port.
 ///
@@ -49,17 +50,12 @@ impl RuntimeSecretMaterialStager {
         &self,
         target_scope: &ResourceScope,
         capability_id: &CapabilityId,
-    ) {
-        if let Err(error) = self
-            .secret_injection_store
+    ) -> Result<(), RuntimeHttpEgressError> {
+        self.secret_injection_store
             .discard_for_capability(target_scope, capability_id)
-        {
-            tracing::debug!(
-                error = ?error,
-                capability_id = %capability_id,
-                "host HTTP egress failed to discard staged secret material"
-            );
-        }
+            .map_err(|_| RuntimeHttpEgressError::Credential {
+                reason: "host-staged credential cleanup failed".to_string(),
+            })
     }
 }
 
@@ -67,7 +63,95 @@ impl RuntimeSecretMaterialStager {
 pub struct HostRuntimeHttpEgressPort {
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
+    network_policies: Arc<NetworkObligationPolicyStore>,
     secret_stager: RuntimeSecretMaterialStager,
+}
+
+struct StagedEgressLease {
+    network_policies: Arc<NetworkObligationPolicyStore>,
+    secret_stager: RuntimeSecretMaterialStager,
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+    includes_secrets: bool,
+    active: bool,
+}
+
+impl StagedEgressLease {
+    fn new(
+        network_policies: Arc<NetworkObligationPolicyStore>,
+        secret_stager: RuntimeSecretMaterialStager,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        includes_secrets: bool,
+    ) -> Self {
+        Self {
+            network_policies,
+            secret_stager,
+            scope,
+            capability_id,
+            includes_secrets,
+            active: true,
+        }
+    }
+
+    fn cleanup(&mut self) -> Result<(), RuntimeHttpEgressError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.network_policies
+            .discard_for_capability(&self.scope, &self.capability_id);
+        let secret_result = self.includes_secrets.then(|| {
+            self.secret_stager
+                .discard_secret_material_for_capability(&self.scope, &self.capability_id)
+        });
+        self.active = false;
+        secret_result.transpose().map(|_| ())
+    }
+
+    fn finish(
+        mut self,
+        result: Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let cleanup = self.cleanup();
+        match (result, cleanup) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup_error)) => {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    capability_id = %self.capability_id,
+                    "host-mediated HTTP egress cleanup also failed after request failure"
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for StagedEgressLease {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            tracing::debug!(
+                error = ?error,
+                capability_id = %self.capability_id,
+                "host-mediated HTTP egress cancellation cleanup failed"
+            );
+        }
+    }
+}
+
+/// Runtime-HTTP view of [`HostRuntimeHttpEgressPort`] bound to one explicit
+/// extension identity and trust class.
+///
+/// Product surfaces that initiate HTTP work outside capability dispatch use
+/// this adapter so the host port stages the request's network obligation before
+/// the canonical runtime egress service performs transport.
+#[derive(Clone)]
+pub struct BoundHostRuntimeHttpEgress {
+    port: HostRuntimeHttpEgressPort,
+    extension_id: ExtensionId,
+    trust: TrustClass,
 }
 
 pub struct HostRuntimeHttpEgressRequest {
@@ -88,12 +172,22 @@ impl HostRuntimeHttpEgressPort {
     pub(crate) fn new(
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
         obligation_handler: Arc<dyn CapabilityObligationHandler>,
+        network_policies: Arc<NetworkObligationPolicyStore>,
         secret_stager: RuntimeSecretMaterialStager,
     ) -> Self {
         Self {
             runtime_http_egress,
             obligation_handler,
+            network_policies,
             secret_stager,
+        }
+    }
+
+    pub fn bind(&self, extension_id: ExtensionId, trust: TrustClass) -> BoundHostRuntimeHttpEgress {
+        BoundHostRuntimeHttpEgress {
+            port: self.clone(),
+            extension_id,
+            trust,
         }
     }
 
@@ -108,25 +202,22 @@ impl HostRuntimeHttpEgressPort {
             });
         }
         self.authorize_network_egress(&request).await?;
-        let staged_scope = request.request.scope.clone();
-        let staged_capability_id = request.request.capability_id.clone();
         let staged_credentials = !request.credentials.is_empty();
+        let lease = StagedEgressLease::new(
+            Arc::clone(&self.network_policies),
+            self.secret_stager.clone(),
+            request.request.scope.clone(),
+            request.request.capability_id.clone(),
+            staged_credentials,
+        );
         if let Err(error) = self
             .stage_credentials(&mut request.request, request.credentials)
             .await
         {
-            if staged_credentials {
-                self.secret_stager
-                    .discard_secret_material_for_capability(&staged_scope, &staged_capability_id);
-            }
-            return Err(error);
+            return lease.finish(Err(error));
         }
         let result = self.runtime_http_egress.execute(request.request).await;
-        if staged_credentials {
-            self.secret_stager
-                .discard_secret_material_for_capability(&staged_scope, &staged_capability_id);
-        }
-        result
+        lease.finish(result)
     }
 
     async fn stage_credentials(
@@ -193,6 +284,23 @@ impl HostRuntimeHttpEgressPort {
     }
 }
 
+#[async_trait]
+impl RuntimeHttpEgress for BoundHostRuntimeHttpEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.port
+            .execute(HostRuntimeHttpEgressRequest {
+                extension_id: self.extension_id.clone(),
+                trust: self.trust,
+                request,
+                credentials: Vec::new(),
+            })
+            .await
+    }
+}
+
 fn execution_context_for_host_http_egress(
     scope: &ResourceScope,
     extension_id: ExtensionId,
@@ -229,7 +337,7 @@ fn execution_context_for_host_http_egress(
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
@@ -240,6 +348,8 @@ mod tests {
         InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
         RuntimeHttpEgressResponse, UserId,
     };
+    use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
+    use ironclaw_secrets::InMemorySecretStore;
 
     use super::*;
 
@@ -251,6 +361,36 @@ mod tests {
             &self,
             _request: CapabilityObligationRequest<'_>,
         ) -> Result<(), CapabilityObligationError> {
+            Ok(())
+        }
+    }
+
+    struct RecordingObligations {
+        network_policies: Arc<NetworkObligationPolicyStore>,
+        satisfy_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CapabilityObligationHandler for RecordingObligations {
+        async fn satisfy(
+            &self,
+            request: CapabilityObligationRequest<'_>,
+        ) -> Result<(), CapabilityObligationError> {
+            self.satisfy_calls.fetch_add(1, Ordering::SeqCst);
+            let policy = request
+                .obligations
+                .iter()
+                .find_map(|obligation| match obligation {
+                    Obligation::ApplyNetworkPolicy { policy } => Some(policy.clone()),
+                    _ => None,
+                });
+            if let Some(policy) = policy {
+                self.network_policies.insert(
+                    &request.context.resource_scope,
+                    request.capability_id,
+                    policy,
+                );
+            }
             Ok(())
         }
     }
@@ -315,6 +455,182 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.response.clone()
         }
+    }
+
+    struct BlockingRuntimeHttpEgress {
+        started: tokio::sync::Notify,
+        entered: AtomicBool,
+    }
+
+    impl BlockingRuntimeHttpEgress {
+        fn new() -> Self {
+            Self {
+                started: tokio::sync::Notify::new(),
+                entered: AtomicBool::new(false),
+            }
+        }
+
+        async fn wait_until_started(&self) {
+            if self.entered.load(Ordering::SeqCst) {
+                return;
+            }
+            self.started.notified().await;
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeHttpEgress for BlockingRuntimeHttpEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            self.entered.store(true, Ordering::SeqCst);
+            self.started.notify_waiters();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn host_runtime_http_egress_cancellation_drops_staged_policy_and_credentials() {
+        let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+        let obligations = Arc::new(RecordingObligations {
+            network_policies: Arc::clone(&network_policies),
+            satisfy_calls: AtomicUsize::new(0),
+        });
+        let secret_injections = secret_store();
+        let blocking = Arc::new(BlockingRuntimeHttpEgress::new());
+        let port = HostRuntimeHttpEgressPort::new(
+            blocking.clone(),
+            obligations,
+            Arc::clone(&network_policies),
+            RuntimeSecretMaterialStager::new(Arc::clone(&secret_injections)),
+        );
+        let mut request = host_request();
+        let scope = request.request.scope.clone();
+        let capability_id = request.request.capability_id.clone();
+        let handle = secret_handle();
+        request.credentials.push(HostRuntimeCredentialMaterial {
+            handle: handle.clone(),
+            material: SecretMaterial::from("cancellation-secret"),
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        });
+
+        let task = tokio::spawn(async move { port.execute(request).await });
+        blocking.wait_until_started().await;
+        assert!(network_policies.contains(&scope, &capability_id));
+        assert!(
+            secret_injections
+                .clone_material(&scope, &capability_id, &handle)
+                .expect("staged secret store is readable")
+                .is_some()
+        );
+
+        task.abort();
+        let cancelled = task.await.expect_err("request task is cancelled");
+        assert!(cancelled.is_cancelled());
+        assert!(!network_policies.contains(&scope, &capability_id));
+        assert!(
+            secret_injections
+                .clone_material(&scope, &capability_id, &handle)
+                .expect("staged secret store is readable after cancellation")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn bound_host_runtime_http_egress_rejects_target_outside_exact_staged_policy() {
+        let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+        let obligations = Arc::new(RecordingObligations {
+            network_policies: Arc::clone(&network_policies),
+            satisfy_calls: AtomicUsize::new(0),
+        });
+        let secret_injections = secret_store();
+        let canonical_egress = Arc::new(crate::HostHttpEgressService::production(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
+                std::time::Duration::from_secs(1),
+            )),
+            InMemorySecretStore::new(),
+            Arc::clone(&network_policies),
+            Arc::clone(&secret_injections),
+            Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
+        ));
+        let bound = HostRuntimeHttpEgressPort::new(
+            canonical_egress,
+            obligations,
+            Arc::clone(&network_policies),
+            RuntimeSecretMaterialStager::new(secret_injections),
+        )
+        .bind(
+            ExtensionId::new("registered-provider").expect("extension id"),
+            TrustClass::Sandbox,
+        );
+        let mut request = host_request().request;
+        let scope = request.scope.clone();
+        let capability_id = request.capability_id.clone();
+        request.url = "https://different.example.test/mcp".to_string();
+
+        let error = bound
+            .execute(request)
+            .await
+            .expect_err("different host must fail before transport");
+
+        assert!(
+            matches!(error, RuntimeHttpEgressError::Network { ref reason, .. } if reason.contains("policy")),
+            "unexpected failure: {error:?}"
+        );
+        assert!(!network_policies.contains(&scope, &capability_id));
+    }
+
+    #[tokio::test]
+    async fn bound_host_runtime_http_egress_cleans_network_policy_on_success_and_failure() {
+        let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+        let obligations = Arc::new(RecordingObligations {
+            network_policies: Arc::clone(&network_policies),
+            satisfy_calls: AtomicUsize::new(0),
+        });
+        let success = HostRuntimeHttpEgressPort::new(
+            Arc::new(RecordingRuntimeHttpEgress::ok()),
+            obligations.clone(),
+            Arc::clone(&network_policies),
+            RuntimeSecretMaterialStager::new(secret_store()),
+        )
+        .bind(
+            ExtensionId::new("test_extension").expect("extension id"),
+            TrustClass::Sandbox,
+        );
+        let success_request = host_request().request;
+        let success_scope = success_request.scope.clone();
+        let success_capability = success_request.capability_id.clone();
+        success
+            .execute(success_request)
+            .await
+            .expect("bound host egress succeeds");
+        assert!(!network_policies.contains(&success_scope, &success_capability));
+
+        let failure = HostRuntimeHttpEgressPort::new(
+            Arc::new(RecordingRuntimeHttpEgress::failing()),
+            obligations.clone(),
+            Arc::clone(&network_policies),
+            RuntimeSecretMaterialStager::new(secret_store()),
+        )
+        .bind(
+            ExtensionId::new("test_extension").expect("extension id"),
+            TrustClass::Sandbox,
+        );
+        let failure_request = host_request().request;
+        let failure_scope = failure_request.scope.clone();
+        let failure_capability = failure_request.capability_id.clone();
+        failure
+            .execute(failure_request)
+            .await
+            .expect_err("transport failure remains visible");
+        assert!(!network_policies.contains(&failure_scope, &failure_capability));
+
+        assert_eq!(obligations.satisfy_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -404,7 +720,12 @@ mod tests {
         obligations: Arc<dyn CapabilityObligationHandler>,
         store: Arc<RuntimeSecretInjectionStore>,
     ) -> HostRuntimeHttpEgressPort {
-        HostRuntimeHttpEgressPort::new(egress, obligations, RuntimeSecretMaterialStager::new(store))
+        HostRuntimeHttpEgressPort::new(
+            egress,
+            obligations,
+            Arc::new(NetworkObligationPolicyStore::new()),
+            RuntimeSecretMaterialStager::new(store),
+        )
     }
 
     fn host_request() -> HostRuntimeHttpEgressRequest {

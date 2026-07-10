@@ -66,8 +66,9 @@ pub use capability_catalog::{
     publish_hot_capability_catalog,
 };
 pub use egress::{
-    HostHttpEgressService, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort,
-    HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager, RuntimeSecretStageError,
+    BoundHostRuntimeHttpEgress, HostHttpEgressService, HostRuntimeCredentialMaterial,
+    HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager,
+    RuntimeSecretStageError,
 };
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,

@@ -10,6 +10,17 @@
 // module-private types only reachable from here.
 
 use super::*;
+use ironclaw_loop_support::HostManagedModelGateway;
+
+/// Test-support mirror of production local-dev capability wiring. Exposes only
+/// trait-object seams so integration harnesses can drive the same refreshing
+/// capability port production uses without naming local-dev internals.
+#[cfg(feature = "test-support")]
+pub struct LocalDevCapabilityWiringForTest {
+    pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+    pub capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
+}
 
 impl RebornServices {
     /// Real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`, via the
@@ -127,5 +138,48 @@ impl RebornServices {
             turn_state as Arc<dyn TurnRunSnapshotSource>,
             turn_coordinator,
         ))
+    }
+
+    /// Build the same local-dev refreshing capability wiring
+    /// `build_reborn_runtime` uses, but over a caller-owned thread service and
+    /// model gateway. Integration groups use this to keep their shared planned
+    /// runtime while exercising production `RefreshingLocalDevCapabilityPort`
+    /// refreshes instead of the static harness allowlist path.
+    ///
+    /// For tests only -- gated behind `test-support`, ships zero bytes in
+    /// production builds.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_capability_wiring_for_test(
+        &self,
+        thread_service: Arc<dyn SessionThreadService>,
+        fallback_user_id: UserId,
+        model_gateway: Arc<dyn HostManagedModelGateway>,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    ) -> Result<Option<LocalDevCapabilityWiringForTest>, RebornRuntimeError> {
+        let Some(_) = self.local_runtime.as_ref() else {
+            return Ok(None);
+        };
+        let local_dev_capability_policy =
+            Arc::new(local_dev_capability_policy().map_err(|error| {
+                RebornRuntimeError::InvalidArgument {
+                    reason: format!("local-dev capability policy is invalid: {error}"),
+                }
+            })?);
+        Ok(local_dev::capability_wiring(
+            self,
+            thread_service,
+            fallback_user_id,
+            local_dev_capability_policy,
+            model_gateway,
+            milestone_sink,
+            None,
+            None,
+            None,
+        )
+        .map(|wiring| LocalDevCapabilityWiringForTest {
+            capability_factory: wiring.capability_factory,
+            capability_input_resolver: wiring.capability_input_resolver,
+            capability_result_writer: wiring.capability_result_writer,
+        }))
     }
 }

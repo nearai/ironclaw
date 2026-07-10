@@ -182,5 +182,6 @@ fn github_issue_tools_with_credential_result(
         persistent_approval_policies: None,
         trigger_repository: None,
         reborn_services: None,
+        refreshing_local_dev_capability_port: false,
     })
 }

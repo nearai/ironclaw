@@ -4,6 +4,7 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
+mod authority_cleanup;
 mod auto_approve;
 mod capability_permission;
 mod cas_record;
@@ -18,6 +19,7 @@ use ironclaw_host_api::{
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
 
+pub use authority_cleanup::{CapabilityAuthorityCleanupError, cleanup_capability_authority};
 pub use auto_approve::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
     AutoApproveSettingRecord, AutoApproveSettingStore, FilesystemAutoApproveSettingStore,

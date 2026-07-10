@@ -116,7 +116,11 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
     };
     assert_eq!(activate_completed.output["payload"]["activated"], true);
 
-    let active = active_extension_capability_ids(&extension_management).await;
+    let active = active_extension_capability_ids(
+        &extension_management,
+        &webui_gate_resource_scope().user_id,
+    )
+    .await;
     assert!(active.iter().any(|id| id == "github.search_issues"));
 }
 
@@ -292,9 +296,12 @@ async fn invoke_outcome_with_context(
 
 async fn active_extension_capability_ids(
     extension_management: &RebornLocalExtensionManagementPort,
+    owner: &UserId,
 ) -> Vec<String> {
+    let scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
+        .expect("valid owner scope");
     extension_management
-        .active_model_visible_capabilities()
+        .active_model_visible_capabilities(&scope)
         .await
         .expect("active extension capabilities") // safety: test-only helper asserts fixture setup.
         .into_iter()

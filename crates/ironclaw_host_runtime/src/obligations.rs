@@ -181,7 +181,7 @@ impl RuntimeSecretInjectionStore {
         Ok(())
     }
 
-    fn has_for_capability(
+    pub(crate) fn has_for_capability(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -381,7 +381,7 @@ impl NetworkObligationPolicyStore {
         let _ = self.take(scope, capability_id);
     }
 
-    fn contains(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> bool {
+    pub(crate) fn contains(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> bool {
         self.policies
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

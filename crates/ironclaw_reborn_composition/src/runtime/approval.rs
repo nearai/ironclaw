@@ -69,7 +69,7 @@ impl LocalDevApprovalLeaseTermsProvider {
         };
         let surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(gate.resource_scope())
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
@@ -99,11 +99,12 @@ impl LocalDevApprovalLeaseTermsProvider {
 
     async fn active_extension_persistent_approval_allowed(
         &self,
+        gate: &ApprovalGateRecord,
         action: LocalDevApprovalPolicyAction<'_>,
     ) -> Result<bool, ProductWorkflowError> {
         let surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(gate.resource_scope())
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval surface is unavailable");
@@ -196,7 +197,7 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             }
         }
         if self
-            .active_extension_persistent_approval_allowed(action)
+            .active_extension_persistent_approval_allowed(gate, action)
             .await?
         {
             Ok(())
@@ -246,6 +247,7 @@ mod tests {
                 effects: vec![EffectKind::Network, EffectKind::UseSecret],
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -316,6 +318,7 @@ mod tests {
                     },
                     required: true,
                 }],
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -367,6 +370,7 @@ mod tests {
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -405,6 +409,7 @@ mod tests {
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Ask,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
@@ -472,6 +477,7 @@ mod tests {
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Deny,
                 runtime_credentials: Vec::new(),
+                network_policy: None,
             }]),
         );
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(

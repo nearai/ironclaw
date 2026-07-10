@@ -4,8 +4,9 @@
 //! ironclaw_extensions::ExtensionInstallationStore
 //!   manifests/installations for any extension
 //!
-//! list_enabled_product_adapter_entries(store)
+//! list_enabled_product_adapter_entries(store, caller)
 //!   → filter enabled installations whose manifest carries ironclaw.product_adapter/v1
+//!   → filter caller-visible owner-registered manifests
 //!   → project ProductAdapterHostApiSection from that section
 //!   → return Vec<ProductAdapterRuntimeEntry>
 //! ```
@@ -22,7 +23,7 @@ use ironclaw_extensions::{
     ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
-    ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId,
+    ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId, UserId,
 };
 use ironclaw_product_adapters::{
     AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
@@ -314,6 +315,7 @@ impl ProductAdapterRuntimeEntry {
 /// targeted projection cache in the owning composition layer.
 pub async fn list_enabled_product_adapter_entries(
     store: &dyn ExtensionInstallationStore,
+    caller: &UserId,
 ) -> Result<Vec<ProductAdapterRuntimeEntry>, RegistryError> {
     let manifests = store.list_manifests().await?;
     let manifest_map: HashMap<_, _> = manifests
@@ -328,6 +330,9 @@ pub async fn list_enabled_product_adapter_entries(
             .ok_or_else(|| RegistryError::UnknownManifest {
                 extension_id: installation.extension_id().clone(),
             })?;
+        if !manifest.manifest().source.visible_to_caller(Some(caller)) {
+            continue;
+        }
         let adapters = if let Some(adapters) = adapter_cache.get(installation.extension_id()) {
             adapters.clone()
         } else {

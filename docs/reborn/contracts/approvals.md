@@ -1,7 +1,7 @@
 # IronClaw Reborn approval resolution contract
 
-**Date:** 2026-04-25
-**Status:** V1 contract slice
+**Date:** 2026-07-09
+**Status:** V1 resolution plus lifecycle authority cleanup
 **Crate:** `crates/ironclaw_approvals`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/capability-access.md`, `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/communication-delivery-resolution.md`
 
@@ -265,7 +265,34 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 
 ---
 
-## 7. Current limits
+## 7. Lifecycle-managed exact authority cleanup
+
+`cleanup_capability_authority(...)` is the reusable aggregate for removing
+authority owned by a lifecycle-managed capability set. Given a caller
+`ResourceScope`, grantee, and exact capability ids, it normalizes the scope to
+tenant-user settings scope and, for each id:
+
+1. revokes the matching `PersistentApprovalAction::Dispatch` policy;
+2. clears the matching `CapabilityPermissionOverrideKey`.
+
+Missing policies and overrides are successful. Other failures stop cleanup so
+the lifecycle caller can retain durable retry intent. The helper does not scan
+by prefix, revoke unrelated actions, or broaden scope across users.
+
+Registered MCP activation persists only a bounded, canonical inventory of the
+currently discovered capability ids. Rediscovery invokes exact cleanup for ids
+removed from the new live surface before replacing that inventory. The
+authenticated unregister route uses the same inventory to revoke every
+registered tool's reusable dispatch policy and clear every explicit permission
+override before deleting the retry intent. Quarantined ids are included because
+an authority record must not survive merely because a tool is hidden from the
+model. This gives the registered-extension lifecycle a user-facing revoke path
+without turning the approval resolver or policy store into an extension
+registry.
+
+---
+
+## 8. Current limits
 
 This slice intentionally keeps approval resolution narrow:
 
@@ -287,8 +314,9 @@ This slice intentionally keeps approval resolution narrow:
   only allows durable reuse for capabilities whose manifest
   `default_permission` is `allow`; `ask` and `deny` remain one-shot approval
   gates and are re-checked before any stored policy is injected as authority
-- revoke is exposed at the policy-store layer for future product integration;
-  no user-facing revoke flow is defined in this slice
+- general per-policy revoke remains a policy/settings concern; registered MCP
+  unregister already exposes lifecycle-owned exact policy/override cleanup
+  through the authenticated product API
 
 Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.
 

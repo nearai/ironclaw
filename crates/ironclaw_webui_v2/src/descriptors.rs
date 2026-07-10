@@ -49,8 +49,10 @@ pub const WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS: &str = "webui.v2.list_connec
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
+pub const WEBUI_V2_ROUTE_REGISTER_EXTENSION: &str = "webui.v2.register_extension";
 pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension";
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
+pub const WEBUI_V2_ROUTE_UNREGISTER_EXTENSION: &str = "webui.v2.unregister_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
 pub const WEBUI_V2_ROUTE_SETUP_EXTENSION: &str = "webui.v2.setup_extension";
 pub const WEBUI_V2_ROUTE_LIST_SKILLS: &str = "webui.v2.list_skills";
@@ -153,10 +155,13 @@ pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/ch
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
+pub const WEBUI_V2_PATTERN_REGISTER_EXTENSION: &str = "/api/webchat/v2/extensions/register";
 pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/activate";
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/remove";
+pub const WEBUI_V2_PATTERN_UNREGISTER_EXTENSION: &str =
+    "/api/webchat/v2/extensions/{package_id}/unregister";
 pub const WEBUI_V2_PATTERN_SETUP_EXTENSION: &str = "/api/webchat/v2/extensions/{package_id}/setup";
 pub const WEBUI_V2_PATTERN_LIST_SKILLS: &str = "/api/webchat/v2/skills";
 pub const WEBUI_V2_PATTERN_SEARCH_SKILLS: &str = "/api/webchat/v2/skills/search";
@@ -241,8 +246,10 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
+        register_extension_descriptor(),
         activate_extension_descriptor(),
         remove_extension_descriptor(),
+        unregister_extension_descriptor(),
         get_extension_setup_descriptor(),
         setup_extension_descriptor(),
         list_skills_descriptor(),
@@ -1069,6 +1076,20 @@ fn install_extension_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn register_extension_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REGISTER_EXTENSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_REGISTER_EXTENSION,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn activate_extension_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_ACTIVATE_EXTENSION,
@@ -1088,6 +1109,20 @@ fn remove_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_REMOVE_EXTENSION,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_REMOVE_EXTENSION,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn unregister_extension_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UNREGISTER_EXTENSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_UNREGISTER_EXTENSION,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),

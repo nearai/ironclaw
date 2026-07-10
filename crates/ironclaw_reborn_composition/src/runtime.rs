@@ -5974,7 +5974,9 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &UserId::new("runtime-nearai-session-mcp-owner").unwrap(),
+            )
             .await
             .expect("active capabilities");
         assert!(
@@ -6079,7 +6081,9 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &UserId::new("runtime-nearai-stored-mcp-owner").unwrap(),
+            )
             .await
             .expect("active capabilities");
         assert!(

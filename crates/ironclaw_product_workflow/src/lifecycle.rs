@@ -174,6 +174,10 @@ pub enum LifecycleProductAction {
         query: String,
     },
     ExtensionList,
+    ExtensionRegister {
+        name: String,
+        url: String,
+    },
     ExtensionInstall {
         package_ref: LifecyclePackageRef,
     },
@@ -189,6 +193,9 @@ pub enum LifecycleProductAction {
         payload: Option<Value>,
     },
     ExtensionRemove {
+        package_ref: LifecyclePackageRef,
+    },
+    ExtensionUnregister {
         package_ref: LifecyclePackageRef,
     },
     SkillSearch {
@@ -209,25 +216,29 @@ pub enum LifecycleProductAction {
 pub enum LifecycleCommandKind {
     ExtensionSearch,
     ExtensionList,
+    ExtensionRegister,
     ExtensionInstall,
     ExtensionAuth,
     ExtensionActivate,
     ExtensionConfigure,
     ExtensionRemove,
+    ExtensionUnregister,
     SkillSearch,
     SkillInstall,
     SkillRemove,
 }
 
 impl LifecycleCommandKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::ExtensionSearch,
         Self::ExtensionList,
+        Self::ExtensionRegister,
         Self::ExtensionInstall,
         Self::ExtensionAuth,
         Self::ExtensionActivate,
         Self::ExtensionConfigure,
         Self::ExtensionRemove,
+        Self::ExtensionUnregister,
         Self::SkillSearch,
         Self::SkillInstall,
         Self::SkillRemove,
@@ -237,11 +248,13 @@ impl LifecycleCommandKind {
         match self {
             Self::ExtensionSearch => "extension_search",
             Self::ExtensionList => "extension_list",
+            Self::ExtensionRegister => "extension_register",
             Self::ExtensionInstall => "extension_install",
             Self::ExtensionAuth => "extension_auth",
             Self::ExtensionActivate => "extension_activate",
             Self::ExtensionConfigure => "extension_configure",
             Self::ExtensionRemove => "extension_remove",
+            Self::ExtensionUnregister => "extension_unregister",
             Self::SkillSearch => "skill_search",
             Self::SkillInstall => "skill_install",
             Self::SkillRemove => "skill_remove",
@@ -261,11 +274,13 @@ impl LifecycleProductAction {
         match self {
             Self::ExtensionSearch { .. } => LifecycleCommandKind::ExtensionSearch,
             Self::ExtensionList => LifecycleCommandKind::ExtensionList,
+            Self::ExtensionRegister { .. } => LifecycleCommandKind::ExtensionRegister,
             Self::ExtensionInstall { .. } => LifecycleCommandKind::ExtensionInstall,
             Self::ExtensionAuth { .. } => LifecycleCommandKind::ExtensionAuth,
             Self::ExtensionActivate { .. } => LifecycleCommandKind::ExtensionActivate,
             Self::ExtensionConfigure { .. } => LifecycleCommandKind::ExtensionConfigure,
             Self::ExtensionRemove { .. } => LifecycleCommandKind::ExtensionRemove,
+            Self::ExtensionUnregister { .. } => LifecycleCommandKind::ExtensionUnregister,
             Self::SkillSearch { .. } => LifecycleCommandKind::SkillSearch,
             Self::SkillInstall { .. } => LifecycleCommandKind::SkillInstall,
             Self::SkillRemove { .. } => LifecycleCommandKind::SkillRemove,
@@ -285,10 +300,12 @@ impl LifecycleProductAction {
             | Self::ExtensionActivate { package_ref }
             | Self::ExtensionConfigure { package_ref, .. }
             | Self::ExtensionRemove { package_ref }
+            | Self::ExtensionUnregister { package_ref }
             | Self::SkillRemove { package_ref } => Some(package_ref),
-            Self::ExtensionSearch { .. } | Self::SkillSearch { .. } | Self::SkillInstall { .. } => {
-                None
-            }
+            Self::ExtensionSearch { .. }
+            | Self::ExtensionRegister { .. }
+            | Self::SkillSearch { .. }
+            | Self::SkillInstall { .. } => None,
             Self::ExtensionList => None,
         }
     }

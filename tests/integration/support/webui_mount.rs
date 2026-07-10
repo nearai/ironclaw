@@ -76,6 +76,27 @@ pub(crate) async fn post_json(router: Router, path: &str, body: Value) -> (Statu
     (status, parse_json_or_null(&bytes))
 }
 
+/// `POST path` with an empty body. Lifecycle action routes such as extension
+/// activate/unregister deliberately take all input from the authenticated
+/// caller plus path package id and reject JSON-shaped test-only wiring.
+pub(crate) async fn post_empty(router: Router, path: &str) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, parse_json_or_null(&bytes))
+}
+
 /// `GET path` against `router`, returning the status, response headers, and
 /// raw body bytes — for non-JSON responses (e.g. served attachment bytes).
 pub(crate) async fn get_raw(router: Router, path: &str) -> (StatusCode, HeaderMap, Vec<u8>) {

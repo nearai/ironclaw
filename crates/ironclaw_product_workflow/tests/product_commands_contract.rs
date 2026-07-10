@@ -222,6 +222,42 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
 }
 
 #[test]
+fn extension_register_parser_requires_string_name_and_url() {
+    let valid_payload = InboundCommandPayload::new(
+        "extension_register",
+        r#"{"name":"Acme MCP","url":"https://mcp.example.com/mcp"}"#,
+        ProductTriggerReason::BotCommand,
+    )
+    .expect("valid command payload");
+    assert_eq!(
+        ProductCommand::from_payload(&valid_payload).expect("parse register command"),
+        ProductCommand::Lifecycle {
+            action: LifecycleProductAction::ExtensionRegister {
+                name: "Acme MCP".to_string(),
+                url: "https://mcp.example.com/mcp".to_string(),
+            },
+        }
+    );
+
+    for arguments in [
+        r#"{"url":"https://mcp.example.com/mcp"}"#,
+        r#"{"name":"Acme MCP"}"#,
+        r#"{"name":42,"url":"https://mcp.example.com/mcp"}"#,
+        r#"{"name":"Acme MCP","url":42}"#,
+    ] {
+        let payload = InboundCommandPayload::new(
+            "extension_register",
+            arguments,
+            ProductTriggerReason::BotCommand,
+        )
+        .expect("valid command payload");
+        let rejection = ProductCommand::from_payload(&payload)
+            .expect_err("register command must require string name and url");
+        assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+    }
+}
+
+#[test]
 fn lifecycle_command_parser_maps_every_lifecycle_command_variant() {
     let cases = [
         (
@@ -230,6 +266,16 @@ fn lifecycle_command_parser_maps_every_lifecycle_command_variant() {
             ProductCommand::Lifecycle {
                 action: LifecycleProductAction::ExtensionSearch {
                     query: "git".to_string(),
+                },
+            },
+        ),
+        (
+            "extension_register",
+            r#"{"name":"Acme MCP","url":"https://mcp.example.com/mcp"}"#,
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionRegister {
+                    name: "Acme MCP".to_string(),
+                    url: "https://mcp.example.com/mcp".to_string(),
                 },
             },
         ),
@@ -264,6 +310,19 @@ fn lifecycle_command_parser_maps_every_lifecycle_command_variant() {
             r#"{"id":"github"}"#,
             ProductCommand::Lifecycle {
                 action: LifecycleProductAction::ExtensionRemove {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "github",
+                    )
+                    .unwrap(),
+                },
+            },
+        ),
+        (
+            "extension_unregister",
+            "github",
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionUnregister {
                     package_ref: LifecyclePackageRef::new(
                         LifecyclePackageKind::Extension,
                         "github",
@@ -362,11 +421,13 @@ fn command_registry_declares_canonical_lifecycle_commands() {
 
     for name in [
         "extension_search",
+        "extension_register",
         "extension_install",
         "extension_auth",
         "extension_activate",
         "extension_configure",
         "extension_remove",
+        "extension_unregister",
         "skill_search",
         "skill_install",
         "skill_remove",

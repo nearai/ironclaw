@@ -981,6 +981,22 @@ struct LocalDevVisibleCapabilityInputs<'a> {
     extension_surface: &'a LocalDevExtensionSurface,
 }
 
+/// Resolve the user a run acts on behalf of: the explicit thread owner, else
+/// the run actor, else the local-dev fallback. Single shared implementation
+/// (correction 4, `docs/plans/2026-07-08-mcp-reg-t3-plan.md`) — previously
+/// duplicated identically in `outbound_delivery.rs`, `project_create.rs`, and
+/// inlined a third time here. Every local-dev synthetic capability and the
+/// extension-lifecycle model-visible-capability filter (T3-iso) resolve the
+/// acting owner through this one function so they can never diverge.
+fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
+    run_context
+        .scope
+        .explicit_owner_user_id()
+        .cloned()
+        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
+        .unwrap_or_else(|| fallback_user_id.clone())
+}
+
 fn local_dev_visible_capability_request(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
@@ -997,12 +1013,7 @@ fn local_dev_visible_capability_request(
     grants
         .grants
         .extend(inputs.extension_surface.grants(&extension_id));
-    let user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
+    let user_id = effective_user_id(run_context, fallback_user_id);
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,

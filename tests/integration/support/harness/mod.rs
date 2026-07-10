@@ -267,6 +267,9 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// harnesses; `None` for the lower-level constructors and the Echo backend.
     /// Read via `reborn_services_for_test`.
     reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
+    /// T3-harness: use production `RefreshingLocalDevCapabilityPort` wiring
+    /// when this harness is installed into a group planned runtime.
+    refreshing_local_dev_capability_port: bool,
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -492,6 +495,7 @@ impl HostRuntimeCapabilityHarness {
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
             project_service_fault_injection,
+            refreshing_local_dev_capability_port,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -663,6 +667,7 @@ impl HostRuntimeCapabilityHarness {
             persistent_approval_policies,
             trigger_repository,
             reborn_services: Some(services),
+            refreshing_local_dev_capability_port,
         })
     }
 
@@ -690,6 +695,10 @@ impl HostRuntimeCapabilityHarness {
         self.reborn_services.as_ref()
     }
 
+    pub(crate) fn uses_refreshing_local_dev_capability_port(&self) -> bool {
+        self.refreshing_local_dev_capability_port
+    }
+
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
@@ -697,7 +706,25 @@ impl HostRuntimeCapabilityHarness {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
             harness: Arc::clone(self),
             milestone_sink,
+            inner: None,
         })
+    }
+
+    pub(crate) fn recording_capability_factory_for(
+        self: &Arc<Self>,
+        inner: Arc<dyn LoopCapabilityPortFactory>,
+    ) -> Arc<dyn LoopCapabilityPortFactory> {
+        Arc::new(HostRuntimeHarnessCapabilityPortFactory {
+            harness: Arc::clone(self),
+            milestone_sink: Arc::new(
+                ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default(),
+            ),
+            inner: Some(inner),
+        })
+    }
+
+    pub(crate) fn invocations_handle_for_test(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
+        Arc::clone(&self.invocations)
     }
 
     pub(crate) fn capability_result_writer(

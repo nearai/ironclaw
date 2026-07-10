@@ -5,7 +5,7 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, InMemoryExtensionInstallationStore, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, UserId, VirtualPath};
+use ironclaw_host_api::{ExtensionId, TenantId, UserId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -258,7 +258,19 @@ enum WireManifestSource {
     HostBundled,
     InstalledLocal,
     RegistryInstalled,
-    UserRegistered { owner: String },
+    UserRegistered {
+        #[serde(default = "default_registered_tenant_id")]
+        tenant_id: String,
+        owner: String,
+    },
+}
+
+fn default_registered_tenant_id() -> String {
+    // Legacy local-dev state pre-dates tenant-aware registrations. It is
+    // intentionally migrated into the local default tenant only; production
+    // callers never infer a tenant from a user id or scan another tenant's
+    // descriptor path as a fallback.
+    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string()
 }
 
 impl WireManifestSource {
@@ -267,7 +279,8 @@ impl WireManifestSource {
             ManifestSource::HostBundled => Self::HostBundled,
             ManifestSource::InstalledLocal => Self::InstalledLocal,
             ManifestSource::RegistryInstalled => Self::RegistryInstalled,
-            ManifestSource::UserRegistered { owner } => Self::UserRegistered {
+            ManifestSource::UserRegistered { tenant_id, owner } => Self::UserRegistered {
+                tenant_id: tenant_id.into_string(),
                 owner: owner.into_string(),
             },
         }
@@ -278,7 +291,8 @@ impl WireManifestSource {
             Self::HostBundled => ManifestSource::HostBundled,
             Self::InstalledLocal => ManifestSource::InstalledLocal,
             Self::RegistryInstalled => ManifestSource::RegistryInstalled,
-            Self::UserRegistered { owner } => ManifestSource::UserRegistered {
+            Self::UserRegistered { tenant_id, owner } => ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(tenant_id),
                 owner: UserId::from_trusted(owner),
             },
         }
@@ -307,6 +321,27 @@ mod tests {
     use ironclaw_host_api::HostPortCatalog;
 
     use super::*;
+
+    #[test]
+    fn legacy_user_registered_wire_source_defaults_to_local_tenant() {
+        let wire: WireManifestSource = serde_json::from_value(serde_json::json!({
+            "user_registered": {
+                "owner": "3eee560a-7fe5-474c-965a-67cb69df3d04"
+            }
+        }))
+        .expect("legacy user-registered source should deserialize");
+
+        let ManifestSource::UserRegistered { tenant_id, owner } = wire.into_manifest_source()
+        else {
+            panic!("expected user-registered manifest source");
+        };
+        assert_eq!(
+            tenant_id.as_str(),
+            ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID,
+            "legacy state without tenant_id must remain local-only"
+        );
+        assert_eq!(owner.as_str(), "3eee560a-7fe5-474c-965a-67cb69df3d04");
+    }
 
     #[tokio::test]
     async fn load_at_treats_not_found_as_empty_state() {

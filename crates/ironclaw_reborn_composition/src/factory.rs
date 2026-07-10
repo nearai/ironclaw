@@ -167,8 +167,8 @@ use crate::extension_host::{
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
-        ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
-        restore_extension_lifecycle_state,
+        ActiveExtensionPublisher, ExtensionCapabilityAuthorityCleanup, ExtensionCredentialCleanup,
+        RebornLocalExtensionManagementPort, restore_extension_lifecycle_state,
     },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
@@ -588,6 +588,42 @@ impl RebornServices {
             .as_ref()
             .and_then(|rt| rt.extension_management.as_ref())
             .map(|em| em.installation_store_for_test())
+    }
+
+    /// Test-support access to the operator tool catalog wired exactly as
+    /// `build_webui_services_with_connectable_channels` wires it
+    /// (`ActiveRegistryOperatorToolCatalog`, registry + installation store).
+    /// `build_webui_services` needs a `&RebornRuntime`, which flat
+    /// integration-test harnesses never construct (they call
+    /// `build_reborn_services` directly) — this accessor lets a test drive
+    /// the REAL owner/enabled operator-tool filter (T3-iso correction 10)
+    /// through `RebornServices::with_operator_approval_config` instead of a
+    /// hand-rolled `RebornOperatorToolCatalog` double. `None` for
+    /// compositions with no local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_operator_tool_catalog_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::RebornOperatorToolCatalog>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let registry = local_runtime
+            .shared_extension_registry
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(SharedExtensionRegistry::new(
+                    local_runtime.extension_registry.as_ref().clone(),
+                ))
+            });
+        let installation_store = local_runtime
+            .extension_management
+            .as_ref()
+            .map(|extension_management| extension_management.installation_store());
+        Some(Arc::new(
+            crate::webui::ActiveRegistryOperatorToolCatalog::new(
+                registry,
+                installation_store,
+                Vec::new(),
+            ),
+        ))
     }
 
     /// Test-support access to the local-dev memory filesystem that backs the
@@ -1814,14 +1850,30 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
-    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        extension_filesystem,
-        available_extensions,
-        extension_installation_store,
-        extension_lifecycle_service,
-        active_extensions,
-        Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
-    ));
+    let extension_persistent_approval_policies: Arc<
+        dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+    > = store_graph
+        .local_runtime
+        .persistent_approval_policies
+        .clone();
+    let extension_tool_permission_overrides: Arc<
+        dyn ironclaw_approvals::CapabilityPermissionOverrideStore,
+    > = store_graph.local_runtime.tool_permission_overrides.clone();
+    let extension_management = Arc::new(
+        RebornLocalExtensionManagementPort::new_with_metadata_safety(
+            extension_filesystem,
+            available_extensions,
+            extension_installation_store,
+            extension_lifecycle_service,
+            active_extensions,
+            ExtensionCapabilityAuthorityCleanup::new(
+                extension_persistent_approval_policies,
+                extension_tool_permission_overrides,
+            ),
+            Arc::new(ironclaw_safety::Sanitizer::new()),
+            Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
+        ),
+    );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
@@ -6581,7 +6633,10 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                    .expect("NEAR AI MCP owner scope"),
+            )
             .await
             .expect("active capabilities");
         let search = capabilities
@@ -6696,7 +6751,10 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Discovered);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                    .expect("NEAR AI MCP owner scope"),
+            )
             .await
             .expect("active capabilities");
         assert!(
@@ -6861,7 +6919,10 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities()
+            .active_model_visible_capabilities(
+                &local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                    .expect("NEAR AI MCP owner scope"),
+            )
             .await
             .expect("active capabilities");
         assert!(

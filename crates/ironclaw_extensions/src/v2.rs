@@ -40,9 +40,9 @@ use std::sync::Arc;
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
     HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
+    RequestedTrustClass, ResourceProfile, ResourceScope, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass, UserId,
+    TenantId, TrustClass, UserId,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -128,16 +128,51 @@ pub enum ManifestSource {
     /// eligible for effective FirstParty/System in v2.
     RegistryInstalled,
     /// Registered by a specific user through the MCP-registration store
-    /// (`/system/extensions/registered/<owner>/<id>/`). Never eligible for
-    /// effective FirstParty/System. Carries the owning [`UserId`] so
-    /// downstream storage/composition code can scope visibility per owner.
-    UserRegistered { owner: UserId },
+    /// (`/system/extensions/registered/<tenant>/<owner>/<id>/`). Never
+    /// eligible for effective FirstParty/System. Carries the owning tenant
+    /// and user so downstream storage/composition code can scope visibility
+    /// per tenant-user owner.
+    UserRegistered { tenant_id: TenantId, owner: UserId },
 }
 
 impl ManifestSource {
     /// True if the source is allowed to assert FirstParty/System trust/runtime.
     pub fn allows_first_party(&self) -> bool {
         matches!(self, Self::HostBundled)
+    }
+
+    /// True when the host may attach in-memory capability schemas discovered
+    /// at runtime instead of resolving schema files from the package root.
+    ///
+    /// This is deliberately narrower than the set of installable sources:
+    /// hosted MCP discovery is host-owned for bundled providers and for the
+    /// owner-scoped descriptors synthesized by the registration lifecycle.
+    pub fn allows_inline_dynamic_schemas(&self) -> bool {
+        matches!(self, Self::HostBundled | Self::UserRegistered { .. })
+    }
+
+    /// Temporary pre-installation-owner visibility bridge for user-registered
+    /// manifests. Tenant-wide ownership should use the installation owner once
+    /// private installs land.
+    pub fn visible_to_caller(&self, caller: Option<&UserId>) -> bool {
+        match self {
+            Self::UserRegistered { owner, .. } => caller.is_some_and(|caller| caller == owner),
+            _ => true,
+        }
+    }
+
+    /// Tenant-aware visibility for registered manifests. New lifecycle paths
+    /// must use this method so equal user ids in different tenants cannot
+    /// share a registration.
+    pub fn visible_to_resource_scope(&self, caller: Option<&ResourceScope>) -> bool {
+        match self {
+            Self::UserRegistered {
+                tenant_id, owner, ..
+            } => {
+                caller.is_some_and(|scope| &scope.tenant_id == tenant_id && &scope.user_id == owner)
+            }
+            _ => true,
+        }
     }
 }
 
@@ -720,9 +755,8 @@ impl ExtensionManifestV2 {
     ) -> Result<(), ManifestV2Error> {
         let projection = registry.project_manifest(self, sections, host_port_catalog)?;
         self.capabilities.extend(projection.capabilities);
-        // Checked on the projected output, not the raw `[[host_api]]` shape, so no
-        // future contract type can slip capabilities past it. A registered server's
-        // capabilities come from live discovery, never from its manifest.
+        // Defense in depth for projections introduced after from_raw's
+        // UserRegistered host_api gate.
         if matches!(self.source, ManifestSource::UserRegistered { .. })
             && !self.capabilities.is_empty()
         {
@@ -787,6 +821,11 @@ impl ExtensionManifestV2 {
                         .to_string(),
             });
         }
+        if matches!(source, ManifestSource::UserRegistered { .. }) && !raw.host_api.is_empty() {
+            return Err(ManifestV2Error::CapabilitiesForbiddenForRegisteredSource {
+                manifest_source: source,
+            });
+        }
 
         let id = ExtensionId::new(raw.id)?;
         if !source.allows_first_party() && id.as_str().starts_with(RESERVED_HOST_BUNDLED_ID_PREFIX)
@@ -820,8 +859,9 @@ impl ExtensionManifestV2 {
         }
         // `installed_allows()` permits Wasm/Mcp/Script for any non-bundled source,
         // but a `UserRegistered` descriptor is server-synthesized by the register
-        // verb and must carry no locally-resolved module: it is never materialized
-        // under an owner-scoped path, only the shared `canonical_extension_root`.
+        // verb and must carry no locally-resolved module. Its descriptor remains
+        // under owner-scoped registered storage and is never materialized into
+        // the shared canonical extension root.
         // Reject any runtime kind other than `mcp` explicitly rather than relying
         // on downstream zero-capability gating alone.
         if matches!(source, ManifestSource::UserRegistered { .. })

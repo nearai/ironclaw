@@ -122,9 +122,14 @@ struct RefreshingLocalDevCapabilityPort {
 
 impl RefreshingLocalDevCapabilityPort {
     async fn build_inner(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        // T3-iso: resolve the SAME acting owner `local_dev_visible_capability_request`
+        // below resolves, so the extension-surface filter and the granted
+        // capability set never diverge on whose registered extensions are visible.
+        let scope =
+            super::local_dev_resource_scope_for_run(&self.run_context, &self.fallback_user_id);
         let extension_surface = self
             .extension_surface_source
-            .snapshot()
+            .snapshot(&scope)
             .await
             .map_err(host_api_agent_loop_error)?;
         let visible_request = local_dev_visible_capability_request(
@@ -320,5 +325,326 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
             .await?
             .invoke_capability_batch(request)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::LocalDevCapabilityIo;
+    use super::*;
+    use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+    use ironclaw_extensions::{
+        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+        ExtensionInstallationStore, ExtensionManifest, ExtensionManifestRecord,
+        ExtensionManifestRef, ExtensionPackage, ManifestSource, SharedExtensionRegistry,
+    };
+    use ironclaw_host_api::{
+        AgentId, ExtensionId, HostPortCatalog, ProjectId, TenantId, ThreadId, VirtualPath,
+    };
+    use ironclaw_turns::{
+        RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
+        run_profile::{InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver},
+    };
+
+    /// Seeds an enabled owner-registered extension and one model-visible
+    /// capability directly through the installation store and registry so this
+    /// wrapper test stays focused on owner-scoped visibility.
+    async fn seed_owner_registered_capability(
+        installation_store: &Arc<dyn ExtensionInstallationStore>,
+        shared_registry: &SharedExtensionRegistry,
+        local_dev_storage_root: &std::path::Path,
+        owner: &UserId,
+        extension_id_str: &str,
+    ) {
+        let extension_id = ExtensionId::new(extension_id_str).expect("valid extension id");
+        let manifest_record = ExtensionManifestRecord::from_toml(
+            format!(
+                r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id_str}"
+name = "{extension_id_str}"
+version = "0.1.0"
+description = "Owner-registered MCP server (T3-iso wrapper fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#
+            ),
+            ManifestSource::UserRegistered {
+                tenant_id: ironclaw_host_api::TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
+                owner: owner.clone(),
+            },
+            &HostPortCatalog::empty(),
+            None,
+        )
+        .expect("owner manifest record parses");
+        installation_store
+            .upsert_manifest(manifest_record)
+            .await
+            .expect("seed owner manifest");
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new(extension_id.as_str().to_string())
+                .expect("valid installation id"),
+            extension_id.clone(),
+            ExtensionActivationState::Enabled,
+            ExtensionManifestRef::new(extension_id.clone(), None),
+            Vec::new(),
+            chrono::Utc::now(),
+        )
+        .expect("valid installation");
+        installation_store
+            .upsert_installation(installation)
+            .await
+            .expect("seed installation");
+
+        let capability_manifest = ExtensionManifest::parse(
+            &format!(
+                r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id_str}"
+name = "{extension_id_str}"
+version = "0.1.0"
+description = "Registered MCP capability probe fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id_str}.wasm"
+
+[[capabilities]]
+id = "{extension_id_str}.search"
+description = "Registered MCP search capability (fixture)"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+            ),
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("capability manifest parses");
+        let capability_package = ExtensionPackage::from_manifest(
+            capability_manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id_str}")).expect("valid root"),
+        )
+        .expect("capability package builds");
+        // The descriptor schema refs are read through the real mounted
+        // filesystem; empty schemas are enough because this test only checks
+        // capability ids.
+        let schema_dir = local_dev_storage_root
+            .join("system/extensions")
+            .join(extension_id_str)
+            .join("schemas");
+        std::fs::create_dir_all(&schema_dir).expect("create schema dir");
+        std::fs::write(schema_dir.join("search.input.json"), "{}").expect("write input schema");
+        std::fs::write(schema_dir.join("search.output.json"), "{}").expect("write output schema");
+        shared_registry
+            .upsert(capability_package)
+            .expect("publish capability into registry");
+    }
+
+    async fn run_context(
+        label: &str,
+        explicit_owner: Option<UserId>,
+        actor: Option<UserId>,
+    ) -> LoopRunContext {
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("profile resolves"); // safety: test-only assertion in #[cfg(test)] module.
+        let scope = TurnScope::new_with_owner(
+            TenantId::new(format!("tenant-{label}")).expect("tenant id"), // safety: test-only assertion in #[cfg(test)] module.
+            Some(AgentId::new(format!("agent-{label}")).expect("agent id")), // safety: test-only assertion in #[cfg(test)] module.
+            Some(ProjectId::new(format!("project-{label}")).expect("project id")), // safety: test-only assertion in #[cfg(test)] module.
+            ThreadId::new(format!("thread-{label}")).expect("thread id"), // safety: test-only assertion in #[cfg(test)] module.
+            explicit_owner,
+        );
+        let context = LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved);
+        match actor {
+            Some(actor) => context.with_actor(TurnActor::new(actor)),
+            None => context,
+        }
+    }
+
+    fn visible_capability_ids(surface: &VisibleCapabilitySurface) -> Vec<String> {
+        // Prefer the callable set so advertised-surface narrowing cannot mask
+        // the owner-scoping invariant.
+        match &surface.callable_capability_ids {
+            Some(ids) => ids.iter().map(|id| id.as_str().to_string()).collect(),
+            None => surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.as_str().to_string())
+                .collect(),
+        }
+    }
+
+    /// Pins the caller-level invariant that `build_inner` resolves the run
+    /// owner before querying user-registered capabilities.
+    ///
+    /// This drives `create_refreshing_local_dev_capability_port` because the
+    /// helper test would still pass if the wrapper used `fallback_user_id` for
+    /// every run.
+    #[tokio::test]
+    async fn build_inner_threads_the_resolved_run_owner_not_the_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "wrapper-build-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let extension_management: Arc<RebornLocalExtensionManagementPort> = local_runtime
+            .extension_management
+            .clone()
+            .expect("extension management");
+        let shared_registry = local_runtime
+            .shared_extension_registry
+            .clone()
+            .expect("shared extension registry");
+        let installation_store = extension_management.installation_store();
+
+        let fallback_user_id = UserId::new("wrapper-owner-fallback").expect("user id");
+        let owner_explicit = UserId::new("wrapper-owner-explicit").expect("user id");
+        let owner_actor = UserId::new("wrapper-owner-actor").expect("user id");
+        seed_owner_registered_capability(
+            &installation_store,
+            &shared_registry,
+            &local_runtime.local_dev_storage_root,
+            &fallback_user_id,
+            "acme-fallback",
+        )
+        .await;
+        seed_owner_registered_capability(
+            &installation_store,
+            &shared_registry,
+            &local_runtime.local_dev_storage_root,
+            &owner_explicit,
+            "acme-explicit",
+        )
+        .await;
+        seed_owner_registered_capability(
+            &installation_store,
+            &shared_registry,
+            &local_runtime.local_dev_storage_root,
+            &owner_actor,
+            "acme-actor",
+        )
+        .await;
+
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+
+        let make_config = |run_context: LoopRunContext| RefreshingLocalDevCapabilityPortConfig {
+            runtime: Arc::clone(&runtime),
+            run_context,
+            fallback_user_id: fallback_user_id.clone(),
+            policy: Arc::clone(&policy),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            skill_mounts: local_runtime.skill_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::new(Some(Arc::clone(
+                &extension_management,
+            ))),
+            input_resolver: Arc::clone(&input_resolver),
+            result_writer: Arc::clone(&result_writer),
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            project_service: Arc::clone(&local_runtime.project_service),
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+        };
+
+        let explicit_run_context =
+            run_context("explicit", Some(owner_explicit.clone()), None).await;
+        let explicit_port =
+            create_refreshing_local_dev_capability_port(make_config(explicit_run_context))
+                .await
+                .expect("capability port for explicit owner");
+        let explicit_surface = explicit_port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface for explicit owner");
+        let explicit_ids = visible_capability_ids(&explicit_surface);
+
+        let actor_run_context = run_context("actor", None, Some(owner_actor.clone())).await;
+        let actor_port =
+            create_refreshing_local_dev_capability_port(make_config(actor_run_context))
+                .await
+                .expect("capability port for actor owner");
+        let actor_surface = actor_port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface for actor owner");
+        let actor_ids = visible_capability_ids(&actor_surface);
+
+        let fallback_run_context = run_context("fallback", None, None).await;
+        let fallback_port =
+            create_refreshing_local_dev_capability_port(make_config(fallback_run_context))
+                .await
+                .expect("capability port for fallback owner");
+        let fallback_surface = fallback_port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface for fallback owner");
+        let fallback_ids = visible_capability_ids(&fallback_surface);
+
+        assert!(
+            explicit_ids.contains(&"acme-explicit.search".to_string()),
+            "explicit thread owner must see its own registered capability, got {explicit_ids:?}"
+        );
+        assert!(
+            !explicit_ids.contains(&"acme-actor.search".to_string())
+                && !explicit_ids.contains(&"acme-fallback.search".to_string()),
+            "explicit thread owner must not see another owner's registered capability, got {explicit_ids:?}"
+        );
+
+        assert!(
+            actor_ids.contains(&"acme-actor.search".to_string()),
+            "run actor must see its own registered capability when no explicit thread owner is set, got {actor_ids:?}"
+        );
+        assert!(
+            !actor_ids.contains(&"acme-explicit.search".to_string())
+                && !actor_ids.contains(&"acme-fallback.search".to_string()),
+            "run actor must not see another owner's registered capability, got {actor_ids:?}"
+        );
+
+        assert!(
+            fallback_ids.contains(&"acme-fallback.search".to_string()),
+            "fallback owner must see its own registered capability when neither an explicit \
+             thread owner nor a run actor is set, got {fallback_ids:?}"
+        );
+        assert!(
+            !fallback_ids.contains(&"acme-explicit.search".to_string())
+                && !fallback_ids.contains(&"acme-actor.search".to_string()),
+            "fallback owner must not see another owner's registered capability, got {fallback_ids:?}"
+        );
     }
 }

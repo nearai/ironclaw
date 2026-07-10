@@ -155,7 +155,7 @@ pub(crate) enum AvailableExtensionAssetContent {
 /// [`crate::extension_host::registered_extension_store`] (freshly loaded
 /// from disk, never borrowed from the shared first-party catalog) and a
 /// first-party catalog hit can flow through the same owned
-/// `AvailableExtensionPackage` return type in `resolve_with_owner_overlay`.
+/// `AvailableExtensionPackage` return type in `resolve_with_owner_overlay_for_scope`.
 #[derive(Debug, Clone)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
@@ -1618,7 +1618,7 @@ where
 /// that has a `manifest.toml`, tagging each with `source`. Reused for both
 /// the shared first-party catalog root (`/system/extensions`, `source =
 /// HostBundled`) and an owner's registered-extension subtree
-/// (`/system/extensions/registered/<owner>`, `source = UserRegistered`) —
+/// (`/system/extensions/registered/<tenant>/<owner>`, `source = UserRegistered`) —
 /// see [`crate::extension_host::registered_extension_store`]. The resulting
 /// package's `root` is always the canonical `/system/extensions/<id>` path
 /// (see [`canonical_extension_root`]), never `root` itself, so a package

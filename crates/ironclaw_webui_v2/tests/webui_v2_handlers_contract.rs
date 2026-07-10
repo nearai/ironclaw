@@ -27,7 +27,7 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
+    FsMount, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
@@ -54,7 +54,8 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
     RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornRegisterExtensionRequest, RebornRegisterExtensionResponse, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornResumeGateResponse,
     RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
@@ -291,8 +292,10 @@ struct StubServices {
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
+    register_extension_calls: Mutex<Vec<RebornRegisterExtensionRequest>>,
     activate_extension_calls: Mutex<Vec<String>>,
     remove_extension_calls: Mutex<Vec<String>>,
+    unregister_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
     upsert_llm_provider_calls: Mutex<Vec<String>>,
     delete_llm_provider_calls: Mutex<Vec<String>>,
@@ -1338,6 +1341,26 @@ impl RebornServicesApi for StubServices {
         Ok(extension_action_response("installed"))
     }
 
+    async fn register_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornRegisterExtensionRequest,
+    ) -> Result<RebornRegisterExtensionResponse, RebornServicesError> {
+        self.register_extension_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        let package_ref = LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            "mcp-minted123456789".to_string(),
+        )
+        .expect("valid package ref");
+        Ok(RebornRegisterExtensionResponse {
+            extension_id: package_ref.id.as_str().to_string(),
+            package_ref,
+        })
+    }
+
     async fn activate_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1360,6 +1383,18 @@ impl RebornServicesApi for StubServices {
             .expect("lock")
             .push(package_ref.id.as_str().to_string());
         Ok(extension_action_response("removed"))
+    }
+
+    async fn unregister_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        self.unregister_extension_calls
+            .lock()
+            .expect("lock")
+            .push(package_ref.id.as_str().to_string());
+        Ok(extension_action_response("unregistered"))
     }
 
     async fn setup_extension(
@@ -2188,6 +2223,22 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
     assert!(
         content_type.starts_with("text/event-stream"),
         "SSE content type expected, got: {content_type}"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-transform"),
+        "SSE responses must not be cached or transformed by intermediaries"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-accel-buffering")
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "Nginx must stream SSE frames without response buffering"
     );
 
     // The SSE body is lazy — drive it by polling the first frame, which
@@ -4346,6 +4397,43 @@ async fn install_extension_rejects_non_extension_package_kind_with_400() {
 }
 
 #[tokio::test]
+async fn register_extension_decodes_body_to_facade_call_and_returns_package_ref() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"Local MCP","url":"https://example.com/mcp"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["package_ref"]["kind"], "extension");
+    assert_eq!(body["package_ref"]["id"], "mcp-minted123456789");
+    assert_eq!(body["extension_id"], "mcp-minted123456789");
+    assert_eq!(
+        services
+            .register_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [RebornRegisterExtensionRequest {
+            name: "Local MCP".to_string(),
+            url: "https://example.com/mcp".to_string(),
+        }]
+    );
+}
+
+#[tokio::test]
 async fn activate_and_remove_extension_decode_path_package_id_to_facade_call() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -4384,6 +4472,33 @@ async fn activate_and_remove_extension_decode_path_package_id_to_facade_call() {
             .expect("lock")
             .as_slice(),
         ["google-calendar"]
+    );
+}
+
+#[tokio::test]
+async fn unregister_extension_decodes_path_package_id_to_facade_call() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/mcp-minted123456789/unregister")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services
+            .unregister_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["mcp-minted123456789"]
     );
 }
 
@@ -4499,6 +4614,37 @@ async fn get_extension_setup_rejects_malformed_package_id_with_400() {
     assert_eq!(body["error"], "invalid_request");
     assert_eq!(body["field"], "package_id");
     assert_eq!(body["validation_code"], "invalid_id");
+}
+
+#[tokio::test]
+async fn unregister_extension_rejects_malformed_package_id_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/bad%0Aid/unregister")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "package_id");
+    assert_eq!(body["validation_code"], "invalid_id");
+    assert!(
+        services
+            .unregister_extension_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid package id must not reach the facade"
+    );
 }
 
 #[tokio::test]
