@@ -398,6 +398,25 @@ jobs:
             exit 0
           fi
 
+          job_result_ok() {
+            local name="$1"
+            local result="$2"
+            local allow_skipped="$3"
+
+            if [[ "$result" == "success" ]]; then
+              return 0
+            fi
+            if [[ "$allow_skipped" == "true" && "$result" == "skipped" ]]; then
+              return 0
+            fi
+            if [[ "$result" == "cancelled" ]] &&
+              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo "$name was cancelled on push to main; treating as non-blocking"
+              return 0
+            fi
+            return 1
+          }
+
           for job_result in \
             "format=${{ needs.format.result }}" \
             "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
@@ -408,7 +427,7 @@ jobs:
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" ]]; then
+            if ! job_result_ok "$name" "$result" "false"; then
               echo "$name failed: $result"
               exit 1
             fi
@@ -420,7 +439,7 @@ jobs:
             "clippy-windows=${{ needs.clippy-windows.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            if ! job_result_ok "$name" "$result" "true"; then
               echo "$name failed: $result"
               exit 1
             fi

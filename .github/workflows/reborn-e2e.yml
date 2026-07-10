@@ -288,7 +288,7 @@ jobs:
     steps:
       - name: Check Reborn E2E jobs
         run: |
-          allow_cancelled_dep() {
+          job_result_ok() {
             local result="$1"
             if [[ "$result" == "success" ]]; then
               return 0
@@ -309,15 +309,15 @@ jobs:
             echo "No Reborn E2E scope in this merge group — roll-up passes"
             exit 0
           fi
-          if ! allow_cancelled_dep "${{ needs.rust-reborn.result }}"; then
+          if ! job_result_ok "${{ needs.rust-reborn.result }}"; then
             echo "Rust Reborn E2E failed"
             exit 1
           fi
-          if ! allow_cancelled_dep "${{ needs.gateway-smoke.result }}"; then
+          if ! job_result_ok "${{ needs.gateway-smoke.result }}"; then
             echo "Reborn gateway smoke failed"
             exit 1
           fi
-          if ! allow_cancelled_dep "${{ needs.webui-v2-smoke.result }}"; then
+          if ! job_result_ok "${{ needs.webui-v2-smoke.result }}"; then
             echo "Reborn WebUI v2 smoke failed"
             exit 1
           fi

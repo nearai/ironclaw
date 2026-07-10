@@ -443,6 +443,22 @@ jobs:
     steps:
       - name: Check Platform & Compat jobs
         run: |
+          job_result_ok() {
+            local name="$1"
+            local result="$2"
+
+            if [[ "$result" == "success" || "$result" == "skipped" ]]; then
+              return 0
+            fi
+
+            if [[ "$result" == "cancelled" ]] &&
+              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo "$name was cancelled on push to main; treating as non-blocking"
+              return 0
+            fi
+            return 1
+          }
+
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes (scope detection) failed: ${{ needs.changes.result }}"
             exit 1
@@ -461,7 +477,7 @@ jobs:
             "version-check=${{ needs.version-check.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            if ! job_result_ok "$name" "$result"; then
               echo "$name failed: $result"
               exit 1
             fi

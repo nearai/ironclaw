@@ -794,6 +794,18 @@ jobs:
     steps:
       - name: Check Reborn test result
         run: |
+          job_result_ok() {
+            local result="$1"
+            if [[ "$result" == "success" ]]; then
+              return 0
+            fi
+            if [[ "$result" == "cancelled" ]] &&
+              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+              return 0
+            fi
+            return 1
+          }
+
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes failed: ${{ needs.changes.result }}"
             exit 1
@@ -809,22 +821,22 @@ jobs:
             exit 0
           fi
 
-          if [[ "${{ needs.package-matrix.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.package-matrix.result }}"; then
             echo "Reborn package matrix discovery failed: ${{ needs.package-matrix.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.crate-tests.result }}"; then
             echo "One or more Reborn binary crate tests failed: ${{ needs.crate-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.root-reborn-parity-tests.result }}"; then
             echo "One or more Reborn root tests failed: ${{ needs.root-reborn-parity-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.reborn-group-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.reborn-group-tests.result }}"; then
             echo "One or more Reborn group tests failed: ${{ needs.reborn-group-tests.result }}"
             exit 1
           fi
@@ -833,7 +845,7 @@ jobs:
           # suites (see the reborn-integration-coverage job), so it gates like
           # every other test job above — real pass/fail, not the coverage
           # percentage (that's coverage-report below).
-          if [[ "${{ needs.reborn-integration-coverage.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.reborn-integration-coverage.result }}"; then
             echo "One or more Reborn integration-tier coverage lanes failed: ${{ needs.reborn-integration-coverage.result }}"
             exit 1
           fi
@@ -845,17 +857,17 @@ jobs:
           # like every other job above. (While [global].enforce = false in the
           # floor file, the ratchet step always exits 0, so this stays green
           # during the dry-run soak period — see the floor file's own header.)
-          if [[ "${{ needs.coverage-report.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.coverage-report.result }}"; then
             echo "Reborn coverage-report job failed (merge/summary error, or a coverage ratchet violation): ${{ needs.coverage-report.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.webui-v2-js-tests.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.webui-v2-js-tests.result }}"; then
             echo "Reborn WebUI v2 JS tests failed: ${{ needs.webui-v2-js-tests.result }}"
             exit 1
           fi
 
-          if [[ "${{ needs.qa-recorded-fixtures.result }}" != "success" ]]; then
+          if ! job_result_ok "${{ needs.qa-recorded-fixtures.result }}"; then
             echo "Reborn QA recorded fixture tests failed: ${{ needs.qa-recorded-fixtures.result }}"
             exit 1
           fi

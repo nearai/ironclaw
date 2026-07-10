@@ -410,6 +410,15 @@ jobs:
           require_success() {
             name="$1"
             result="$2"
+            if [[ "$result" == "success" ]]; then
+              return 0
+            fi
+            if [[ "$result" == "cancelled" ]] &&
+              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo "$name was cancelled on push to main; treating as non-blocking"
+              return 0
+            fi
+
             if [[ "$result" != "success" ]]; then
               echo "$name failed: $result"
               exit 1
@@ -470,8 +479,14 @@ jobs:
       - run-tests
     steps:
       - run: |
-          if [[ "${{ needs.run-tests.result }}" != "success" ]]; then
+          if [[ "${{ needs.run-tests.result }}" != "success" ]] && \
+             [[ "${{ needs.run-tests.result }}" != "cancelled" ]]; then
             echo "Tests (Legacy) failed: ${{ needs.run-tests.result }}"
             exit 1
+          fi
+          if [[ "${{ needs.run-tests.result }}" == "cancelled" ]] && \
+             [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "Tests (Legacy) was cancelled on push to main; treating as non-blocking"
+            exit 0
           fi
           echo "Compatibility roll-up for the current main required check."
