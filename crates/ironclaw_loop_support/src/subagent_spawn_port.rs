@@ -456,12 +456,6 @@ impl SpawnCompensationState {
         if let Some((scope, run_id)) = self.goal_written.as_ref() {
             let _ = deps.goal_store.delete_goal(scope, *run_id).await;
         }
-        if let Some(result_ref) = self.result_written.as_ref() {
-            let _ = deps
-                .result_writer
-                .delete_capability_result(run_context, result_ref)
-                .await;
-        }
         if let Some((scope, tree_root)) = self.submitted_child_tree.as_ref() {
             // Idempotency key for the release-tree-descendants dedup guard
             // (§5.5 round-5/6): the just-submitted child's own run id, the

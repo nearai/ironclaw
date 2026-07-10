@@ -386,36 +386,6 @@ impl LocalDevCapabilityIo {
         }
     }
 
-    async fn delete_persisted_tool_result(
-        &self,
-        run_context: &LoopRunContext,
-        result_ref: &LoopResultRef,
-    ) -> Result<(), AgentLoopHostError> {
-        let Some((durable_previews, scope)) = self.durable_tool_result_scope(run_context)? else {
-            return Ok(());
-        };
-        match durable_previews
-            .thread_service
-            .delete_tool_result_record(ironclaw_threads::DeleteToolResultRecordRequest {
-                scope,
-                thread_id: run_context.thread_id.clone(),
-                result_ref: result_ref.as_str().to_string(),
-            })
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(ironclaw_threads::SessionThreadError::UnknownThread { thread_id }) => {
-                tracing::debug!(
-                    thread_id = %thread_id,
-                    result_ref = result_ref.as_str(),
-                    "local-dev durable tool result delete skipped: thread is unknown"
-                );
-                Ok(())
-            }
-            Err(error) => Err(durable_result_store_error(error)),
-        }
-    }
-
     fn durable_tool_result_scope(
         &self,
         run_context: &LoopRunContext,
@@ -838,8 +808,6 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         result_ref: &LoopResultRef,
     ) -> Result<(), AgentLoopHostError> {
         ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
-        self.delete_persisted_tool_result(run_context, result_ref)
-            .await?;
         self.results
             .lock()
             .map_err(|_| capability_io_error())?
