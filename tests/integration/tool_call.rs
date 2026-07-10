@@ -148,6 +148,12 @@ async fn decimal_number_in_prompt_does_not_suppress_tool_call() {
     h.assert_tool_invoked("builtin.http")
         .await
         .expect("http tool ran; guard must not misfire on the decimal 0.95");
+    h.assert_egress_request_matching("api.example.test")
+        .await
+        .expect("scripted http call crossed the recording egress");
+    h.assert_reply_contains("fetched")
+        .await
+        .expect("final reply finalized");
 }
 
 /// Regression for #5782: a backticked code reference (`playwright.sync_api`,
@@ -171,6 +177,12 @@ async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
     h.assert_tool_invoked("builtin.http")
         .await
         .expect("http tool ran; guard must not misfire on the code reference playwright.sync_api");
+    h.assert_egress_request_matching("api.example.test")
+        .await
+        .expect("scripted http call crossed the recording egress");
+    h.assert_reply_contains("fetched")
+        .await
+        .expect("final reply finalized");
 }
 
 /// The globally-disabled `builtin.spawn_subagent` capability (configured
