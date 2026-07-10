@@ -34,10 +34,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: code-coverage-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
@@ -317,11 +313,11 @@ jobs:
           # shellcheck disable=SC1091
           source .github/scripts/ci-job-result-ok.sh
 
-          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "superseded_only"; then
+          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "none"; then
             echo "Coverage job failed: ${{ needs.coverage.result }}"
             exit 1
           fi
-          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "superseded_only"; then
+          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "none"; then
             echo "E2E coverage job failed: ${{ needs.e2e-coverage.result }}"
             echo "One or more coverage jobs failed"
             exit 1
