@@ -458,6 +458,34 @@ impl ExtensionInstallation {
         updated_at: DateTime<Utc>,
         owner: InstallationOwner,
     ) -> Result<Self, ExtensionInstallationError> {
+        Self::from_persisted_parts(
+            installation_id,
+            extension_id,
+            activation_state,
+            manifest_ref,
+            credential_bindings,
+            ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
+            updated_at,
+            owner,
+        )
+    }
+
+    /// Reconstruct an installation with all state read from persistence.
+    ///
+    /// The ordinary [`Self::new`] constructor starts a fresh installation with
+    /// a healthy snapshot. Persistence adapters use this neutral constructor
+    /// when they need to preserve an existing health snapshot and timestamp
+    /// while changing the canonical installation identity.
+    pub fn from_persisted_parts(
+        installation_id: ExtensionInstallationId,
+        extension_id: ExtensionId,
+        activation_state: ExtensionActivationState,
+        manifest_ref: ExtensionManifestRef,
+        credential_bindings: Vec<ExtensionCredentialBinding>,
+        health: ExtensionHealthSnapshot,
+        updated_at: DateTime<Utc>,
+        owner: InstallationOwner,
+    ) -> Result<Self, ExtensionInstallationError> {
         if manifest_ref.extension_id() != &extension_id {
             return Err(ExtensionInstallationError::ManifestExtensionMismatch {
                 extension_id,
@@ -471,7 +499,7 @@ impl ExtensionInstallation {
             activation_state,
             manifest_ref,
             credential_bindings,
-            health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
+            health,
             updated_at,
             owner,
         })
@@ -1120,6 +1148,13 @@ pub enum ExtensionInstallationError {
     InvalidInstallation { reason: String },
     #[error("duplicate credential binding {handle}")]
     DuplicateCredentialBinding { handle: ExtensionCredentialHandle },
+    #[error("conflicting manifest references for extension {extension_id}")]
+    ConflictingManifestReference { extension_id: ExtensionId },
+    #[error("conflicting credential bindings for extension {extension_id} and handle {handle}")]
+    ConflictingCredentialBinding {
+        extension_id: ExtensionId,
+        handle: ExtensionCredentialHandle,
+    },
 }
 
 fn validate_installation_against_manifest(

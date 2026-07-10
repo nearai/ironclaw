@@ -20,6 +20,7 @@ use axum::http::StatusCode;
 use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
 use ironclaw_events::InMemoryDurableEventLog;
+use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, TenantId, UserId,
@@ -387,6 +388,209 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
+}
+
+#[tokio::test]
+async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let storage_root = root.path().join("local-dev");
+    let tenant_id = TenantId::new("webui-legacy-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-legacy-agent").expect("agent id");
+    let operator_id = UserId::new("webui-legacy-operator").expect("operator id");
+    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-legacy-source".to_string(),
+                reply_target_binding_id: "webui-legacy-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id.clone(),
+        operator_id,
+        Some(agent_id.clone()),
+        None,
+    );
+
+    let operator_router = webui_v2_router(WebUiV2State::new(
+        Arc::clone(&webui.api),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(
+        operator_caller.with_operator_webui_config(true),
+    ))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+    let (status, body) = post_raw(
+        operator_router,
+        "/api/webchat/v2/extensions/import",
+        importable_extension_zip("legacy-members"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator response: {body}");
+    assert_eq!(body["success"], true);
+
+    let alice_id = UserId::new("alice").expect("alice id");
+    let bob_id = UserId::new("bob").expect("bob id");
+    let install_request = serde_json::json!({
+        "package_ref": {"kind": "extension", "id": "legacy-members"}
+    });
+    for (name, user_id) in [("Alice", alice_id.clone()), ("Bob", bob_id.clone())] {
+        let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+            tenant_id.clone(),
+            user_id,
+            Some(agent_id.clone()),
+            None,
+        );
+        let (status, body) = post_json(
+            mount_webui_v2_router(Arc::clone(&webui.api), caller),
+            "/api/webchat/v2/extensions/install",
+            install_request.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name} install response: {body}");
+        assert_eq!(body["success"], true, "{name} install response: {body}");
+    }
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+
+    let state_path = storage_root.join("system/extensions/.installations/state.json");
+    let mut state: Value = serde_json::from_slice(
+        &std::fs::read(&state_path).expect("read extension installation state"),
+    )
+    .expect("extension installation state is JSON");
+    let rows = state["installations"]
+        .as_array()
+        .expect("installations array");
+    assert_eq!(rows.len(), 1, "member installs must already share one row");
+    let mut alice_row = rows[0].clone();
+    alice_row["installation_id"] = Value::String("legacy-alice-legacy-members".to_string());
+    alice_row["owner"] = serde_json::json!({"kind": "user", "user_id": "alice"});
+    let mut bob_row = rows[0].clone();
+    bob_row["installation_id"] = Value::String("legacy-bob-legacy-members".to_string());
+    bob_row["owner"] = serde_json::json!({"kind": "user", "user_id": "bob"});
+    state["installations"] = serde_json::json!([alice_row, bob_row]);
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("serialize legacy installation state"),
+    )
+    .expect("write legacy installation state");
+
+    let rebuilt_input = RebornBuildInput::local_dev("webui-legacy-operator", storage_root.clone())
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let rebuilt_runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(rebuilt_input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-legacy-source".to_string(),
+                reply_target_binding_id: "webui-legacy-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("rebuilt production Reborn runtime builds");
+    let rebuilt_webui =
+        build_webui_services(&rebuilt_runtime, None).expect("rebuilt WebUI facade builds");
+
+    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+        &storage_root,
+    )
+    .await
+    .expect("reopen canonical extension installation store");
+    let installations = store
+        .list_installations()
+        .await
+        .expect("list canonical extension installations");
+    assert_eq!(
+        installations.len(),
+        1,
+        "legacy rows must canonicalize to one installation"
+    );
+    let installation = &installations[0];
+    assert_eq!(installation.installation_id().as_str(), "legacy-members");
+    assert_eq!(installation.extension_id().as_str(), "legacy-members");
+    let members = installation
+        .owner()
+        .members()
+        .expect("canonical installation is member-owned");
+    assert!(
+        members.contains(&alice_id),
+        "canonical owner contains Alice"
+    );
+    assert!(members.contains(&bob_id), "canonical owner contains Bob");
+
+    let alice_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id.clone(),
+        alice_id,
+        Some(agent_id.clone()),
+        None,
+    );
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui.api), alice_caller),
+        "/api/webchat/v2/extensions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Alice extensions response: {body}");
+    let alice_extension = body["extensions"]
+        .as_array()
+        .and_then(|extensions| {
+            extensions
+                .iter()
+                .find(|extension| extension["package_ref"]["id"] == "legacy-members")
+        })
+        .unwrap_or_else(|| panic!("Alice should see private legacy-members: {body}"));
+    assert_eq!(alice_extension["install_scope"], "private");
+
+    let bob_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id,
+        bob_id,
+        Some(agent_id),
+        None,
+    );
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&rebuilt_webui.api), bob_caller),
+        "/api/webchat/v2/extensions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Bob extensions response: {body}");
+    let bob_extension = body["extensions"]
+        .as_array()
+        .and_then(|extensions| {
+            extensions
+                .iter()
+                .find(|extension| extension["package_ref"]["id"] == "legacy-members")
+        })
+        .unwrap_or_else(|| panic!("Bob should see private legacy-members: {body}"));
+    assert_eq!(bob_extension["install_scope"], "private");
+
+    drop(store);
+    drop(rebuilt_webui);
+    rebuilt_runtime
+        .shutdown()
+        .await
+        .expect("rebuilt runtime shuts down");
 }
 
 async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {

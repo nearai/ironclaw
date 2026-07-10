@@ -1,12 +1,14 @@
+use std::collections::BTreeSet;
+
 use chrono::Utc;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionHealthMessage, ExtensionHealthSnapshot,
-    ExtensionHealthStatus, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
-    ExtensionManifestRef, InMemoryExtensionInstallationStore, InstallationOwner,
-    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 
 fn extension_id(value: &str) -> ExtensionId {
     ExtensionId::new(value).unwrap()
@@ -363,6 +365,44 @@ fn new_installation_uses_updated_at_for_initial_health_timestamp() {
     .unwrap();
 
     assert_eq!(installation.health().checked_at(), updated_at);
+}
+
+#[test]
+fn persisted_reconstruction_preserves_health_timestamp_and_bindings() {
+    let extension_id = extension_id("acme-tools");
+    let checked_at = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let updated_at = chrono::DateTime::parse_from_rfc3339("2026-01-03T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let health = ExtensionHealthSnapshot::new(
+        ExtensionHealthStatus::Degraded,
+        Some(ExtensionHealthMessage::new("redacted diagnostic")),
+        checked_at,
+    );
+    let binding = ExtensionCredentialBinding::new(
+        ExtensionCredentialHandle::new("api").unwrap(),
+        SecretHandle::new("api-secret").unwrap(),
+    );
+    let owner = InstallationOwner::users(BTreeSet::from([UserId::new("alice").unwrap()])).unwrap();
+
+    let installation = ExtensionInstallation::from_persisted_parts(
+        installation_id("acme-tools"),
+        extension_id.clone(),
+        ExtensionActivationState::Enabled,
+        ExtensionManifestRef::new(extension_id, None),
+        vec![binding.clone()],
+        health.clone(),
+        updated_at,
+        owner.clone(),
+    )
+    .unwrap();
+
+    assert_eq!(installation.health(), &health);
+    assert_eq!(installation.updated_at(), updated_at);
+    assert_eq!(installation.credential_bindings(), &[binding]);
+    assert_eq!(installation.owner(), &owner);
 }
 
 #[tokio::test]

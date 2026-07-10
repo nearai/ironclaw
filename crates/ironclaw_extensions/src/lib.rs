@@ -407,6 +407,7 @@ fn descriptors_match_except_schema(
         })
 }
 
+mod canonicalization;
 pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
@@ -431,6 +432,7 @@ pub use v2::{
 
 pub type CapabilityManifest = CapabilityDeclV2;
 
+pub use canonicalization::canonicalize_installation_rows;
 pub use installations::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,

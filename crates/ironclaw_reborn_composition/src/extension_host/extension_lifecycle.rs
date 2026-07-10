@@ -439,19 +439,12 @@ impl RebornLocalExtensionManagementPort {
         // capabilities so the per-request grant minting in the local-dev
         // capability surface can filter user-private extensions to their
         // owner. The registry itself stays global; owner is joined here.
-        let owner_by_extension = self
-            .installation_store
-            .list_enabled_installations()
-            .await
-            .map_err(map_extension_installation_error)?
-            .into_iter()
-            .map(|installation| {
-                (
-                    installation.extension_id().clone(),
-                    installation.owner().clone(),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let owner_by_extension = project_installation_owners(
+            self.installation_store
+                .list_enabled_installations()
+                .await
+                .map_err(map_extension_installation_error)?,
+        )?;
         let registry = self.active_extensions.snapshot();
         Ok(registry
             .capabilities()
@@ -477,19 +470,12 @@ impl RebornLocalExtensionManagementPort {
         &self,
     ) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductWorkflowError>
     {
-        Ok(self
-            .installation_store
-            .list_installations()
-            .await
-            .map_err(map_extension_installation_error)?
-            .into_iter()
-            .map(|installation| {
-                (
-                    installation.extension_id().clone(),
-                    installation.owner().clone(),
-                )
-            })
-            .collect())
+        project_installation_owners(
+            self.installation_store
+                .list_installations()
+                .await
+                .map_err(map_extension_installation_error)?,
+        )
     }
 
     pub(crate) async fn activation_credential_requirements(
@@ -2068,6 +2054,30 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
     }
 }
 
+fn project_installation_owners<I>(
+    installations: I,
+) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductWorkflowError>
+where
+    I: IntoIterator<Item = ExtensionInstallation>,
+{
+    let mut owners = std::collections::BTreeMap::new();
+    for installation in installations {
+        let extension_id = installation.extension_id().clone();
+        if owners
+            .insert(extension_id.clone(), installation.owner().clone())
+            .is_some()
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "duplicate extension id in lifecycle owner projection: {}",
+                    extension_id.as_str()
+                ),
+            });
+        }
+    }
+    Ok(owners)
+}
+
 fn ensure_caller_may_mutate_tenant_installation(
     installation: &ExtensionInstallation,
     caller: &UserId,
@@ -2151,6 +2161,60 @@ mod tests {
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
 
     mod private_install_tests;
+
+    #[tokio::test]
+    async fn lifecycle_owner_projections_reject_duplicate_extension_ids() {
+        let (_dir, _storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let extension_id = ExtensionId::new("fixture").unwrap();
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                fixture_extension_manifest(),
+                ManifestSource::HostBundled,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        for installation_id in ["fixture", "legacy-fixture"] {
+            installation_store
+                .upsert_installation(
+                    ExtensionInstallation::new(
+                        ExtensionInstallationId::new(installation_id).unwrap(),
+                        extension_id.clone(),
+                        ExtensionActivationState::Enabled,
+                        ExtensionManifestRef::new(extension_id.clone(), None),
+                        Vec::new(),
+                        chrono::Utc::now(),
+                        InstallationOwner::Tenant,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let owners_error = port
+            .installation_owners()
+            .await
+            .expect_err("duplicate owner rows fail closed");
+        assert!(matches!(
+            owners_error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+
+        let active_error = port
+            .active_model_visible_capabilities()
+            .await
+            .expect_err("duplicate active owner rows fail closed");
+        assert!(matches!(
+            active_error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
 
     fn zip_bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::Write;
