@@ -32,11 +32,9 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: wasm_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello wasm"}),
@@ -59,12 +57,10 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: script_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script"}),
@@ -89,12 +85,10 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
             scope: mcp_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello mcp"}),
@@ -131,14 +125,12 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for EchoAdapter {
         request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let output = request.input;
-        let usage = ResourceUsage {
-            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
-            process_count: u32::from(matches!(
+        let usage = ResourceUsage::default()
+            .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64)
+            .set_process_count(u32::from(matches!(
                 self.runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
+            )));
         let reservation = request
             .governor
             .reserve(request.scope, request.estimate)

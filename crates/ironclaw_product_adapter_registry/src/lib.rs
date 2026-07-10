@@ -46,9 +46,8 @@ pub fn parse_product_adapter_manifest_record(
     host_port_catalog: &HostPortCatalog,
     manifest_hash: Option<ManifestHash>,
 ) -> Result<ExtensionManifestRecord, RegistryError> {
-    let contract = Arc::new(ProductAdapterHostApiContract::new()?);
     let mut contracts = HostApiContractRegistry::new();
-    contracts.register(contract)?;
+    register_product_adapter_host_api_contract(&mut contracts)?;
     let record = ExtensionManifestRecord::from_toml_with_contracts(
         raw_toml,
         source,
@@ -365,6 +364,13 @@ impl ProductAdapterHostApiContract {
             id: HostApiId::new(PRODUCT_ADAPTER_HOST_API_ID)?,
         })
     }
+}
+
+pub fn register_product_adapter_host_api_contract(
+    registry: &mut HostApiContractRegistry,
+) -> Result<(), RegistryError> {
+    registry.register(Arc::new(ProductAdapterHostApiContract::new()?))?;
+    Ok(())
 }
 
 impl HostApiManifestContract for ProductAdapterHostApiContract {

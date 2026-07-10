@@ -341,12 +341,10 @@ async fn adapter_enforces_when_backend_advertises_capability_but_does_not_protec
     #[async_trait]
     impl MemoryBackend for PromptSafetyAdvertisingBackend {
         fn capabilities(&self) -> MemoryBackendCapabilities {
-            MemoryBackendCapabilities {
-                file_documents: true,
-                // **The footgun**: backend says "I do prompt-write safety"…
-                prompt_write_safety: true,
-                ..MemoryBackendCapabilities::default()
-            }
+            // **The footgun**: backend says "I do prompt-write safety"…
+            MemoryBackendCapabilities::default()
+                .set_file_documents(true)
+                .set_prompt_write_safety(true)
         }
 
         // …but reports protecting *no* paths. Adapter-classified files
@@ -1271,10 +1269,7 @@ impl RecordingBackend {
 #[async_trait]
 impl MemoryBackend for RecordingBackend {
     fn capabilities(&self) -> MemoryBackendCapabilities {
-        MemoryBackendCapabilities {
-            file_documents: true,
-            ..MemoryBackendCapabilities::default()
-        }
+        MemoryBackendCapabilities::default().set_file_documents(true)
     }
 
     async fn read_document(
@@ -1320,11 +1315,9 @@ impl BackendPromptSafetyRejects {
 #[async_trait]
 impl MemoryBackend for BackendPromptSafetyRejects {
     fn capabilities(&self) -> MemoryBackendCapabilities {
-        MemoryBackendCapabilities {
-            file_documents: true,
-            prompt_write_safety: true,
-            ..MemoryBackendCapabilities::default()
-        }
+        MemoryBackendCapabilities::default()
+            .set_file_documents(true)
+            .set_prompt_write_safety(true)
     }
 
     // The adapter defers to this backend only when it reports that it
@@ -1561,10 +1554,7 @@ impl ConflictOnceAppendBackend {
 #[async_trait]
 impl MemoryBackend for ConflictOnceAppendBackend {
     fn capabilities(&self) -> MemoryBackendCapabilities {
-        MemoryBackendCapabilities {
-            file_documents: true,
-            ..MemoryBackendCapabilities::default()
-        }
+        MemoryBackendCapabilities::default().set_file_documents(true)
     }
 
     async fn read_document(

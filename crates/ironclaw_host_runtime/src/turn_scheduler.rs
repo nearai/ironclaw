@@ -10,12 +10,12 @@ use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
     runner::{
-        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
+        ClaimRunsRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
         RecoverExpiredLeasesRequest, RelinquishRunRequest, TurnRunTransitionPort,
     },
 };
 use tokio::{
-    sync::{Semaphore, mpsc},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
     task::{JoinHandle, JoinSet},
     time::{MissedTickBehavior, interval, sleep},
 };
@@ -26,6 +26,8 @@ use tracing::debug;
 mod executor_task;
 mod latency;
 use self::executor_task::ExecutorTaskOutcome;
+
+const MAX_CLAIMS_PER_DRAIN_BATCH: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct TurnRunSchedulerConfig {
@@ -607,60 +609,79 @@ async fn drain_queued_runs(
             return false;
         }
 
-        let Ok(permit) = Arc::clone(&context.semaphore).try_acquire_owned() else {
+        let permits = acquire_claim_permits(&context.semaphore);
+        if permits.is_empty() {
             return false;
         };
         let claim_started_at = live_latency_started_at();
         let scope_filter_fields = latency::scope_fields(claim_started_at, scope_filter.as_ref());
         let claim = context
             .transitions
-            .claim_next_run(ClaimRunRequest {
+            .claim_next_runs(ClaimRunsRequest {
                 runner_id: context.runner_id,
-                lease_token: ironclaw_turns::TurnLeaseToken::new(),
                 scope_filter: scope_filter.clone(),
+                max_runs: permits.len(),
             })
             .await;
-        latency::claim_next_run_result(scope_filter_fields.as_ref(), claim_started_at, &claim);
         match claim {
-            Ok(Some(claimed)) => {
-                let run_id = claimed.state.run_id;
-                active_runs.insert(
-                    run_id,
-                    RelinquishIdentity {
+            Ok(claimed_runs) if claimed_runs.is_empty() => return false,
+            Ok(claimed_runs) => {
+                latency::claim_next_runs_result(
+                    scope_filter_fields.as_ref(),
+                    claim_started_at,
+                    &claimed_runs,
+                );
+                for (claimed, permit) in claimed_runs.into_iter().zip(permits) {
+                    let run_id = claimed.state.run_id;
+                    active_runs.insert(
                         run_id,
-                        runner_id: claimed.runner_id,
-                        lease_token: claimed.lease_token,
-                    },
-                );
-                let task_config = ExecutorTaskConfig {
-                    runner_heartbeat_interval: context.config.runner_heartbeat_interval(),
-                    max_consecutive_heartbeat_failures: context
-                        .config
-                        .max_consecutive_heartbeat_failures(),
-                    terminal_failure_record_attempts: context
-                        .config
-                        .terminal_failure_record_attempts(),
-                    terminal_failure_record_backoff: context
-                        .config
-                        .terminal_failure_record_backoff(),
-                };
-                spawn_executor_task(
-                    claimed,
-                    Arc::clone(&context.transitions),
-                    Arc::clone(&context.executor),
-                    context.command_tx.clone(),
-                    permit,
-                    task_config,
-                    executor_tasks,
-                );
+                        RelinquishIdentity {
+                            run_id,
+                            runner_id: claimed.runner_id,
+                            lease_token: claimed.lease_token,
+                        },
+                    );
+                    let task_config = ExecutorTaskConfig {
+                        runner_heartbeat_interval: context.config.runner_heartbeat_interval(),
+                        max_consecutive_heartbeat_failures: context
+                            .config
+                            .max_consecutive_heartbeat_failures(),
+                        terminal_failure_record_attempts: context
+                            .config
+                            .terminal_failure_record_attempts(),
+                        terminal_failure_record_backoff: context
+                            .config
+                            .terminal_failure_record_backoff(),
+                    };
+                    spawn_executor_task(
+                        claimed,
+                        Arc::clone(&context.transitions),
+                        Arc::clone(&context.executor),
+                        context.command_tx.clone(),
+                        permit,
+                        task_config,
+                        executor_tasks,
+                    );
+                }
             }
-            Ok(None) => return false,
             Err(error) => {
+                latency::claim_next_runs_error(scope_filter_fields.as_ref(), claim_started_at);
                 debug!(error = %error, "turn run scheduler claim failed");
                 return true;
             }
         }
     }
+}
+
+fn acquire_claim_permits(semaphore: &Arc<Semaphore>) -> Vec<OwnedSemaphorePermit> {
+    let mut permits = Vec::new();
+    for _ in 0..MAX_CLAIMS_PER_DRAIN_BATCH {
+        let Ok(permit) = Arc::clone(semaphore).try_acquire_owned() else {
+            break;
+        };
+        permits.push(permit);
+    }
+    permits
 }
 
 #[derive(Clone, Copy)]

@@ -210,6 +210,48 @@ pub struct ResourceEstimate {
     pub concurrency_slots: Option<u32>,
 }
 
+impl ResourceEstimate {
+    pub fn set_usd(mut self, usd: Decimal) -> Self {
+        self.usd = Some(usd);
+        self
+    }
+
+    pub fn set_input_tokens(mut self, input_tokens: u64) -> Self {
+        self.input_tokens = Some(input_tokens);
+        self
+    }
+
+    pub fn set_output_tokens(mut self, output_tokens: u64) -> Self {
+        self.output_tokens = Some(output_tokens);
+        self
+    }
+
+    pub fn set_wall_clock_ms(mut self, wall_clock_ms: u64) -> Self {
+        self.wall_clock_ms = Some(wall_clock_ms);
+        self
+    }
+
+    pub fn set_output_bytes(mut self, output_bytes: u64) -> Self {
+        self.output_bytes = Some(output_bytes);
+        self
+    }
+
+    pub fn set_network_egress_bytes(mut self, network_egress_bytes: u64) -> Self {
+        self.network_egress_bytes = Some(network_egress_bytes);
+        self
+    }
+
+    pub fn set_process_count(mut self, process_count: u32) -> Self {
+        self.process_count = Some(process_count);
+        self
+    }
+
+    pub fn set_concurrency_slots(mut self, concurrency_slots: u32) -> Self {
+        self.concurrency_slots = Some(concurrency_slots);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceUsage {
     pub usd: Decimal,
@@ -219,6 +261,43 @@ pub struct ResourceUsage {
     pub output_bytes: u64,
     pub network_egress_bytes: u64,
     pub process_count: u32,
+}
+
+impl ResourceUsage {
+    pub fn set_usd(mut self, usd: Decimal) -> Self {
+        self.usd = usd;
+        self
+    }
+
+    pub fn set_input_tokens(mut self, input_tokens: u64) -> Self {
+        self.input_tokens = input_tokens;
+        self
+    }
+
+    pub fn set_output_tokens(mut self, output_tokens: u64) -> Self {
+        self.output_tokens = output_tokens;
+        self
+    }
+
+    pub fn set_wall_clock_ms(mut self, wall_clock_ms: u64) -> Self {
+        self.wall_clock_ms = wall_clock_ms;
+        self
+    }
+
+    pub fn set_output_bytes(mut self, output_bytes: u64) -> Self {
+        self.output_bytes = output_bytes;
+        self
+    }
+
+    pub fn set_network_egress_bytes(mut self, network_egress_bytes: u64) -> Self {
+        self.network_egress_bytes = network_egress_bytes;
+        self
+    }
+
+    pub fn set_process_count(mut self, process_count: u32) -> Self {
+        self.process_count = process_count;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

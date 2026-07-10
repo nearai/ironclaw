@@ -44,7 +44,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env={},
         )
 
-    def _fake_assistant_reply_page(self, response_text: str):
+    def _fake_assistant_reply_page(
+        self,
+        response_text: str,
+        *,
+        final_reply_state: str | None = "true",
+    ):
         class FakeApprove:
             @property
             def last(self):
@@ -63,6 +68,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             async def inner_text(self, **_kwargs):
                 return response_text
+
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-final-reply":
+                    return final_reply_state
+                return None
 
             async def all_inner_texts(self):
                 return [response_text]
@@ -762,7 +772,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_live_chat_case",
                 side_effect=fake_live_chat_case,
             ),
-            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 0]),
+            patch.object(run_live_qa, "_trigger_record_count", return_value=0),
+            patch.object(
+                run_live_qa,
+                "_wait_for_trigger_record_after_count",
+                return_value=(0, 25),
+            ),
         ):
             result = asyncio.run(
                 run_live_qa._routine_creation_case(
@@ -779,7 +794,41 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured_prompts, ["original sheet prompt"])
         self.assertEqual(captured_follow_up_flags, [True])
         self.assertEqual(result.details["trigger_records_after"], 0)
+        self.assertEqual(result.details["trigger_record_wait_ms"], 25)
         self.assertIn("did not add a trigger_record", result.details["error"])
+
+    def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
+        counts = iter([0, 0, 1])
+        observed_sleeps: list[float] = []
+
+        def fake_trigger_record_count(_home: Path, routine_name: str | None) -> int:
+            self.assertIsNone(routine_name)
+            return next(counts)
+
+        async def fake_sleep(seconds: float) -> None:
+            observed_sleeps.append(seconds)
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_trigger_record_count",
+                side_effect=fake_trigger_record_count,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+        ):
+            after_count, waited_ms = asyncio.run(
+                run_live_qa._wait_for_trigger_record_after_count(
+                    Path("/tmp/reborn-home"),
+                    None,
+                    before_count=0,
+                    timeout=10.0,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertEqual(after_count, 1)
+        self.assertGreaterEqual(len(observed_sleeps), 1)
+        self.assertGreaterEqual(waited_ms, 0)
 
     def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
         text = (
@@ -970,6 +1019,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             async def inner_text(self, **_kwargs):
                 return "latest news on that company\nEmails a concise briefing"
 
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-final-reply":
+                    return "true"
+                return None
+
             async def all_inner_texts(self):
                 return [
                     'The routine has been created successfully. Routine: "30-min meeting briefing"',
@@ -999,6 +1053,133 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("emails", text.lower())
         self.assertFalse(reply.semantic_judge_used)
         self.assertEqual(reply.semantic_judge_reason, "literal_required_text_matched")
+        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+
+    def test_wait_for_assistant_reply_waits_for_final_marked_message(self):
+        state = {"index": 0, "sleep_calls": 0}
+        responses = [
+            ("I'll connect Google Calendar and get it connected.", "false"),
+            ("Google Calendar connected.", "true"),
+        ]
+
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def inner_text(self, **_kwargs):
+                return responses[state["index"]][0]
+
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-final-reply":
+                    return responses[state["index"]][1]
+                return None
+
+            async def all_inner_texts(self):
+                return [responses[state["index"]][0]]
+
+        class FakePage:
+            def locator(self, selector):
+                if selector != "[data-testid='msg-assistant']":
+                    raise AssertionError(f"unexpected selector: {selector}")
+                return FakeAssistantBlocks()
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        async def fake_sleep(_seconds):
+            state["sleep_calls"] += 1
+            state["index"] = min(1, state["index"] + 1)
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    FakePage(),
+                    marker=None,
+                    required_text=["Google Calendar", "connected"],
+                    timeout=1.0,
+                )
+            )
+
+        self.assertGreaterEqual(state["sleep_calls"], 1)
+        self.assertEqual(reply.text_excerpt, "Google Calendar connected.")
+        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+
+    def test_wait_for_assistant_reply_preserves_non_final_state_on_attribute_error(self):
+        state = {"index": 0, "sleep_calls": 0}
+        responses = [
+            ("Google Calendar connected.", "false"),
+            ("Google Calendar connected.", RuntimeError("transient attr failure")),
+            ("Google Calendar connected.", "true"),
+        ]
+
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def inner_text(self, **_kwargs):
+                return responses[state["index"]][0]
+
+            async def get_attribute(self, name, **_kwargs):
+                if name != "data-final-reply":
+                    return None
+                value = responses[state["index"]][1]
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+            async def all_inner_texts(self):
+                return [responses[state["index"]][0]]
+
+        class FakePage:
+            def locator(self, selector):
+                if selector != "[data-testid='msg-assistant']":
+                    raise AssertionError(f"unexpected selector: {selector}")
+                return FakeAssistantBlocks()
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        async def fake_sleep(_seconds):
+            state["sleep_calls"] += 1
+            state["index"] = min(len(responses) - 1, state["index"] + 1)
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    FakePage(),
+                    marker=None,
+                    required_text=["Google Calendar", "connected"],
+                    timeout=1.0,
+                )
+            )
+
+        self.assertGreaterEqual(state["sleep_calls"], 2)
+        self.assertEqual(reply.text_excerpt, "Google Calendar connected.")
+        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
 
     def test_wait_for_assistant_reply_uses_semantic_judge_for_text_mismatch(self):
         response_text = (

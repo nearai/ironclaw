@@ -504,22 +504,20 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
                 let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)
                     .map_err(|error| {
-                        error.with_usage(ResourceUsage {
-                            wall_clock_ms,
-                            network_egress_bytes,
-                            process_count: 1,
-                            ..ResourceUsage::default()
-                        })
+                        error.with_usage(
+                            ResourceUsage::default()
+                                .set_wall_clock_ms(wall_clock_ms)
+                                .set_network_egress_bytes(network_egress_bytes)
+                                .set_process_count(1),
+                        )
                     })?;
                 return Ok(FirstPartyCapabilityResult::new(
                     output,
-                    ResourceUsage {
-                        wall_clock_ms,
-                        output_bytes,
-                        network_egress_bytes,
-                        process_count: 1,
-                        ..ResourceUsage::default()
-                    },
+                    ResourceUsage::default()
+                        .set_wall_clock_ms(wall_clock_ms)
+                        .set_output_bytes(output_bytes)
+                        .set_network_egress_bytes(network_egress_bytes)
+                        .set_process_count(1),
                 ));
             }
             SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
@@ -576,21 +574,19 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {
             if network_egress_bytes > 0 {
-                error.with_usage(ResourceUsage {
-                    wall_clock_ms,
-                    network_egress_bytes,
-                    ..ResourceUsage::default()
-                })
+                error.with_usage(
+                    ResourceUsage::default()
+                        .set_wall_clock_ms(wall_clock_ms)
+                        .set_network_egress_bytes(network_egress_bytes),
+                )
             } else {
                 error
             }
         })?;
-        let usage = ResourceUsage {
-            wall_clock_ms,
-            output_bytes,
-            network_egress_bytes,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default()
+            .set_wall_clock_ms(wall_clock_ms)
+            .set_output_bytes(output_bytes)
+            .set_network_egress_bytes(network_egress_bytes);
         Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }
@@ -683,11 +679,9 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
 
 fn resource_profile() -> Option<ResourceProfile> {
     Some(ResourceProfile {
-        default_estimate: ResourceEstimate {
-            wall_clock_ms: Some(FIRST_PARTY_DEFAULT_WALL_CLOCK_MS),
-            output_bytes: Some(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
-            ..ResourceEstimate::default()
-        },
+        default_estimate: ResourceEstimate::default()
+            .set_wall_clock_ms(FIRST_PARTY_DEFAULT_WALL_CLOCK_MS)
+            .set_output_bytes(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
         hard_ceiling: Some(ResourceCeiling {
             max_usd: None,
             max_input_tokens: None,

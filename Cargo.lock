@@ -3941,7 +3941,6 @@ dependencies = [
  "ironclaw_mcp",
  "ironclaw_memory",
  "ironclaw_network",
- "ironclaw_oauth",
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_adapters",
@@ -4103,6 +4102,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "urlencoding",
  "uuid",
 ]
 
@@ -4460,7 +4460,6 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_process_sandbox",
  "ironclaw_processes",
- "ironclaw_product_adapter_registry",
  "ironclaw_prompt_envelope",
  "ironclaw_reborn_event_store",
  "ironclaw_reborn_traces",
@@ -4554,6 +4553,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
+ "ironclaw_observability",
  "ironclaw_process_sandbox",
  "ironclaw_resources",
  "ironclaw_safety",
@@ -4639,16 +4639,6 @@ dependencies = [
  "tokio",
  "url",
  "zeroize",
-]
-
-[[package]]
-name = "ironclaw_oauth"
-version = "0.1.0"
-dependencies = [
- "ironclaw_common",
- "thiserror 2.0.18",
- "tokio",
- "urlencoding",
 ]
 
 [[package]]
@@ -4962,7 +4952,6 @@ dependencies = [
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
- "ironclaw_skill_learning",
  "ironclaw_skills",
  "ironclaw_slack_v2_adapter",
  "ironclaw_threads",
@@ -5296,16 +5285,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_skill_learning"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ironclaw_skills",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "ironclaw_skills"
 version = "0.3.0"
 dependencies = [
@@ -5503,7 +5482,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_resources",
  "ironclaw_wasm_limiter",
- "ironclaw_wasm_sandbox_core",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -5534,7 +5512,7 @@ dependencies = [
  "hmac 0.13.0",
  "http 1.4.2",
  "ironclaw_product_adapters",
- "ironclaw_wasm_sandbox_core",
+ "ironclaw_wasm",
  "serde_json",
  "sha2 0.11.0",
  "subtle",
@@ -5545,17 +5523,6 @@ dependencies = [
  "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
-]
-
-[[package]]
-name = "ironclaw_wasm_sandbox_core"
-version = "0.1.0"
-dependencies = [
- "ironclaw_wasm_limiter",
- "thiserror 2.0.18",
- "tracing",
- "wasmtime",
- "wasmtime-wasi",
 ]
 
 [[package]]
