@@ -614,7 +614,7 @@ async fn compaction_failed_continue(
     error: &LoopCompactionError,
 ) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
     let reason_kind = loop_compaction_reason(error);
-    tracing::warn!(
+    tracing::debug!(
         task_id = ?task_id,
         %reason_kind,
         "compaction failed; continuing run with uncompacted prompt"
