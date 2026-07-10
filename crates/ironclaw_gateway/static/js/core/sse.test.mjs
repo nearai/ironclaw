@@ -3,40 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-function messageElement(role, content = "") {
-  return {
-    role,
-    content,
-    classList: {
-      contains: (name) => name === role || name === "message",
-      add: () => {},
-      remove: () => {},
-    },
-    getAttribute: () => "",
-    setAttribute: () => {},
-    removeAttribute: () => {},
-  };
-}
-
-function createChatContainer(messages) {
-  return {
-    querySelectorAll(selector) {
-      if (selector === ".message.assistant, .message.system") {
-        return messages.filter((message) =>
-          message.role === "assistant" || message.role === "system"
-        );
-      }
-      if (selector === ".message" || selector === "#chat-messages .message") {
-        return messages;
-      }
-      return [];
-    },
-    querySelector: () => null,
-  };
-}
+import { createChatContainer, createMessageElement } from "./test-dom.mjs";
 
 function createHarness() {
-  const messages = [messageElement("user", "hello")];
+  const container = createChatContainer([createMessageElement("user", "hello")]);
   let source = null;
   const timers = [];
   const calls = [];
@@ -82,7 +52,7 @@ function createHarness() {
       updateJob: () => {},
     },
     addMessage: (role, content) => {
-      messages.push(messageElement(role, content));
+      container.appendChild(createMessageElement(role, content));
     },
     clearInterval: () => {},
     clearTimeout: () => {},
@@ -92,9 +62,9 @@ function createHarness() {
     debouncedLoadThreads: () => calls.push("debouncedLoadThreads"),
     document: {
       getElementById: (id) =>
-        id === "chat-messages" ? createChatContainer(messages) : null,
+        id === "chat-messages" ? container : null,
       querySelector: () => null,
-      querySelectorAll: () => [],
+      querySelectorAll: (selector) => container.querySelectorAll(selector),
     },
     enableChatInput: () => calls.push("enableChatInput"),
     encodeURIComponent,
@@ -129,7 +99,7 @@ function createHarness() {
   return {
     calls,
     context,
-    messages,
+    messages: container.children,
     source: () => source,
     async runTimers() {
       for (const timer of timers.splice(0)) timer();

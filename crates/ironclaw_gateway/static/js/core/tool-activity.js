@@ -256,11 +256,16 @@ function createActivityGroupFromEntries(entries, options) {
 
 function trailingAssistantMessageAnchor(container) {
   if (!container || !container.children) return null;
+  if (container.children.length === 0) return null;
   const child = container.children[container.children.length - 1];
-  if (!child?.classList?.contains('message')) return null;
+  if (!child.classList.contains('message')) return null;
   return child.classList.contains('assistant') ? child : null;
 }
 
+// Live tool events can arrive after the same turn's assistant response has
+// rendered. Insert a new activity group before only a trailing assistant bubble
+// so the visible turn stays user -> activity -> final reply; once any other
+// child follows that reply, keep normal append order for the newer UI state.
 function appendActivityGroupInTurnOrder(container, group) {
   const anchor = trailingAssistantMessageAnchor(container);
   if (anchor) {
