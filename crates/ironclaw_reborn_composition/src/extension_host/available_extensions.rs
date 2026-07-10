@@ -1385,11 +1385,20 @@ fn slack_assets() -> Vec<AvailableExtensionAsset> {
         slack_schema_asset!("search_messages.input.v1.json"),
         slack_prompt_asset!("search_messages"),
         slack_schema_asset!("list_conversations.input.v1.json"),
+        slack_schema_asset!("list_conversations.output.v1.json"),
         slack_prompt_asset!("list_conversations"),
         slack_schema_asset!("get_conversation_history.input.v1.json"),
+        slack_schema_asset!("get_conversation_history.output.v1.json"),
         slack_prompt_asset!("get_conversation_history"),
+        slack_schema_asset!("get_thread_replies.input.v1.json"),
+        slack_schema_asset!("get_thread_replies.output.v1.json"),
+        slack_prompt_asset!("get_thread_replies"),
         slack_schema_asset!("get_user_info.input.v1.json"),
+        slack_schema_asset!("get_user_info.output.v1.json"),
         slack_prompt_asset!("get_user_info"),
+        slack_schema_asset!("whoami.input.v1.json"),
+        slack_schema_asset!("whoami.output.v1.json"),
+        slack_prompt_asset!("whoami"),
         slack_schema_asset!("send_message.input.v1.json"),
         slack_prompt_asset!("send_message"),
         bytes_asset("wasm/slack_user_tool.wasm", SLACK_WASM_MODULE),
@@ -1816,7 +1825,8 @@ mod tests {
     fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        for extension_id in [
+        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+        let mut extension_ids = vec![
             "github",
             "notion",
             "web-access",
@@ -1827,7 +1837,11 @@ mod tests {
             "google-sheets",
             "google-slides",
             "gmail",
-        ] {
+        ];
+        #[cfg(feature = "slack-v2-host-beta")]
+        extension_ids.push(SLACK_EXTENSION_ID);
+
+        for extension_id in extension_ids {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();
@@ -2351,6 +2365,98 @@ mod tests {
                 .contains("Do not use this to deliver your reply"),
             "send_message description must forbid self-delivery of the run's own answer: {}",
             send_message.description
+        );
+        // Honesty: a per-trigger delivery_target_id can route the final reply
+        // elsewhere, so the description must name the configured outbound
+        // delivery target, not promise "the requesting user".
+        assert!(
+            send_message
+                .description
+                .contains("configured outbound delivery target"),
+            "send_message description must not promise delivery to the requesting user: {}",
+            send_message.description
+        );
+        assert!(
+            !send_message
+                .description
+                .contains("delivered automatically to the requesting user"),
+            "send_message description must not claim requester-directed delivery: {}",
+            send_message.description
+        );
+        // Mentions: plain @name does not notify anyone on Slack; the model
+        // must be told the <@U…> encoding or pings silently do nothing.
+        assert!(
+            send_message.description.contains("<@U"),
+            "send_message description must document the <@U…> mention encoding: {}",
+            send_message.description
+        );
+    }
+
+    /// Raw-entity hygiene pin (live canary qa_10i): the model narrates raw
+    /// Slack ids into replies ("… user id U0BDC16TML3 …") unless the ONLY
+    /// model-visible guidance — capability descriptions — forbids it
+    /// explicitly. Every slack read surface must carry the imperative
+    /// "tool calls only … never include" raw-id rule.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_read_descriptions_forbid_raw_ids_in_replies() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        for capability_id in [
+            "slack.search_messages",
+            "slack.list_conversations",
+            "slack.get_conversation_history",
+            "slack.get_thread_replies",
+            "slack.get_user_info",
+            "slack.whoami",
+        ] {
+            let capability = package
+                .package
+                .manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("slack manifest declares {capability_id}"));
+            assert!(
+                capability.description.contains("tool calls only")
+                    && capability.description.contains("never include"),
+                "{capability_id} description must forbid raw ids in user-facing replies: {}",
+                capability.description
+            );
+        }
+    }
+
+    /// Honesty pin: the slack_personal OAuth grant does not include
+    /// users:read.email, so `get_user_info` can never return an email —
+    /// the model-visible description must not promise one.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_get_user_info_description_matches_grantable_scopes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let get_user_info = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_user_info")
+            .expect("slack manifest declares slack.get_user_info");
+        assert!(
+            !get_user_info
+                .description
+                .to_ascii_lowercase()
+                .contains("email"),
+            "get_user_info description must not promise email fields the OAuth grant (no users:read.email) can never return: {}",
+            get_user_info.description
+        );
+        assert!(
+            get_user_info.description.contains("status"),
+            "get_user_info description must keep advertising presence fields: {}",
+            get_user_info.description
         );
     }
 
