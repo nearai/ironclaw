@@ -372,6 +372,13 @@ runtime state stores sit behind the composed local-dev root filesystem
 files). Production durable retention/live fanout still belongs in the
 host runtime/event-store follow-up rather than this composition facade.
 
+Live cumulative assistant-text projections are producer-coalesced: the first
+update is published immediately, rapid replacements publish the latest value
+at most once per 75 ms, and any non-text milestone flushes the pending value
+before that milestone is projected. Reasoning, capability, and lifecycle
+milestones remain ordered and uncoalesced. The in-memory source still records
+the latest projection for replay when no browser subscriber is active.
+
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —
 // `reborn_product_api_crates_do_not_bind_http_ingress` forbids
@@ -401,6 +408,13 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   — regression guard that the WebUI projection adapter uses the facade
   request actor when selecting the runtime event stream, rather than a
   hidden runtime owner actor.
+- `src/projection/tests/live_progress_stream.rs::live_assistant_text_coalescer_flushes_latest_update_on_timer`
+  — regression guard that rapid cumulative text still advances while the
+  model continues streaming.
+- `src/projection/tests/live_progress_stream.rs::live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_activity`
+  — caller-level regression guard that a provider-rate text burst does not
+  terminate the bounded WebUI subscription and that the latest text is
+  published before the next capability milestone.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,
