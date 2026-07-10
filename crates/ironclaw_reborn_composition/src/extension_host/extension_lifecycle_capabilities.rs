@@ -94,7 +94,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_REMOVE_CAPABILITY_ID,
-            "Remove or disconnect an installed Reborn extension from durable local-dev lifecycle state. Use this for explicit disconnect, unlink, disable, uninstall, or remove requests for connected products/channels. For Slack account disconnect requests, call this with extension_id \"slack\" so the caller's Slack personal OAuth binding and delivery target are cleaned up before the extension is removed.",
+            "Remove or disconnect an installed Reborn extension from durable local-dev lifecycle state. Use this for explicit disconnect, unlink, disable, uninstall, or remove requests for connected products/channels after identifying the matching extension. When applicable, removal clears caller-scoped channel connection state before removing the extension.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
@@ -713,9 +713,11 @@ mod tests {
         assert!(
             remove.description.contains("disconnect")
                 && remove.description.contains("unlink")
-                && remove.description.contains("Slack account disconnect")
-                && remove.description.contains("extension_id \"slack\""),
-            "extension_remove description should route product disconnect requests through removal: {}",
+                && remove.description.contains("connected products/channels")
+                && remove
+                    .description
+                    .contains("caller-scoped channel connection state"),
+            "extension_remove description should route product disconnect requests through generic removal: {}",
             remove.description
         );
     }
