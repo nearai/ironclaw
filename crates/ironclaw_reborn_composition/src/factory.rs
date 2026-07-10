@@ -5284,6 +5284,10 @@ mod tests {
         RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
+    fn test_scope(user: UserId) -> ResourceScope {
+        ResourceScope::local_default(user, InvocationId::new()).expect("valid local scope")
+    }
+
     #[cfg(feature = "libsql")]
     #[test]
     fn libsql_build_resource_governor_guard_requires_singleton_authority() {
@@ -6323,13 +6327,11 @@ mod tests {
         extension_management
             .install(
                 gmail_ref.clone(),
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("install Gmail");
@@ -6343,13 +6345,11 @@ mod tests {
         extension_management
             .install(
                 calendar_ref.clone(),
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("install Google Calendar");
@@ -6479,13 +6479,11 @@ mod tests {
         extension_management
             .install(
                 notion_ref.clone(),
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("install Notion MCP");
@@ -6544,13 +6542,11 @@ mod tests {
         extension_management
             .install(
                 web_access_ref.clone(),
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("install Web Access");
@@ -6985,13 +6981,11 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -7109,13 +7103,11 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -7285,13 +7277,11 @@ mod tests {
         let projection = extension_management
             .project(
                 nearai_ref,
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");

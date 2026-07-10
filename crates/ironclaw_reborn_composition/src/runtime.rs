@@ -5108,6 +5108,10 @@ output_schema_ref = "schemas/write.output.json"
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
     };
 
+    fn test_scope(user: UserId) -> ResourceScope {
+        ResourceScope::local_default(user, InvocationId::new()).expect("valid local scope")
+    }
+
     use super::{
         RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
         TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS, TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET,
@@ -6428,13 +6432,11 @@ output_schema_ref = "schemas/write.output.json"
         let projection = extension_management
             .project(
                 nearai_ref,
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -6542,13 +6544,11 @@ output_schema_ref = "schemas/write.output.json"
         let projection = extension_management
             .project(
                 nearai_ref,
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("NEAR AI MCP projected");
@@ -8080,13 +8080,11 @@ output_schema_ref = "schemas/write.output.json"
         extension_management
             .install(
                 notion_ref.clone(),
-                &ResourceScope::local_default(
+                &test_scope(
                     extension_management
                         .tenant_operator_user_id_for_test()
                         .clone(),
-                    InvocationId::new(),
-                )
-                .expect("valid local scope"),
+                ),
             )
             .await
             .expect("install Notion MCP");
