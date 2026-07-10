@@ -46,7 +46,7 @@ function Caption({ children }) {
 
 /* ── Button ───────────────────────────────────────────────────────── */
 
-const BUTTON_VARIANTS = ["primary", "outline", "secondary", "ghost", "danger"];
+const BUTTON_VARIANTS = ["primary", "outline", "secondary", "ghost", "danger"] as const;
 
 export function ButtonSection() {
   return (
@@ -65,11 +65,11 @@ export function ButtonSection() {
 
       <SectionTitle>Sizes — compact control scale</SectionTitle>
       <Row className="items-end">
-        {[
+        {([
           ["sm", "sm · 28px", "New chat"],
           ["md", "md (default) · 32px", "New chat"],
           ["lg", "lg · 36px", "New chat"],
-        ].map(([size, caption, label]) => (
+        ] as const).map(([size, caption, label]) => (
           <div key={size} className="flex flex-col items-center gap-1.5">
             <Button variant="secondary" size={size}>{label}</Button>
             <Caption>{caption}</Caption>
