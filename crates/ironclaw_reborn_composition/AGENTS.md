@@ -5,7 +5,7 @@
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
-  - `crates/ironclaw_reborn/AGENTS.md`
+  - `crates/ironclaw_runner/AGENTS.md`
   - `crates/ironclaw_reborn_config/AGENTS.md`
   - `crates/ironclaw_host_runtime/AGENTS.md`
   - `crates/ironclaw_turns/AGENTS.md`

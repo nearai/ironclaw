@@ -75,11 +75,11 @@ use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse, LoopCapabilityInputResolver,
 };
-use ironclaw_reborn::hook_gate_refs::{
+use ironclaw_runner::hook_gate_refs::{
     HookGateActorBinding, HookGateReservationContext, HookGateResolutionRequest, HookGateRouter,
     InMemoryHookGateRouter, RouterBackedHookGateRefFactory, hook_gate_arguments_digest,
 };
-use ironclaw_reborn::loop_driver_host::{
+use ironclaw_runner::loop_driver_host::{
     EventTriggeredHookSubscription, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
     TextOnlyLoopHostConfig,
 };

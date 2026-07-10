@@ -665,6 +665,39 @@ fn build_triggered_run_delivery_hook_from_parts(
         approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
             as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
     };
+    // Per-trigger delivery target resolution runs over the same durable Slack
+    // host state (channel routes + personal DM targets) the outbound target
+    // surface publishes ids from, so an id selected at trigger_create time
+    // resolves at fire time or fails closed.
+    let host_state = Arc::new(FilesystemSlackHostState::new(
+        Arc::clone(&parts.local_runtime.host_state_filesystem),
+        config.tenant_id.clone(),
+        config.user_id.clone(),
+        config.agent_id.clone(),
+        config.project_id.clone(),
+    ));
+    let outbound_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+        Arc::new(SlackHostBetaOutboundTargetProvider::new(
+            SlackOutboundTargetProviderConfig {
+                tenant_id: config.tenant_id.clone(),
+                agent_id: config.agent_id.clone(),
+                project_id: config.project_id.clone(),
+                installation_id: config.installation_id.clone(),
+                team_id: config.team_id.clone(),
+                configured_channel_routes: config
+                    .channel_routes
+                    .iter()
+                    .map(|route| {
+                        SlackConfiguredChannelRoute::new(
+                            route.channel_id.clone(),
+                            route.subject_user_id.clone(),
+                        )
+                    })
+                    .collect(),
+            },
+            host_state.clone(),
+            host_state,
+        ));
     // Pass config.agent_id as the fallback so the ThreadScope key matches the
     // value ConversationContentRefMaterializer uses (same runtime default_agent_id).
     let driver = TriggeredRunDeliveryDriver::new(
@@ -672,7 +705,8 @@ fn build_triggered_run_delivery_hook_from_parts(
         delivery_store,
         route_store,
         config.agent_id.clone(),
-    );
+    )
+    .with_outbound_target_provider(outbound_target_provider);
     Ok(Arc::new(driver))
 }
 
@@ -4719,6 +4753,7 @@ mod tests {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("* * * * *").expect("valid cron"),
             prompt: format!("{trigger_name}-prompt-marker"),
+            delivery_target: None,
             state: TriggerState::Scheduled,
             next_run_at: Utc::now() - chrono::Duration::seconds(120),
             last_run_at: None,
@@ -4734,7 +4769,10 @@ mod tests {
         // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
         // both `last_fired_slot` and `active_run_ref` atomically, so if we see
         // `last_fired_slot` we can also safely read the run_id.
-        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        // Generous deadline: the fire normally lands in ~1-2 s, but this rides
+        // a real poller on shared CI runners (observed >15 s under load); the
+        // extra budget is only ever spent on failure.
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
         let mut fired_run_id = None;
         while Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -4759,12 +4797,13 @@ mod tests {
             .expect("local-dev runtime has local_runtime services");
         let delivery_store = Arc::clone(&local_runtime.triggered_run_delivery);
 
-        // Poll briefly for the delivery record.  The driver spawns a background
-        // task; for the `NoDefaultConfigured` fast-path it should complete well
-        // within 2 s.
+        // Poll for the delivery record.  The driver spawns a background task;
+        // the `NoDefaultConfigured` fast-path normally completes well within
+        // 2 s, but shared CI runners need the same load headroom as the fire
+        // wait above.
         let mut delivery_record = None;
         if let Some(run_id) = fired_run_id {
-            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(30);
             while Instant::now() < delivery_deadline {
                 if let Ok(Some(rec)) = delivery_store.load_triggered_run_delivery(run_id).await {
                     delivery_record = Some(rec);
@@ -4776,7 +4815,7 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within 15 s — hook wiring e2e stalled"
+            "trigger did not fire within 60 s — hook wiring e2e stalled"
         );
         assert!(
             delivery_record.is_some(),

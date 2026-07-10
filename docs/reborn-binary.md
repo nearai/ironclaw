@@ -587,7 +587,7 @@ Run these before changing Reborn CLI behavior:
 cargo fmt --all -- --check
 cargo test -p ironclaw_reborn_cli
 cargo test -p ironclaw_reborn_config
-cargo test -p ironclaw_reborn model_slots_are_exposed_in_cli_display_order
+cargo test -p ironclaw_runner model_slots_are_exposed_in_cli_display_order
 cargo test -p ironclaw_architecture reborn
 cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help

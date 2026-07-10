@@ -1401,6 +1401,7 @@ impl CapabilityDispatcher for FailingDispatcher {
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Backend,
+            safe_summary: None,
         })
     }
 }
