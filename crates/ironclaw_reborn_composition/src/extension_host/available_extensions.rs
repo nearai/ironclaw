@@ -1884,7 +1884,7 @@ mod tests {
     };
     use ironclaw_host_api::{
         EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
-        RuntimeCredentialRequirementSource,
+        RuntimeCredentialRequirementSource, TenantId, UserId,
     };
 
     use super::*;
@@ -2253,6 +2253,80 @@ mod tests {
         assert!(!is_host_managed_credential_extension(&nearai_ref));
         assert!(!is_host_managed_credential_extension(&notion_ref));
         assert!(!is_host_managed_credential_extension(&mcp_ref));
+    }
+
+    #[test]
+    fn registered_package_summary_reports_user_registered_source() {
+        // Owner-registered hosted-MCP manifests declare zero static
+        // `[[capabilities]]` (discovered at runtime), the only shape
+        // `ManifestSource::UserRegistered` is allowed to parse.
+        static MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp"
+name = "Acme MCP"
+version = "0.1.0"
+description = "user-registered hosted MCP server"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+        let tenant_id = TenantId::new("summary-tenant").unwrap();
+        let owner = UserId::new("summary-owner").unwrap();
+        let source = ManifestSource::UserRegistered { tenant_id, owner };
+        let manifest =
+            ExtensionManifest::parse(MANIFEST, source.clone(), &HostPortCatalog::empty())
+                .expect("registered manifest");
+        let package = ExtensionPackage::from_manifest_toml(
+            manifest,
+            VirtualPath::new("/system/extensions/acme-mcp").unwrap(),
+            MANIFEST,
+        )
+        .expect("package");
+        let available = AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp")
+                .unwrap(),
+            manifest_toml: MANIFEST.to_string(),
+            source,
+            package,
+            surface_kinds: Vec::new(),
+            assets: Vec::new(),
+        };
+
+        assert_eq!(
+            available.summary().source,
+            LifecycleExtensionSource::UserRegistered,
+            "a UserRegistered manifest must report the wire UserRegistered source, not HostBundled"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_propagates_malformed_shared_manifest() {
+        // The shared `/system/extensions` catalog keeps the pre-skip-and-log
+        // all-or-nothing behavior: a corrupt shared manifest aborts catalog
+        // load instead of silently vanishing from the set. The skip-and-log
+        // carve-out in `load_filesystem_packages` applies ONLY to
+        // `ManifestSource::UserRegistered`.
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/broken/manifest.toml").unwrap(),
+            b"not = [valid toml",
+        )
+        .await
+        .unwrap();
+
+        let error = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .expect_err("malformed shared manifest must fail catalog load, not be skipped");
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
     }
 
     #[test]

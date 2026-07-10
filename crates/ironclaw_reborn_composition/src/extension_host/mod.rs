@@ -25,6 +25,8 @@ pub(crate) mod extension_lifecycle_capabilities;
 #[cfg(test)]
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
+#[cfg(test)]
+pub(crate) mod extension_lifecycle_registered_store_tests;
 pub(crate) mod extension_removal_cleanup;
 pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
@@ -32,6 +34,8 @@ pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
 pub(crate) mod registered_extension_store;
+#[cfg(test)]
+pub(crate) mod registered_extension_store_blast_radius_tests;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;

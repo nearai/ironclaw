@@ -141,6 +141,42 @@ prompt_doc_ref = "prompts/gmail/echo.md"
             .starts_with(b"{")
     );
 
+    // A UserRegistered manifest alongside the HostBundled one above: the
+    // owner-scoped MCP-registration source must round-trip through the
+    // same wire encoding (`WireManifestSource`), not just HostBundled.
+    let registered_extension_id = ExtensionId::new("acme-mcp").expect("valid extension id");
+    let tenant_id = TenantId::new("registered-tenant").expect("valid tenant id");
+    let owner = UserId::new("registered-owner").expect("valid owner id");
+    let registered_manifest = ExtensionManifestRecord::from_toml(
+        format!(
+            r#"
+schema_version = "{schema}"
+id = "acme-mcp"
+name = "Acme MCP"
+version = "0.1.0"
+description = "user-registered hosted MCP server"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://example.com/mcp"
+"#,
+            schema = MANIFEST_SCHEMA_VERSION,
+        ),
+        ManifestSource::UserRegistered {
+            tenant_id: tenant_id.clone(),
+            owner: owner.clone(),
+        },
+        &HostPortCatalog::empty(),
+        None,
+    )
+    .expect("valid registered manifest");
+    store
+        .upsert_manifest(registered_manifest)
+        .await
+        .expect("registered manifest saved");
+
     let reloaded = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
         .await
         .expect("store reloads");
@@ -150,6 +186,16 @@ prompt_doc_ref = "prompts/gmail/echo.md"
             .await
             .expect("installation read")
             .is_some()
+    );
+    let reloaded_registered_manifest = reloaded
+        .get_manifest(&registered_extension_id)
+        .await
+        .expect("registered manifest read")
+        .expect("registered manifest present after reload");
+    assert_eq!(
+        reloaded_registered_manifest.manifest().source,
+        ManifestSource::UserRegistered { tenant_id, owner },
+        "owner must survive the wire round-trip, not collapse to HostBundled/InstalledLocal"
     );
 }
 

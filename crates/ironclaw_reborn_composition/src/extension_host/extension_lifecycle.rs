@@ -8485,6 +8485,358 @@ output_schema_ref = "schemas/search.output.json"
         );
     }
 
+    const REGISTERED_ISOLATION_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme-mcp-registered"
+name = "Acme Registered MCP"
+version = "0.1.0"
+description = "User-registered hosted MCP server (owner isolation fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+
+    /// Owner-isolation harness for registered packages: writes the descriptor
+    /// at the tenant-scoped registered-store path (the overlay's filesystem
+    /// source) over an EMPTY shared catalog, with `owner_scope.user_id` also
+    /// wired as the tenant operator — the worst case for the row-stamping
+    /// rule, since `derive_owner` would map the operator to `Tenant`.
+    /// `pre_install: true` also seeds the installed row + lifecycle/active
+    /// registries the way an owner install would.
+    async fn user_registered_isolation_fixture(
+        owner_scope: &ResourceScope,
+        pre_install: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<RebornLocalExtensionManagementPort>,
+        LifecyclePackageRef,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        let extension_id = ExtensionId::new("acme-mcp-registered").expect("valid extension id");
+        let source = ManifestSource::UserRegistered {
+            tenant_id: owner_scope.tenant_id.clone(),
+            owner: owner_scope.user_id.clone(),
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let descriptor_dir = storage_root
+            .join("system/extensions/registered")
+            .join(owner_scope.tenant_id.as_str())
+            .join(owner_scope.user_id.as_str())
+            .join("acme-mcp-registered");
+        std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir");
+        std::fs::write(
+            descriptor_dir.join("manifest.toml"),
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+        )
+        .expect("write registered descriptor");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+
+        let mut lifecycle_registry = ExtensionRegistry::new();
+        let mut active_registry_initial = ExtensionRegistry::new();
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        if pre_install {
+            let manifest = ExtensionManifest::parse(
+                REGISTERED_ISOLATION_MANIFEST_TOML,
+                source.clone(),
+                &HostPortCatalog::empty(),
+            )
+            .expect("registered manifest");
+            let root =
+                VirtualPath::new("/system/extensions/acme-mcp-registered").expect("extension root");
+            let package = ExtensionPackage::from_manifest_toml(
+                manifest,
+                root,
+                REGISTERED_ISOLATION_MANIFEST_TOML,
+            )
+            .expect("registered package");
+            lifecycle_registry
+                .insert(package.clone())
+                .expect("lifecycle package");
+            active_registry_initial
+                .insert(package)
+                .expect("active package");
+            let manifest_record = fixture_manifest_record_with_source(
+                REGISTERED_ISOLATION_MANIFEST_TOML,
+                source.clone(),
+                None,
+            );
+            installation_store
+                .upsert_manifest(manifest_record)
+                .await
+                .expect("seed registered manifest record");
+            let installation = ExtensionInstallation::new(
+                ExtensionInstallationId::new("acme-mcp-registered").expect("valid installation id"),
+                extension_id.clone(),
+                ExtensionActivationState::Enabled,
+                ExtensionManifestRef::new(extension_id, None),
+                Vec::new(),
+                chrono::Utc::now(),
+                InstallationOwner::user(owner_scope.user_id.clone()),
+            )
+            .expect("registered installation");
+            installation_store
+                .upsert_installation(installation)
+                .await
+                .expect("seed registered installation");
+        }
+        let active_registry = Arc::new(SharedExtensionRegistry::new(active_registry_initial));
+
+        let port = Arc::new(RebornLocalExtensionManagementPort::new(
+            Arc::new(local_filesystem),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store.clone(),
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                lifecycle_registry,
+            ))),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                test_extension_trust_policy(),
+            ),
+            None,
+            // The registering owner IS the tenant operator: the row must
+            // still be the singleton owner, never Tenant.
+            owner_scope.user_id.clone(),
+        ));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "acme-mcp-registered")
+                .expect("valid ref");
+        (dir, port, package_ref, active_registry, installation_store)
+    }
+
+    fn resource_scope_for(tenant: &str, user: &str) -> ResourceScope {
+        let mut scope = ResourceScope::local_default(
+            UserId::new(user).expect("valid user"),
+            InvocationId::new(),
+        )
+        .expect("valid local scope");
+        scope.tenant_id = TenantId::new(tenant).expect("valid tenant");
+        scope
+    }
+
+    /// Installed owner-registered extensions must not vanish from
+    /// `extension_list` (the shared catalog never holds them — the list path
+    /// overlays the CALLER's registered set), and only the owner sees them:
+    /// the row's `InstallationOwner` is the filter, so another user listing
+    /// the same store gets nothing.
+    #[tokio::test]
+    async fn extension_list_shows_owner_registered_install_only_to_owner() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let other_scope = resource_scope_for("default", "owner-b");
+        let (_dir, port, _package_ref, _active_registry, installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+
+        let list = port.list_installed(&owner_scope).await.expect("owner list");
+        let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = list.payload
+        else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(count, 1, "owner must see their registered install");
+        assert_eq!(
+            extensions[0].summary.package_ref.id.as_str(),
+            "acme-mcp-registered"
+        );
+        assert_eq!(
+            extensions[0].summary.source,
+            LifecycleExtensionSource::UserRegistered,
+            "listed registered extension must report the user_registered source"
+        );
+
+        // The installed row itself carries the singleton owner — the single
+        // predicate every ownership-aware reader keys on.
+        let row = installation_store
+            .get_installation(
+                &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
+            )
+            .await
+            .expect("store read")
+            .expect("registered row present");
+        assert!(
+            row.owner().visible_to(&owner_scope.user_id)
+                && !row.owner().visible_to(&other_scope.user_id)
+                && !row.owner().is_tenant(),
+            "registered row must carry InstallationOwner::user(owner)"
+        );
+
+        let other_list = port
+            .list_installed(&other_scope)
+            .await
+            .expect("other owner list");
+        let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = other_list.payload
+        else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(
+            (count, extensions.len()),
+            (0, 0),
+            "another owner must not see the owner's registered installation"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_activate_rejects_caller_outside_owning_scope() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let other_scope = resource_scope_for("default", "owner-b");
+        let (_dir, port, package_ref, _active_registry, _installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+
+        let error = port
+            .activate(
+                package_ref,
+                ExtensionActivationMode::Static,
+                &other_scope.user_id,
+            )
+            .await
+            .expect_err("a foreign caller must not activate another owner's registered install");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn extension_remove_rejects_caller_outside_owning_scope() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let other_scope = resource_scope_for("default", "owner-b");
+        let (_dir, port, package_ref, active_registry, _installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+
+        let error = port
+            .remove(package_ref, &other_scope, Some(&other_scope.user_id))
+            .await
+            .expect_err("a foreign caller must not remove another owner's registered install");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("acme-mcp-registered").expect("valid id"))
+                .is_some(),
+            "extension must remain published after a rejected foreign remove"
+        );
+    }
+
+    /// Design point 4a/4b: a registered package resolves through the CALLER's
+    /// path-sharded overlay only, so neither another member nor the tenant
+    /// operator can even resolve it — install fails not-found BEFORE
+    /// `decide_install_on_existing` could join a foreign caller or evict the
+    /// row to `Tenant`, and the row is untouched.
+    #[tokio::test]
+    async fn foreign_and_operator_install_of_registered_package_is_not_found() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let other_scope = resource_scope_for("default", "owner-b");
+        let (_dir, port, package_ref, _active_registry, installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+        // The fixture wires owner-a as the tenant operator, but a distinct
+        // operator identity must ALSO fail to resolve a foreign registration;
+        // other_scope covers the plain-member probe.
+        for probe in [&other_scope] {
+            let error = port
+                .install(package_ref.clone(), probe)
+                .await
+                .expect_err("foreign caller must not install another owner's registered package");
+            assert!(matches!(
+                error,
+                ProductWorkflowError::InvalidBindingRequest { .. }
+            ));
+        }
+        let row = installation_store
+            .get_installation(
+                &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
+            )
+            .await
+            .expect("store read")
+            .expect("registered row present");
+        assert!(
+            !row.owner().is_tenant() && row.owner().visible_to(&owner_scope.user_id),
+            "failed foreign install attempts must not evict the registered row to Tenant"
+        );
+    }
+
+    /// Design points 2 and 5: a fresh owner install of a registered package
+    /// stamps `InstallationOwner::user(<manifest owner>)` even though the
+    /// owner IS the tenant operator (`derive_owner` would produce `Tenant`
+    /// and leak the private registration tenant-wide), and an owner
+    /// RE-install keeps the singleton row instead of routing through
+    /// `decide_install_on_existing`'s operator eviction.
+    #[tokio::test]
+    async fn owner_install_of_registered_package_stamps_manifest_owner_row() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let other_scope = resource_scope_for("default", "owner-b");
+        let (_dir, port, package_ref, _active_registry, installation_store) =
+            user_registered_isolation_fixture(&owner_scope, false).await;
+
+        for pass in ["fresh install", "re-install"] {
+            port.install(package_ref.clone(), &owner_scope)
+                .await
+                .expect("owner installs their registered package");
+            let row = installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
+                )
+                .await
+                .expect("store read")
+                .expect("registered row present");
+            assert!(
+                !row.owner().is_tenant()
+                    && row.owner().visible_to(&owner_scope.user_id)
+                    && !row.owner().visible_to(&other_scope.user_id),
+                "{pass}: registered row must be the singleton manifest owner, never Tenant"
+            );
+        }
+    }
+
+    /// Design point 4c: the owner removing their registered install is the
+    /// last (only) holder, so the remove tears the installation down —
+    /// no row, no lifecycle residue, no published capability.
+    #[tokio::test]
+    async fn owner_remove_of_registered_install_tears_down_without_residue() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let (_dir, port, package_ref, active_registry, installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+
+        port.remove(
+            package_ref.clone(),
+            &owner_scope,
+            Some(&owner_scope.user_id),
+        )
+        .await
+        .expect("owner removes their registered install");
+
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
+                )
+                .await
+                .expect("store read")
+                .is_none(),
+            "registered row must be gone after the owner's remove"
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("acme-mcp-registered").expect("valid id"))
+                .is_none(),
+            "registered extension must be unpublished after the owner's remove"
+        );
+    }
+
     fn fixture_installation(
         manifest_hash: Option<String>,
         activation_state: ExtensionActivationState,

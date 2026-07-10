@@ -143,6 +143,20 @@ impl RebornIntegrationGroup {
         Self::builder().multiuser_memory_tools().await
     }
 
+    /// C-MULTIUSER variant of [`extension_lifecycle`](Self::extension_lifecycle):
+    /// same capability surface (extension_search/install/activate/remove) with
+    /// **per-actor capability scoping** (`with_run_owner_scoped_capability_dispatch`),
+    /// so `builtin.extension_search`/`builtin.extension_install` dispatch under
+    /// each thread's OWN run owner instead of the group's single fixed
+    /// constructor user. Needed for MCP-registration per-user isolation
+    /// (`scenario_extension_registration_isolation_across_actors`) — without the
+    /// flag every actor's extension-lifecycle calls collapse onto one shared
+    /// `(tenant, user)` scope, which would make an owner-scoped registered-store
+    /// test vacuous.
+    pub async fn multiuser_extension_lifecycle_tools() -> HarnessResult<Self> {
+        Self::builder().multiuser_extension_lifecycle_tools().await
+    }
+
     /// C-MULTIUSER: file-approval tools (write_file/read_file @ `Ask`) with
     /// **per-actor capability scoping**. A grant via
     /// [`RebornIntegrationGroup::enable_auto_approve_for_owner`] and an explicit
@@ -393,6 +407,20 @@ impl RebornIntegrationGroupBuilder {
             super::super::harness::profiles::core_builtin::core_builtin_tools_default()
                 .await?
                 .with_run_owner_scoped_capability_dispatch();
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Per-actor-scoped extension-lifecycle group. See
+    /// [`RebornIntegrationGroup::multiuser_extension_lifecycle_tools`]. Same
+    /// capability surface as [`extension_lifecycle`](Self::extension_lifecycle)
+    /// but with per-actor capability dispatch.
+    pub async fn multiuser_extension_lifecycle_tools(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime = super::super::harness::profiles::extension::extension_lifecycle_tools()
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
