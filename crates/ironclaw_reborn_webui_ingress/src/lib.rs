@@ -31,7 +31,8 @@ pub use auth::EmailUserDirectory;
 pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
-    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError, webui_v2_auth_router,
+    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
+    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
 };
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
@@ -42,7 +43,8 @@ pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStor
 // the standalone `serve` binary supplies env config and calls the
 // builder; the auth/session model lives here, not in the command crate.
 pub use signed_session_login::{
-    SignedSessionLoginConfig, SignedSessionLoginWiring, build_signed_session_login,
+    CompositeAuthenticator, SignedSessionLoginConfig, SignedSessionLoginWiring,
+    build_signed_session_login, signed_session_store,
 };
 // `InMemorySessionStore` is gated behind `dev-in-memory-session` so a
 // production binary cannot accidentally wire a process-local store as

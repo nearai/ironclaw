@@ -76,6 +76,25 @@ impl SyntheticIds {
         }
     }
 
+    pub(crate) fn scope_for_user_index(&self, user_index: usize) -> Result<ResourceScope, String> {
+        if user_index >= self.users.len() {
+            return Err(format!(
+                "synthetic user index {user_index} out of range for {} users",
+                self.users.len()
+            ));
+        }
+        let tenant_index = user_index % self.tenants.len();
+        Ok(ResourceScope {
+            tenant_id: self.tenants[tenant_index].clone(),
+            user_id: self.users[user_index].clone(),
+            agent_id: Some(self.agent_id.clone()),
+            project_id: Some(self.project_id.clone()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        })
+    }
+
     pub(crate) fn user_turn_context(
         &self,
         args: &Args,

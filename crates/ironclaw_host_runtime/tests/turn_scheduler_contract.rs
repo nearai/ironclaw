@@ -356,9 +356,21 @@ impl TurnSpawnTreeStateStore for DurableLikeTurnStore {
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         self.inner
-            .release_tree_descendants(scope, root_run_id, delta)
+            .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
+            .await
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.inner
+            .prune_released_child(scope, root_run_id, child_run_id)
             .await
     }
 }

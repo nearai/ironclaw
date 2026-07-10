@@ -151,8 +151,6 @@ const ACTIVE_THREADS_PATH: &str = "state/active_threads";
 const ACTIVE_THREAD_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 /// Hard cap on remembered threads per workspace.
 const ACTIVE_THREAD_MAX_ENTRIES: usize = 256;
-/// Channel name for pairing store (used by pairing host APIs).
-const CHANNEL_NAME: &str = "slack";
 
 #[cfg(not(test))]
 fn host_workspace_read(path: &str) -> Option<String> {
@@ -236,8 +234,8 @@ impl Guest for SlackChannel {
             let _ = host_workspace_write(OWNER_ID_PATH, "");
         }
 
-        // Persist dm_policy and allow_from for DM pairing
-        let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing");
+        // Persist dm_policy and allow_from for DM access checks.
+        let dm_policy = config.dm_policy.as_deref().unwrap_or("allowlist");
         let _ = host_workspace_write(DM_POLICY_PATH, dm_policy);
 
         let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
@@ -573,7 +571,7 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
 
                 // DMs are always processed. For channel threads, once the bot
                 // has already replied in a thread we intentionally allow
-                // follow-ups from that thread without re-running DM pairing or
+                // follow-ups from that thread without re-running DM allowlist or
                 // allow_from checks. This matches Slack's app_mention behavior:
                 // the thread stays as visible as the surrounding channel.
                 if is_dm || is_active_thread {
@@ -843,11 +841,11 @@ fn prune_active_threads(active_threads: &mut ActiveThreads, now_millis: u64) -> 
 }
 
 // ============================================================================
-// Permission & Pairing
+// Permission
 // ============================================================================
 
 /// Check if a sender is permitted. Returns true if allowed.
-/// For pairing mode, sends a pairing code DM if denied.
+/// Returns whether the sender is allowed to produce an inbound Slack message.
 fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool {
     // 1. Owner check (highest priority, applies to all contexts)
     let owner_id = host_workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
@@ -870,20 +868,26 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
         return true; // Channel messages bypass DM policy
     }
 
-    let dm_policy = host_workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
+    let dm_policy = host_workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "allowlist".to_string());
 
     if dm_policy == "open" {
         return true;
     }
 
-    // 3. Build merged allow list: config allow_from + pairing store
-    let mut allowed: Vec<String> = host_workspace_read(ALLOW_FROM_PATH)
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    if let Ok(store_allowed) = channel_host::pairing_read_allow_from(CHANNEL_NAME) {
-        allowed.extend(store_allowed);
-    }
+    // 3. Check configured allow list.
+    let allowed: Vec<String> = host_workspace_read(ALLOW_FROM_PATH)
+        .map(|s| {
+            serde_json::from_str(&s).unwrap_or_else(|error| {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Failed to parse Slack allow_from state, treating as empty: {error}"
+                    ),
+                );
+                Vec::new()
+            })
+        })
+        .unwrap_or_default(); // silent-ok: unset allow_from means no explicit allowlist yet.
 
     // 4. Check sender (Slack events only have user ID, not username)
     let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
@@ -892,86 +896,14 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
         return true;
     }
 
-    // 5. Not allowed — handle by policy
-    if dm_policy == "pairing" {
-        let meta = serde_json::json!({
-            "user_id": user_id,
-            "channel_id": channel_id,
-        })
-        .to_string();
-
-        match channel_host::pairing_upsert_request(CHANNEL_NAME, user_id, &meta) {
-            Ok(result) => {
-                channel_host::log(
-                    channel_host::LogLevel::Info,
-                    &format!("Pairing request for user {}: code {}", user_id, result.code),
-                );
-                // Surface Slack-side send failures rather than swallowing them —
-                // #1839 (pairing dead-ends) reported users seeing "Awaiting
-                // Pairing" forever because `chat.postMessage` failed silently
-                // (e.g., missing `chat:write` scope, revoked bot token).
-                if let Err(e) = send_pairing_reply(channel_id, &result.code) {
-                    channel_host::log(
-                        channel_host::LogLevel::Error,
-                        &format!(
-                            "Slack pairing reply failed for user {}: {}. Verify the bot has `chat:write` and `im:write` scopes and that the bot token is still valid.",
-                            user_id, e
-                        ),
-                    );
-                }
-            }
-            Err(e) => {
-                channel_host::log(
-                    channel_host::LogLevel::Error,
-                    &format!("Pairing upsert failed: {}", e),
-                );
-            }
-        }
-    }
-    false
-}
-
-/// Send a pairing code message via Slack chat.postMessage.
-fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "channel": channel_id,
-        "text": format!(
-            "Enter this code in IronClaw to pair your slack account: `{}`. CLI fallback: `ironclaw pairing approve slack {}`",
-            code, code
+    channel_host::log(
+        channel_host::LogLevel::Debug,
+        &format!(
+            "Dropping Slack DM from user {} on channel {} because dm_policy={} did not allow it",
+            user_id, channel_id, dm_policy
         ),
-    });
-
-    let payload_bytes =
-        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
-
-    let headers = serde_json::json!({"Content-Type": "application/json"});
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://slack.com/api/chat.postMessage",
-        &headers.to_string(),
-        Some(&payload_bytes),
-        None,
     );
-
-    match result {
-        Ok(response) if response.status == 200 => {
-            // Slack's `chat.postMessage` returns HTTP 200 even on permission /
-            // scope / token failures — the actual error lives in the response
-            // body as `{"ok": false, "error": "<code>"}`. Treating HTTP 200 as
-            // success unconditionally was the root cause of pairing-reply
-            // failures being invisible (#1839).
-            slack_post_message_result(&response.body)
-        }
-        Ok(response) => {
-            let body_str = String::from_utf8_lossy(&response.body);
-            Err(format!(
-                "Slack API error: {} - {}",
-                response.status, body_str
-            ))
-        }
-        Err(e) => Err(format!("HTTP request failed: {}", e)),
-    }
+    false
 }
 
 // Private-use Unicode chars used as internal sentinels by `markdown_to_mrkdwn`
@@ -1406,11 +1338,8 @@ mod tests {
         }
     }
 
-    // Regression for #1839 — pairing dead-ends were in part caused by
-    // `send_pairing_reply` treating HTTP 200 as success even when Slack's
-    // `chat.postMessage` body contained `{"ok": false}`. The failures were
-    // swallowed, the user saw no pairing code, and "Awaiting Pairing" stuck
-    // in the UI indefinitely.
+    // Slack's Web API returns HTTP 200 for some failed `chat.postMessage`
+    // calls, so callers must inspect the response body's `ok` field.
     #[test]
     fn slack_post_message_result_accepts_ok_true() {
         let body = br#"{"ok":true,"channel":"D123","ts":"1710000000.000100"}"#;

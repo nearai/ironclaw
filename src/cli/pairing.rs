@@ -1,6 +1,6 @@
 //! DM pairing CLI commands.
 //!
-//! Manage pairing requests for channels (Telegram, Slack, etc.).
+//! Manage pairing requests for channels such as Telegram.
 
 use clap::Subcommand;
 
@@ -9,7 +9,7 @@ use clap::Subcommand;
 pub enum PairingCommand {
     /// List pending pairing requests
     List {
-        /// Channel name (e.g., telegram, slack)
+        /// Channel name (e.g., telegram)
         #[arg(required = true)]
         channel: String,
 
@@ -20,7 +20,7 @@ pub enum PairingCommand {
 
     /// Approve a pairing request by code
     Approve {
-        /// Channel name (e.g., telegram, slack)
+        /// Channel name (e.g., telegram)
         #[arg(required = true)]
         channel: String,
 

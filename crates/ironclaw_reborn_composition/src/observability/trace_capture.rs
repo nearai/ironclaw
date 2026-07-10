@@ -30,7 +30,7 @@ use ironclaw_reborn_traces::client::{
     TraceClientAutonomousCaptureOutcome, TraceClientAutonomousCaptureRequest, TraceClientHost,
     TraceClientScope,
 };
-use ironclaw_reborn_traces::contribution::{self as trace, read_trace_policy_for_scope};
+use ironclaw_reborn_traces::contribution::{self as trace, resolve_effective_capture_policy};
 use ironclaw_threads::{
     ContextWindow, LoadContextWindowRequest, MessageKind, MessageStatus, SessionThreadError,
     SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -106,6 +106,8 @@ fn context_window_to_records(window: ContextWindow) -> Vec<ThreadMessageRecord> 
             sequence: message.sequence,
             kind: message.kind,
             status: MessageStatus::Finalized,
+            created_at: None,
+            updated_at: None,
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -193,16 +195,20 @@ pub(crate) async fn capture_turn_trace(
     scope: String,
 ) {
     let scope_ref = trace::local_pseudonymous_contributor_id(&scope);
-    let policy = match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(policy) => policy,
+    // Gate on the EFFECTIVE enrollment (personal-invite OR admin-provisioned
+    // instance), mirroring the flush gate: an instance-only-enrolled user has no
+    // enabled per-user policy, so a per-user-only check would drop their turns
+    // before queueing — leaving the instance-aware flush nothing to submit. The
+    // resolver returns the governing (and always-enabled) policy, or None when
+    // the scope is enrolled in neither.
+    let policy = match resolve_effective_capture_policy(Some(scope.as_str())) {
+        Ok(Some(policy)) => policy,
+        Ok(None) => return,
         Err(error) => {
-            tracing::debug!(%error, %scope_ref, "Reborn trace capture could not read policy");
+            tracing::debug!(%error, %scope_ref, "Reborn trace capture could not resolve policy");
             return;
         }
     };
-    if !policy.enabled {
-        return;
-    }
 
     let Some(messages) = load_capture_messages(&history, &event, &scope_ref).await else {
         return;
@@ -545,6 +551,8 @@ mod tests {
             sequence: 0,
             kind,
             status,
+            created_at: None,
+            updated_at: None,
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -590,17 +598,15 @@ mod tests {
     }
 
     fn enabled_policy() -> trace::StandingTraceContributionPolicy {
-        trace::StandingTraceContributionPolicy {
-            enabled: true,
-            // Loopback endpoint on a closed port: the immediate flush attempt
-            // fails fast and locally (no external traffic), leaving the
-            // envelope queued for assertion.
-            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
-            min_submission_score: 0.0,
-            require_manual_approval_when_pii_detected: false,
-            auto_submit_high_value_traces: true,
-            ..trace::StandingTraceContributionPolicy::default()
-        }
+        // Loopback endpoint on a closed port: the immediate flush attempt fails
+        // fast and locally (no external traffic), leaving the envelope queued
+        // for assertion.
+        trace::StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://127.0.0.1:1/v1/traces")
+            .set_min_submission_score(0.0)
+            .set_require_manual_approval_when_pii_detected(false)
+            .set_auto_submit_high_value_traces(true)
     }
 
     fn unique_scope(label: &str) -> String {
@@ -693,6 +699,8 @@ mod tests {
             sequence: 0,
             kind: MessageKind::ToolResultReference,
             status: MessageStatus::Finalized,
+            created_at: None,
+            updated_at: None,
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,

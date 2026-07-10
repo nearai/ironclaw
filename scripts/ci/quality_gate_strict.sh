@@ -31,8 +31,19 @@ cargo fmt --all -- --check
 
 echo "==> WebUI bundle toolchain"
 require_node_22
-require_command npm "install npm with Node.js"
-npm --version
+if ! command -v pnpm &>/dev/null; then
+    require_command corepack "install Node.js Corepack or pnpm"
+    corepack enable pnpm
+fi
+require_command pnpm "enable with: corepack enable pnpm"
+pnpm --version
+
+echo "==> WebUI frontend build"
+(
+    cd crates/ironclaw_webui_v2/frontend
+    pnpm install --frozen-lockfile
+    pnpm build
+)
 
 echo "==> clippy (all warnings)"
 cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings

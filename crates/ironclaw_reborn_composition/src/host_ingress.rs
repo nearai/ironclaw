@@ -9,18 +9,21 @@
 //!
 //! Parsing deliberately reuses the same context as bundled extension
 //! installation (`available_extensions::bundled_extension_package`): the
-//! default host-port catalog and the default host-API contract registry. A
-//! bundled manifest therefore cannot be installable but fail serve-time
-//! projection (or vice versa) because the two paths diverged on parsing
-//! context. `ironclaw_product_adapter_registry` owns the section
-//! validation and the fail-closed credential coherence (every auth-required
-//! route names a verifying credential declared in `required_credentials`);
+//! default host-port catalog and the composition-owned product extension
+//! host-API contract registry. A bundled manifest therefore cannot be
+//! installable but fail serve-time projection (or vice versa) because the two
+//! paths diverged on parsing context. `ironclaw_product_adapter_registry` owns
+//! the section validation and the fail-closed credential coherence (every
+//! auth-required route names a verifying credential declared in
+//! `required_credentials`);
 //! this module only projects the descriptors and selects one by id.
 
 use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource};
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_product_adapter_registry::product_adapter_sections;
 use thiserror::Error;
+
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 #[derive(Debug, Error)]
 pub(crate) enum HostIngressProjectionError {
@@ -43,8 +46,7 @@ pub(crate) fn bundled_host_ingress_descriptors(
     manifest_toml: &str,
 ) -> Result<Vec<IngressRouteDescriptor>, HostIngressProjectionError> {
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(projection)?;
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().map_err(projection)?;
+    let contracts = product_extension_host_api_contract_registry().map_err(projection)?;
     let record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
         ManifestSource::HostBundled,

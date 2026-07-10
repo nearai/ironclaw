@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
@@ -29,16 +29,17 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAddMemberRequest,
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetAutomationResponse,
+    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetAutomationResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
@@ -59,12 +60,13 @@ use ironclaw_product_workflow::{
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -74,7 +76,7 @@ use ironclaw_webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
 fn caller() -> WebUiAuthenticatedCaller {
@@ -258,8 +260,16 @@ struct StubServices {
     get_automation_calls: Mutex<Vec<String>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
+    rename_automation_calls: Mutex<Vec<(String, WebUiRenameAutomationRequest)>>,
     delete_automation_calls: Mutex<Vec<String>>,
+    /// Captures the authenticated caller's user id for each
+    /// `trace_account_traces` call, so the contract test can assert the handler
+    /// forwards the caller (the route is caller-scoped).
+    trace_account_traces_callers: Mutex<Vec<String>>,
+    /// Forwarded caller user-ids for each `trace_account_login_link` call.
+    trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_rename_automation_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
@@ -299,6 +309,9 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    stream_events_subscription_enabled: Mutex<bool>,
+    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    next_stream_events_subscription: Mutex<Option<RebornStreamEventsSubscription>>,
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
@@ -331,6 +344,10 @@ impl StubServices {
 
     fn fail_delete_automation(&self, error: RebornServicesError) {
         *self.next_delete_automation_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_rename_automation(&self, error: RebornServicesError) {
+        *self.next_rename_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
@@ -373,6 +390,23 @@ impl StubServices {
             .lock()
             .expect("lock")
             .push_back(response);
+    }
+
+    fn enable_stream_events_subscription(
+        &self,
+        events: Vec<Result<ProductOutboundEnvelope, RebornServicesError>>,
+    ) {
+        let (sender, receiver) = mpsc::channel(events.len().max(1));
+        for event in events {
+            sender.try_send(event).expect("subscription test queue");
+        }
+        drop(sender);
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock") = true;
+        *self.next_stream_events_subscription.lock().expect("lock") =
+            Some(RebornStreamEventsSubscription::new(receiver));
     }
 
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
@@ -683,6 +717,29 @@ impl RebornServicesApi for StubServices {
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
 
+    fn supports_stream_events_subscription(&self) -> bool {
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock")
+    }
+
+    async fn subscribe_events(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        self.subscribe_events_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        self.next_stream_events_subscription
+            .lock()
+            .expect("lock")
+            .take()
+            .ok_or_else(|| service_unavailable_error(true))
+    }
+
     async fn get_run_state(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -845,6 +902,34 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn rename_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.rename_automation_calls
+            .lock()
+            .expect("lock")
+            .push((automation_id, request));
+        if let Some(error) = self
+            .next_rename_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-renamed",
+                "Renamed status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
     async fn delete_automation(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -960,18 +1045,18 @@ impl RebornServicesApi for StubServices {
         }
         Ok(RebornConnectableChannelListResponse {
             channels: vec![RebornConnectableChannelInfo {
-                channel: "slack".to_string(),
-                display_name: "Slack".to_string(),
+                channel: "telegram".to_string(),
+                display_name: "Telegram".to_string(),
                 strategy: RebornChannelConnectStrategy::InboundProofCode,
                 action: RebornChannelConnectAction {
-                    title: "Slack account connection".to_string(),
-                    instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                    input_placeholder: "Enter Slack pairing code...".to_string(),
+                    title: "Telegram account connection".to_string(),
+                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
+                    input_placeholder: "Enter Telegram pairing code...".to_string(),
                     submit_label: "Connect".to_string(),
-                    success_message: "Slack account connected.".to_string(),
-                    error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
+                    success_message: "Telegram account connected.".to_string(),
+                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
                 },
-                command_aliases: vec!["slack".to_string()],
+                command_aliases: vec!["telegram".to_string()],
             }],
         })
     }
@@ -1383,6 +1468,48 @@ impl RebornServicesApi for StubServices {
             ok: true,
             models: vec!["model-a".to_string()],
             message: String::new(),
+        })
+    }
+
+    async fn trace_account_traces(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        // Capture the forwarded caller so the contract test can verify the
+        // caller-scoped route actually threads the authenticated identity.
+        self.trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .push(caller.actor().user_id.as_str().to_string());
+        // Hermetic zero-state stub — no filesystem or network access.
+        // Mirrors the unenrolled branch of the real `account_traces_for_user`
+        // so the contract test for `GET /traces/account` is fully self-contained.
+        Ok(RebornAccountTracesResponse {
+            enrolled: false,
+            traces: vec![],
+        })
+    }
+
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        // Capture the forwarded caller (tenant AND user — this is the trusted
+        // identity boundary) so the contract test can verify the caller-scoped
+        // route threads the authenticated identity, then return a hermetic
+        // canned mint (no network / filesystem).
+        self.trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .push(format!(
+                "{}/{}",
+                caller.tenant_id.as_str(),
+                caller.actor().user_id.as_str()
+            ));
+        Ok(RebornAccountLoginLinkResponse {
+            minted: true,
+            enrolled: true,
+            url: Some("https://commons.example/account/login?code=stub".to_string()),
         })
     }
 }
@@ -2307,6 +2434,108 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
 }
 
 #[tokio::test]
+async fn rename_automation_dispatches_path_id_and_body_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Renamed status"}"#))
+                .expect("rename request"),
+        )
+        .await
+        .expect("rename oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert_eq!(body["automation"]["automation_id"], "automation-renamed");
+    assert_eq!(body["automation"]["name"], "Renamed status");
+
+    let calls = services
+        .rename_automation_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "automation-alpha");
+    assert_eq!(calls[0].1.name.as_deref(), Some("Renamed status"));
+}
+
+#[tokio::test]
+async fn rename_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("name".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::Blank),
+            },
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "validation",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_rename_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Renamed status"}"#))
+                    .expect("rename request"),
+            )
+            .await
+            .expect("rename oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .rename_automation_calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(automation_id, request)| { (automation_id.clone(), request.name.clone()) })
+                .collect::<Vec<_>>(),
+            vec![(
+                "automation-alpha".to_string(),
+                Some("Renamed status".to_string())
+            )]
+        );
+    }
+}
+
+#[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
     // The facade's default `trace_credits` body reads contributor-local
     // Trace Commons state scoped by the authenticated caller's user id.
@@ -2356,6 +2585,103 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .as_str()
             .expect("note")
             .contains("authoritative ledger is server-side")
+    );
+}
+
+#[tokio::test]
+async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
+    // The facade's default `trace_account_traces` body reads contributor-local
+    // Trace Commons state scoped by the authenticated caller's user id.
+    // A unique per-test user id guarantees a fresh scope so the
+    // unenrolled zero-state is deterministic on any machine.
+    let user_id = format!(
+        "webui-v2-account-traces-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let unique_caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new(user_id.as_str()).expect("user"),
+        None,
+        None,
+    );
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(unique_caller))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/account")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["enrolled"], false);
+    assert_eq!(body["traces"].as_array().expect("traces array").len(), 0);
+
+    // The route is caller-scoped: the handler must forward the authenticated
+    // caller's user id to the facade (fails if it stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec![user_id],
+    );
+}
+
+#[tokio::test]
+async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
+    // POST /traces/account-login-link is caller-scoped and returns the minted
+    // one-time URL in the authenticated response body — the only delivery
+    // channel hosted users have (no host-file access).
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/traces/account-login-link")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["minted"], true);
+    assert_eq!(body["enrolled"], true);
+    assert_eq!(
+        body["url"],
+        "https://commons.example/account/login?code=stub"
+    );
+
+    // The route must forward the authenticated caller's tenant AND user id to
+    // the facade — the scope is trusted-caller-derived, never request input
+    // (fails if the handler stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_login_link_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["tenant-alpha/user-alpha".to_string()],
     );
 }
 
@@ -2840,15 +3166,15 @@ async fn list_connectable_channels_dispatches_through_facade() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "slack");
+    assert_eq!(body["channels"][0]["channel"], "telegram");
     assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
     assert_eq!(
         body["channels"][0]["action"]["instructions"],
-        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         body["channels"][0]["action"]["error_message"],
-        "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
     );
     assert_eq!(
         *services
@@ -4924,6 +5250,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                 "thread-x",
                 vec![ProductProjectionItem::Text {
                     id: "message-1".to_string(),
+                    run_id: None,
                     body: "projection body".to_string(),
                 }],
             )
@@ -5042,6 +5369,154 @@ where
         }
     }
     buf
+}
+
+#[tokio::test]
+async fn stream_events_sets_unbuffered_sse_headers() {
+    let services = Arc::new(StubServices::default());
+    services.enable_stream_events_subscription(Vec::new());
+
+    let router = router_with(services);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-transform"),
+        "SSE must opt out of intermediary transforms that can buffer chunks"
+    );
+    assert_eq!(
+        headers
+            .get(HeaderName::from_static("x-accel-buffering"))
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "SSE must ask reverse proxies not to buffer stream chunks"
+    );
+    assert!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")),
+        "SSE content type must remain event-stream"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_continues_immediately_after_non_empty_batch() {
+    let services = Arc::new(StubServices::default());
+
+    let envelope_a = make_projection_update_envelope("cursor:live-a");
+    let envelope_b = make_projection_update_envelope("cursor:live-b");
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_a],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_b],
+    }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "second SSE event must not wait for the idle poll interval; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert!(
+        calls.len() >= 2,
+        "SSE handler must immediately re-enter stream_events after a non-empty batch"
+    );
+    let expected_cursor = ProjectionCursor::new("cursor:live-a").expect("cursor");
+    assert_eq!(
+        calls[1].after_cursor.as_ref(),
+        Some(&expected_cursor),
+        "follow-up call must still preserve cursor ordering"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_uses_subscription_when_facade_supports_it() {
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:sub-b");
+    services.enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b)]);
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let cursor_a_json =
+        serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
+    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled SSE route must not call the polling drain facade"
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being
@@ -5445,6 +5920,87 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         Some(envelope_b.projection_cursor()),
         "second WS poll must advance after_cursor to the last emitted projection cursor",
     );
+}
+
+#[tokio::test]
+async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:ws-sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:ws-sub-b");
+    services
+        .enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b.clone())]);
+
+    let router = router_with(services.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let (mut ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+
+    let mut text_frames: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => break,
+            Err(_) => break,
+        }
+    }
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+
+    assert!(
+        text_frames.len() >= 2,
+        "expected subscription projection frames; got {} text frame(s): {:?}",
+        text_frames.len(),
+        text_frames,
+    );
+
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
+    assert_eq!(
+        envelope_a_json, expected_a,
+        "first WS frame must carry the first subscription envelope",
+    );
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
+    assert_eq!(
+        envelope_b_json, expected_b,
+        "second WS frame must carry the second subscription envelope",
+    );
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled WS route must not call the polling drain facade",
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 #[tokio::test]

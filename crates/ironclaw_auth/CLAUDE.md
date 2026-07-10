@@ -1,6 +1,7 @@
 # ironclaw_auth Guardrails
 
 - Own product-facing auth vocabulary and fake services only.
+- Temporary exception: `loopback_oauth` contains the v1 fixed-port OAuth callback transport folded from `ironclaw_oauth`; do not add Reborn consumers, and delete it with v1.
 - Exception: `ProviderBackedCredentialAccountService` may live here because refresh serialization and status projection belong at the `CredentialAccountService` boundary, while raw provider/token material stays behind `AuthProviderClient` and secret boundaries.
 - Keep Reborn auth code independent from V1 route handlers, V1 pending state, V1 extension manager authority, and V1 secret-store implementation details.
 - Serializable records may contain hashes, ids, handles, statuses, and redacted metadata. They must not contain raw OAuth state, PKCE verifiers, authorization codes, tokens, secret values, provider response bodies, backend internals, or host paths.

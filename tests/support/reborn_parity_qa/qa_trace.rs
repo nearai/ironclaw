@@ -1929,6 +1929,7 @@ mod tests {
             access_secret: Some(SecretHandle::new("qa-google-access").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
+            provider_identity: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1963,6 +1964,7 @@ mod tests {
             access_secret: Some(SecretHandle::new("qa-google-access").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
+            provider_identity: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

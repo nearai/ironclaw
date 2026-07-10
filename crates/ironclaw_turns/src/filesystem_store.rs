@@ -59,10 +59,10 @@ use crate::{
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -751,6 +751,16 @@ where
             Self::Row(store) => store.get_run_state(request).await,
         }
     }
+
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_run_state_for_cancellation(request).await,
+            Self::Row(store) => store.get_run_state_for_cancellation(request).await,
+        }
+    }
 }
 
 #[async_trait]
@@ -826,16 +836,37 @@ where
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         match self {
             Self::Blob(store) => {
                 store
-                    .release_tree_descendants(scope, root_run_id, delta)
+                    .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
                     .await
             }
             Self::Row(store) => {
                 store
-                    .release_tree_descendants(scope, root_run_id, delta)
+                    .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
+                    .await
+            }
+        }
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .prune_released_child(scope, root_run_id, child_run_id)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .prune_released_child(scope, root_run_id, child_run_id)
                     .await
             }
         }
@@ -907,6 +938,16 @@ where
         match self {
             Self::Blob(store) => store.claim_next_run(request).await,
             Self::Row(store) => store.claim_next_run(request).await,
+        }
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        match self {
+            Self::Blob(store) => store.claim_next_runs(request).await,
+            Self::Row(store) => store.claim_next_runs(request).await,
         }
     }
 
@@ -1206,15 +1247,36 @@ where
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         self.apply(RunnerLeaseOverlay::None, |store| async move {
             let outcome = store
-                .release_tree_descendants(scope, root_run_id, delta)
+                .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
                 .await;
             (outcome, store)
         })
         .instrument(turn_state_write_span(
             "release_tree_descendants",
+            Some(scope),
+            Some(&root_run_id),
+        ))
+        .await
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.apply(RunnerLeaseOverlay::None, |store| async move {
+            let outcome = store
+                .prune_released_child(scope, root_run_id, child_run_id)
+                .await;
+            (outcome, store)
+        })
+        .instrument(turn_state_write_span(
+            "prune_released_child",
             Some(scope),
             Some(&root_run_id),
         ))
@@ -1308,6 +1370,38 @@ where
             {
                 self.compensate_failed_claim(claimed).await;
                 return Err(error);
+            }
+            Ok(claimed)
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let span = turn_state_write_span("claim_next_runs", request.scope_filter.as_ref(), None);
+        async move {
+            let claimed = self
+                .apply(RunnerLeaseOverlay::None, |store| {
+                    let request = request.clone();
+                    async move {
+                        let outcome = store.claim_next_runs(request).await;
+                        (outcome, store)
+                    }
+                })
+                .await?;
+            for run in &claimed {
+                if let Err(error) = self
+                    .seed_runner_lease_from_snapshot_inner(run.state.run_id)
+                    .await
+                {
+                    for claimed_run in &claimed {
+                        self.compensate_failed_claim(claimed_run).await;
+                    }
+                    return Err(error);
+                }
             }
             Ok(claimed)
         }
