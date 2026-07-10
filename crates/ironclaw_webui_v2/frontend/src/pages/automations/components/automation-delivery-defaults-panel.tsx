@@ -136,7 +136,7 @@ export function DeliveryDefaultsContent({ deliveryState }) {
       command: (
         <code
           key="cmd"
-          className="rounded px-1.5 py-0.5 font-mono text-[0.6875rem] bg-[var(--v2-surface-muted)] text-[var(--v2-accent-text)]"
+          className="whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[0.6875rem] bg-[var(--v2-surface-muted)] text-[var(--v2-accent-text)]"
         >
           {"approve <code>"}
         </code>
@@ -307,32 +307,15 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         </div>
       </div>
 
-      {/* ── Save / Clear — full-width, centered ──────────────────── */}
-      <div className="flex flex-col gap-2">
-        <div className="flex gap-3">
-          <Button
-            variant="primary"
-            size="sm"
-            fullWidth
-            disabled={!canSave}
-            onClick={handleSave}
-          >
-            {t("automations.delivery.save")}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            fullWidth
-            disabled={!canClear}
-            onClick={handleClear}
-          >
-            {t("automations.delivery.clear")}
-          </Button>
-        </div>
+      {/* ── Clear / Save — right-aligned, primary rightmost (the modal
+          footer convention used across the app). Default (md) control
+          height, not the compact toolbar size. The saved/error status
+          fills the space to the left of the buttons. ─────────────── */}
+      <div className="flex items-center justify-end gap-3">
         {showSaved && (
           <span
             role="status"
-            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
+            className="mr-auto flex items-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
           >
             <Icon name="check" className="h-3 w-3" />
             {t("automations.delivery.saved")}
@@ -341,19 +324,37 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         {deliveryState.saveError && !showSaved && (
           <span
             role="alert"
-            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-[var(--v2-danger-text)]"
+            className="mr-auto flex items-center gap-1.5 text-xs font-semibold text-[var(--v2-danger-text)]"
           >
             <Icon name="close" className="h-3 w-3" />
             {t("automations.delivery.saveFailed")}
           </span>
         )}
+        <Button
+          variant="secondary"
+          size="md"
+          disabled={!canClear}
+          onClick={handleClear}
+        >
+          {t("automations.delivery.clear")}
+        </Button>
+        <Button
+          variant="primary"
+          size="md"
+          disabled={!canSave}
+          onClick={handleSave}
+        >
+          {t("automations.delivery.save")}
+        </Button>
       </div>
 
-      {/* ── Footnote — centered, beneath Save/Clear (Slack targets only) ── */}
+      {/* ── Footnote — plain muted text beneath the button row (Slack
+          targets only). Narrow max-width wraps the sentence before the
+          inline code chip; the chip itself never breaks mid-token. ── */}
       {hasExternalTargets && (
-        <div className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-center text-xs leading-relaxed text-[var(--v2-text-faint)]">
+        <p className="mx-auto max-w-[24rem] text-center text-xs leading-relaxed text-[var(--v2-text-faint)]">
           {footnoteSegments}
-        </div>
+        </p>
       )}
     </div>
   );

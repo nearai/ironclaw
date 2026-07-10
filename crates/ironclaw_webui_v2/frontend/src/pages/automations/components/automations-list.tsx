@@ -142,17 +142,21 @@ export function AutomationsList({
               row cards; from sm up it is one flat card whose header carries
               the filter tabs (left) and sort + delivery controls (right),
               with the column-label row beneath. */}
+          {/* Corner math: the card corner (--v2-radius-xl, 20px) coalesces
+              with the header buttons' corner (--v2-radius-md, 10px) because
+              the controls sit exactly 10px from the top, right, and bottom
+              of the header — inner radius = outer radius − gap. */}
           <div
             className={cn(
               "flex flex-col gap-3",
-              "sm:gap-0 sm:overflow-hidden sm:rounded-[1.25rem] md:rounded-[1.5rem]",
+              "sm:gap-0 sm:overflow-hidden sm:rounded-[var(--v2-radius-xl)]",
               "sm:border sm:border-[var(--v2-panel-border)] sm:bg-[var(--v2-card-bg)]"
             )}
           >
             {/* Card header: on lg+ tabs and controls share one baseline; below
                 lg the controls sit on their own line above the tabs so the tab
                 underline always merges with the header rule. */}
-            <div className="hidden border-b border-[var(--v2-panel-border)] px-5 sm:flex sm:flex-col lg:flex-row lg:items-stretch lg:justify-between lg:gap-x-4">
+            <div className="hidden border-b border-[var(--v2-panel-border)] pl-5 pr-2.5 sm:flex sm:flex-col lg:flex-row lg:items-stretch lg:justify-between lg:gap-x-4">
               {/* The tab row stretches to the toolbar's full height so tab
                   labels sit vertically centered against the controls while
                   the active underline stays on the header hairline. */}
@@ -166,7 +170,7 @@ export function AutomationsList({
                   className="min-w-0"
                 />
               </div>
-              <div className="order-1 flex items-center justify-end gap-2 pb-2 pt-2.5 lg:order-2 lg:py-2">
+              <div className="order-1 flex items-center justify-end gap-2 pb-2 pt-2.5 lg:order-2 lg:py-2.5">
                 {sortControl}
                 {deliveryState && (
                   <Button
