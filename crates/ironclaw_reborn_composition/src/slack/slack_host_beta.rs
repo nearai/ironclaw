@@ -4768,7 +4768,10 @@ mod tests {
         // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
         // both `last_fired_slot` and `active_run_ref` atomically, so if we see
         // `last_fired_slot` we can also safely read the run_id.
-        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        // Generous deadline: the fire normally lands in ~1-2 s, but this rides
+        // a real poller on shared CI runners (observed >15 s under load); the
+        // extra budget is only ever spent on failure.
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
         let mut fired_run_id = None;
         while Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -4793,12 +4796,13 @@ mod tests {
             .expect("local-dev runtime has local_runtime services");
         let delivery_store = Arc::clone(&local_runtime.triggered_run_delivery);
 
-        // Poll briefly for the delivery record.  The driver spawns a background
-        // task; for the `NoDefaultConfigured` fast-path it should complete well
-        // within 2 s.
+        // Poll for the delivery record.  The driver spawns a background task;
+        // the `NoDefaultConfigured` fast-path normally completes well within
+        // 2 s, but shared CI runners need the same load headroom as the fire
+        // wait above.
         let mut delivery_record = None;
         if let Some(run_id) = fired_run_id {
-            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(30);
             while Instant::now() < delivery_deadline {
                 if let Ok(Some(rec)) = delivery_store.load_triggered_run_delivery(run_id).await {
                     delivery_record = Some(rec);
@@ -4810,7 +4814,7 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within 15 s — hook wiring e2e stalled"
+            "trigger did not fire within 60 s — hook wiring e2e stalled"
         );
         assert!(
             delivery_record.is_some(),
