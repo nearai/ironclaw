@@ -88,7 +88,10 @@ export function ColorsSection({ theme }) {
       {COLOR_TOKENS.map((group) => (
         <div key={group.group}>
           <SectionTitle>{group.group}</SectionTitle>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+          {/* Caps at four columns: the composition bundle guard bans
+              `xl:grid-cols-5` (the automations summary strip must never
+              force five cards into a row), and swatches read fine at 4. */}
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {group.tokens.map((token) => {
               const value = readToken(token.var);
               return (
