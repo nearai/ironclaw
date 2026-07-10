@@ -165,13 +165,18 @@ fn quote_postgres_identifier(identifier: &str) -> String {
 async fn postgres_root_filesystem_migration_key(
     client: &deadpool_postgres::Object,
 ) -> Result<String, FilesystemError> {
+    // `inet_server_addr()` / `inet_server_port()` can collapse to the same
+    // value across isolated Docker testcontainers. The postmaster start time
+    // distinguishes those server instances while still letting a live process
+    // skip repeat migrations against the same running database.
     let row = client
         .query_one(
             "SELECT \
                 current_database(), \
                 current_schema(), \
                 COALESCE(inet_server_addr()::text, 'local'), \
-                COALESCE(inet_server_port()::text, 'local')",
+                COALESCE(inet_server_port()::text, 'local'), \
+                pg_postmaster_start_time()::text",
             &[],
         )
         .await
@@ -180,7 +185,10 @@ async fn postgres_root_filesystem_migration_key(
     let schema: String = row.get(1);
     let host: String = row.get(2);
     let port: String = row.get(3);
-    Ok(format!("{host}:{port}/{database}/{schema}"))
+    let postmaster_started_at: String = row.get(4);
+    Ok(format!(
+        "{host}:{port}/{database}/{schema}@{postmaster_started_at}"
+    ))
 }
 
 #[cfg(feature = "postgres")]
