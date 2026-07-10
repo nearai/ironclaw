@@ -9,7 +9,6 @@ use ironclaw_turns::{
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
-use std::time::Duration;
 use tracing::debug;
 
 use crate::state::{
@@ -494,7 +493,6 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
         let compaction_result = await_compaction_with_cancellation(
             self.ctx,
-            Duration::from_millis(deadline_ms),
             self.ctx.host.compact_loop_context(compaction_request),
         )
         .await;
@@ -517,20 +515,6 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                 return compaction_cancelled_exit(self.ctx, state, self.pending_input_ack).await;
             }
             CompactionCallOutcome::Completed(Err(error)) => {
-                return compaction_failed_continue(
-                    self.ctx,
-                    state,
-                    self.pending_input_ack,
-                    task_id,
-                    drop_through_seq,
-                    &error,
-                )
-                .await;
-            }
-            CompactionCallOutcome::TimedOut => {
-                let error = LoopCompactionError::InferenceFailed {
-                    safe_summary: safe("compaction deadline exceeded"),
-                };
                 return compaction_failed_continue(
                     self.ctx,
                     state,
@@ -578,13 +562,18 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
 
 enum CompactionCallOutcome {
     Completed(Result<LoopCompactionOutcome, ironclaw_turns::run_profile::LoopCompactionError>),
-    TimedOut,
     Cancelled,
 }
 
+/// Races the compaction call against run cancellation only. The deadline is
+/// enforced solely by the inner `ModelGatewayBackedSystemInferencePort`
+/// timeout (which surfaces as `SystemInferenceError::Timeout` ->
+/// `LoopCompactionError::InferenceFailed`); a second, outer timeout here
+/// would drop the call future on the same deadline and detach the
+/// `GuardedSystemInferencePort` worker it spawned, leaking a task per
+/// timed-out compaction.
 async fn await_compaction_with_cancellation<F>(
     ctx: StageContext<'_>,
-    deadline: Duration,
     call: F,
 ) -> CompactionCallOutcome
 where
@@ -592,14 +581,11 @@ where
 {
     let call = call;
     tokio::pin!(call);
-    let timeout = tokio::time::sleep(deadline);
-    tokio::pin!(timeout);
     let cancellation = ctx.host.cancellation_requested();
     tokio::pin!(cancellation);
 
     tokio::select! {
         result = &mut call => CompactionCallOutcome::Completed(result),
-        _ = &mut timeout => CompactionCallOutcome::TimedOut,
         _signal = &mut cancellation => {
             CompactionCallOutcome::Cancelled
         }
@@ -754,9 +740,5 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::Cancelled => "cancelled",
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
-    LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
-}
-
-fn safe(value: &'static str) -> LoopSafeSummary {
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
 }

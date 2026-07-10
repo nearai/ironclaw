@@ -646,18 +646,20 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_timeout_returns_to_normal_prompt_path() {
+async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path() {
+    // Simulates the inner `ModelGatewayBackedSystemInferencePort` deadline
+    // firing: it surfaces as `LoopCompactionError::InferenceFailed`, not as
+    // a separate outer race in the executor (that duplicate timeout was
+    // removed — see `await_compaction_with_cancellation`).
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
             LoopContextCompactionKind::User,
             10,
         )])
-        .with_compaction_result(Ok(LoopCompactionResponse {
-            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
-            compression_ratio_ppm: 250_000,
-        }))
-        .with_compaction_delay(std::time::Duration::from_millis(25));
+        .with_compaction_result(Err(LoopCompactionError::InferenceFailed {
+            safe_summary: LoopSafeSummary::new("compaction deadline exceeded").unwrap(),
+        }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
         ..Default::default()
