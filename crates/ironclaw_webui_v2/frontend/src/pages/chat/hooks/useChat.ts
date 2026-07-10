@@ -35,10 +35,18 @@ import {
   upsertConnectionLostRunFailure,
 } from "../lib/failureMessages";
 import {
+  CHAT_MESSAGE_ROLES,
+  createErrorChatMessage,
+  createRequestFailureChatMessage,
+  isRequestFailureForMessage,
+  requestFailureIdForMessage,
+} from "../lib/message-types";
+import {
   CONNECTION_STATUS,
   isConnectionLostStatus,
 } from "../lib/connection-status";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments";
+import { failureMessageForRequestError } from "../lib/failureMessages";
 import { useHistory } from "./useHistory";
 import { useSSE } from "./useSSE";
 
@@ -219,6 +227,7 @@ export function useChat(threadId) {
   });
   const submitBusyRef = React.useRef(false);
   const localRunAdmissionRef = React.useRef(null);
+  const streamErrorClosedAdmissionThreadIdsRef = React.useRef(new Set());
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -263,6 +272,9 @@ export function useChat(threadId) {
     () => () => {
       if (localRunAdmissionRef.current?.threadId === threadId) {
         localRunAdmissionRef.current = null;
+      }
+      if (threadId) {
+        streamErrorClosedAdmissionThreadIdsRef.current.delete(threadId);
       }
     },
     [threadId],
@@ -374,6 +386,17 @@ export function useChat(threadId) {
     return { connectionStatus, connectionInterrupted };
   }, []);
 
+  const handleStreamError = React.useCallback(() => {
+    const currentThreadId = threadIdRef.current;
+    if (!currentThreadId) return;
+    const localRunAdmission = localRunAdmissionRef.current;
+    if (localRunAdmission?.threadId !== currentThreadId) return;
+    if (!localRunAdmission.runId) {
+      streamErrorClosedAdmissionThreadIdsRef.current.add(currentThreadId);
+    }
+    localRunAdmissionRef.current = null;
+  }, []);
+
   const handleEvent = useChatEvents({
     threadId,
     setMessages,
@@ -385,6 +408,7 @@ export function useChat(threadId) {
     toolActivityStateRef,
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
+    onStreamError: handleStreamError,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -529,18 +553,26 @@ export function useChat(threadId) {
       let sendThreadId = targetThreadId || threadId;
 
       if (!sendThreadId) {
-        const created = await createThreadRequest();
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
-        sendThreadId = created?.thread?.thread_id;
-        if (!sendThreadId) {
-          throw new Error("createThread returned no thread_id");
+        try {
+          const created = await createThreadRequest();
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
+          sendThreadId = created?.thread?.thread_id;
+          if (!sendThreadId) {
+            throw new Error("createThread returned no thread_id");
+          }
+        } catch (err) {
+          appendRequestFailureMessage(setMessages, {
+            id: requestFailureIdForMessage(`create-${pendingSeqRef.current++}`),
+            error: err,
+          });
+          throw err;
         }
       }
 
       const pendingKey = sendThreadId;
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
-        role: "user",
+        role: CHAT_MESSAGE_ROLES.USER,
         content: renderContent,
         attachments: renderAttachments,
         retryContent: content,
@@ -551,7 +583,7 @@ export function useChat(threadId) {
       };
       const pendingRenderMessage = {
         id: pendingRecord.id,
-        role: "user",
+        role: CHAT_MESSAGE_ROLES.USER,
         content: renderContent,
         attachments: renderAttachments,
         retryContent: content,
@@ -577,6 +609,7 @@ export function useChat(threadId) {
       // target sends are left to the server's rejected_busy response instead.
       const shouldTrackLocalRun = shouldRenderInCurrentThread;
       if (shouldTrackLocalRun) {
+        streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
         localRunAdmissionRef.current = {
           threadId: sendThreadId,
           runId: null,
@@ -614,36 +647,45 @@ export function useChat(threadId) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
         let runSettledBeforeResponse = false;
+        let streamErrorClosedAdmission = false;
         if (response?.run_id && shouldTrackLocalRun) {
+          streamErrorClosedAdmission =
+            streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
           if (connectionInterruptedUnknownRef.current) {
             noteConnectionInterruptedRunId(response.run_id);
             setMessages((prev) =>
               rewriteConnectionLostRunFailures(prev, { runId: response.run_id }),
             );
           }
-          const localRunAdmission = localRunAdmissionRef.current;
-          runSettledBeforeResponse = Boolean(
-            localRunAdmission &&
-              localRunAdmission.threadId === sendThreadId &&
-              localRunAdmission.runId === response.run_id &&
-              localRunAdmission.settledBeforeResponse,
-          );
-          if (runSettledBeforeResponse) {
+          if (streamErrorClosedAdmission) {
             localRunAdmissionRef.current = null;
           } else {
-            localRunAdmissionRef.current = {
-              threadId: sendThreadId,
-              runId: response.run_id,
-              settledBeforeResponse: false,
-            };
+            const localRunAdmission = localRunAdmissionRef.current;
+            runSettledBeforeResponse = Boolean(
+              localRunAdmission &&
+                localRunAdmission.threadId === sendThreadId &&
+                localRunAdmission.runId === response.run_id &&
+                localRunAdmission.settledBeforeResponse,
+            );
+            if (runSettledBeforeResponse) {
+              localRunAdmissionRef.current = null;
+            } else {
+              localRunAdmissionRef.current = {
+                threadId: sendThreadId,
+                runId: response.run_id,
+                settledBeforeResponse: false,
+              };
+            }
           }
         } else if (shouldTrackLocalRun) {
+          streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
           localRunAdmissionRef.current = null;
         }
         if (
           response?.run_id &&
           shouldRenderInCurrentThread &&
-          !runSettledBeforeResponse
+          !runSettledBeforeResponse &&
+          !streamErrorClosedAdmission
         ) {
           setActiveRun({
             runId: response.run_id,
@@ -687,7 +729,7 @@ export function useChat(threadId) {
             const appendSystemNotice = (renderCurrent = shouldRenderInCurrentThread) => {
               const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,
-                role: "system",
+                role: CHAT_MESSAGE_ROLES.SYSTEM,
                 content: response.notice,
                 timestamp: new Date().toISOString(),
                 isOptimistic: false,
@@ -728,11 +770,16 @@ export function useChat(threadId) {
         return response;
       } catch (err) {
         if (shouldTrackLocalRun) {
+          streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
           localRunAdmissionRef.current = null;
         }
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
+        const failureContent = failureMessageForRequestError(err);
+        // Mark the optimistic user bubble as retryable and append a separate
+        // assistant-side error bubble. Apply each updater to both stores because
+        // the rendered current thread and seeded target thread are distinct caches.
         const markFailed = (prev) =>
           prev.map((m) =>
             m.id === optimisticId
@@ -740,12 +787,18 @@ export function useChat(threadId) {
                   ...m,
                   isOptimistic: false,
                   status: "error",
-                  error: err.message,
+                  error: failureContent,
                 }
               : m,
           );
         updateCurrentThread(markFailed);
         updateSeededTarget(markFailed);
+        const appendFailure = (prev) => [
+          ...prev,
+          requestFailureMessageForContent(optimisticId, failureContent),
+        ];
+        updateCurrentThread(appendFailure);
+        updateSeededTarget(appendFailure);
         updateCurrentRunState(() => setIsProcessing(false));
         submitBusyRef.current = false;
         throw err;
@@ -977,12 +1030,17 @@ export function useChat(threadId) {
         : [];
       if (!content && attachments.length === 0) return;
 
-      const removeFailed = (prev) => prev.filter((item) => item.id !== message.id);
+      const removeFailed = (prev) =>
+        prev.filter(
+          (item) =>
+            item.id !== message.id &&
+            !isRequestFailureForMessage(item, message.id),
+        );
       const restoreFailedIfNoReplacement = (prev) => {
         const hasReplacement = prev.some(
           (item) =>
             item.id !== message.id &&
-            item.role === "user" &&
+            item.role === CHAT_MESSAGE_ROLES.USER &&
             item.status === "error" &&
             item.retryContent === content,
         );
@@ -1057,4 +1115,31 @@ function retryAfterMs(err) {
   const seconds = Number(raw);
   if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
   return 2000;
+}
+
+function requestFailureMessageForError(messageId, error) {
+  return requestFailureMessageForContent(
+    messageId,
+    failureMessageForRequestError(error),
+  );
+}
+
+function requestFailureMessageForContent(messageId, content) {
+  return createRequestFailureChatMessage({
+    messageId,
+    content,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function appendRequestFailureMessage(setMessages, { id, error }) {
+  const content = failureMessageForRequestError(error);
+  setMessages((prev) => [
+    ...prev,
+    createErrorChatMessage({
+      id,
+      content,
+      timestamp: new Date().toISOString(),
+    }),
+  ]);
 }
