@@ -80,6 +80,11 @@ struct SuspendedBatchPort {
 
 struct NoopResultWriter;
 
+#[derive(Default)]
+struct RecordingResultWriter {
+    delete_calls: std::sync::atomic::AtomicUsize,
+}
+
 struct NoopGoalStore;
 
 /// Wraps [`InMemoryAwaitEdgeWriter`] but always rejects the lazy-recovery
@@ -572,6 +577,29 @@ impl LoopCapabilityResultWriter for NoopResultWriter {
             LoopResultRef::new("result:spawn").unwrap(),
             0,
         ))
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityResultWriter for RecordingResultWriter {
+    async fn write_capability_result(
+        &self,
+        _write: CapabilityResultWrite<'_>,
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
+            LoopResultRef::new("result:spawn").unwrap(),
+            0,
+        ))
+    }
+
+    async fn delete_capability_result(
+        &self,
+        _run_context: &LoopRunContext,
+        _result_ref: &LoopResultRef,
+    ) -> Result<(), AgentLoopHostError> {
+        self.delete_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -2307,6 +2335,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
     let goal_store = Arc::new(RecordingGoalStore::default());
     let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let result_writer = Arc::new(RecordingResultWriter::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
@@ -2321,7 +2350,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         spawn_input_codec: Arc::new(StaticSpawnInputCodec {
             args: default_spawn_args(),
         }),
-        result_writer: Arc::new(NoopResultWriter),
+        result_writer: result_writer.clone(),
     });
     let port = SubagentSpawnCapabilityPort::new(
         Arc::new(FailingBatchPort),
@@ -2357,6 +2386,13 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
     assert!(gate_store.records().is_empty());
     assert_eq!(goal_store.deletes().len(), 1);
     assert_eq!(turn_store.releases.lock().unwrap().len(), 1);
+    assert_eq!(
+        result_writer
+            .delete_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "rollback must retain durable tool results"
+    );
 
     let child_thread_scope = ThreadScope {
         tenant_id: child_request.child_scope.tenant_id.clone(),
