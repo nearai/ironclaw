@@ -114,10 +114,7 @@ mod tests {
     #[test]
     fn slack_host_beta_runtime_config_uses_webui_scope_when_enabled() {
         let project_id = project_id("project");
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(true);
 
         let resolved = resolve_slack_config_for_serve(
             Some(&section),
@@ -172,10 +169,7 @@ mod tests {
     #[cfg(not(feature = "slack-v2-host-beta"))]
     #[test]
     fn slack_config_rejects_enabled_section_without_feature() {
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(true);
 
         let err = resolve_slack_config_for_serve(
             Some(&section),
@@ -196,10 +190,7 @@ mod tests {
     #[cfg(not(feature = "slack-v2-host-beta"))]
     #[test]
     fn slack_config_is_noop_without_feature_when_disabled_or_unset() {
-        let disabled = ironclaw_reborn_config::SlackSection {
-            enabled: Some(false),
-            ..Default::default()
-        };
+        let disabled = ironclaw_reborn_config::SlackSection::default().set_enabled(false);
         for section in [None, Some(&disabled)] {
             let resolved = resolve_slack_config_for_serve(
                 section,
@@ -219,11 +210,9 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_runtime_config_rejects_legacy_static_user_binding() {
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            slack_user_id: Some("U123".to_string()),
-            ..Default::default()
-        };
+        let section = ironclaw_reborn_config::SlackSection::default()
+            .set_enabled(true)
+            .set_slack_user_id("U123");
 
         let error = resolve_slack_config_for_serve(
             Some(&section),
@@ -244,14 +233,12 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_runtime_config_rejects_legacy_channel_routes() {
-        let section = ironclaw_reborn_config::SlackSection {
-            enabled: Some(true),
-            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+        let section = ironclaw_reborn_config::SlackSection::default()
+            .set_enabled(true)
+            .set_channel_routes(vec![ironclaw_reborn_config::SlackChannelRouteSection {
                 channel_id: Some("CENG".to_string()),
                 subject_user_id: Some("U123".to_string()),
-            }],
-            ..Default::default()
-        };
+            }]);
 
         let error = resolve_slack_config_for_serve(
             Some(&section),

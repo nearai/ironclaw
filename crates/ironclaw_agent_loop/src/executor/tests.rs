@@ -2709,6 +2709,26 @@ async fn model_request_uses_current_visible_surface_not_prompt_bundle_version() 
 }
 
 #[tokio::test]
+async fn prompt_reuses_current_visible_surface_without_refetching() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_current_default_visible_surface()
+        .with_failing_visible_capabilities();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.visible_capability_request_count(), 0);
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].surface_version, Some(surface_version()));
+}
+
+#[tokio::test]
 async fn model_retry_success_clears_recovery_state() {
     let host = MockHost::new(vec![reply_response()])
         .with_model_errors(vec![AgentLoopHostError::new(

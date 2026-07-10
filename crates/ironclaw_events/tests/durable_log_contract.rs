@@ -981,10 +981,7 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
 
     let stream = EventStreamKey::new(tenant_id, user_id, Some(agent_id));
 
-    let project_a_filter = ReadScope {
-        project_id: Some(project_a.clone()),
-        ..ReadScope::default()
-    };
+    let project_a_filter = ReadScope::default().set_project_id(project_a.clone());
     let project_a_replay = log
         .read_after_cursor(&stream, &project_a_filter, None, 10)
         .await
@@ -998,10 +995,7 @@ async fn read_scope_filter_isolates_project_within_same_stream() {
     // cursor reflects the position they've already considered.
     assert_eq!(project_a_replay.next_cursor, EventCursor::new(3));
 
-    let project_b_filter = ReadScope {
-        project_id: Some(project_b.clone()),
-        ..ReadScope::default()
-    };
+    let project_b_filter = ReadScope::default().set_project_id(project_b.clone());
     let project_b_replay = log
         .read_after_cursor(&stream, &project_b_filter, None, 10)
         .await
@@ -1148,10 +1142,7 @@ async fn read_scope_filter_excludes_records_with_none_field_when_filter_is_some(
     .expect("without project");
 
     let stream = EventStreamKey::from_scope(&scope_with_project);
-    let filter = ReadScope {
-        project_id: scope_with_project.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let filter = ReadScope::default().set_project_id(scope_with_project.project_id.clone());
     let replay = log
         .read_after_cursor(&stream, &filter, None, 10)
         .await

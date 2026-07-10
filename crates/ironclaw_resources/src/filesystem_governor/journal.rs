@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
 use ironclaw_host_api::{ReservationStatus, ResourceReservationId, ResourceScope, ScopedPath};
 use serde::{Deserialize, Serialize};
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::warn;
 
 use crate::{
@@ -129,6 +130,15 @@ where
 
 impl PendingResourceDelta {
     pub(super) fn wait(self) -> Result<SeqNo, ResourceError> {
+        if let Ok(handle) = Handle::try_current()
+            && handle.runtime_flavor() == RuntimeFlavor::MultiThread
+        {
+            return tokio::task::block_in_place(|| self.recv_ack());
+        }
+        self.recv_ack()
+    }
+
+    fn recv_ack(self) -> Result<SeqNo, ResourceError> {
         self.ack
             .recv()
             .map_err(|_| storage_error("resource governor delta journal stopped"))?
@@ -284,4 +294,149 @@ fn delta_log_path() -> Result<ScopedPath, ResourceError> {
     ScopedPath::new(DELTA_LOG_PATH.to_string()).map_err(|error| {
         storage_error(format!("invalid resource governor delta log path: {error}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ironclaw_filesystem::{
+        BackendCapabilities, Capability, DirEntry, FileStat, FilesystemError, FilesystemOperation,
+        RootFilesystem,
+    };
+    use ironclaw_host_api::{
+        MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
+    };
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    struct GatedAppendFilesystem {
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl GatedAppendFilesystem {
+        fn new(release: oneshot::Receiver<()>) -> Self {
+            Self {
+                release: Mutex::new(Some(release)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for GatedAppendFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::sql_typical().with(Capability::Events)
+        }
+
+        async fn append(
+            &self,
+            path: &VirtualPath,
+            _payload: Vec<u8>,
+        ) -> Result<SeqNo, FilesystemError> {
+            self.wait_for_release(path).await?;
+            Ok(SeqNo::from_backend(1))
+        }
+
+        async fn append_batch(
+            &self,
+            path: &VirtualPath,
+            payloads: Vec<Vec<u8>>,
+        ) -> Result<Vec<SeqNo>, FilesystemError> {
+            self.wait_for_release(path).await?;
+            Ok((1..=payloads.len() as u64)
+                .map(SeqNo::from_backend)
+                .collect())
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::ListDir))
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(unsupported(path, FilesystemOperation::Stat))
+        }
+    }
+
+    impl GatedAppendFilesystem {
+        async fn wait_for_release(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            let release = self
+                .release
+                .lock()
+                .map_err(|_| backend_error(path, "gated append lock poisoned"))?
+                .take()
+                .ok_or_else(|| backend_error(path, "gated append released more than once"))?;
+            release
+                .await
+                .map_err(|_| backend_error(path, "gated append release sender dropped"))
+        }
+    }
+
+    fn backend_error(path: &VirtualPath, reason: impl Into<String>) -> FilesystemError {
+        FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Append,
+            reason: reason.into(),
+        }
+    }
+
+    fn unsupported(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {
+        FilesystemError::Unsupported {
+            path: path.clone(),
+            operation,
+        }
+    }
+
+    fn scoped_gated_filesystem(
+        release: oneshot::Receiver<()>,
+    ) -> Arc<ScopedFilesystem<GatedAppendFilesystem>> {
+        let backend = Arc::new(GatedAppendFilesystem::new(release));
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/resources").expect("alias"),
+            VirtualPath::new("/resources").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    #[test]
+    fn pending_delta_wait_does_not_park_the_only_tokio_worker() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("runtime");
+
+            let result = runtime.block_on(async { pending_delta_wait_with_gated_append().await });
+            let _ = done_tx.send(result);
+        });
+
+        let seq = done_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("pending delta wait should not starve the only runtime worker")
+            .expect("pending delta ack");
+        assert_eq!(seq, SeqNo::from_backend(1));
+    }
+
+    async fn pending_delta_wait_with_gated_append() -> Result<SeqNo, ResourceError> {
+        let (release_tx, release_rx) = oneshot::channel();
+        let journal = ResourceDeltaJournal::new(scoped_gated_filesystem(release_rx));
+        let pending = journal
+            .enqueue(ResourceGovernorDelta::AccountSnapshot {
+                account: ResourceAccount::tenant(TenantId::new("tenant1").expect("tenant id")),
+                at: Utc::now(),
+            })
+            .expect("enqueue delta");
+
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = release_tx.send(());
+        });
+
+        pending.wait()
+    }
 }

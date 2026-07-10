@@ -72,21 +72,17 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        process_count: Some(1),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_process_count(1)
+        .set_output_bytes(10_000);
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
     let adapter = Arc::new(RecordingAdapter::new(
@@ -492,14 +488,12 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
         });
 
         let output_bytes = serde_json::to_vec(&self.output).unwrap().len() as u64;
-        let usage = ResourceUsage {
-            output_bytes,
-            process_count: u32::from(matches!(
+        let usage = ResourceUsage::default()
+            .set_output_bytes(output_bytes)
+            .set_process_count(u32::from(matches!(
                 self.runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
+            )));
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
             None => request

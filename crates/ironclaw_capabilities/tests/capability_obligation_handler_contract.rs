@@ -90,10 +90,7 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
         "/projects/demo",
         MountPermissions::read_write(),
     );
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let scope = context.resource_scope.clone();
     let authorizer = ObligatingAuthorizer::new(vec![
         Obligation::UseScopedMounts {

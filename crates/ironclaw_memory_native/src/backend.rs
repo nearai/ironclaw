@@ -47,6 +47,58 @@ pub struct MemoryBackendCapabilities {
     pub transactions: bool,
 }
 
+impl MemoryBackendCapabilities {
+    pub fn set_file_documents(mut self, file_documents: bool) -> Self {
+        self.file_documents = file_documents;
+        self
+    }
+
+    pub fn set_metadata(mut self, metadata: bool) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn set_versioning(mut self, versioning: bool) -> Self {
+        self.versioning = versioning;
+        self
+    }
+
+    pub fn set_prompt_write_safety(mut self, prompt_write_safety: bool) -> Self {
+        self.prompt_write_safety = prompt_write_safety;
+        self
+    }
+
+    pub fn set_full_text_search(mut self, full_text_search: bool) -> Self {
+        self.full_text_search = full_text_search;
+        self
+    }
+
+    pub fn set_vector_search(mut self, vector_search: bool) -> Self {
+        self.vector_search = vector_search;
+        self
+    }
+
+    pub fn set_embeddings(mut self, embeddings: bool) -> Self {
+        self.embeddings = embeddings;
+        self
+    }
+
+    pub fn set_graph_memory(mut self, graph_memory: bool) -> Self {
+        self.graph_memory = graph_memory;
+        self
+    }
+
+    pub fn set_delete(mut self, delete: bool) -> Self {
+        self.delete = delete;
+        self
+    }
+
+    pub fn set_transactions(mut self, transactions: bool) -> Self {
+        self.transactions = transactions;
+        self
+    }
+}
+
 // `MemoryContext` moved to `ironclaw_memory`; re-exported so
 // `crate::backend::MemoryContext` and the backend code below keep resolving.
 // NOTE: the backend's "already enforced" signal (`prompt_safety_already_enforced`)
@@ -227,13 +279,11 @@ where
             repository,
             indexer: None,
             embedding_provider: None,
-            capabilities: MemoryBackendCapabilities {
-                file_documents: true,
-                metadata: true,
-                versioning: true,
-                prompt_write_safety: true,
-                ..MemoryBackendCapabilities::default()
-            },
+            capabilities: MemoryBackendCapabilities::default()
+                .set_file_documents(true)
+                .set_metadata(true)
+                .set_versioning(true)
+                .set_prompt_write_safety(true),
             prompt_safety_policy: Some(Arc::new(DefaultPromptWriteSafetyPolicy::with_registry(
                 registry.clone(),
             ))),
@@ -1082,10 +1132,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_document_capability_rejects_direct_backend_file_operations() {
-        let backend = make_backend().with_capabilities(MemoryBackendCapabilities {
-            file_documents: false,
-            ..MemoryBackendCapabilities::default()
-        });
+        let backend = make_backend()
+            .with_capabilities(MemoryBackendCapabilities::default().set_file_documents(false));
         assert!(
             backend
                 .read_document(&alpha_context(), &alpha_path())
@@ -1114,12 +1162,12 @@ mod tests {
 
     #[tokio::test]
     async fn vector_request_fails_closed_when_vector_search_is_unsupported() {
-        let backend = make_search_backend(MemoryBackendCapabilities {
-            full_text_search: true,
-            vector_search: false,
-            embeddings: true,
-            ..MemoryBackendCapabilities::default()
-        });
+        let backend = make_search_backend(
+            MemoryBackendCapabilities::default()
+                .set_full_text_search(true)
+                .set_vector_search(false)
+                .set_embeddings(true),
+        );
         let request = MemorySearchRequest::new("query").unwrap();
         let err = backend.search(&alpha_context(), request).await.unwrap_err();
         assert!(err.to_string().contains("vector search"));
@@ -1127,12 +1175,12 @@ mod tests {
 
     #[tokio::test]
     async fn vector_request_fails_closed_when_embedding_generation_is_disabled() {
-        let backend = make_search_backend(MemoryBackendCapabilities {
-            full_text_search: true,
-            vector_search: true,
-            embeddings: false,
-            ..MemoryBackendCapabilities::default()
-        });
+        let backend = make_search_backend(
+            MemoryBackendCapabilities::default()
+                .set_full_text_search(true)
+                .set_vector_search(true)
+                .set_embeddings(false),
+        );
         let request = MemorySearchRequest::new("query").unwrap();
         let err = backend.search(&alpha_context(), request).await.unwrap_err();
         assert!(err.to_string().contains("embedding generation"));
@@ -1144,12 +1192,12 @@ mod tests {
         let backend = RepositoryMemoryBackend::new(repo)
             .without_prompt_write_safety_policy()
             .with_embedding_provider(Arc::new(FailingEmbeddingProvider))
-            .with_capabilities(MemoryBackendCapabilities {
-                full_text_search: true,
-                vector_search: true,
-                embeddings: true,
-                ..MemoryBackendCapabilities::default()
-            });
+            .with_capabilities(
+                MemoryBackendCapabilities::default()
+                    .set_full_text_search(true)
+                    .set_vector_search(true)
+                    .set_embeddings(true),
+            );
 
         let request = MemorySearchRequest::new("query").unwrap();
         let err = backend.search(&alpha_context(), request).await.unwrap_err();
@@ -1166,12 +1214,12 @@ mod tests {
 
     #[tokio::test]
     async fn full_text_only_search_ignores_stale_query_embedding_dimension() {
-        let backend = make_search_backend(MemoryBackendCapabilities {
-            full_text_search: true,
-            vector_search: true,
-            embeddings: true,
-            ..MemoryBackendCapabilities::default()
-        });
+        let backend = make_search_backend(
+            MemoryBackendCapabilities::default()
+                .set_full_text_search(true)
+                .set_vector_search(true)
+                .set_embeddings(true),
+        );
         let request = MemorySearchRequest::new("query")
             .unwrap()
             .with_vector(false)

@@ -60,10 +60,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     });
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
-    let estimate = ResourceEstimate {
-        output_bytes: Some(4_096),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(4_096);
     let input = json!({"message":"through host runtime"});
 
     let outcome = runtime
@@ -217,10 +214,8 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             input: request.input.clone(),
         });
         let output = self.output.clone();
-        let usage = ResourceUsage {
-            output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default()
+            .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64);
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
             None => request
