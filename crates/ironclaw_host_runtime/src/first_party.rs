@@ -389,10 +389,7 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_preserves_required_secrets() {
         let handle = SecretHandle::new("google-access-token").unwrap();
-        let usage = ResourceUsage {
-            network_egress_bytes: 42,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default().set_network_egress_bytes(42);
         let error = FirstPartyCapabilityError::auth_required_with(vec![handle.clone()])
             .with_usage(usage.clone());
 
@@ -417,12 +414,8 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_on_dispatch_variant() {
         use ironclaw_host_api::RuntimeDispatchErrorKind;
-        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend).with_usage(
-            ResourceUsage {
-                network_egress_bytes: 10,
-                ..ResourceUsage::default()
-            },
-        );
+        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+            .with_usage(ResourceUsage::default().set_network_egress_bytes(10));
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
         assert_eq!(error.required_secrets(), None);
         assert!(!error.is_auth_required());

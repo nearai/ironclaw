@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasExpectation, FileType, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
     VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -192,6 +192,18 @@ pub trait PersistentApprovalPolicyStore: Send + Sync {
         key: &PersistentApprovalPolicyKey,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError>;
 
+    fn supports_scope_listing(&self) -> bool {
+        false
+    }
+
+    async fn list_for_scope_action(
+        &self,
+        _scope: &ResourceScope,
+        _action: PersistentApprovalAction,
+    ) -> Result<Vec<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(Vec::new())
+    }
+
     async fn revoke(
         &self,
         key: &PersistentApprovalPolicyKey,
@@ -266,6 +278,26 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(key)
             .cloned())
+    }
+
+    fn supports_scope_listing(&self) -> bool {
+        true
+    }
+
+    async fn list_for_scope_action(
+        &self,
+        scope: &ResourceScope,
+        action: PersistentApprovalAction,
+    ) -> Result<Vec<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        let target_scope = PersistentApprovalScope::from_resource_scope(scope);
+        Ok(self
+            .policies
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .filter(|policy| policy.key.scope == target_scope && policy.key.action == action)
+            .cloned()
+            .collect())
     }
 
     async fn revoke(
@@ -385,6 +417,48 @@ where
             .lookup_versioned(key)
             .await?
             .map(|(policy, _version)| policy))
+    }
+
+    fn supports_scope_listing(&self) -> bool {
+        true
+    }
+
+    async fn list_for_scope_action(
+        &self,
+        scope: &ResourceScope,
+        action: PersistentApprovalAction,
+    ) -> Result<Vec<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        let target_scope = PersistentApprovalScope::from_resource_scope(scope);
+        let root = policy_scope_action_path(&target_scope, action)?;
+        let entries = match self.records.filesystem.list_dir(scope, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut policies = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::File || !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_child_path(&root, &entry.name)?;
+            let Some(versioned) = self.records.get(scope, &path).await? else {
+                continue;
+            };
+            let policy = deserialize::<PersistentApprovalPolicy>(&versioned.entry.body)?;
+            if policy.key.scope != target_scope || policy.key.action != action {
+                tracing::error!(
+                    stored_scope = ?policy.key.scope,
+                    expected_scope = ?target_scope,
+                    stored_action = ?policy.key.action,
+                    expected_action = ?action,
+                    "persistent approval policy scope/action mismatch while listing"
+                );
+                continue;
+            }
+            policies.push(policy);
+        }
+        Ok(policies)
     }
 
     async fn revoke(
@@ -524,6 +598,19 @@ fn policy_path(
     .map_err(invalid_path)
 }
 
+fn policy_scope_action_path(
+    scope: &PersistentApprovalScope,
+    action: PersistentApprovalAction,
+) -> Result<ScopedPath, PersistentApprovalPolicyError> {
+    ScopedPath::new(format!(
+        "{}/{}/{}",
+        POLICY_PREFIX,
+        within_tenant_scope(scope),
+        action.as_path_segment()
+    ))
+    .map_err(invalid_path)
+}
+
 fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     let mut segments = Vec::new();
     if let Some(agent_id) = &scope.agent_id {
@@ -537,6 +624,18 @@ fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     } else {
         segments.join("/")
     }
+}
+
+fn scoped_child_path(
+    parent: &ScopedPath,
+    child: &str,
+) -> Result<ScopedPath, PersistentApprovalPolicyError> {
+    ScopedPath::new(format!(
+        "{}/{}",
+        parent.as_str().trim_end_matches('/'),
+        child
+    ))
+    .map_err(invalid_path)
 }
 
 fn policy_digest(
