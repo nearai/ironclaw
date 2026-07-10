@@ -441,23 +441,14 @@ jobs:
       - docker-build
       - version-check
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Check Platform & Compat jobs
         run: |
-          job_result_ok() {
-            local name="$1"
-            local result="$2"
-
-            if [[ "$result" == "success" || "$result" == "skipped" ]]; then
-              return 0
-            fi
-
-            if [[ "$result" == "cancelled" ]] &&
-              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-              echo "$name was cancelled on push to main; treating as non-blocking"
-              return 0
-            fi
-            return 1
-          }
+          # shellcheck disable=SC1091
+          source .github/scripts/ci-job-result-ok.sh
 
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes (scope detection) failed: ${{ needs.changes.result }}"
@@ -477,7 +468,7 @@ jobs:
             "version-check=${{ needs.version-check.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if ! job_result_ok "$name" "$result"; then
+            if ! job_result_ok "$name" "$result" true "allow"; then
               echo "$name failed: $result"
               exit 1
             fi

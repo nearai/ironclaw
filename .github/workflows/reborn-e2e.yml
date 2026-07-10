@@ -286,21 +286,14 @@ jobs:
       - gateway-smoke
       - webui-v2-smoke
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Check Reborn E2E jobs
         run: |
-          job_result_ok() {
-            local name="$1"
-            local result="$2"
-            if [[ "$result" == "success" ]]; then
-              return 0
-            fi
-            if [[ "$result" == "cancelled" ]] && \
-              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-              echo "$name was cancelled on push to main; treating as non-blocking"
-              return 0
-            fi
-            return 1
-          }
+          # shellcheck disable=SC1091
+          source .github/scripts/ci-job-result-ok.sh
 
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes (scope detection) failed: ${{ needs.changes.result }}"
@@ -310,15 +303,15 @@ jobs:
             echo "No Reborn E2E scope in this merge group — roll-up passes"
             exit 0
           fi
-          if ! job_result_ok "rust-reborn" "${{ needs.rust-reborn.result }}"; then
+          if ! job_result_ok "rust-reborn" "${{ needs.rust-reborn.result }}" false "allow"; then
             echo "Rust Reborn E2E failed"
             exit 1
           fi
-          if ! job_result_ok "gateway-smoke" "${{ needs.gateway-smoke.result }}"; then
+          if ! job_result_ok "gateway-smoke" "${{ needs.gateway-smoke.result }}" false "allow"; then
             echo "Reborn gateway smoke failed"
             exit 1
           fi
-          if ! job_result_ok "webui-v2-smoke" "${{ needs.webui-v2-smoke.result }}"; then
+          if ! job_result_ok "webui-v2-smoke" "${{ needs.webui-v2-smoke.result }}" false "allow"; then
             echo "Reborn WebUI v2 smoke failed"
             exit 1
           fi

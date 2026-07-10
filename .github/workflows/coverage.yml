@@ -309,35 +309,19 @@ jobs:
     if: always()
     needs: [coverage, e2e-coverage]
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - run: |
-          job_result_ok() {
-            local name="$1"
-            local result="$2"
+          # shellcheck disable=SC1091
+          source .github/scripts/ci-job-result-ok.sh
 
-            if [[ "$result" == "success" ]]; then
-              return 0
-            fi
-
-            if [[ "$result" == "cancelled" ]] &&
-              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-              if git fetch --no-tags --depth=2 origin +refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1; then
-                local latest_sha
-                latest_sha="$(git rev-parse refs/remotes/origin/main)"
-                if [[ "${{ github.sha }}" != "$latest_sha" ]]; then
-                  echo "$name was cancelled on a superseded push-to-main run; treating as non-blocking"
-                  return 0
-                fi
-              fi
-            fi
-
-            return 1
-          }
-
-          if ! job_result_ok "coverage" "${{ needs.coverage.result }}"; then
+          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "superseded_only"; then
             echo "Coverage job failed: ${{ needs.coverage.result }}"
             exit 1
           fi
-          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}"; then
+          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "superseded_only"; then
             echo "E2E coverage job failed: ${{ needs.e2e-coverage.result }}"
             echo "One or more coverage jobs failed"
             exit 1
