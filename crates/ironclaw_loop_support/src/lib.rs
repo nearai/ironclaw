@@ -745,19 +745,24 @@ where
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
-        let safe_summary = LoopSafeSummary::new(request.safe_summary).map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "tool result reference summary is not safe",
-            )
-        })?;
-        let safe_summary =
-            ToolResultSafeSummary::new(safe_summary.as_str().to_string()).map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "tool result reference summary is not safe",
-                )
-            })?;
+        // Fail soft on a summary that trips either strict validator: the
+        // summary is only the inline label for the result reference (the model
+        // sees the real output via the result ref / observation), so a
+        // malformed label must not end the run
+        // (.claude/rules/agent-loop-capabilities.md Invariant 1). Degrade to a
+        // fixed host-authored marker; the raw text stays out of the transcript.
+        let safe_summary = LoopSafeSummary::new(request.safe_summary)
+            .and_then(|summary| {
+                ToolResultSafeSummary::new(summary.as_str().to_string())
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|reason| {
+                tracing::debug!(
+                    %reason,
+                    "tool result summary failed strict validation; degrading to redaction marker"
+                );
+                ToolResultSafeSummary::redacted_tool_result_summary()
+            });
         let model_observation = request
             .model_observation
             .and_then(|observation| match observation.validate() {

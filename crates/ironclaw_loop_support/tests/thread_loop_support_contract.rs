@@ -2574,7 +2574,7 @@ async fn transcript_port_drops_invalid_model_observation_without_failing_append(
 }
 
 #[tokio::test]
-async fn transcript_port_rejects_unsafe_tool_result_summary() {
+async fn transcript_port_degrades_unsafe_tool_result_summary_without_borking() {
     let fixture = ThreadFixture::new().await;
     let adapter = ThreadBackedLoopTranscriptPort::new(
         Arc::clone(&fixture.thread_service),
@@ -2582,7 +2582,11 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
         fixture.run_context.clone(),
     );
 
-    let error = adapter
+    // A summary that trips the strict validator (credential marker here; a
+    // path delimiter behaves the same) must NOT end the run: the result
+    // reference is still written with a fixed redaction marker as its label,
+    // and the raw rejected text never reaches the transcript.
+    adapter
         .append_capability_result_ref(AppendCapabilityResultRef {
             result_ref: LoopResultRef::new("result:unsafe-tool").unwrap(),
             safe_summary: "raw tool input includes secret".to_string(),
@@ -2590,9 +2594,8 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
             model_observation: None,
         })
         .await
-        .unwrap_err();
+        .expect("unsafe summary must degrade to a fixed label, not end the run");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     let history = fixture
         .thread_service
         .list_thread_history(ThreadHistoryRequest {
@@ -2601,11 +2604,19 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
         })
         .await
         .unwrap();
+    let reference = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::ToolResultReference)
+        .expect("result reference must be written despite the unsafe summary");
+    let wire = serde_json::to_string(&reference).unwrap();
     assert!(
-        !history
-            .messages
-            .iter()
-            .any(|message| message.kind == MessageKind::ToolResultReference)
+        !wire.contains("raw tool input includes secret"),
+        "raw rejected summary must not reach the transcript: {wire}"
+    );
+    assert!(
+        wire.contains("the tool result summary was redacted"),
+        "degraded label must be the fixed redaction marker: {wire}"
     );
 }
 
