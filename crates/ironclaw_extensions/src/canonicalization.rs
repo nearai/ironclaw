@@ -4,7 +4,8 @@ use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::installations::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId, InstallationOwner,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationPersistedParts, InstallationOwner,
 };
 
 /// Reduce persisted installation rows to one deterministic row per extension.
@@ -108,7 +109,7 @@ pub fn canonicalize_installation_rows(
                 })?;
             let installation_id = ExtensionInstallationId::new(extension_id.as_str())?;
 
-            ExtensionInstallation::from_persisted_parts(
+            ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
                 installation_id,
                 extension_id,
                 activation_state,
@@ -117,7 +118,7 @@ pub fn canonicalize_installation_rows(
                 health,
                 updated_at,
                 owner,
-            )
+            })
         })
         .collect()
 }

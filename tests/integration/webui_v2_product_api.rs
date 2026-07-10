@@ -593,6 +593,223 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         .expect("rebuilt runtime shuts down");
 }
 
+/// Pins PR #5499 private-install membership through the PRODUCTION webui
+/// facade, mirroring the crate-tier invariants in
+/// `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/tests/private_install_tests.rs`
+/// (`members_install_the_same_tool_independently` +
+/// `operator_install_evicts_member_installs_to_tenant_shared`), but driven
+/// through the real HTTP router instead of the facade directly.
+#[tokio::test]
+async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_through_production_webui_facade()
+ {
+    let root = tempdir().expect("runtime storage tempdir");
+    let storage_root = root.path().join("local-dev");
+    let tenant_id = TenantId::new("webui-eviction-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-eviction-agent").expect("agent id");
+    let operator_id = UserId::new("webui-eviction-operator").expect("operator id");
+    let input = RebornBuildInput::local_dev(operator_id.as_str(), storage_root.clone())
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-eviction-source".to_string(),
+                reply_target_binding_id: "webui-eviction-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+
+    let extension_id = "member-eviction-fixture";
+    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id.clone(),
+        operator_id.clone(),
+        Some(agent_id.clone()),
+        None,
+    );
+    let operator_router = webui_v2_router(WebUiV2State::new(
+        Arc::clone(&webui.api),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(
+        operator_caller.clone().with_operator_webui_config(true),
+    ))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+    let (status, body) = post_raw(
+        operator_router,
+        "/api/webchat/v2/extensions/import",
+        importable_extension_zip(extension_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator import response: {body}");
+    assert_eq!(body["success"], true);
+
+    let alice_id = UserId::new("alice").expect("alice id");
+    let bob_id = UserId::new("bob").expect("bob id");
+    let carol_id = UserId::new("carol").expect("carol id");
+    let caller_for = |user_id: UserId| {
+        ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+            tenant_id.clone(),
+            user_id,
+            Some(agent_id.clone()),
+            None,
+        )
+    };
+    let install_request = serde_json::json!({
+        "package_ref": {"kind": "extension", "id": extension_id}
+    });
+
+    // 1: alice installs -> private install created.
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(alice_id.clone())),
+        "/api/webchat/v2/extensions/install",
+        install_request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "alice install response: {body}");
+    assert_eq!(body["success"], true, "alice install response: {body}");
+
+    // 2: bob installs the SAME id -> joins the membership, not a duplicate error.
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(bob_id.clone())),
+        "/api/webchat/v2/extensions/install",
+        install_request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "bob install response: {body}");
+    assert_eq!(body["success"], true, "bob join response: {body}");
+
+    // 3: both members see a PRIVATE entry.
+    for (name, user_id) in [("alice", alice_id.clone()), ("bob", bob_id.clone())] {
+        let (status, body) = get_json(
+            mount_webui_v2_router(Arc::clone(&webui.api), caller_for(user_id)),
+            "/api/webchat/v2/extensions",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name} extensions response: {body}");
+        let entry = body["extensions"]
+            .as_array()
+            .and_then(|extensions| {
+                extensions
+                    .iter()
+                    .find(|extension| extension["package_ref"]["id"] == extension_id)
+            })
+            .unwrap_or_else(|| panic!("{name} should see private {extension_id}: {body}"));
+        assert_eq!(entry["install_scope"], "private", "{name} scope: {body}");
+    }
+
+    // 4: carol, never a member, does not see the entry at all (masked visibility).
+    let (status, body) = get_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(carol_id.clone())),
+        "/api/webchat/v2/extensions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "carol extensions response: {body}");
+    assert!(
+        body["extensions"].as_array().is_some_and(|extensions| {
+            !extensions
+                .iter()
+                .any(|extension| extension["package_ref"]["id"] == extension_id)
+        }),
+        "carol must not see a member-private entry: {body}"
+    );
+
+    // 5: carol attempting to remove the member-private id gets the masked
+    // "is not installed" denial (`ProductWorkflowError::InvalidBindingRequest`
+    // via `install_policy::ensure_caller_may_operate`, mapped to 400 by
+    // `map_lifecycle_error` in `lifecycle_setup.rs`) rather than a 403/404 that
+    // would let a non-member distinguish "not installed" from "not yours".
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(carol_id.clone())),
+        &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "carol must not be able to remove a private install she is not a member of: {body}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "masked denial maps InvalidBindingRequest to 400: {body}"
+    );
+    let body_text = body.to_string();
+    assert!(
+        !body_text.contains("alice") && !body_text.contains("bob"),
+        "masked denial must not leak member identities: {body}"
+    );
+
+    // 6: operator installs the same id -> evicts both members to Tenant.
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), operator_caller.clone()),
+        "/api/webchat/v2/extensions/install",
+        install_request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator install response: {body}");
+    assert_eq!(body["success"], true, "operator eviction response: {body}");
+
+    // 7: everyone now sees the SHARED (tenant) entry.
+    for (name, user_id) in [
+        ("alice", alice_id.clone()),
+        ("bob", bob_id.clone()),
+        ("carol", carol_id.clone()),
+    ] {
+        let (status, body) = get_json(
+            mount_webui_v2_router(Arc::clone(&webui.api), caller_for(user_id)),
+            "/api/webchat/v2/extensions",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name} extensions response: {body}");
+        let entry = body["extensions"]
+            .as_array()
+            .and_then(|extensions| {
+                extensions
+                    .iter()
+                    .find(|extension| extension["package_ref"]["id"] == extension_id)
+            })
+            .unwrap_or_else(|| panic!("{name} should see shared {extension_id}: {body}"));
+        assert_eq!(entry["install_scope"], "shared", "{name} scope: {body}");
+    }
+
+    // 8: a former member cannot remove the now-tenant row; the operator can.
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller_for(alice_id.clone())),
+        &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "alice must not be able to remove the tenant-shared row: {body}"
+    );
+
+    let (status, body) = post_json(
+        mount_webui_v2_router(Arc::clone(&webui.api), operator_caller),
+        &format!("/api/webchat/v2/extensions/{extension_id}/remove"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator remove response: {body}");
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
 async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
     let response = router
         .oneshot(

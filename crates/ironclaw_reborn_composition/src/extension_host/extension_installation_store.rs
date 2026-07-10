@@ -87,7 +87,14 @@ async fn write_snapshot(
     filesystem
         .write_file(state_path, &bytes)
         .await
-        .map_err(|_| invalid_installation_error(INSTALLATION_STATE_IO_ERROR))
+        .map_err(|error| {
+            tracing::debug!(
+                ?error,
+                state_path = %state_path.as_str(),
+                "extension installation state write failed"
+            );
+            invalid_installation_error(INSTALLATION_STATE_IO_ERROR)
+        })
 }
 
 fn default_installation_state_path() -> Result<VirtualPath, ExtensionInstallationError> {

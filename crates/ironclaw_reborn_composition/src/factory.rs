@@ -7078,7 +7078,7 @@ mod tests {
             .as_ref()
             .expect("extension management");
         let removal_scope = ironclaw_host_api::ResourceScope::local_default(
-            ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
+            ironclaw_host_api::UserId::new(owner).expect("valid user"),
             ironclaw_host_api::InvocationId::new(),
         )
         .expect("valid scope");

@@ -4,9 +4,10 @@ use chrono::Utc;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    InMemoryExtensionInstallationStore, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
+    ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 
@@ -387,17 +388,18 @@ fn persisted_reconstruction_preserves_health_timestamp_and_bindings() {
     );
     let owner = InstallationOwner::users(BTreeSet::from([UserId::new("alice").unwrap()])).unwrap();
 
-    let installation = ExtensionInstallation::from_persisted_parts(
-        installation_id("acme-tools"),
-        extension_id.clone(),
-        ExtensionActivationState::Enabled,
-        ExtensionManifestRef::new(extension_id, None),
-        vec![binding.clone()],
-        health.clone(),
-        updated_at,
-        owner.clone(),
-    )
-    .unwrap();
+    let installation =
+        ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+            installation_id: installation_id("acme-tools"),
+            extension_id: extension_id.clone(),
+            activation_state: ExtensionActivationState::Enabled,
+            manifest_ref: ExtensionManifestRef::new(extension_id, None),
+            credential_bindings: vec![binding.clone()],
+            health: health.clone(),
+            updated_at,
+            owner: owner.clone(),
+        })
+        .unwrap();
 
     assert_eq!(installation.health(), &health);
     assert_eq!(installation.updated_at(), updated_at);

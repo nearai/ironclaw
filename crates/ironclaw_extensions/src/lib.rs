@@ -436,9 +436,9 @@ pub use canonicalization::canonicalize_installation_rows;
 pub use installations::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    InstallationOwner, ManifestHash,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    InMemoryExtensionInstallationStore, InstallationOwner, ManifestHash,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

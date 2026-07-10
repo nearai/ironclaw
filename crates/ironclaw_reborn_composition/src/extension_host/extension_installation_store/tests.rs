@@ -4,8 +4,8 @@ use chrono::Utc;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationId, ExtensionManifestRecord, ExtensionManifestRef, InstallationOwner,
-    MANIFEST_SCHEMA_VERSION,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionManifestRecord,
+    ExtensionManifestRef, InstallationOwner, MANIFEST_SCHEMA_VERSION,
 };
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemOperation,
@@ -378,19 +378,19 @@ fn canonicalization_rejects_conflicting_credential_mappings() {
         let timestamp = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        ExtensionInstallation::from_persisted_parts(
-            ExtensionInstallationId::new(installation_id).unwrap(),
-            extension_id.clone(),
-            ExtensionActivationState::Installed,
-            ExtensionManifestRef::new(extension_id.clone(), None),
-            vec![ExtensionCredentialBinding::new(
+        ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+            installation_id: ExtensionInstallationId::new(installation_id).unwrap(),
+            extension_id: extension_id.clone(),
+            activation_state: ExtensionActivationState::Installed,
+            manifest_ref: ExtensionManifestRef::new(extension_id.clone(), None),
+            credential_bindings: vec![ExtensionCredentialBinding::new(
                 ExtensionCredentialHandle::new("api").unwrap(),
                 SecretHandle::new(secret).unwrap(),
             )],
-            ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, timestamp),
-            timestamp,
-            InstallationOwner::Tenant,
-        )
+            health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, timestamp),
+            updated_at: timestamp,
+            owner: InstallationOwner::Tenant,
+        })
         .unwrap()
     };
 
@@ -419,16 +419,16 @@ fn canonicalization_preserves_newest_health_max_updated_at_and_agreeing_bindings
         let updated_at = chrono::DateTime::parse_from_rfc3339(updated_at)
             .unwrap()
             .with_timezone(&Utc);
-        ExtensionInstallation::from_persisted_parts(
-            ExtensionInstallationId::new(installation_id).unwrap(),
-            extension_id.clone(),
-            ExtensionActivationState::Enabled,
-            ExtensionManifestRef::new(extension_id.clone(), None),
-            vec![binding.clone()],
-            ExtensionHealthSnapshot::new(status, None, checked_at),
+        ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+            installation_id: ExtensionInstallationId::new(installation_id).unwrap(),
+            extension_id: extension_id.clone(),
+            activation_state: ExtensionActivationState::Enabled,
+            manifest_ref: ExtensionManifestRef::new(extension_id.clone(), None),
+            credential_bindings: vec![binding.clone()],
+            health: ExtensionHealthSnapshot::new(status, None, checked_at),
             updated_at,
-            InstallationOwner::Tenant,
-        )
+            owner: InstallationOwner::Tenant,
+        })
         .unwrap()
     };
 
@@ -539,23 +539,23 @@ fn stored_installation_with_bindings(
     let timestamp = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    ExtensionInstallation::from_persisted_parts(
-        ExtensionInstallationId::new(installation_id).unwrap(),
-        extension_id.clone(),
+    ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+        installation_id: ExtensionInstallationId::new(installation_id).unwrap(),
+        extension_id: extension_id.clone(),
         activation_state,
-        ExtensionManifestRef::new(
+        manifest_ref: ExtensionManifestRef::new(
             extension_id,
             manifest_hash.map(|value| ManifestHash::new(value).unwrap()),
         ),
         credential_bindings,
-        ExtensionHealthSnapshot::new(
+        health: ExtensionHealthSnapshot::new(
             ExtensionHealthStatus::Healthy,
             Some(ExtensionHealthMessage::new(installation_id)),
             timestamp,
         ),
-        timestamp,
+        updated_at: timestamp,
         owner,
-    )
+    })
     .unwrap()
 }
 

@@ -3169,7 +3169,7 @@ output_schema_ref = "schemas/run.output.json"
         )
         .await
         .expect("activate Slack and internal user tools");
-        let removal_scope = hosted_mcp_scope("extension-remove-test");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
         let error = port
             .remove(slack_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
@@ -3476,7 +3476,7 @@ output_schema_ref = "schemas/run.output.json"
             .await
             .expect("tools/list request should start");
 
-        let removal_scope = hosted_mcp_scope("extension-remove-test");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
         port.remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
             .expect("remove can proceed while discovery is in flight");
@@ -3537,13 +3537,9 @@ output_schema_ref = "schemas/run.output.json"
             vec![EffectKind::Network, EffectKind::ExternalWrite]
         );
 
-        port.remove(
-            package_ref,
-            &hosted_mcp_scope("extension-remove-test"),
-            None,
-        )
-        .await
-        .expect("remove fixture extension");
+        port.remove(package_ref, &hosted_mcp_scope("lifecycle-owner"), None)
+            .await
+            .expect("remove fixture extension");
         let removed_decision = trust_policy
             .evaluate(&trust_input)
             .expect("removed extension trust");
@@ -4999,11 +4995,7 @@ output_schema_ref = "schemas/run.output.json"
         );
 
         let error = port
-            .remove(
-                package_ref,
-                &hosted_mcp_scope("extension-remove-test"),
-                None,
-            )
+            .remove(package_ref, &hosted_mcp_scope("lifecycle-owner"), None)
             .await
             .expect_err("delete installation failure is reported");
 
@@ -5058,11 +5050,7 @@ output_schema_ref = "schemas/run.output.json"
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(
-                package_ref,
-                &hosted_mcp_scope("extension-remove-test"),
-                None,
-            )
+            .remove(package_ref, &hosted_mcp_scope("lifecycle-owner"), None)
             .await
             .expect_err("delete manifest failure is reported");
 
@@ -5101,11 +5089,7 @@ output_schema_ref = "schemas/run.output.json"
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(
-                package_ref,
-                &hosted_mcp_scope("extension-remove-test"),
-                None,
-            )
+            .remove(package_ref, &hosted_mcp_scope("lifecycle-owner"), None)
             .await
             .expect_err("delete files failure is reported");
 

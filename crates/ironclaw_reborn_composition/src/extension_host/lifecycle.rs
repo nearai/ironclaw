@@ -543,20 +543,36 @@ fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowE
 fn lifecycle_resource_scope(
     context: &LifecycleProductContext,
 ) -> Result<ResourceScope, ProductWorkflowError> {
-    let LifecycleProductContext::Surface(context) = context else {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension lifecycle activation requires a surface caller".to_string(),
-        });
-    };
-    Ok(ResourceScope {
-        tenant_id: context.tenant_id.clone(),
-        user_id: context.user_id.clone(),
-        agent_id: context.agent_id.clone(),
-        project_id: context.project_id.clone(),
-        mission_id: None,
-        thread_id: None,
-        invocation_id: InvocationId::new(),
-    })
+    match context {
+        LifecycleProductContext::Surface(context) => Ok(ResourceScope {
+            tenant_id: context.tenant_id.clone(),
+            user_id: context.user_id.clone(),
+            agent_id: context.agent_id.clone(),
+            project_id: context.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }),
+        LifecycleProductContext::Command(command_context) => {
+            // Commands have no surface context of their own. Their verified
+            // auth claim is the authority-bearing source for the caller, and
+            // a host-minted tenant claim is the corresponding tenant scope.
+            // Claims without a tenant remain valid for local-dev commands,
+            // which use the local default scope just like the local command
+            // facade.
+            let caller = lifecycle_caller(context)?;
+            let mut scope =
+                ResourceScope::local_default(caller, InvocationId::new()).map_err(|error| {
+                    ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("command lifecycle scope is invalid: {error}"),
+                    }
+                })?;
+            if let Some(tenant_id) = command_context.auth_claim.tenant_id() {
+                scope.tenant_id = tenant_id.clone();
+            }
+            Ok(scope)
+        }
+    }
 }
 
 /// Owner-attributing caller identity for extension lifecycle actions.

@@ -448,6 +448,20 @@ pub struct ExtensionInstallation {
     owner: InstallationOwner,
 }
 
+/// All persisted fields needed to reconstruct an installation without
+/// inventing fresh health or timestamp state.
+#[derive(Debug)]
+pub struct ExtensionInstallationPersistedParts {
+    pub installation_id: ExtensionInstallationId,
+    pub extension_id: ExtensionId,
+    pub activation_state: ExtensionActivationState,
+    pub manifest_ref: ExtensionManifestRef,
+    pub credential_bindings: Vec<ExtensionCredentialBinding>,
+    pub health: ExtensionHealthSnapshot,
+    pub updated_at: DateTime<Utc>,
+    pub owner: InstallationOwner,
+}
+
 impl ExtensionInstallation {
     pub fn new(
         installation_id: ExtensionInstallationId,
@@ -458,16 +472,16 @@ impl ExtensionInstallation {
         updated_at: DateTime<Utc>,
         owner: InstallationOwner,
     ) -> Result<Self, ExtensionInstallationError> {
-        Self::from_persisted_parts(
+        Self::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id,
             extension_id,
             activation_state,
             manifest_ref,
             credential_bindings,
-            ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
+            health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
             updated_at,
             owner,
-        )
+        })
     }
 
     /// Reconstruct an installation with all state read from persistence.
@@ -477,31 +491,24 @@ impl ExtensionInstallation {
     /// when they need to preserve an existing health snapshot and timestamp
     /// while changing the canonical installation identity.
     pub fn from_persisted_parts(
-        installation_id: ExtensionInstallationId,
-        extension_id: ExtensionId,
-        activation_state: ExtensionActivationState,
-        manifest_ref: ExtensionManifestRef,
-        credential_bindings: Vec<ExtensionCredentialBinding>,
-        health: ExtensionHealthSnapshot,
-        updated_at: DateTime<Utc>,
-        owner: InstallationOwner,
+        parts: ExtensionInstallationPersistedParts,
     ) -> Result<Self, ExtensionInstallationError> {
-        if manifest_ref.extension_id() != &extension_id {
+        if parts.manifest_ref.extension_id() != &parts.extension_id {
             return Err(ExtensionInstallationError::ManifestExtensionMismatch {
-                extension_id,
-                manifest_extension_id: manifest_ref.extension_id().clone(),
+                extension_id: parts.extension_id,
+                manifest_extension_id: parts.manifest_ref.extension_id().clone(),
             });
         }
-        validate_bindings_unique(&credential_bindings)?;
+        validate_bindings_unique(&parts.credential_bindings)?;
         Ok(Self {
-            installation_id,
-            extension_id,
-            activation_state,
-            manifest_ref,
-            credential_bindings,
-            health,
-            updated_at,
-            owner,
+            installation_id: parts.installation_id,
+            extension_id: parts.extension_id,
+            activation_state: parts.activation_state,
+            manifest_ref: parts.manifest_ref,
+            credential_bindings: parts.credential_bindings,
+            health: parts.health,
+            updated_at: parts.updated_at,
+            owner: parts.owner,
         })
     }
 

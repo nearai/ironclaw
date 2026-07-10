@@ -236,8 +236,7 @@ mod tests {
             (members(&["alice"]), user("alice")),
         ] {
             let error = decide_install_on_existing(&extension_id, &existing, &caller, &operator)
-                .err()
-                .expect("duplicate install rejected");
+                .expect_err("duplicate install rejected");
             let rendered = error.to_string();
             assert!(
                 rendered.contains("already installed") && !rendered.contains("alice"),
