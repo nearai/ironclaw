@@ -1937,7 +1937,9 @@ mod tests {
             count: 1,
         };
 
-        assert!(extension_search_has_inactive_installed_result(Some(&payload)));
+        assert!(extension_search_has_inactive_installed_result(Some(
+            &payload
+        )));
         assert!(!extension_search_has_ready_result(Some(&payload)));
         assert!(!extension_search_has_installed_external_channel_result(
             Some(&payload)
