@@ -76,6 +76,7 @@ parking_lot = "0.12"
 secrecy = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -94,7 +95,6 @@ ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
-rust_decimal = "1"
 serde = "1"
 serde_json = "1"
 tempfile = "3"
