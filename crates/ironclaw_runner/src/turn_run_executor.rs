@@ -9,7 +9,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_runtime::{TurnRunExecutor, TurnRunExecutorError};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
@@ -27,6 +26,7 @@ use crate::{
     failure_categories::host_stage_unavailable_category,
     loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
+    turn_scheduler::{TurnRunExecutor, TurnRunExecutorError},
 };
 
 fn trace_executor_latency_ok(
@@ -422,7 +422,6 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_host_runtime::TurnRunExecutor;
     use ironclaw_turns::{
         AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
         AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, EventCursor, LoopCompleted,
@@ -448,6 +447,7 @@ mod tests {
     };
 
     use super::RebornTurnRunExecutor;
+    use crate::turn_scheduler::TurnRunExecutor;
 
     // ── Minimal fakes ────────────────────────────────────────────────────────
 

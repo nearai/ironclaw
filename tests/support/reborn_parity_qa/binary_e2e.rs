@@ -22,7 +22,6 @@ use ironclaw_host_api::{
     CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
     ThreadId,
 };
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
     JsonSpawnSubagentInputCodec,
@@ -37,7 +36,7 @@ use ironclaw_product_workflow::{
     IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
 };
-use ironclaw_reborn::subagent::{
+use ironclaw_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
@@ -45,7 +44,8 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
-use ironclaw_reborn::{
+use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
+use ironclaw_runner::{
     loop_exit_applier::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
         FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
@@ -762,7 +762,7 @@ impl RebornBinaryE2EHarness {
                 turn_state_for_evidence,
                 Arc::clone(&loop_checkpoint_store),
                 Arc::clone(&await_edge_store)
-                    as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                    as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
                 thread_scope.clone(),
             ),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
@@ -787,7 +787,7 @@ impl RebornBinaryE2EHarness {
             subagent_await_edge_settler: await_edge_resolver
                 as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
-                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,

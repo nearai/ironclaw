@@ -291,7 +291,7 @@ pub struct SubagentThreadMetadata {
     pub handoff: Option<String>,
     /// The spawning parent's `LoopRunContext`, cached verbatim at spawn time
     /// (`finish_spawn` already has it in hand — no new store fetch). Lets
-    /// `ironclaw_reborn`'s `reconstruct_edge` rebuild a lost/never-opened
+    /// `ironclaw_runner`'s `reconstruct_edge` rebuild a lost/never-opened
     /// await-edge with zero live `turn_state_store` lookups for the parent,
     /// avoiding the re-entrant deadlock of querying the store from inside
     /// the child's own commit-observer callback. New field on fresh threads
@@ -1366,7 +1366,7 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
 /// Lightweight in-memory [`crate::AwaitEdgeWriter`] test fixture — no
 /// filesystem/CAS/roster semantics. For `loop_support`'s own unit tests that
 /// just need a legal writer, not a durability test; production and any test
-/// that exercises real await-edge behavior use `ironclaw_reborn`'s
+/// that exercises real await-edge behavior use `ironclaw_runner`'s
 /// `FilesystemAwaitEdgeStore`.
 #[derive(Default)]
 pub struct InMemoryAwaitEdgeWriter {
