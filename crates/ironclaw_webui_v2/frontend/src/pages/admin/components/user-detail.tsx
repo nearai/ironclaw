@@ -42,7 +42,7 @@ export function UserDetail({ userId, onBack }) {
 
   const [role, setRole] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
-  const roleOptions = buildRoleOptions(t);
+  const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const user = userQuery.data;
   const usageEntries = usageQuery.data?.usage || [];

@@ -74,7 +74,7 @@ function CreateUserForm({ onCreate, isCreating, error }) {
   const [email, setEmail] = React.useState("");
   const [role, setRole] = React.useState("member");
   const [isOpen, setIsOpen] = React.useState(false);
-  const roleOptions = buildRoleOptions(t);
+  const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

@@ -1,3 +1,4 @@
+import React from "react";
 import { Button } from "../../../design-system/button";
 import { Input } from "../../../design-system/input";
 import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
@@ -32,9 +33,16 @@ export function ProviderDialog({
     t,
   });
 
+  const { form, apiKey, models, message, busy, isBuiltin, isEditing } = formState;
+  const modelOptions = React.useMemo(() => {
+    const typedModel = String(form.model || "").trim();
+    const fetchedOptions = models.map((model) => ({ value: model, label: model }));
+    if (!typedModel || models.includes(typedModel)) return fetchedOptions;
+    return [{ value: typedModel, label: typedModel }, ...fetchedOptions];
+  }, [form.model, models]);
+
   if (!open) return null;
 
-  const { form, apiKey, models, message, busy, isBuiltin, isEditing } = formState;
   const title = isBuiltin
     ? t("llm.configureProvider", { name: provider.name || provider.id })
     : isEditing
@@ -109,7 +117,7 @@ export function ProviderDialog({
         (
           <SelectMenu
             value={form.model}
-            options={models.map((model) => ({ value: model, label: model }))}
+            options={modelOptions}
             onChange={(value) => formState.update("model", value)}
             ariaLabel={t("llm.defaultModel")}
             className="w-full"

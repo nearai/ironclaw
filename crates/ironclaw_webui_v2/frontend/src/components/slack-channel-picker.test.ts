@@ -50,6 +50,7 @@ function createReactStub(state) {
         effect();
       }
     },
+    useMemo: (factory) => factory(),
   };
 }
 
@@ -63,6 +64,7 @@ function SelectMenu(props) {
     options=${props.options}
     onChange=${props.onChange}
     disabled=${props.disabled}
+    ariaLabel=${props.ariaLabel}
   />`;
 }
 
@@ -217,6 +219,8 @@ test("SlackChannelPicker edits saved channels and blocks save after load failure
       subject_display_name: "Ops",
     },
   ]);
+  assert.ok(valuesAfter(rendered, "ariaLabel=").includes("Auto-generated team subject (C0ENG)"));
+  assert.ok(valuesAfter(rendered, "ariaLabel=").includes("Auto-generated team subject (C0OPS)"));
 
   valuesAfter(rendered, "onChange=")[0]({ target: { value: " C0NEW " } });
   rendered = renderPicker(context, state);

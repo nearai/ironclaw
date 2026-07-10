@@ -13,6 +13,7 @@ import {
 } from "../lib/slack-channels-api";
 
 const QUERY_KEY = ["slack-allowed-channels"];
+const EMPTY_SUBJECTS = [];
 
 export function SlackChannelPicker({ action }) {
   const t = useT();
@@ -30,19 +31,26 @@ export function SlackChannelPicker({ action }) {
     queryKey: ["slack-routable-subjects"],
     queryFn: listSlackRoutableSubjects,
   });
-  const subjects = subjectsQuery.data?.subjects || [];
-  const subjectOptions = subjectOptionsForChannel(subjects);
+  const subjects = subjectsQuery.data?.subjects || EMPTY_SUBJECTS;
   const subjectsSettled = subjectsQuery.isSuccess || subjectsQuery.isError;
   const hasRoutableSubjects = subjects.length > 0;
-  const draftSubjectOptions = hasRoutableSubjects
-    ? [
-        { value: "", label: copy.autoSubjectLabel },
-        ...subjectOptions.map((subject) => ({
-          value: subject.subject_user_id,
-          label: subject.display_name,
-        })),
-      ]
-    : [];
+  const draftSubjectOptions = React.useMemo(
+    () =>
+      hasRoutableSubjects
+        ? subjectSelectOptions(subjects, copy.autoSubjectLabel)
+        : [],
+    [copy.autoSubjectLabel, hasRoutableSubjects, subjects],
+  );
+  const channelSubjectOptions = React.useMemo(() => {
+    const byChannelId = new Map();
+    for (const channel of channels) {
+      byChannelId.set(
+        channel.channel_id,
+        subjectSelectOptions(subjects, copy.autoSubjectLabel, channel),
+      );
+    }
+    return byChannelId;
+  }, [channels, copy.autoSubjectLabel, subjects]);
 
   React.useEffect(() => {
     if (!channelsQuery.data) return;
@@ -163,15 +171,9 @@ export function SlackChannelPicker({ action }) {
                   ? (
                     <SelectMenu
                       value={channel.subject_user_id}
-                      options={[
-                        { value: "", label: copy.autoSubjectLabel },
-                        ...subjectOptionsForChannel(subjects, channel).map((subject) => ({
-                          value: subject.subject_user_id,
-                          label: subject.display_name,
-                        })),
-                      ]}
+                      options={channelSubjectOptions.get(channel.channel_id) || []}
                       onChange={(value) => updateChannelSubject(channel.channel_id, value)}
-                      ariaLabel={copy.autoSubjectLabel}
+                      ariaLabel={`${copy.autoSubjectLabel} (${channel.channel_id})`}
                       className="w-44"
                       buttonClassName="h-8 rounded-md border-white/10 bg-white/[0.04] px-2 font-sans text-xs text-iron-100"
                     />
@@ -221,6 +223,20 @@ export function SlackChannelPicker({ action }) {
       </div>
     </div>
   );
+}
+
+function subjectSelectOption(subject) {
+  return {
+    value: subject.subject_user_id,
+    label: subject.display_name,
+  };
+}
+
+function subjectSelectOptions(subjects = [], label, channel = {}) {
+  return [
+    { value: "", label },
+    ...subjectOptionsForChannel(subjects, channel).map(subjectSelectOption),
+  ];
 }
 
 function subjectOptionsForChannel(subjects = [], channel = {}) {
