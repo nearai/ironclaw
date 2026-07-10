@@ -88,7 +88,7 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
 use active_publication::extension_trust_policy_input;
 use install_policy::{
-    InstallDecision, RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
+    RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,
 };
 
@@ -413,7 +413,7 @@ impl RebornLocalExtensionManagementPort {
             .unwrap_or(LifecyclePhase::Discovered);
         let install_scope = installation
             .as_ref()
-            .and_then(|installation| install_scope_for_owner(installation.owner()));
+            .map(|installation| install_scope_for_owner(installation.owner()));
         let summary = {
             let catalog = self.catalog.read().await;
             catalog.resolve(&package_ref)?.summary()
@@ -547,7 +547,7 @@ impl RebornLocalExtensionManagementPort {
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
                 phase: phase_for_activation_state(installation.activation_state()),
-                install_scope: install_scope_for_owner(installation.owner()),
+                install_scope: Some(install_scope_for_owner(installation.owner())),
             });
         }
         Ok(summaries)
@@ -633,21 +633,23 @@ impl RebornLocalExtensionManagementPort {
         &self,
         bundle: Vec<u8>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let package = {
-            let _decode_permit = self.import_decode_semaphore.acquire().await.map_err(|_| {
-                ProductWorkflowError::Transient {
-                    reason: "import decode limiter is closed".to_string(),
-                }
-            })?;
-            tokio::task::spawn_blocking(move || {
-                let files = unzip_extension_bundle(&bundle)?;
-                imported_extension_package(files)
-            })
-            .await
-            .map_err(|error| ProductWorkflowError::Transient {
-                reason: format!("import decode task failed: {error}"),
-            })??
-        };
+        // Hold the permit until the package has passed duplicate checks,
+        // materialization, and catalog insertion. This bounds the number of
+        // fully expanded packages retained by an import in addition to the
+        // decode work itself.
+        let _decode_permit = self.import_decode_semaphore.acquire().await.map_err(|_| {
+            ProductWorkflowError::Transient {
+                reason: "import decode limiter is closed".to_string(),
+            }
+        })?;
+        let package = tokio::task::spawn_blocking(move || {
+            let files = unzip_extension_bundle(&bundle)?;
+            imported_extension_package(files)
+        })
+        .await
+        .map_err(|error| ProductWorkflowError::Transient {
+            reason: format!("import decode task failed: {error}"),
+        })??;
         let package_ref = package.package_ref.clone();
         let summary = package.summary();
         let mut catalog = self.catalog.write().await;
@@ -710,7 +712,7 @@ impl RebornLocalExtensionManagementPort {
             // already registered, materialized, and (if enabled) published,
             // so there is nothing to compensate.
             Some(existing) => {
-                let InstallDecision::UpdateOwner(new_owner) = decide_install_on_existing(
+                let new_owner = decide_install_on_existing(
                     &available.package.id,
                     existing.owner(),
                     caller,
@@ -910,7 +912,7 @@ impl RebornLocalExtensionManagementPort {
             .load_installation(&extension_id, &installation_id)
             .await
             .map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     extension_id = %extension_id.as_str(),
                     installation_id = %installation_id.as_str(),
@@ -918,13 +920,13 @@ impl RebornLocalExtensionManagementPort {
                 );
                 hosted_mcp_changed_during_discovery_error()
             })?;
-        // #5459 P1: the slot may have changed hands while the lock was dropped
-        // for discovery (eviction+reinstall / remove+reinstall reuse the same
-        // installation id), so re-check ownership before committing — phase 1's
-        // check is stale. A foreign row must not be flipped to Enabled under
-        // this caller's action.
+        // #5459 P1: the installation's owner or member set may have changed
+        // while the lock was dropped for discovery (eviction+reinstall /
+        // remove+reinstall reuse the same installation id), so re-check
+        // ownership before committing — phase 1's check is stale. A foreign
+        // row must not be flipped to Enabled under this caller's action.
         ensure_caller_may_operate(&installation, caller).map_err(|error| {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 extension_id = %extension_id.as_str(),
                 installation_id = %installation_id.as_str(),
@@ -939,7 +941,7 @@ impl RebornLocalExtensionManagementPort {
             "activate",
         )
         .map_err(|error| {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 extension_id = %extension_id.as_str(),
                 installation_id = %installation_id.as_str(),
@@ -951,7 +953,7 @@ impl RebornLocalExtensionManagementPort {
             .lifecycle_package(&extension_id)
             .await
             .map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     extension_id = %extension_id.as_str(),
                     "hosted MCP activation could not recheck the lifecycle package after discovery"
@@ -4162,7 +4164,7 @@ output_schema_ref = "schemas/run.output.json"
                 },
             )
             .await
-            .expect("operator clears the shared slot");
+            .expect("operator removes the shared installation");
         facade
             .execute(
                 lifecycle_surface_context_for_user("alice"),

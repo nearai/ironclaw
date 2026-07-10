@@ -51,15 +51,6 @@ pub(super) fn ensure_caller_may_operate(
     })
 }
 
-/// What an install of an id whose installation row already exists does.
-pub(super) enum InstallDecision {
-    /// The caller gains the tool via a single row rewrite (member JOIN, or
-    /// operator EVICT-to-tenant); the bundle is already registered,
-    /// materialized, and — if enabled — published, so there is nothing to
-    /// compensate.
-    UpdateOwner(InstallationOwner),
-}
-
 /// Membership rules for an extension id whose installation row already
 /// exists. `Err` is always "already installed": under membership the
 /// outcome of installing never depends on whether OTHER users hold the
@@ -69,7 +60,7 @@ pub(super) fn decide_install_on_existing(
     existing_owner: &InstallationOwner,
     caller: &UserId,
     tenant_operator: &UserId,
-) -> Result<InstallDecision, ProductWorkflowError> {
+) -> Result<InstallationOwner, ProductWorkflowError> {
     let already_installed = || ProductWorkflowError::InvalidBindingRequest {
         reason: format!("extension {} is already installed", extension_id.as_str()),
     };
@@ -82,20 +73,18 @@ pub(super) fn decide_install_on_existing(
                 // installation; the tenant row takes the id and everyone
                 // (the evicted members included) reaches the tool through
                 // the shared install.
-                Ok(InstallDecision::UpdateOwner(InstallationOwner::Tenant))
+                Ok(InstallationOwner::Tenant)
             } else if user_ids.contains(caller) {
                 Err(already_installed())
             } else {
                 // JOIN: the caller becomes a member alongside the others.
                 let mut user_ids = user_ids.clone();
                 user_ids.insert(caller.clone());
-                Ok(InstallDecision::UpdateOwner(
-                    InstallationOwner::users(user_ids).map_err(|error| {
-                        ProductWorkflowError::InvalidBindingRequest {
-                            reason: format!("installation owner update failed: {error}"),
-                        }
-                    })?,
-                ))
+                Ok(InstallationOwner::users(user_ids).map_err(|error| {
+                    ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("installation owner update failed: {error}"),
+                    }
+                })?)
             }
         }
     }
@@ -144,11 +133,11 @@ pub(super) fn decide_remove(
 /// Settings/list projection of an installation owner (#5459 P1). Rows are
 /// caller-filtered before projection, so a member-held row shown to a
 /// viewer is by construction one they hold — "mine".
-pub(super) fn install_scope_for_owner(owner: &InstallationOwner) -> Option<LifecycleInstallScope> {
-    Some(match owner {
+pub(super) fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleInstallScope {
+    match owner {
         InstallationOwner::Tenant => LifecycleInstallScope::Shared,
         InstallationOwner::Users { .. } => LifecycleInstallScope::Private,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -219,7 +208,7 @@ mod tests {
         let operator = user("operator");
 
         // Member joins an existing member set.
-        let Ok(InstallDecision::UpdateOwner(joined)) = decide_install_on_existing(
+        let Ok(joined) = decide_install_on_existing(
             &extension_id,
             &members(&["alice"]),
             &user("bob"),
@@ -230,7 +219,7 @@ mod tests {
         assert!(joined.visible_to(&user("alice")) && joined.visible_to(&user("bob")));
 
         // Operator evicts the whole member set to Tenant.
-        let Ok(InstallDecision::UpdateOwner(evicted)) = decide_install_on_existing(
+        let Ok(evicted) = decide_install_on_existing(
             &extension_id,
             &members(&["alice", "bob"]),
             &operator,
@@ -280,11 +269,11 @@ mod tests {
     fn install_scope_projects_owner_kind() {
         assert_eq!(
             install_scope_for_owner(&InstallationOwner::Tenant),
-            Some(LifecycleInstallScope::Shared)
+            LifecycleInstallScope::Shared
         );
         assert_eq!(
             install_scope_for_owner(&members(&["alice"])),
-            Some(LifecycleInstallScope::Private)
+            LifecycleInstallScope::Private
         );
     }
 }
