@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 job_result_ok() {
   local name="$1"

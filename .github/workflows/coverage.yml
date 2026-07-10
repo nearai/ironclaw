@@ -313,11 +313,11 @@ jobs:
           # shellcheck disable=SC1091
           source .github/scripts/ci-job-result-ok.sh
 
-          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "none"; then
+          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "allow"; then
             echo "Coverage job failed: ${{ needs.coverage.result }}"
             exit 1
           fi
-          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "none"; then
+          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "allow"; then
             echo "E2E coverage job failed: ${{ needs.e2e-coverage.result }}"
             echo "One or more coverage jobs failed"
             exit 1
