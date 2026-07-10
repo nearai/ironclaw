@@ -13,7 +13,8 @@ use super::{
     inputs::{optional_usize, required_str},
     paths::{
         filesystem_error, is_excluded_name, is_excluded_relative_path, is_sensitive_scoped_path,
-        resolve_optional_path, scoped_child_path, validate_relative_pattern, virtual_to_relative,
+        list_dir_or_empty_mount_root, resolve_optional_path, scoped_child_path,
+        validate_relative_pattern, virtual_to_relative,
     },
     types::ResolvedPath,
 };
@@ -89,11 +90,7 @@ async fn walk_entries(
     let mut stack = vec![root.virtual_path.clone()];
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
-        let entries = request
-            .filesystem
-            .list_dir(&dir)
-            .await
-            .map_err(filesystem_error)?;
+        let entries = list_dir_or_empty_mount_root(request, root, &dir).await?;
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {

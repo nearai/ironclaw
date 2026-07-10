@@ -6343,6 +6343,105 @@ async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
 }
 
 #[tokio::test]
+async fn builtin_coding_virtual_root_maps_to_default_workspace_mount() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("README.md"), "virtual root marker\n").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let listed = invoke_with_context(
+        &runtime,
+        LIST_DIR_CAPABILITY_ID,
+        json!({"path": "/"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["entries"], json!(["README.md (20B)"]));
+
+    let globbed = invoke_with_context(
+        &runtime,
+        GLOB_CAPABILITY_ID,
+        json!({"path": "/", "pattern": "*.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(globbed["files"], json!(["README.md"]));
+
+    let grepped = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/", "pattern": "virtual root marker"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(grepped["files"], json!(["README.md"]));
+}
+
+#[tokio::test]
+async fn builtin_coding_empty_virtual_root_is_readable_before_first_write() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/projects/coding-pack").unwrap(),
+            HostPath::from_path_buf(temp.path().to_path_buf()),
+        )
+        .unwrap();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/coding-pack/tenants/tenant-a/users/user-a").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let listed = invoke_with_context(
+        &runtime,
+        LIST_DIR_CAPABILITY_ID,
+        json!({"path": "/"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["entries"], json!([]));
+
+    let globbed = invoke_with_context(
+        &runtime,
+        GLOB_CAPABILITY_ID,
+        json!({"path": "/", "pattern": "*.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(globbed["files"], json!([]));
+
+    let grepped = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/", "pattern": "needle"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(grepped["files"], json!([]));
+
+    let missing_subpath = invoke_with_context(
+        &runtime,
+        LIST_DIR_CAPABILITY_ID,
+        json!({"path": "/workspace/missing"}),
+        context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing_subpath, RuntimeFailureKind::OperationFailed);
+}
+
+#[tokio::test]
 async fn builtin_coding_tools_match_v1_read_write_list_glob_and_grep_shapes() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
