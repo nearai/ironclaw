@@ -534,6 +534,23 @@ pub struct TurnPersistenceSnapshot {
     pub spawn_tree_reservations: Vec<SpawnTreeReservation>,
 }
 
+impl TurnPersistenceSnapshot {
+    pub fn set_runs(mut self, runs: Vec<TurnRunRecord>) -> Self {
+        self.runs = runs;
+        self
+    }
+
+    pub fn set_checkpoints(mut self, checkpoints: Vec<TurnCheckpointRecord>) -> Self {
+        self.checkpoints = checkpoints;
+        self
+    }
+
+    pub fn set_events(mut self, events: Vec<TurnLifecycleEvent>) -> Self {
+        self.events = events;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{

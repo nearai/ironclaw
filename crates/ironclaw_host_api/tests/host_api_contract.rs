@@ -784,11 +784,9 @@ fn principal_agent_serializes_as_first_class_principal() {
 fn invocation_fingerprint_is_stable_and_input_hashed() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_output_bytes(10_000);
     let input = json!({"message": "secret payload"});
     let mut reordered = serde_json::Map::new();
     reordered.insert("z".to_string(), json!(1));
@@ -916,20 +914,14 @@ fn invocation_fingerprint_changes_when_authorized_invocation_changes() {
 fn actions_and_decisions_serialize_with_stable_snake_case_tags() {
     let action = Action::Dispatch {
         capability: CapabilityId::new("github.search_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            usd: Some(dec!(0.01)),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_usd(dec!(0.01)),
     };
     let json = serde_json::to_value(&action).unwrap();
     assert_eq!(json["type"], "dispatch");
 
     let spawn = Action::SpawnCapability {
         capability: CapabilityId::new("github.watch_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_concurrency_slots(1),
     };
     let json = serde_json::to_value(&spawn).unwrap();
     assert_eq!(json["type"], "spawn_capability");

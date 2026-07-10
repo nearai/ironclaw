@@ -363,10 +363,7 @@ where
         );
         async move {
             let record = loop_checkpoint_record_from_request(request);
-            let delta = SnapshotDelta {
-                loop_checkpoints_upsert: vec![record.clone()],
-                ..SnapshotDelta::default()
-            };
+            let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
             let ack = {
                 let _commit_guard = self.commit_gate.lock().await;
                 let ack = self

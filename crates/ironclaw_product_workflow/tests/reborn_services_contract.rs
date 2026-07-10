@@ -2473,13 +2473,7 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(coordinator.submission_count(), 1);
 
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -2654,13 +2648,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     assert_eq!(err.code, RebornServicesErrorCode::Internal);
     assert_eq!(coordinator.submission_count(), 0);
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -2686,10 +2674,7 @@ async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_sc
     let timeline = services
         .get_timeline(
             web_caller.clone(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha"),
         )
         .await
         .expect("timeline is served by fake M2 thread port");
@@ -3013,10 +2998,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
     let timeline = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(thread_id.as_str().to_string()),
         )
         .await
         .expect("timeline");
@@ -3067,10 +3049,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let alpha_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("alpha timeline");
@@ -3079,10 +3058,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let beta_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-beta".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-beta".to_string()),
         )
         .await
         .expect("beta timeline");
@@ -3142,10 +3118,7 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("timeline");
@@ -3164,20 +3137,14 @@ async fn refresh_reresolves_thread_to_same_canonical_scope() {
     let first = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("first resolve");
     let refreshed = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("refresh resolve");
@@ -3208,10 +3175,7 @@ async fn get_timeline_rejects_cross_user_access() {
     let err = services
         .get_timeline(
             caller_for_user("user-beta"),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("cross-user timeline read must be rejected");
@@ -3244,10 +3208,7 @@ async fn delete_thread_removes_owned_thread() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("deleted thread must no longer be readable");
@@ -3280,10 +3241,7 @@ async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread()
     services
         .get_timeline(
             alice,
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("owner thread must remain after rejected cross-user delete");
@@ -3325,10 +3283,7 @@ async fn delete_thread_rejects_thread_with_active_run() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -3392,10 +3347,7 @@ async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -3892,10 +3844,7 @@ async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("timeline backend failure is stable unavailable taxonomy");
@@ -5151,11 +5100,7 @@ async fn list_automation_dispatches_through_product_facade() {
     let listed = services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect("list automations");
@@ -5887,11 +5832,7 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = services
         .list_automations(
             caller_without_agent(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect_err("missing agent id should fail closed");
@@ -5913,11 +5854,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(u32::MAX),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -5943,11 +5880,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(0),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(0),
         )
         .await
         .expect("list automations");
@@ -5970,14 +5903,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: None,
-                ..Default::default()
-            },
-        )
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -6002,11 +5928,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(u32::MAX),
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -6032,11 +5954,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(0),
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(0),
         )
         .await
         .expect("list automations");
@@ -6061,10 +5979,7 @@ async fn list_automations_forwards_include_completed_true_to_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                include_completed: true,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_include_completed(true),
         )
         .await
         .expect("list automations");
@@ -6087,13 +6002,7 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest {
-                include_completed: false,
-                ..Default::default()
-            },
-        )
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -6595,23 +6504,7 @@ async fn query_logs_requires_thread_scope() {
     .with_operator_logs_service(operator_logs.clone());
 
     let err = services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest {
-                limit: None,
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: None,
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: false,
-            },
-        )
+        .query_logs(caller(), RebornLogQueryRequest::default())
         .await
         .expect_err("public logs require a thread scope");
 
@@ -6637,20 +6530,10 @@ async fn query_logs_rejects_ambiguous_tail_follow_modes() {
     let err = services
         .query_logs(
             caller(),
-            RebornLogQueryRequest {
-                limit: None,
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: Some("thread-alpha".to_string()),
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: true,
-                follow: true,
-            },
+            RebornLogQueryRequest::default()
+                .set_thread_id("thread-alpha")
+                .set_tail(true)
+                .set_follow(true),
         )
         .await
         .expect_err("tail and follow cannot be combined");
@@ -6679,20 +6562,13 @@ async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
     services
         .query_logs(
             caller(),
-            RebornLogQueryRequest {
-                limit: Some(25),
-                cursor: Some("after:7".to_string()),
-                level: Some(RebornLogLevel::Info),
-                target: Some("ironclaw".to_string()),
-                thread_id: Some("thread-alpha".to_string()),
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: true,
-            },
+            RebornLogQueryRequest::default()
+                .set_limit(25)
+                .set_cursor("after:7")
+                .set_level(RebornLogLevel::Info)
+                .set_target("ironclaw")
+                .set_thread_id("thread-alpha")
+                .set_follow(true),
         )
         .await
         .expect("owned thread logs query");
@@ -6722,20 +6598,9 @@ async fn query_logs_rejects_thread_owned_by_another_caller() {
     let err = services
         .query_logs(
             caller(),
-            RebornLogQueryRequest {
-                limit: Some(25),
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: Some("thread-bob".to_string()),
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: false,
-            },
+            RebornLogQueryRequest::default()
+                .set_limit(25)
+                .set_thread_id("thread-bob"),
         )
         .await
         .expect_err("foreign thread logs are not caller-visible");
@@ -6864,10 +6729,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
     let response = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect("owner should be able to read their automation trigger thread timeline");
@@ -7042,10 +6904,7 @@ async fn get_timeline_rejects_other_users_automation_trigger_thread() {
     let err = services
         .get_timeline(
             bob,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("non-owner must not read another user's trigger thread");
@@ -7092,10 +6951,7 @@ async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("backend error from facade must propagate, not become 404");
@@ -7309,10 +7165,7 @@ async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reloa
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect_err("backend error on trigger-owned reload must surface as 503, not 404");
@@ -7388,10 +7241,7 @@ async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
     let response = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: trigger_thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
         )
         .await
         .expect("timeline must resolve when agent_id is None via caller fallback");
@@ -7927,10 +7777,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
     let err = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: "thread-absent-from-automations".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-absent-from-automations".to_string()),
         )
         .await
         .expect_err("unknown thread_id must return 404");
@@ -9261,11 +9108,9 @@ async fn run_operator_setup_requires_provider_id_for_provider_changes() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                adapter: Some("open_ai_completions".to_string()),
-                api_key: Some(SecretString::from("sk-secret".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_adapter("open_ai_completions")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
         )
         .await
         .expect_err("provider changes require provider_id");
@@ -9285,10 +9130,7 @@ async fn run_operator_setup_rejects_model_without_provider_id() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                model: Some("gpt-5-mini".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default().set_model("gpt-5-mini"),
         )
         .await
         .expect_err("model requires provider_id");
@@ -9305,11 +9147,9 @@ async fn run_operator_setup_rejects_base_url_without_adapter() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                base_url: Some("https://api.example.test/v1".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_base_url("https://api.example.test/v1"),
         )
         .await
         .expect_err("base_url requires adapter");
@@ -9328,11 +9168,9 @@ async fn run_operator_setup_rejects_api_key_without_adapter() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                api_key: Some(SecretString::from("sk-secret".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
         )
         .await
         .expect_err("api_key requires adapter");
@@ -9351,12 +9189,10 @@ async fn run_operator_setup_rejects_internal_base_url_before_upsert() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_base_url("http://169.254.169.254/latest/meta-data/"),
         )
         .await
         .expect_err("metadata endpoint is rejected");
@@ -9373,12 +9209,10 @@ async fn run_operator_setup_rejects_blank_profile_before_provider_write() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("   ".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("   "),
         )
         .await
         .expect_err("blank profile id is rejected");
@@ -9396,12 +9230,10 @@ async fn run_operator_setup_rejects_oversized_profile_before_provider_write() {
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("x".repeat(129)),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("x".repeat(129)),
         )
         .await
         .expect_err("oversized profile id is rejected");
@@ -9419,12 +9251,10 @@ async fn run_operator_setup_rejects_short_webui_access_token_before_provider_wri
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from("too-short".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("too-short".to_string())),
         )
         .await
         .expect_err("short WebUI token is rejected");
@@ -9446,12 +9276,10 @@ async fn run_operator_setup_rejects_serve_weak_webui_access_token_before_provide
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from("x".repeat(16))),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("x".repeat(16))),
         )
         .await
         .expect_err("16-byte WebUI token is rejected");
@@ -9473,12 +9301,10 @@ async fn run_operator_setup_rejects_oversized_webui_access_token_before_provider
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from("x".repeat(4097))),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("x".repeat(4097))),
         )
         .await
         .expect_err("oversized WebUI token is rejected");
@@ -9600,14 +9426,12 @@ async fn run_operator_setup_upserts_and_activates_provider_config() {
     let response = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                base_url: Some("https://api.example.test/v1".to_string()),
-                model: Some("gpt-5-mini".to_string()),
-                api_key: Some(SecretString::from("sk-secret".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_base_url("https://api.example.test/v1")
+                .set_model("gpt-5-mini")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
         )
         .await
         .expect("setup response");
@@ -9642,12 +9466,10 @@ async fn run_operator_setup_ignores_redacted_webui_access_token_sentinel() {
     let response = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                model: Some("gpt-5-mini".to_string()),
-                webui_access_token: Some(SecretString::from("••••••••".to_string())),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_model("gpt-5-mini")
+                .set_webui_access_token(SecretString::from("••••••••".to_string())),
         )
         .await
         .expect("setup response");
@@ -9681,15 +9503,13 @@ async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("production".to_string()),
-                webui_access_token: Some(SecretString::from(
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("production")
+                .set_webui_access_token(SecretString::from(
                     "webui-secret-token-value-32-bytes".to_string(),
                 )),
-                ..Default::default()
-            },
         )
         .await
         .expect_err("unwired host mutations fail closed");
@@ -9709,12 +9529,10 @@ async fn run_operator_setup_rejects_profile_only_host_mutation_before_provider_w
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                profile_id: Some("production".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("production"),
         )
         .await
         .expect_err("unwired profile mutation fails closed");
@@ -9734,14 +9552,12 @@ async fn run_operator_setup_rejects_token_only_host_mutation_before_provider_wri
     let err = services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                webui_access_token: Some(SecretString::from(
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from(
                     "webui-secret-token-value-32-bytes".to_string(),
                 )),
-                ..Default::default()
-            },
         )
         .await
         .expect_err("unwired WebUI token mutation fails closed");
@@ -9761,11 +9577,9 @@ async fn run_operator_setup_selects_existing_provider_without_adapter() {
     services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                model: Some("gpt-5-mini".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_model("gpt-5-mini"),
         )
         .await
         .expect("setup response");
@@ -9806,11 +9620,9 @@ async fn run_operator_setup_propagates_llm_config_service_error() {
     let upsert_err = upsert_services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                adapter: Some("open_ai_completions".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions"),
         )
         .await
         .expect_err("upsert error propagates");
@@ -9823,10 +9635,7 @@ async fn run_operator_setup_propagates_llm_config_service_error() {
     let set_active_err = set_active_services
         .run_operator_setup(
             caller(),
-            RebornOperatorSetupRequest {
-                provider_id: Some("openai".to_string()),
-                ..Default::default()
-            },
+            RebornOperatorSetupRequest::default().set_provider_id("openai"),
         )
         .await
         .expect_err("set_active error propagates");
@@ -10160,11 +9969,7 @@ async fn get_timeline_pages_messages_with_cursor() {
     let first = services
         .get_timeline(
             alice.clone(),
-            RebornTimelineRequest {
-                thread_id: "thread-paginate".to_string(),
-                limit: Some(10),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-paginate".to_string()).set_limit(10),
         )
         .await
         .expect("first page");
@@ -10249,11 +10054,7 @@ async fn get_timeline_clamps_oversize_limit_to_hard_ceiling() {
     let response = services
         .get_timeline(
             alice,
-            RebornTimelineRequest {
-                thread_id: "thread-cap".to_string(),
-                limit: Some(u32::MAX),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-cap".to_string()).set_limit(u32::MAX),
         )
         .await
         .expect("clamped timeline");
@@ -10479,10 +10280,7 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10526,10 +10324,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10572,10 +10367,7 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10621,10 +10413,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10680,10 +10469,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10720,11 +10506,9 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                candidate_thread_id: Some(automation_pending_thread_id.as_str().to_string()),
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default()
+                .set_needs_approval(true)
+                .set_candidate_thread_id(automation_pending_thread_id.as_str()),
         )
         .await
         .expect("list approval threads");
@@ -10775,14 +10559,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
 
     let response = tokio::time::timeout(
         Duration::from_secs(1),
-        services.list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(2),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
-        ),
+        services.list_threads(caller, WebUiListThreadsRequest::default().set_limit(2)),
     )
     .await
     .expect("list_threads should terminate when backend cursor stalls")
@@ -10836,14 +10613,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
     );
 
     let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
-        )
+        .list_threads(caller, WebUiListThreadsRequest::default().set_limit(1))
         .await
         .expect("list threads");
 
@@ -10927,11 +10697,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let first_page = services
         .list_threads(
             caller.clone(),
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_limit(1),
         )
         .await
         .expect("list first visible page");
@@ -10948,11 +10714,9 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_page = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: first_page.next_cursor,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default()
+                .set_limit(1)
+                .set_cursor(first_page.next_cursor.expect("first visible page cursor")),
         )
         .await
         .expect("list second visible page");
@@ -11541,10 +11305,7 @@ async fn get_timeline_returns_attachment_refs_on_the_user_message() {
     let timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("timeline");

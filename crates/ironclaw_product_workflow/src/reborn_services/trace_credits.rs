@@ -333,10 +333,7 @@ mod tests {
     fn enabled_policy_reports_enrolled_with_zero_aggregates() {
         let scope = unique_scope("pw-trace-credits-enrolled");
         let _cleanup = ScopeCleanup(scope.clone());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default().set_enabled(true);
         write_trace_policy_for_scope(Some(scope.as_str()), &policy).expect("write policy");
 
         let response = local_trace_credits_for_user(&scope).expect("local credits read");

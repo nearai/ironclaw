@@ -50,6 +50,19 @@ wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2"
 [workspace.lints.rust]
 unreachable_pub = "warn"
 dead_code = "warn"
+# A `Result`/`#[must_use]` value that is silently discarded is a swallowed
+# error. `unused_must_use` is warn-by-default; deny it so a dropped `Result`
+# fails the build instead of hiding a failure. Verified zero current fires
+# across the workspace, so this only guards against *future* silent drops.
+#
+# Companion clippy lints that catch the other swallow idioms are deferred to
+# follow-up PRs because they need a real cleanup first (measured on this tree):
+#   * `clippy::let_underscore_must_use` — 67 sites (`let _ = <must_use>`), a mix
+#     of safe discards and genuine swallows (e.g. an ignored async delete).
+#   * `clippy::map_err_ignore` — ~861 sites; a blanket deny is wrong here since
+#     `.claude/rules/error-handling.md` permits `map_err` to a *specific* typed
+#     error and only forbids cause-dropping ones. Needs a scoped sweep.
+unused_must_use = "deny"
 
 [package]
 name = "ironclaw"

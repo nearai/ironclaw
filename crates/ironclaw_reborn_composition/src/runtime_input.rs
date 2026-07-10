@@ -231,6 +231,31 @@ impl Default for TurnRunnerSettings {
     }
 }
 
+impl TurnRunnerSettings {
+    pub fn set_heartbeat_interval(mut self, heartbeat_interval: Duration) -> Self {
+        self.heartbeat_interval = heartbeat_interval;
+        self
+    }
+
+    pub fn set_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    pub fn set_worker_count(mut self, worker_count: std::num::NonZeroUsize) -> Self {
+        self.worker_count = Some(worker_count);
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
+    }
+}
+
 /// Completion polling policy for `RebornRuntime::send_user_message`.
 #[derive(Debug, Clone)]
 pub struct PollSettings {

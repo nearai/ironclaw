@@ -7038,15 +7038,12 @@ output_schema_ref = "schemas/write.output.json"
             reply: "trigger invalid config".to_string(),
             requests: Arc::new(StdMutex::new(Vec::new())),
         });
-        let trigger_poller = TriggerPollerSettings {
-            enabled: true,
-            worker: ironclaw_triggers::TriggerPollerWorkerConfig {
-                poll_interval: Duration::ZERO,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .with_tenant_scoped_authorizer_for_test();
+        let trigger_poller = TriggerPollerSettings::enabled()
+            .with_worker_config(
+                ironclaw_triggers::TriggerPollerWorkerConfig::default()
+                    .set_poll_interval(Duration::ZERO),
+            )
+            .with_tenant_scoped_authorizer_for_test();
 
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev(
@@ -7300,16 +7297,14 @@ output_schema_ref = "schemas/write.output.json"
         // later read the queue) under `trace_scope_key(tenant, owner)`, not the
         // bare owner id.
         let scope = trace_contribution::trace_scope_key("runtime-trace-capture-tenant", &owner);
-        let policy = trace_contribution::StandingTraceContributionPolicy {
-            enabled: true,
-            // Closed loopback port: the immediate flush fails fast and
-            // locally; no traffic leaves the machine.
-            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
-            min_submission_score: 0.0,
-            require_manual_approval_when_pii_detected: false,
-            auto_submit_high_value_traces: true,
-            ..trace_contribution::StandingTraceContributionPolicy::default()
-        };
+        // Closed loopback port: the immediate flush fails fast and locally; no
+        // traffic leaves the machine.
+        let policy = trace_contribution::StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://127.0.0.1:1/v1/traces")
+            .set_min_submission_score(0.0)
+            .set_require_manual_approval_when_pii_detected(false)
+            .set_auto_submit_high_value_traces(true);
         trace_contribution::write_trace_policy_for_scope(Some(&scope), &policy)
             .expect("write trace policy");
 

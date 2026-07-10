@@ -124,6 +124,46 @@ impl Default for ProductLiveAgentLoopHarnessConfig {
     }
 }
 
+impl ProductLiveAgentLoopHarnessConfig {
+    pub fn set_assistant_reply(mut self, assistant_reply: impl Into<String>) -> Self {
+        self.assistant_reply = assistant_reply.into();
+        self
+    }
+
+    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = user_id.into();
+        self
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = thread_id.into();
+        self
+    }
+
+    pub fn set_pause_model_until_released(mut self, pause_model_until_released: bool) -> Self {
+        self.pause_model_until_released = pause_model_until_released;
+        self
+    }
+
+    pub fn set_model_responses(mut self, model_responses: Vec<HostManagedModelResponse>) -> Self {
+        self.model_responses = model_responses;
+        self
+    }
+
+    pub fn set_capability(mut self, capability: HarnessCapabilityConfig) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    pub fn set_host_runtime_capability(
+        mut self,
+        host_runtime_capability: HostRuntimeCapabilityConfig,
+    ) -> Self {
+        self.host_runtime_capability = Some(host_runtime_capability);
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HarnessCapabilityConfig {
     pub capability_id: String,

@@ -180,6 +180,24 @@ pub(super) struct SnapshotDelta {
 }
 
 impl SnapshotDelta {
+    pub(super) fn set_turns_upsert(mut self, turns_upsert: Vec<TurnRecord>) -> Self {
+        self.turns_upsert = turns_upsert;
+        self
+    }
+
+    pub(super) fn set_runs_upsert(mut self, runs_upsert: Vec<TurnRunRecord>) -> Self {
+        self.runs_upsert = runs_upsert;
+        self
+    }
+
+    pub(super) fn set_loop_checkpoints_upsert(
+        mut self,
+        loop_checkpoints_upsert: Vec<LoopCheckpointRecord>,
+    ) -> Self {
+        self.loop_checkpoints_upsert = loop_checkpoints_upsert;
+        self
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.turns_upsert.is_empty()
             && self.turns_delete.is_empty()
@@ -544,11 +562,9 @@ pub(super) fn submit_turn_targeted_delta(
         .ok_or_else(|| TurnError::Unavailable {
             reason: "accepted run missing from row-store hot state".to_string(),
         })?;
-    let mut delta = SnapshotDelta {
-        turns_upsert: vec![turn.clone()],
-        runs_upsert: vec![run],
-        ..SnapshotDelta::default()
-    };
+    let mut delta = SnapshotDelta::default()
+        .set_turns_upsert(vec![turn.clone()])
+        .set_runs_upsert(vec![run]);
     if let Some(lock) = store.active_lock_record(&turn.scope) {
         delta.active_locks_upsert.push(lock);
     }

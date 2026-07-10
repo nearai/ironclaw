@@ -562,10 +562,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -726,10 +723,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -849,10 +843,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -975,10 +966,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -1095,10 +1083,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -1206,10 +1191,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -1411,10 +1393,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         &root,
         Arc::clone(&gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
         tool_disclosure,
     )

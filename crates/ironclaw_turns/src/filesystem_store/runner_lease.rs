@@ -549,18 +549,15 @@ mod tests {
         let runner_id = TurnRunnerId::new();
         let lease_token = TurnLeaseToken::new();
         let now = Utc::now();
-        let snapshot = TurnPersistenceSnapshot {
-            runs: vec![turn_run_record(
-                run_id,
-                runner_id,
-                lease_token,
-                TurnStatus::Running,
-                now,
-                now,
-                EventCursor(1),
-            )],
-            ..TurnPersistenceSnapshot::default()
-        };
+        let snapshot = TurnPersistenceSnapshot::default().set_runs(vec![turn_run_record(
+            run_id,
+            runner_id,
+            lease_token,
+            TurnStatus::Running,
+            now,
+            now,
+            EventCursor(1),
+        )]);
         let existing = RunnerLeaseRecord {
             run_id,
             runner_id,

@@ -145,6 +145,67 @@ impl Default for InMemoryTurnStateStoreLimits {
     }
 }
 
+impl InMemoryTurnStateStoreLimits {
+    pub fn set_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = max_events;
+        self
+    }
+
+    pub fn set_max_terminal_records(mut self, max_terminal_records: usize) -> Self {
+        self.max_terminal_records = max_terminal_records;
+        self
+    }
+
+    pub fn set_max_idempotency_records(mut self, max_idempotency_records: usize) -> Self {
+        self.max_idempotency_records = max_idempotency_records;
+        self
+    }
+
+    pub fn set_runner_lease_ttl(mut self, runner_lease_ttl: ChronoDuration) -> Self {
+        self.runner_lease_ttl = runner_lease_ttl;
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
+    }
+
+    pub fn clear_max_concurrent_runs_per_user(mut self) -> Self {
+        self.max_concurrent_runs_per_user = None;
+        self
+    }
+
+    pub fn set_max_concurrent_trigger_runs(
+        mut self,
+        max_concurrent_trigger_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_trigger_runs = Some(max_concurrent_trigger_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_trigger_runs(mut self) -> Self {
+        self.max_concurrent_trigger_runs = None;
+        self
+    }
+
+    pub fn set_max_concurrent_conversation_runs(
+        mut self,
+        max_concurrent_conversation_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_conversation_runs = Some(max_concurrent_conversation_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_conversation_runs(mut self) -> Self {
+        self.max_concurrent_conversation_runs = None;
+        self
+    }
+}
+
 pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Notify,
@@ -4021,10 +4082,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_pruning_removes_orphaned_turn_records() {
-        let limits = InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        };
+        let limits = InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1);
         let store = InMemoryTurnStateStore::with_limits(limits);
         let policy = AllowAllTurnAdmissionPolicy;
         let resolver = TestRunProfileResolver;

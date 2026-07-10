@@ -134,6 +134,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
     any(feature = "libsql", feature = "postgres")
 ))]
 use ironclaw_turns::FilesystemTurnStateBlockPersistence;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStoreKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
@@ -5111,23 +5112,11 @@ mod tests {
 
         let reservation = local_runtime
             .resource_governor
-            .reserve(
-                scope,
-                ResourceEstimate {
-                    usd: Some(dec!(0.10)),
-                    ..ResourceEstimate::default()
-                },
-            )
+            .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
             .expect("reservation");
         local_runtime
             .resource_governor
-            .reconcile(
-                reservation.id,
-                ResourceUsage {
-                    usd: dec!(0.10),
-                    ..ResourceUsage::default()
-                },
-            )
+            .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
             .expect("reconcile");
 
         assert_eq!(

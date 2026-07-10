@@ -249,10 +249,7 @@ fn persistent_trait_set_limit_surfaces_storage_errors() {
     let error = governor
         .set_limit(
             ResourceAccount::tenant(scope.tenant_id),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap_err();
 
@@ -282,22 +279,18 @@ fn reserve_succeeds_when_budget_is_available() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                max_concurrency_slots: Some(2),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1.00))
+                .set_max_concurrency_slots(2),
         )
         .unwrap();
 
     let reservation = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.25)),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.25))
+                .set_concurrency_slots(1),
         )
         .unwrap();
 
@@ -313,10 +306,7 @@ fn reserve_with_id_uses_requested_identifier_and_rejects_duplicates() {
     let scope = sample_scope("tenant1", "user1", Some("project1"));
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     let reservation_id = ResourceReservationId::new();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
 
     let reservation = governor
         .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
@@ -339,10 +329,7 @@ fn reserve_with_id_rejects_negative_usd_estimates() {
     let err = governor
         .reserve_with_id(
             scope,
-            ResourceEstimate {
-                usd: Some(dec!(-100.00)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(-100.00)),
             ResourceReservationId::new(),
         )
         .unwrap_err();
@@ -363,22 +350,13 @@ fn reconcile_rejects_negative_usd_actuals_without_closing_reservation() {
     let scope = sample_scope("tenant1", "user1", Some("project1"));
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     let reservation = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.25)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.25)))
         .unwrap();
 
     let err = governor
         .reconcile(
             reservation.id,
-            ResourceUsage {
-                usd: dec!(-100.00),
-                ..ResourceUsage::default()
-            },
+            ResourceUsage::default().set_usd(dec!(-100.00)),
         )
         .unwrap_err();
 
@@ -403,20 +381,11 @@ fn usd_tally_saturates_instead_of_panicking_on_decimal_overflow() {
     governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(rust_decimal::Decimal::MAX),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(rust_decimal::Decimal::MAX),
         )
         .unwrap();
     governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(1)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(1)))
         .unwrap();
 
     assert_eq!(
@@ -433,31 +402,19 @@ fn usd_limit_check_denies_instead_of_panicking_on_decimal_overflow() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(rust_decimal::Decimal::MAX),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(rust_decimal::Decimal::MAX),
         )
         .unwrap();
 
     governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(rust_decimal::Decimal::MAX),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(rust_decimal::Decimal::MAX),
         )
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(1)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(1)))
         .unwrap_err();
 
     assert!(matches!(
@@ -475,21 +432,12 @@ fn reserve_denies_when_usd_limit_would_be_exceeded() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(0.50)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(0.50)),
         )
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.75)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.75)))
         .unwrap_err();
 
     assert!(matches!(
@@ -511,22 +459,18 @@ fn reserve_denies_runtime_quota_even_without_usd() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_wall_clock_ms: Some(1_000),
-                max_process_count: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_wall_clock_ms(1_000)
+                .set_max_process_count(1),
         )
         .unwrap();
 
     let err = governor
         .reserve(
             scope,
-            ResourceEstimate {
-                wall_clock_ms: Some(2_000),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_wall_clock_ms(2_000)
+                .set_process_count(1),
         )
         .unwrap_err();
 
@@ -549,30 +493,21 @@ fn active_reservations_consume_concurrency_until_released() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
 
     let first = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_concurrency_slots(1),
         )
         .unwrap();
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
 
     let second = governor.reserve(
         scope.clone(),
-        ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        },
+        ResourceEstimate::default().set_concurrency_slots(1),
     );
     assert!(matches!(
         second,
@@ -584,13 +519,7 @@ fn active_reservations_consume_concurrency_until_released() {
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
 
     governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_concurrency_slots(1))
         .unwrap();
 }
 
@@ -606,10 +535,7 @@ fn concurrent_reservations_cannot_oversubscribe_scope() {
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
 
@@ -623,13 +549,7 @@ fn concurrent_reservations_cannot_oversubscribe_scope() {
         handles.push(thread::spawn(move || {
             barrier.wait();
             governor
-                .reserve(
-                    scope,
-                    ResourceEstimate {
-                        concurrency_slots: Some(1),
-                        ..ResourceEstimate::default()
-                    },
-                )
+                .reserve(scope, ResourceEstimate::default().set_concurrency_slots(1))
                 .is_ok()
         }));
     }
@@ -650,22 +570,18 @@ fn reconcile_records_actual_usage_and_closes_reservation() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1.00))
+                .set_max_concurrency_slots(1),
         )
         .unwrap();
 
     let reservation = governor
         .reserve(
             scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.75)),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.75))
+                .set_concurrency_slots(1),
         )
         .unwrap();
 
@@ -711,22 +627,18 @@ fn release_frees_reserved_capacity_without_recording_spend() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1.00))
+                .set_max_concurrency_slots(1),
         )
         .unwrap();
 
     let reservation = governor
         .reserve(
             scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.75)),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.75))
+                .set_concurrency_slots(1),
         )
         .unwrap();
 
@@ -764,31 +676,16 @@ fn tenant_limit_applies_across_projects() {
     governor
         .set_limit(
             tenant_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 
     governor
-        .reserve(
-            project_a,
-            ResourceEstimate {
-                usd: Some(dec!(0.75)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(project_a, ResourceEstimate::default().set_usd(dec!(0.75)))
         .unwrap();
 
     let err = governor
-        .reserve(
-            project_b,
-            ResourceEstimate {
-                usd: Some(dec!(0.50)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(project_b, ResourceEstimate::default().set_usd(dec!(0.50)))
         .unwrap_err();
 
     assert!(matches!(
@@ -808,17 +705,11 @@ fn resource_governor_enforces_agent_scoped_limits_independently() {
     governor
         .set_limit(
             ResourceAccount::agent(tenant.clone(), user.clone(), None, agent_a.clone()),
-            ResourceLimits {
-                max_output_bytes: Some(10),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_output_bytes(10),
         )
         .unwrap();
 
-    let estimate = ResourceEstimate {
-        output_bytes: Some(8),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(8);
     governor
         .reserve(
             sample_scope_with_agent("tenant1", "user1", None, Some("agent-a")),
@@ -872,21 +763,17 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
     governor
         .try_set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1.00))
+                .set_max_concurrency_slots(1),
         )
         .unwrap();
     let active = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.20)),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.20))
+                .set_concurrency_slots(1),
         )
         .unwrap();
 
@@ -894,10 +781,7 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
     let concurrency_denial = reloaded
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_concurrency_slots(1),
         )
         .unwrap_err();
     assert!(matches!(
@@ -909,24 +793,12 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
     ));
 
     reloaded
-        .reconcile(
-            active.id,
-            ResourceUsage {
-                usd: dec!(0.95),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(active.id, ResourceUsage::default().set_usd(dec!(0.95)))
         .unwrap();
 
     let reloaded_again = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
     let usd_denial = reloaded_again
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.10)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
         .unwrap_err();
     assert!(matches!(
         usd_denial,
@@ -949,11 +821,9 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
     let reservation = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.20)),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.20))
+                .set_concurrency_slots(1),
         )
         .unwrap();
     assert!(
@@ -962,13 +832,7 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
     );
 
     governor
-        .reconcile(
-            reservation.id,
-            ResourceUsage {
-                usd: dec!(0.20),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.20)))
         .unwrap();
     assert!(
         matches!(
@@ -988,10 +852,7 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
     let active = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_concurrency_slots(1),
         )
         .unwrap();
     assert!(
@@ -1002,20 +863,11 @@ fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_li
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
     let denied = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_concurrency_slots(1))
         .unwrap_err();
     assert!(matches!(
         denied,
@@ -1044,20 +896,15 @@ fn persistent_governor_unlimited_fast_path_ignores_legacy_durable_activity() {
     let legacy_reservation = legacy_governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.20)),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.20))
+                .set_concurrency_slots(1),
         )
         .unwrap();
     legacy_governor
         .reconcile(
             legacy_reservation.id,
-            ResourceUsage {
-                usd: dec!(0.20),
-                ..ResourceUsage::default()
-            },
+            ResourceUsage::default().set_usd(dec!(0.20)),
         )
         .unwrap();
     let legacy_usage = legacy_governor.usage_for(&tenant_account).unwrap();
@@ -1096,21 +943,13 @@ fn persistent_governor_unlimited_fast_path_ignores_legacy_durable_activity() {
     let reservation = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.10)),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.10))
+                .set_concurrency_slots(1),
         )
         .unwrap();
     governor
-        .reconcile(
-            reservation.id,
-            ResourceUsage {
-                usd: dec!(0.10),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
         .unwrap();
 
     assert!(
@@ -1132,10 +971,7 @@ fn persistent_governor_unlimited_fast_path_ignores_legacy_durable_activity() {
     governor
         .set_limit(
             tenant_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(10.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(10.00)),
         )
         .unwrap();
 
@@ -1159,10 +995,7 @@ fn persistent_governor_serializes_concurrent_reservations_across_handles() {
     governor
         .try_set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
 
@@ -1178,13 +1011,7 @@ fn persistent_governor_serializes_concurrent_reservations_across_handles() {
                 PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(path));
             barrier.wait();
             governor
-                .reserve(
-                    scope,
-                    ResourceEstimate {
-                        concurrency_slots: Some(1),
-                        ..ResourceEstimate::default()
-                    },
-                )
+                .reserve(scope, ResourceEstimate::default().set_concurrency_slots(1))
                 .is_ok()
         }));
     }
@@ -1206,13 +1033,7 @@ fn persistent_governor_writes_versioned_snapshot_schema() {
 
     let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
     governor
-        .try_set_limit(
-            account,
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
-        )
+        .try_set_limit(account, ResourceLimits::default().set_max_usd(dec!(1.00)))
         .unwrap();
 
     let snapshot: serde_json::Value =
@@ -1241,10 +1062,7 @@ fn persistent_governor_upgrades_legacy_unversioned_snapshot() {
     governor
         .try_set_limit(
             ResourceAccount::tenant(TenantId::new("tenant1").unwrap()),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 
@@ -1384,10 +1202,7 @@ fn persistent_governor_rejects_unknown_reservation_estimate_fields() {
     governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.20)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(0.20)),
         )
         .unwrap();
 
@@ -1422,13 +1237,7 @@ fn persistent_governor_rejects_unknown_reservation_actual_fields() {
         .reserve(scope.clone(), ResourceEstimate::default())
         .unwrap();
     governor
-        .reconcile(
-            reservation.id,
-            ResourceUsage {
-                usd: dec!(0.20),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.20)))
         .unwrap();
 
     let mut snapshot: serde_json::Value =
@@ -1536,20 +1345,15 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
     governor
         .try_set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(1.00))
+                .set_max_concurrency_slots(1),
         )
         .unwrap();
     let active = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_concurrency_slots(1),
         )
         .unwrap();
 
@@ -1561,10 +1365,7 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
     let concurrency_denial = reloaded
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_concurrency_slots(1),
         )
         .unwrap_err();
     assert!(matches!(
@@ -1574,22 +1375,10 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
     ));
 
     reloaded
-        .reconcile(
-            active.id,
-            ResourceUsage {
-                usd: dec!(0.95),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(active.id, ResourceUsage::default().set_usd(dec!(0.95)))
         .unwrap();
     let usd_denial = reloaded
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.10)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
         .unwrap_err();
     assert!(matches!(
         usd_denial,
@@ -2216,29 +2005,20 @@ fn project_and_agent_limits_both_apply_without_override() {
     governor
         .set_limit(
             project_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(0.50)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(0.50)),
         )
         .unwrap();
     governor
         .set_limit(
             agent_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 
     let err = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.75)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(0.75)),
         )
         .unwrap_err();
 
@@ -2251,30 +2031,18 @@ fn project_and_agent_limits_both_apply_without_override() {
     governor
         .set_limit(
             project_account,
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
     governor
         .set_limit(
             agent_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(0.50)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(0.50)),
         )
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.75)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.75)))
         .unwrap_err();
 
     assert!(matches!(
@@ -2297,12 +2065,10 @@ fn reservation_and_usage_are_charged_to_full_scope_cascade() {
     let reservation = governor
         .reserve(
             scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.10)),
-                output_bytes: Some(100),
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_usd(dec!(0.10))
+                .set_output_bytes(100)
+                .set_concurrency_slots(1),
         )
         .unwrap();
 
@@ -2353,32 +2119,17 @@ fn project_limit_denies_leaf_even_when_tenant_allows() {
         scope.project_id.clone().unwrap(),
     );
     governor
-        .set_limit(
-            tenant,
-            ResourceLimits {
-                max_usd: Some(dec!(10.00)),
-                ..ResourceLimits::default()
-            },
-        )
+        .set_limit(tenant, ResourceLimits::default().set_max_usd(dec!(10.00)))
         .unwrap();
     governor
         .set_limit(
             project.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(1.50)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(1.50)))
         .unwrap_err();
 
     assert!(matches!(
@@ -2396,40 +2147,22 @@ fn reconciled_usage_counts_against_future_reservations() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 
     let reservation = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.20)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(0.20)),
         )
         .unwrap();
     governor
-        .reconcile(
-            reservation.id,
-            ResourceUsage {
-                usd: dec!(0.80),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.80)))
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.30)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.30)))
         .unwrap_err();
 
     assert!(matches!(
@@ -2451,50 +2184,29 @@ fn active_reserved_and_usage_appear_in_denial_details() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 
     let completed = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.40)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(0.40)),
         )
         .unwrap();
     governor
-        .reconcile(
-            completed.id,
-            ResourceUsage {
-                usd: dec!(0.40),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(completed.id, ResourceUsage::default().set_usd(dec!(0.40)))
         .unwrap();
 
     governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.30)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(0.30)),
         )
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.40)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.40)))
         .unwrap_err();
 
     assert!(matches!(
@@ -2517,40 +2229,25 @@ fn actual_usage_above_estimate_is_recorded_and_blocks_future_work() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 
     let reservation = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(0.20)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(0.20)),
         )
         .unwrap();
     governor
-        .reconcile(
-            reservation.id,
-            ResourceUsage {
-                usd: dec!(0.95),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.95)))
         .unwrap();
 
     assert_eq!(governor.usage_for(&account).usd, dec!(0.95));
     assert!(matches!(
         governor.reserve(
             scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.10)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(0.10)),
         ),
         Err(ResourceError::LimitExceeded { denial, .. })
             if denial.current_usage == ResourceValue::Decimal(dec!(0.95))
@@ -2592,58 +2289,28 @@ fn closed_reservations_reject_cross_lifecycle_operations_with_status() {
 #[test]
 fn non_usd_dimensions_can_deny_reservations() {
     assert_denied_dimension(
-        ResourceLimits {
-            max_input_tokens: Some(10),
-            ..ResourceLimits::default()
-        },
-        ResourceEstimate {
-            input_tokens: Some(11),
-            ..ResourceEstimate::default()
-        },
+        ResourceLimits::default().set_max_input_tokens(10),
+        ResourceEstimate::default().set_input_tokens(11),
         ResourceDimension::InputTokens,
     );
     assert_denied_dimension(
-        ResourceLimits {
-            max_output_tokens: Some(10),
-            ..ResourceLimits::default()
-        },
-        ResourceEstimate {
-            output_tokens: Some(11),
-            ..ResourceEstimate::default()
-        },
+        ResourceLimits::default().set_max_output_tokens(10),
+        ResourceEstimate::default().set_output_tokens(11),
         ResourceDimension::OutputTokens,
     );
     assert_denied_dimension(
-        ResourceLimits {
-            max_output_bytes: Some(10),
-            ..ResourceLimits::default()
-        },
-        ResourceEstimate {
-            output_bytes: Some(11),
-            ..ResourceEstimate::default()
-        },
+        ResourceLimits::default().set_max_output_bytes(10),
+        ResourceEstimate::default().set_output_bytes(11),
         ResourceDimension::OutputBytes,
     );
     assert_denied_dimension(
-        ResourceLimits {
-            max_network_egress_bytes: Some(10),
-            ..ResourceLimits::default()
-        },
-        ResourceEstimate {
-            network_egress_bytes: Some(11),
-            ..ResourceEstimate::default()
-        },
+        ResourceLimits::default().set_max_network_egress_bytes(10),
+        ResourceEstimate::default().set_network_egress_bytes(11),
         ResourceDimension::NetworkEgressBytes,
     );
     assert_denied_dimension(
-        ResourceLimits {
-            max_process_count: Some(1),
-            ..ResourceLimits::default()
-        },
-        ResourceEstimate {
-            process_count: Some(2),
-            ..ResourceEstimate::default()
-        },
+        ResourceLimits::default().set_max_process_count(1),
+        ResourceEstimate::default().set_process_count(2),
         ResourceDimension::ProcessCount,
     );
 }
@@ -2676,24 +2343,12 @@ fn zero_usd_limit_treated_as_unlimited() {
     let scope = sample_scope("tenant-zero", "user-zero", Some("project-zero"));
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     governor
-        .set_limit(
-            account,
-            ResourceLimits {
-                max_usd: Some(dec!(0)),
-                ..ResourceLimits::default()
-            },
-        )
+        .set_limit(account, ResourceLimits::default().set_max_usd(dec!(0)))
         .unwrap();
     // A reservation that would clearly exceed any non-zero cap still succeeds
     // because 0 is the "explicit no cap" sentinel.
     governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(1_000_000)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(1_000_000)))
         .unwrap();
 }
 
@@ -2705,19 +2360,13 @@ fn zero_integer_limit_treated_as_unlimited() {
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(0),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(0),
         )
         .unwrap();
     governor
         .reserve(
             scope,
-            ResourceEstimate {
-                concurrency_slots: Some(u32::MAX),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_concurrency_slots(u32::MAX),
         )
         .unwrap();
 }
@@ -2742,13 +2391,7 @@ fn reserve_with_outcome_returns_warning_above_warn_threshold_below_pause() {
         .unwrap();
 
     let outcome = governor
-        .reserve_with_outcome(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(8.00)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve_with_outcome(scope, ResourceEstimate::default().set_usd(dec!(8.00)))
         .unwrap();
     assert_eq!(outcome.warnings.len(), 1);
     assert_eq!(outcome.warnings[0].account, account);
@@ -2777,13 +2420,7 @@ fn reserve_returns_requires_approval_above_pause_below_hard_limit() {
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(9.50)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(9.50)))
         .unwrap_err();
     match err {
         ResourceError::RequiresApproval { needed, .. } => {
@@ -2816,13 +2453,7 @@ fn hard_limit_overrun_returns_limit_exceeded_not_requires_approval() {
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(11.00)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(11.00)))
         .unwrap_err();
     assert!(matches!(err, ResourceError::LimitExceeded { .. }));
 }
@@ -2844,31 +2475,17 @@ fn account_snapshot_reports_current_period_and_spend() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(5.00)),
-                period: BudgetPeriod::Rolling24h,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(5.00))
+                .set_period(BudgetPeriod::Rolling24h),
         )
         .unwrap();
 
     let reservation = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.50)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.50)))
         .unwrap();
     governor
-        .reconcile(
-            reservation.id,
-            ResourceUsage {
-                usd: dec!(0.50),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.50)))
         .unwrap();
 
     let snapshot = governor.account_snapshot(&account).unwrap().unwrap();
@@ -2894,11 +2511,9 @@ fn rolling_24h_snapshot_reports_anchored_window_not_now_window() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(5.00)),
-                period: BudgetPeriod::Rolling24h,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(5.00))
+                .set_period(BudgetPeriod::Rolling24h),
         )
         .unwrap();
 
@@ -2944,13 +2559,7 @@ fn threshold_pause_fires_at_exactly_100_percent_when_pause_below_one() {
 
     // Exactly 100% utilization: usage 0, requested 10.00 against a $10 cap.
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(10.00)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(10.00)))
         .unwrap_err();
     match err {
         ResourceError::RequiresApproval { needed, .. } => {
@@ -2986,13 +2595,7 @@ fn pause_threshold_of_one_disables_approval_and_allows_under_hard_cap() {
 
     // 95% of cap; pause_at = 1.0 disables approval, hard limit not yet hit.
     let outcome = governor
-        .reserve_with_outcome(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(9.50)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve_with_outcome(scope, ResourceEstimate::default().set_usd(dec!(9.50)))
         .unwrap();
     assert!(outcome.warnings.is_empty());
 }
@@ -3031,30 +2634,18 @@ fn calendar_day_period_resets_at_local_midnight() {
     let r1 = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(4.00)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(4.00)),
         )
         .unwrap();
     governor
-        .reconcile(
-            r1.id,
-            ResourceUsage {
-                usd: dec!(4.00),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(r1.id, ResourceUsage::default().set_usd(dec!(4.00)))
         .unwrap();
 
     // 80% spent in the day-1 window. Same window: another $1.50 should hard-deny.
     let denied = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(1.50)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(1.50)),
         )
         .unwrap_err();
     assert!(matches!(denied, ResourceError::LimitExceeded { .. }));
@@ -3062,13 +2653,7 @@ fn calendar_day_period_resets_at_local_midnight() {
     // Advance the clock past LA midnight into day 2. New period, full budget.
     clock.set(day2_morning_utc);
     governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(4.00)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(4.00)))
         .unwrap();
 }
 
@@ -3083,42 +2668,25 @@ fn rolling_24h_period_resets_after_anchor_passes() {
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_usd: Some(dec!(5.00)),
-                period: BudgetPeriod::Rolling24h,
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_usd(dec!(5.00))
+                .set_period(BudgetPeriod::Rolling24h),
         )
         .unwrap();
 
     let r = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(4.50)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(4.50)),
         )
         .unwrap();
     governor
-        .reconcile(
-            r.id,
-            ResourceUsage {
-                usd: dec!(4.50),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(r.id, ResourceUsage::default().set_usd(dec!(4.50)))
         .unwrap();
     // After 24h+1m the window has rolled over.
     clock.advance(chrono::Duration::hours(24) + chrono::Duration::minutes(1));
     governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(4.50)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(4.50)))
         .unwrap();
 }
 
@@ -3138,30 +2706,18 @@ fn cascade_reports_first_failing_account_in_user_project_order() {
     governor
         .set_limit(
             user_account,
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
     governor
         .set_limit(
             project_account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(0.50)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(0.50)),
         )
         .unwrap();
 
     let err = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.75)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.75)))
         .unwrap_err();
     match err {
         ResourceError::LimitExceeded { denial, .. } => {
@@ -3210,31 +2766,20 @@ fn limit_exceeded_carries_warnings_from_other_dimensions() {
     let prior = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                input_tokens: Some(80),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_input_tokens(80),
         )
         .unwrap();
     governor
-        .reconcile(
-            prior.id,
-            ResourceUsage {
-                input_tokens: 80,
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(prior.id, ResourceUsage::default().set_input_tokens(80))
         .unwrap();
     // Now request 20 output_tokens (cap 10, hard deny) + 5 input_tokens
     // (running total 85, warn at 0.5 fires).
     let err = governor
         .reserve(
             scope,
-            ResourceEstimate {
-                input_tokens: Some(5),
-                output_tokens: Some(20),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_input_tokens(5)
+                .set_output_tokens(20),
         )
         .unwrap_err();
     let warnings = match err {
@@ -3309,20 +2854,11 @@ fn governor_emits_budget_events_through_event_sink() {
     let outcome = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(2.00)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(2.00)),
         )
         .unwrap();
     governor
-        .reconcile(
-            outcome.id,
-            ResourceUsage {
-                usd: dec!(2.00),
-                ..ResourceUsage::default()
-            },
-        )
+        .reconcile(outcome.id, ResourceUsage::default().set_usd(dec!(2.00)))
         .unwrap();
     assert!(
         sink.snapshot()
@@ -3344,10 +2880,7 @@ fn governor_emits_budget_events_through_event_sink() {
     let _ = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(4.00)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(4.00)),
         )
         .unwrap();
     let warn_events = sink.drain();
@@ -3362,10 +2895,7 @@ fn governor_emits_budget_events_through_event_sink() {
     let approval = governor
         .reserve(
             scope.clone(),
-            ResourceEstimate {
-                usd: Some(dec!(3.00)),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_usd(dec!(3.00)),
         )
         .unwrap_err();
     assert!(matches!(approval, ResourceError::RequiresApproval { .. }));
@@ -3379,13 +2909,7 @@ fn governor_emits_budget_events_through_event_sink() {
 
     // Push over the hard cap.
     let denial = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(100.00)),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_usd(dec!(100.00)))
         .unwrap_err();
     assert!(matches!(denial, ResourceError::LimitExceeded { .. }));
     let deny_events = sink.drain();
@@ -3419,10 +2943,7 @@ fn schema_v1_snapshot_migrates_in_place_on_load() {
     governor
         .try_set_limit(
             ResourceAccount::tenant(TenantId::new("tenant1").unwrap()),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_usd(dec!(1.00)),
         )
         .unwrap();
 

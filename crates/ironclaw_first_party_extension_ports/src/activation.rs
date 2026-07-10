@@ -94,6 +94,28 @@ impl Default for SkillActivationSelectorConfig {
     }
 }
 
+impl SkillActivationSelectorConfig {
+    pub fn set_max_active_skills(mut self, max_active_skills: usize) -> Self {
+        self.max_active_skills = max_active_skills;
+        self
+    }
+
+    pub fn set_max_context_tokens(mut self, max_context_tokens: usize) -> Self {
+        self.max_context_tokens = max_context_tokens;
+        self
+    }
+
+    pub fn set_selection_mode(mut self, selection_mode: SkillActivationSelectionMode) -> Self {
+        self.selection_mode = selection_mode;
+        self
+    }
+
+    pub fn set_regex_activation_enabled(mut self, regex_activation_enabled: bool) -> Self {
+        self.regex_activation_enabled = regex_activation_enabled;
+        self
+    }
+}
+
 /// Result of selecting skill activations from one user message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillActivationSelection {
@@ -1992,10 +2014,7 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                regex_activation_enabled: false,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_regex_activation_enabled(false),
         );
         let context = run_context().await;
         selectable
@@ -2031,10 +2050,7 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                regex_activation_enabled: false,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_regex_activation_enabled(false),
         );
         let context = run_context().await;
         selectable
@@ -2073,10 +2089,8 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
         selectable
@@ -2130,10 +2144,8 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
 
@@ -2176,10 +2188,8 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source.clone(),
-            SkillActivationSelectorConfig {
-                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
 
@@ -2216,10 +2226,7 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                max_active_skills: 0,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_max_active_skills(0),
         );
         let context = run_context().await;
 
@@ -2428,10 +2435,7 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                max_active_skills: 1,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default().set_max_active_skills(1),
         );
         let context = run_context().await;
 
@@ -2888,11 +2892,9 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig {
-                max_active_skills: 1,
-                max_context_tokens: 4,
-                ..SkillActivationSelectorConfig::default()
-            },
+            SkillActivationSelectorConfig::default()
+                .set_max_active_skills(1)
+                .set_max_context_tokens(4),
         );
         let context = run_context().await;
         selectable
