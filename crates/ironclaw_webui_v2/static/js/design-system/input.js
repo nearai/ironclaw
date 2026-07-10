@@ -27,9 +27,11 @@ const INPUT_BASE =
   "focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_28%,transparent)] " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
-/* Sizes mirroring reference AppInput */
+/* Sizes mirroring reference AppInput. `sm` is the compact toolbar size:
+   it uses the shared --v2-control-* tokens (like Button md) so a small
+   Select/Input lines up with buttons and segmented controls in a row. */
 const INPUT_SIZES = {
-  sm: "h-9 rounded-[10px] px-3 text-[12px]",
+  sm: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-sm)] text-xs",
   md: "h-[44px] rounded-[14px] px-3.5 text-[13px] md:h-[50px] md:rounded-[16px] md:px-4 md:text-sm",
   lg: "h-[54px] rounded-[18px] px-4 text-base",
 };
@@ -83,12 +85,13 @@ export function Textarea({
 export function Select({
   children,
   className = "",
+  wrapperClassName = "w-full",
   size = "md",
   error = false,
   ...rest
 }) {
   return html`
-    <div className="relative w-full">
+    <div className=${cn("relative", wrapperClassName)}>
       <select
         className=${cn(
           INPUT_BASE,
