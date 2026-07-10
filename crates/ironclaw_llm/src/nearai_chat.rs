@@ -1,3 +1,4 @@
+// arch-exempt: large_file, NEAR AI chat provider decomposition, plan #5662
 //! NEAR AI provider implementation (Chat Completions API).
 //!
 //! This provider uses the OpenAI-compatible Chat Completions endpoint with

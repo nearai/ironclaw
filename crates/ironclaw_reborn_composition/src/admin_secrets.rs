@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
 use ironclaw_secrets::{
     FilesystemSecretStore, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
     SecretsCrypto,
@@ -34,6 +36,7 @@ pub(crate) trait AdminSecretProvisioner: Send + Sync {
         tenant: &TenantId,
         user: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
     ) -> Result<Vec<SecretMetadata>, SecretStoreError>;
 
     async fn put(
@@ -41,6 +44,7 @@ pub(crate) trait AdminSecretProvisioner: Send + Sync {
         tenant: &TenantId,
         user: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: SecretHandle,
         material: SecretMaterial,
     ) -> Result<SecretMetadata, SecretStoreError>;
@@ -50,6 +54,7 @@ pub(crate) trait AdminSecretProvisioner: Send + Sync {
         tenant: &TenantId,
         user: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: &SecretHandle,
     ) -> Result<bool, SecretStoreError>;
 }
@@ -76,18 +81,22 @@ where
     /// `MountView` (via [`invocation_mount_view`](crate::invocation_mount_view))
     /// resolves `/secrets` → `/tenants/{tenant}/users/{user}/secrets` for path
     /// isolation; the scope carries the same `(tenant, user)` so the store's
-    /// `same_scope_owner` check matches between put and list/delete.
+    /// `same_scope_owner` check matches between put and list/delete. The
+    /// optional agent/project pair is the trusted runtime owner scope stamped
+    /// onto the authenticated WebUI caller, so admin writes land where
+    /// capability preflight reads for that same deployment.
     fn store_for(
         &self,
         tenant: &TenantId,
         user: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
     ) -> Result<(FilesystemSecretStore<F>, ResourceScope), SecretStoreError> {
         let scope = ResourceScope {
             tenant_id: tenant.clone(),
             user_id: user.clone(),
             agent_id: agent_id.cloned(),
-            project_id: None,
+            project_id: project_id.cloned(),
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),
@@ -118,8 +127,9 @@ where
         tenant: &TenantId,
         user: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
     ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        let (store, scope) = self.store_for(tenant, user, agent_id)?;
+        let (store, scope) = self.store_for(tenant, user, agent_id, project_id)?;
         store.metadata_for_scope(&scope).await
     }
 
@@ -128,10 +138,11 @@ where
         tenant: &TenantId,
         user: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: SecretHandle,
         material: SecretMaterial,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        let (store, scope) = self.store_for(tenant, user, agent_id)?;
+        let (store, scope) = self.store_for(tenant, user, agent_id, project_id)?;
         store.put(scope, handle, material, None).await
     }
 
@@ -140,9 +151,10 @@ where
         tenant: &TenantId,
         user: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: &SecretHandle,
     ) -> Result<bool, SecretStoreError> {
-        let (store, scope) = self.store_for(tenant, user, agent_id)?;
+        let (store, scope) = self.store_for(tenant, user, agent_id, project_id)?;
         store.delete(&scope, handle).await
     }
 }

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, RebornServices facade decomposition tracked separately, plan #4469
 //! WebUI-facing Reborn service facade.
 //!
 //! This module is the stable high-level API beta WebUI route handlers use
@@ -3282,7 +3283,12 @@ impl RebornServicesApi for RebornServices {
             .await?;
         let secrets = self
             .admin_users
-            .list_secrets(&caller.tenant_id, &user_id, caller.agent_id.as_ref())
+            .list_secrets(
+                &caller.tenant_id,
+                &user_id,
+                caller.agent_id.as_ref(),
+                caller.project_id.as_ref(),
+            )
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminUserSecretsListResponse { secrets })
@@ -3304,6 +3310,7 @@ impl RebornServicesApi for RebornServices {
                 &caller.tenant_id,
                 &user_id,
                 caller.agent_id.as_ref(),
+                caller.project_id.as_ref(),
                 handle,
                 SecretString::from(request.value),
             )
@@ -3329,6 +3336,7 @@ impl RebornServicesApi for RebornServices {
                 &caller.tenant_id,
                 &user_id,
                 caller.agent_id.as_ref(),
+                caller.project_id.as_ref(),
                 handle,
             )
             .await

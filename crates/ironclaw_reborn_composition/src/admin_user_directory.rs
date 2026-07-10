@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, SecretHandle, TenantId, UserId};
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
@@ -201,10 +201,11 @@ impl AdminUserService for RebornAdminUserDirectory {
         tenant: &TenantId,
         user_id: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
         let secrets = self
             .secrets
-            .list(tenant, user_id, agent_id)
+            .list(tenant, user_id, agent_id, project_id)
             .await
             .map_err(map_secret_error)?;
         Ok(secrets.into_iter().map(to_secret_meta).collect())
@@ -215,6 +216,7 @@ impl AdminUserService for RebornAdminUserDirectory {
         tenant: &TenantId,
         user_id: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
@@ -223,7 +225,7 @@ impl AdminUserService for RebornAdminUserDirectory {
         // there), so the adapter never sees a raw string to re-validate.
         let meta = self
             .secrets
-            .put(tenant, user_id, agent_id, handle, material)
+            .put(tenant, user_id, agent_id, project_id, handle, material)
             .await
             .map_err(map_secret_error)?;
         Ok(to_secret_meta(meta))
@@ -234,10 +236,11 @@ impl AdminUserService for RebornAdminUserDirectory {
         tenant: &TenantId,
         user_id: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         self.secrets
-            .delete(tenant, user_id, agent_id, &handle)
+            .delete(tenant, user_id, agent_id, project_id, &handle)
             .await
             .map_err(map_secret_error)
     }

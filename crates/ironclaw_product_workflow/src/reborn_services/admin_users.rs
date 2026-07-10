@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, SecretHandle, TenantId, UserId};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -178,27 +178,39 @@ pub trait AdminUserService: Send + Sync {
 
     async fn count_active_admins(&self, tenant: &TenantId) -> Result<usize, AdminUserError>;
 
+    /// `agent_id` and `project_id` identify the trusted runtime owner scope
+    /// selected by the authenticated WebUI caller for the target user's secret
+    /// namespace. `None` keeps the corresponding dimension user-level,
+    /// matching pre-scoping behavior.
     async fn list_secrets(
         &self,
         tenant: &TenantId,
         user_id: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError>;
 
+    /// Stores secret material under the target user plus the trusted runtime
+    /// owner scope selected by `agent_id`/`project_id`; omitted dimensions
+    /// remain user-level.
     async fn put_secret(
         &self,
         tenant: &TenantId,
         user_id: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError>;
 
+    /// Deletes from the same target-user runtime owner scope used by list/put.
+    /// `None` dimensions delete from the corresponding user-level scope.
     async fn delete_secret(
         &self,
         tenant: &TenantId,
         user_id: &UserId,
         agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
         handle: SecretHandle,
     ) -> Result<bool, AdminUserError>;
 }
@@ -284,6 +296,7 @@ impl AdminUserService for RejectingAdminUserService {
         _tenant: &TenantId,
         _user_id: &UserId,
         _agent_id: Option<&AgentId>,
+        _project_id: Option<&ProjectId>,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
@@ -293,6 +306,7 @@ impl AdminUserService for RejectingAdminUserService {
         _tenant: &TenantId,
         _user_id: &UserId,
         _agent_id: Option<&AgentId>,
+        _project_id: Option<&ProjectId>,
         _handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
@@ -304,6 +318,7 @@ impl AdminUserService for RejectingAdminUserService {
         _tenant: &TenantId,
         _user_id: &UserId,
         _agent_id: Option<&AgentId>,
+        _project_id: Option<&ProjectId>,
         _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Unavailable)

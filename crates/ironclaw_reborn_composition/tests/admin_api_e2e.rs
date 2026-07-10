@@ -26,7 +26,9 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -45,6 +47,7 @@ use tower::ServiceExt;
 
 const TENANT: &str = "admin-e2e-tenant";
 const AGENT: &str = "admin-e2e-agent";
+const PROJECT: &str = "admin-e2e-project";
 const OPERATOR_USER: &str = "admin-e2e-operator";
 const OPERATOR_TOKEN: &str = "operator-secret-token";
 
@@ -175,7 +178,8 @@ async fn build_admin_harness() -> AdminHarness {
         authenticator,
         vec![HeaderValue::from_static("http://localhost:0")],
     )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
     let router = webui_v2_app(bundle, config).expect("webui v2 app");
 
     AdminHarness {
@@ -454,7 +458,7 @@ async fn admin_full_lifecycle_and_api_token_login() {
         tenant_id: TenantId::new(TENANT).expect("tenant"),
         user_id: UserId::new(admin_id.as_str()).expect("admin user"),
         agent_id: Some(AgentId::new(AGENT).expect("agent")),
-        project_id: None,
+        project_id: Some(ProjectId::new(PROJECT).expect("project")),
         mission_id: None,
         thread_id: None,
         invocation_id: InvocationId::new(),
@@ -463,21 +467,42 @@ async fn admin_full_lifecycle_and_api_token_login() {
     let lease = secret_store
         .lease_once(&runtime_scope, &handle)
         .await
-        .expect("admin-provisioned secret is readable at the runtime agent scope");
+        .expect("admin-provisioned secret is readable at the runtime agent+project scope");
     let material = secret_store
         .consume(&runtime_scope, lease.id)
         .await
-        .expect("agent-scoped lease consumes");
+        .expect("agent+project-scoped lease consumes");
     assert_eq!(
         material.expose_secret(),
         "sk-super-secret-value",
-        "admin secret PUT must write to the default-agent scope capability preflight reads"
+        "admin secret PUT must write to the default runtime scope capability preflight reads"
+    );
+    let mut agent_only_scope = runtime_scope.clone();
+    agent_only_scope.project_id = None;
+    let err = secret_store
+        .lease_once(&agent_only_scope, &handle)
+        .await
+        .expect_err("admin secret PUT should not write an agent-only duplicate");
+    assert!(
+        matches!(
+            err,
+            ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+        ),
+        "expected UnknownSecret for agent-only scope, got {err:?}"
     );
     let mut user_scope = runtime_scope.clone();
     user_scope.agent_id = None;
+    user_scope.project_id = None;
+    let err = secret_store
+        .lease_once(&user_scope, &handle)
+        .await
+        .expect_err("admin secret PUT should not write a user-only duplicate");
     assert!(
-        secret_store.lease_once(&user_scope, &handle).await.is_err(),
-        "admin secret PUT should not fall back to writing a user-only duplicate"
+        matches!(
+            err,
+            ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+        ),
+        "expected UnknownSecret for user-only scope, got {err:?}"
     );
 
     // Delete cascades: the record is gone, and a re-read is a 404.
