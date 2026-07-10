@@ -3896,6 +3896,91 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
         )
 
+    def test_classify_encoded_mention_accepts_via_app_user_post(self):
+        # Granular Slack apps stamp EVERY user-token post with the app's
+        # bot_id/bot_profile ("via app") while `user` stays the human author
+        # — the connected user's own encoded-mention post must be FOUND, with
+        # the stamp surfaced as via_app, never rejected as a bot post.
+        verdict = run_live_qa._classify_encoded_mention_messages(
+            [
+                {
+                    "user": "U0AUTHOR01",
+                    "bot_id": "B0VIAAPP01",
+                    "text": "hey <@U0TARGET01> MENTION_123",
+                    "ts": "1.000100",
+                }
+            ],
+            marker="MENTION_123",
+            author_user_id="U0AUTHOR01",
+        )
+        found = verdict["found"]
+        self.assertIsNotNone(found)
+        self.assertEqual(found["ts"], "1.000100")
+        self.assertTrue(found["via_app"])
+        self.assertEqual(verdict["author_mismatch"], [])
+
+    def test_classify_encoded_mention_ignores_unencoded_echoes(self):
+        # A delivered assistant reply echoes the marker WITHOUT an encoded
+        # mention: it must be ignored entirely — neither selected as the
+        # post nor reported as a wrong author.
+        verdict = run_live_qa._classify_encoded_mention_messages(
+            [
+                {
+                    "user": "U0BOTUSER9",
+                    "bot_id": "B0SERVBOT9",
+                    "text": "I posted the mention with marker MENTION_123",
+                    "ts": "2.000100",
+                }
+            ],
+            marker="MENTION_123",
+            author_user_id="U0AUTHOR01",
+        )
+        self.assertIsNone(verdict["found"])
+        self.assertEqual(verdict["author_mismatch"], [])
+        self.assertIsNone(verdict["unencoded_author_marker_ts"])
+
+    def test_classify_encoded_mention_rejects_bot_identity_posts(self):
+        # A true bot-identity post (user = the BOT user id) carrying an
+        # encoded marker mention is a wrong-identity author — the check the
+        # probe exists for, judged on Slack's unforgeable `user` field.
+        verdict = run_live_qa._classify_encoded_mention_messages(
+            [
+                {
+                    "user": "U0BOTUSER9",
+                    "bot_id": "B0SERVBOT9",
+                    "text": "hey <@U0TARGET01> MENTION_123",
+                    "ts": "3.000100",
+                }
+            ],
+            marker="MENTION_123",
+            author_user_id="U0AUTHOR01",
+        )
+        self.assertIsNone(verdict["found"])
+        self.assertEqual(
+            verdict["author_mismatch"],
+            [{"ts": "3.000100", "bot": True, "user_matches_author": False}],
+        )
+
+    def test_classify_encoded_mention_flags_literal_at_posts(self):
+        # The connected user posting the marker WITHOUT an encoded mention is
+        # the literal-@ failure this probe pins — it must be flagged, not
+        # silently treated as "never posted".
+        verdict = run_live_qa._classify_encoded_mention_messages(
+            [
+                {
+                    "user": "U0AUTHOR01",
+                    "bot_id": "B0VIAAPP01",
+                    "text": "hey @Target Name MENTION_123",
+                    "ts": "4.000100",
+                }
+            ],
+            marker="MENTION_123",
+            author_user_id="U0AUTHOR01",
+        )
+        self.assertIsNone(verdict["found"])
+        self.assertEqual(verdict["unencoded_author_marker_ts"], "4.000100")
+        self.assertIn("@Target Name", verdict["unencoded_author_text"])
+
     def test_email_addresses_in_text_matches_only_real_addresses(self):
         self.assertEqual(
             run_live_qa._email_addresses_in_text(
@@ -4196,7 +4281,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             run_live_qa.case_qa_10f_slack_mention_encoding: (
                 "MENTION_",
-                "ENCODED_SLACK_MENTION_PATTERN",
+                # The encoded-mention gate moved into
+                # _classify_encoded_mention_messages (selection is
+                # encoded-mention-first); the case pins its literal-@
+                # failure surface instead. The pattern itself is pinned on
+                # the classifier below.
+                "unencoded_author_marker_ts",
+                "a literal @-name notifies nobody",
                 "_encoded_mention_targets_user",
                 "mention_targets_counterpart",
                 "_wait_for_authored_slack_message",
@@ -4225,6 +4316,23 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     f"{case_fn.__name__} must keep its {needle!r} assert — it "
                     "pins the audited failure",
                 )
+        # qa_10f's encoded-mention gate lives in the shared classifier now:
+        # the pattern and the authoritative `user`-field authorship check
+        # must stay pinned there.
+        classifier_source = inspect.getsource(
+            run_live_qa._classify_encoded_mention_messages
+        )
+        for needle in (
+            "ENCODED_SLACK_MENTION_PATTERN",
+            "author_user_id",
+            "via_app",
+        ):
+            self.assertIn(
+                needle,
+                classifier_source,
+                f"_classify_encoded_mention_messages must keep its {needle!r} "
+                "gate — it pins the audited failure",
+            )
 
     def test_qa_10_cases_fail_closed_without_slack_tokens(self):
         # Drive real case functions (not just their source): with no personal
