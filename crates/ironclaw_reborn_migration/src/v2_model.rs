@@ -127,8 +127,16 @@ pub(crate) struct Project {
     pub description: String,
     #[serde(default)]
     pub goals: Vec<String>,
+    #[serde(default)]
+    pub metrics: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub workspace_path: Option<std::path::PathBuf>,
     #[serde(default = "epoch_fallback")]
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// `ironclaw_engine::types::thread::Thread` (subset) — a mission's execution

@@ -41,6 +41,8 @@ mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
+#[cfg(feature = "migration-support")]
+mod migration_support;
 mod observability;
 mod outbound;
 mod product_auth;
@@ -147,6 +149,12 @@ pub use local_runtime_profile::{
     hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
     local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
+};
+#[cfg(all(feature = "migration-support", feature = "libsql"))]
+pub use migration_support::resolve_local_migration_target_key;
+#[cfg(feature = "migration-support")]
+pub use migration_support::{
+    RebornMigrationTargetConfig, RebornMigrationTargetStore, resolve_reborn_migration_target,
 };
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};

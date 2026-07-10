@@ -301,9 +301,9 @@ fn map_identity_error(error: RebornIdentityError) -> AdminUserError {
         RebornIdentityError::Backend(_) => AdminUserError::Unavailable,
         // A persisted-id inconsistency or a channel-actor misuse is not
         // retryable and not the client's fault.
-        RebornIdentityError::InvalidUserId(_) | RebornIdentityError::ChannelActorNotMintable => {
-            AdminUserError::Internal
-        }
+        RebornIdentityError::InvalidUserId(_)
+        | RebornIdentityError::UserImportConflict(_)
+        | RebornIdentityError::ChannelActorNotMintable => AdminUserError::Internal,
         // Only `resolve_or_create` (the SSO login path) raises this; the admin
         // directory operations never resolve external identities, so reaching
         // it here is a backend inconsistency rather than the client's fault.

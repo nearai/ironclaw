@@ -33,6 +33,18 @@ else
   IRONCLAW_REBORN_HOME="/data/ironclaw-reborn"
 fi
 export IRONCLAW_REBORN_HOME
+
+# Migration is always an explicit operator workflow. Read-only planning,
+# status, and help must not let the container entrypoint create target state or
+# seed config first. Mutating/resume/verify operations continue through the
+# normal persistent-volume and config checks below.
+if [ "${1:-}" = "migrate" ]; then
+  case "${2:-}:${3:-}" in
+    v1:apply|v1:resume|v1:verify) ;;
+    *) exec ironclaw-reborn "$@" ;;
+  esac
+fi
+
 if [ -n "${IRONCLAW_REBORN_DEFAULT_CONFIG:-}" ]; then
   default_config="$IRONCLAW_REBORN_DEFAULT_CONFIG"
 else

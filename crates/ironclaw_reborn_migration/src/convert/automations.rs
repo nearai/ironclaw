@@ -34,6 +34,7 @@ use crate::options::MigrationOptions;
 use crate::report::{Domain, LossReason, MigrationReport};
 use crate::source::V1Source;
 use crate::target::RebornTarget;
+use crate::target::ids;
 use crate::v2_model::{self, EngineThread, Mission, MissionCadence, MissionStatus};
 
 pub(crate) async fn run(
@@ -136,8 +137,14 @@ async fn convert_routine(
         return Ok(());
     };
 
+    let migration_identity = ids::MigrationIdentity::from_report(report)?;
     let record = TriggerRecord {
-        trigger_id: ironclaw_triggers::TriggerId::new(),
+        trigger_id: migration_identity.trigger_id(
+            "routine",
+            &routine.id.to_string(),
+            &tgt.tenant_id,
+            &tgt.agent_id,
+        )?,
         tenant_id: tgt.tenant_id.clone(),
         creator_user_id,
         agent_id: Some(tgt.agent_id.clone()),
@@ -160,15 +167,10 @@ async fn convert_routine(
     };
 
     if !options.dry_run {
-        tgt.trigger_repo
-            .upsert_trigger(record)
-            .await
-            .map_err(|e| MigrationError::WriteTarget {
-                domain: format!("trigger for {source_id}"),
-                reason: e.to_string(),
-            })?;
+        tgt.compare_and_upsert_trigger(&source_id, record).await?;
     }
     report.stats.routines += 1;
+    report.stats.triggers += 1;
     Ok(())
 }
 
@@ -374,7 +376,7 @@ async fn convert_mission(
             let tz = timezone.clone().unwrap_or_else(|| "UTC".to_string());
             match TriggerSchedule::cron_with_timezone(expression.clone(), tz) {
                 Ok(schedule) => {
-                    let state = match mission.status {
+                    let mut state = match mission.status {
                         MissionStatus::Active => TriggerState::Scheduled,
                         MissionStatus::Paused => TriggerState::Paused,
                         MissionStatus::Completed => TriggerState::Completed,
@@ -395,13 +397,36 @@ async fn convert_mission(
                     if let Some(creator_user_id) =
                         report.valid_user_id(Domain::Mission, &source_id, "user_id", &owner)
                     {
-                        let next_run_at = mission_next_run_at(report, &source_id, mission);
+                        let (next_run_at, synthesized_next_run) =
+                            mission_next_run_at(report, &source_id, mission);
+                        // A source without a durable next fire cannot safely be
+                        // armed. Keep the deterministic historical timestamp,
+                        // but require an operator to review and resume it.
+                        if synthesized_next_run && state == TriggerState::Scheduled {
+                            state = TriggerState::Paused;
+                        }
+                        let project_id = mission
+                            .project_id
+                            .map(|id| ProjectId::new(id.to_string()))
+                            .transpose()
+                            .map_err(|error| {
+                                MigrationError::InvalidInput(format!(
+                                    "mission {} has invalid project id: {error}",
+                                    mission.id
+                                ))
+                            })?;
+                        let migration_identity = ids::MigrationIdentity::from_report(report)?;
                         let record = TriggerRecord {
-                            trigger_id: ironclaw_triggers::TriggerId::new(),
+                            trigger_id: migration_identity.trigger_id(
+                                "mission",
+                                &mission.id.to_string(),
+                                &tgt.tenant_id,
+                                &tgt.agent_id,
+                            )?,
                             tenant_id: tgt.tenant_id.clone(),
                             creator_user_id,
                             agent_id: Some(tgt.agent_id.clone()),
-                            project_id: Option::<ProjectId>::None,
+                            project_id,
                             name: mission.name.clone(),
                             source: TriggerSourceKind::Schedule,
                             schedule,
@@ -422,13 +447,9 @@ async fn convert_mission(
                             created_at: mission.created_at,
                         };
                         if !options.dry_run {
-                            tgt.trigger_repo.upsert_trigger(record).await.map_err(|e| {
-                                MigrationError::WriteTarget {
-                                    domain: format!("trigger for {source_id}"),
-                                    reason: e.to_string(),
-                                }
-                            })?;
+                            tgt.compare_and_upsert_trigger(&source_id, record).await?;
                         }
+                        report.stats.triggers += 1;
                     }
                 }
                 Err(e) => report.record_loss(
@@ -471,6 +492,7 @@ async fn convert_mission(
             thread_id: thread.id,
             owner_user: owner.clone(),
             title: thread.title.clone().or_else(|| Some(mission.name.clone())),
+            project_id: mission.project_id,
             mission_id: Some(mission.id),
             provenance: serde_json::json!({
                 "source": "engine_v2_mission_thread",
@@ -510,30 +532,28 @@ async fn convert_mission(
 }
 
 /// The trigger's `next_run_at` for a migrated mission. A mission with an
-/// explicit `next_fire_at` uses it; otherwise the fallback is the **migration
-/// time**, not `mission.created_at` — the latter can be the `epoch_fallback`
-/// synthesized when a drifted blob omits `created_at`, which would produce a
-/// `1970`-dated, immediately-due trigger. The synthesized fallback is recorded
-/// as a `Degraded` loss so it is never silent.
+/// explicit `next_fire_at` uses it; otherwise the deterministic source
+/// `created_at` is retained and an active mission is forced to `Paused`. The
+/// degraded fallback is recorded so an old timestamp can never silently arm an
+/// immediately-due trigger.
 fn mission_next_run_at(
     report: &mut MigrationReport,
     source_id: &str,
     mission: &Mission,
-) -> chrono::DateTime<chrono::Utc> {
+) -> (chrono::DateTime<chrono::Utc>, bool) {
     match mission.next_fire_at {
-        Some(next_fire_at) => next_fire_at,
+        Some(next_fire_at) => (next_fire_at, false),
         None => {
             report.record_loss(
                 Domain::Mission,
                 source_id,
                 "next_fire_at",
                 LossReason::Degraded,
-                "mission had no next_fire_at; the trigger's next run was synthesized to the \
-                 migration time (mission created_at may be an epoch fallback, which would make \
-                 the trigger immediately due)"
+                "mission had no next_fire_at; its deterministic created_at is retained and an \
+                 active mission is imported Paused so migration cannot fire it unexpectedly"
                     .to_string(),
             );
-            chrono::Utc::now()
+            (mission.created_at, true)
         }
     }
 }

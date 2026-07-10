@@ -1,7 +1,10 @@
 # Reborn CLI Docker Deployment
 
 `Dockerfile.reborn` builds the standalone `ironclaw-reborn` binary with the
-WebUI v2 and Slack host-beta features enabled. The image defaults to:
+WebUI v2 and Slack host-beta features enabled. It also installs the exact
+same-release `ironclaw-reborn-migration` companion in `/usr/local/bin`; the
+primary CLI verifies that sibling before any migration operation. The image
+defaults to:
 
 ```text
 ironclaw-reborn serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
@@ -16,6 +19,20 @@ set `IRONCLAW_REBORN_SERVE_PORT=3000`.
 ```bash
 docker build -f Dockerfile.reborn -t ironclaw-reborn:local .
 ```
+
+To inspect the migration surface without starting the default WebUI service:
+
+```bash
+docker run --rm ironclaw-reborn:local migrate v1 --help
+```
+
+Read-only migration planning/status/help bypass entrypoint config seeding so
+planning does not create target state. Apply, resume, and verify retain the
+normal persistent-volume and config checks. The container never migrates during
+its normal startup path. Mount source snapshots, the Reborn home, and the
+manifest destination explicitly; see
+[`v1-migration.md`](v1-migration.md) for the offline cutover and rollback
+procedure.
 
 ## Local Run
 

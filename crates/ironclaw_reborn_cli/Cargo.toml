@@ -13,8 +13,8 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-# Keep disabled until #3483 resolves cargo-dist tag/versioning + Windows WiX
-# packaging for the standalone Reborn binary.
+# Keep disabled until native cargo-dist packaging can install the Reborn CLI
+# and its required same-release migration companion into one directory.
 [package.metadata.dist]
 dist = false
 

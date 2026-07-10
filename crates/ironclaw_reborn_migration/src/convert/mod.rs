@@ -7,6 +7,8 @@ pub(crate) mod heartbeat;
 pub(crate) mod identities;
 pub(crate) mod jobs;
 pub(crate) mod memory;
+pub(crate) mod projects;
 pub(crate) mod secrets;
 pub(crate) mod settings;
 pub(crate) mod threads;
+pub(crate) mod users;

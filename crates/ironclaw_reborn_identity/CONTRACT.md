@@ -96,6 +96,11 @@ stack; the boundary tests still allow no new edge).
   the same email mints a *separate* user; admin-created users are token/API
   users, not pre-linked SSO accounts. Linking them is a future `link_email`
   action via `adopt_migrated_identity`, deliberately out of scope here.)
+- `import_migrated_user` — historical import with an authoritative supplied
+  `UserId` and full canonical user state. Writes only the `users/` record and
+  never a verified-email index. Absent creates; an exact replay succeeds; a
+  divergent existing row fails with `UserImportConflict` and is not
+  overwritten. Migration calls this before `adopt_migrated_identity`.
 - `update_profile` / `update_status` / `update_role` — partial mutations through
   the shared `ironclaw_filesystem::cas_update` helper (never a per-record mutex;
   `ironclaw_filesystem/CLAUDE.md` invariant 2). Each bumps `updated_at`.
@@ -193,6 +198,8 @@ Filed from the de-slop review:
 - **#5614** — cross-process divergent-email logins can split a principal.
 - **#5615** — `bind()` has no OAuth-surface guard (defense-in-depth).
 - **#5616** — `adopt_migrated_identity` never writes `StoredUser` and reverses the
-  index/identity write order.
+  index/identity write order. The migration path must call
+  `import_migrated_user` first; folding both operations into one atomic port is
+  still unresolved.
 - **#5617** — the login seam is tested only with fakes on both sides.
 - **#5618** — decide the `ExternalIdentityKey` + `lookup`/`bind` public surface.

@@ -37,7 +37,7 @@ This document is a summary for planning and triage. It does not replace `FEATURE
 | --- | --- | --- | --- |
 | Default runtime | Available | Missing | `ironclaw-reborn` is explicitly not the default runtime and does not replace `ironclaw` behavior yet. |
 | Standalone binary | Missing | Partial | `ironclaw-reborn` supports `run`, `repl`, `doctor`, `onboard`, `models`, `skills`, `hooks`, `logs`, `extension`, `profile`, and selected `channels` commands. |
-| Configuration and migration | Available | Partial | Reborn has its own home/config path. It intentionally does not yet support v1 config, DB, settings, secrets, or history migration. |
+| Configuration and migration | Available | Partial | Reborn has its own home/config path plus a versioned offline v1 migration workflow with read-only planning, explicit per-domain dispositions, and stopped-snapshot apply/resume. Current verification checks structural durable-table/path counts rather than performing a production cold-boot test. Fidelity remains release- and domain-specific; the manifest reports archive/reset/re-auth/reinstall gaps. |
 | WebChat/UI | Available | Partial | Legacy has Web gateway chat and dashboard views. Reborn WebChat v2 is supported through `serve` only with `webui-v2-beta`; it is an early beta operator surface. |
 | Web gateway APIs | Available | Partial | Legacy includes health/status, chat, memory, jobs, logs, extensions, SSE/WebSocket, and OpenAI-compatible APIs. Reborn WebUI exposes browser-facing `/api/webchat/v2` flows and event projections, but production durable/live fanout remains follow-up work. |
 | Channel registry and channels | Available | Partial | Legacy supports CLI/TUI, HTTP webhook, REPL, WebChat, WASM channels, Telegram, Slack, Signal, and partial Discord/Feishu/WeCom/WeChat. Reborn channel registry is still not product-complete; `channels list` currently reports a deliberate empty/configured surface in the standalone CLI docs. |
@@ -89,7 +89,7 @@ This document is a summary for planning and triage. It does not replace `FEATURE
 
 | Gap | Impact |
 | --- | --- |
-| v1 migration | Reborn does not yet migrate legacy config, DB, settings, secrets, or history. |
+| v1 migration | Reborn now has an explicit, manifest-driven offline migration workflow with read-only planning, stopped-source snapshot enforcement, and resumable apply. The Docker image packages the same-version companion, but native installers do not yet package the pair. Users, projects, and typed settings are still reported rather than converted; API/session credentials require re-authentication and incompatible executable artifacts require reinstall. |
 | Production runtime services | Reborn `serve` is beta and not yet a production gateway replacement. |
 | Channel product parity | Reborn channel registry/product adapters are not complete enough to cover legacy channel behavior. |
 | Gateway API parity | OpenAI-compatible API, broader control-plane endpoints, diagnostics, and durable fanout need explicit replacement decisions. |
@@ -97,7 +97,7 @@ This document is a summary for planning and triage. It does not replace `FEATURE
 | Model/provider feature parity | Catalog, OAuth/login flows, pricing, advanced thinking controls, replay normalization, and media generation support are incomplete. |
 | Memory UX parity | Reborn has stronger storage contracts, but not all legacy memory/search/identity UX is product-complete. |
 | Automation production readiness | Trigger loop follow-ups remain around external result delivery, readiness policy, active-run retention, and jitter. |
-| Docs and operator guidance | Reborn needs a migration guide, replacement readiness checklist, and explicit compatibility policy before defaulting users to it. |
+| Docs and operator guidance | The v1 cutover/rollback runbook and explicit data-disposition policy now live in `docs/reborn/v1-migration.md`; broader replacement readiness and product parity remain separate blockers. |
 
 ## Suggested Tracking Categories
 

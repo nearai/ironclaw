@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::{
-    ExternalSubjectId, ProviderInstanceId, ProviderKind, RebornUserDirectory,
+    ExternalSubjectId, ProviderInstanceId, ProviderKind, RebornUser, RebornUserDirectory,
     RebornUserProfileUpdate, RebornUserRole, RebornUserStatus, SurfaceKind,
 };
 use ironclaw_filesystem::InMemoryBackend;
@@ -49,6 +49,24 @@ fn store_pair() -> (
 
 fn tenant(id: &str) -> TenantId {
     TenantId::new(id).expect("tenant")
+}
+
+fn migrated_user(id: &str) -> RebornUser {
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("legacy_plan".to_string(), "enterprise".to_string());
+    RebornUser {
+        user_id: UserId::new(id).expect("user"),
+        email: Some("legacy@example.com".to_string()),
+        display_name: Some("Legacy User".to_string()),
+        status: RebornUserStatus::Suspended,
+        role: RebornUserRole::Admin,
+        created_at: "2024-01-02T03:04:05Z".to_string(),
+        updated_at: "2025-02-03T04:05:06Z".to_string(),
+        created_by: Some(UserId::new("legacy-admin").expect("creator")),
+        last_login_at: Some("2025-03-04T05:06:07Z".to_string()),
+        tenant_id: Some(tenant("acme")),
+        metadata,
+    }
 }
 
 fn oauth(
@@ -879,6 +897,87 @@ async fn create_then_list_and_get_roundtrip() {
         .await
         .expect("list other");
     assert!(other.is_empty(), "users are tenant-scoped in enumeration");
+}
+
+#[tokio::test]
+async fn import_migrated_user_preserves_supplied_state_and_exact_replay_is_idempotent() {
+    let store = store();
+    let imported = migrated_user("legacy-user-42");
+
+    let first = store
+        .import_migrated_user(imported.clone())
+        .await
+        .expect("first historical import");
+    let replay = store
+        .import_migrated_user(imported.clone())
+        .await
+        .expect("exact replay");
+
+    assert_eq!(first, imported);
+    assert_eq!(replay, imported);
+    assert_eq!(
+        store
+            .get_user(&imported.user_id)
+            .await
+            .expect("get imported user"),
+        Some(imported.clone()),
+        "every supplied historical field must round-trip unchanged"
+    );
+    assert!(
+        store
+            .read_record::<StoredVerifiedEmailIndex>(
+                &verified_email_path("acme", "legacy@example.com").unwrap()
+            )
+            .await
+            .expect("read verified-email index")
+            .is_none(),
+        "importing a user profile must not establish verified-email linking"
+    );
+}
+
+#[tokio::test]
+async fn import_migrated_user_rejects_divergent_existing_state_without_overwrite() {
+    let store = store();
+    let original = migrated_user("legacy-user-42");
+    store
+        .import_migrated_user(original.clone())
+        .await
+        .expect("seed imported user");
+
+    let mut divergent = original.clone();
+    divergent.role = RebornUserRole::Owner;
+    divergent.updated_at = "2026-01-01T00:00:00Z".to_string();
+    let error = store
+        .import_migrated_user(divergent)
+        .await
+        .expect_err("divergent replay must conflict");
+
+    assert!(
+        matches!(error, RebornIdentityError::UserImportConflict(ref id) if id == "legacy-user-42"),
+        "divergent state must surface a typed import conflict, got {error:?}"
+    );
+    assert_eq!(
+        store
+            .get_user(&original.user_id)
+            .await
+            .expect("get original"),
+        Some(original),
+        "a conflict must never overwrite the existing canonical row"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_exact_user_imports_converge_across_store_instances() {
+    let (store_a, store_b) = store_pair();
+    let imported = migrated_user("legacy-user-42");
+
+    let (result_a, result_b) = tokio::join!(
+        store_a.import_migrated_user(imported.clone()),
+        store_b.import_migrated_user(imported.clone()),
+    );
+
+    assert_eq!(result_a.expect("import a"), imported);
+    assert_eq!(result_b.expect("import b"), imported);
 }
 
 #[tokio::test]

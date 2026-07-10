@@ -15,6 +15,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_memory::MemoryService;
 use ironclaw_memory_native::NativeMemoryService;
+use ironclaw_projects::{FilesystemProjectRepository, ProjectRepository};
 use ironclaw_reborn_identity::{
     FilesystemRebornIdentityStore, RebornIdentityResolver, RebornUserDirectory,
 };
@@ -26,6 +27,302 @@ use secrecy::SecretString;
 use crate::error::MigrationError;
 use crate::mounts;
 use crate::options::{MigrationOptions, TargetStore};
+
+#[path = "target_ids.rs"]
+pub(crate) mod ids;
+
+#[cfg(feature = "postgres")]
+const LIVE_TARGET_TABLES: &[&str] = &[
+    "root_filesystem_entries",
+    "root_filesystem_events",
+    "root_filesystem_index_specs",
+    "trigger_records",
+    "trigger_run_history",
+];
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TargetReadback {
+    pub(crate) users: u64,
+    pub(crate) threads: u64,
+    pub(crate) messages: u64,
+    pub(crate) projects: u64,
+    pub(crate) triggers: u64,
+    pub(crate) memory_documents: u64,
+    pub(crate) secrets: u64,
+    pub(crate) identity_records: u64,
+}
+
+/// Inspect whether a target contains live Reborn state without applying schema
+/// migrations or creating any target object.
+pub(crate) async fn target_is_empty(target: &TargetStore) -> Result<bool, MigrationError> {
+    match target {
+        TargetStore::LibSql { path } => Ok(!path.exists()),
+        #[cfg(feature = "postgres")]
+        TargetStore::Postgres { url } => {
+            let pool = open_postgres_pool(url)?;
+            let client = pool.get().await.map_err(|error| {
+                MigrationError::OpenTarget(format!(
+                    "PostgreSQL target emptiness probe failed (details redacted): {}",
+                    error
+                ))
+            })?;
+            for table in LIVE_TARGET_TABLES {
+                let relation: Option<String> = client
+                    .query_one("SELECT to_regclass($1)::text", &[table])
+                    .await
+                    .map_err(|error| {
+                        MigrationError::OpenTarget(format!(
+                            "PostgreSQL target schema probe failed for {table}: {error}"
+                        ))
+                    })?
+                    .try_get(0)
+                    .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+                if relation.is_none() {
+                    continue;
+                }
+                // Table names are fixed internal constants, never operator
+                // input. Querying one row avoids a potentially expensive full
+                // count while still enforcing the fresh-target contract.
+                let sql = format!("SELECT EXISTS (SELECT 1 FROM {table} LIMIT 1)");
+                let populated: bool = client
+                    .query_one(&sql, &[])
+                    .await
+                    .map_err(|error| {
+                        MigrationError::OpenTarget(format!(
+                            "PostgreSQL target data probe failed for {table}: {error}"
+                        ))
+                    })?
+                    .try_get(0)
+                    .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+                if populated {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        #[cfg(not(feature = "postgres"))]
+        TargetStore::Postgres { .. } => Err(MigrationError::OpenTarget(
+            "binary built without the postgres feature".to_string(),
+        )),
+    }
+}
+
+/// Read migrated state through the same durable tables used by production,
+/// without running migrations or starting workers/ingress.
+pub(crate) async fn readback(
+    target: &TargetStore,
+    tenant_id: &TenantId,
+) -> Result<TargetReadback, MigrationError> {
+    let tenant = tenant_id.as_str();
+    let thread_pattern = format!("/tenants/{tenant}/users/%/threads/%/thread.json");
+    let message_pattern = format!("/tenants/{tenant}/users/%/threads/%/messages/%.json");
+    let append_pattern = format!("/tenants/{tenant}/users/%/threads/%/message_appends");
+    let memory_pattern = format!("/memory/tenants/{tenant}/%");
+    let secret_pattern = format!("/tenants/{tenant}/users/%/secrets/%/secrets/%.json");
+    let identity_pattern = format!("/tenants/{tenant}/shared/reborn-identity/%");
+    let user_pattern = format!("/tenants/{tenant}/shared/reborn-identity/users/%.json");
+    let project_pattern = format!("/tenants/{tenant}/shared/reborn-projects/%/records/%.json");
+
+    match target {
+        #[cfg(feature = "libsql")]
+        TargetStore::LibSql { path } => {
+            if !path.is_file() {
+                return Err(MigrationError::OpenTarget(
+                    "Reborn target does not exist for verification".to_string(),
+                ));
+            }
+            let database = libsql::Builder::new_local(path)
+                .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .build()
+                .await
+                .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+            let connection = database
+                .connect()
+                .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+            connection
+                .execute("PRAGMA query_only = ON", ())
+                .await
+                .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+            Ok(TargetReadback {
+                users: count_libsql(&connection, "root_filesystem_entries", &user_pattern).await?,
+                threads: count_libsql(&connection, "root_filesystem_entries", &thread_pattern)
+                    .await?,
+                messages: count_libsql(&connection, "root_filesystem_entries", &message_pattern)
+                    .await?
+                    + count_libsql(&connection, "root_filesystem_events", &append_pattern).await?,
+                projects: count_libsql(&connection, "root_filesystem_entries", &project_pattern)
+                    .await?,
+                triggers: count_libsql_tenant(&connection, "trigger_records", tenant).await?,
+                memory_documents: count_libsql_files(&connection, &memory_pattern).await?,
+                secrets: count_libsql(&connection, "root_filesystem_entries", &secret_pattern)
+                    .await?,
+                identity_records: count_libsql(
+                    &connection,
+                    "root_filesystem_entries",
+                    &identity_pattern,
+                )
+                .await?,
+            })
+        }
+        #[cfg(not(feature = "libsql"))]
+        TargetStore::LibSql { .. } => Err(MigrationError::OpenTarget(
+            "binary built without the libsql feature".to_string(),
+        )),
+        #[cfg(feature = "postgres")]
+        TargetStore::Postgres { url } => {
+            let pool = open_postgres_pool(url)?;
+            let client = pool
+                .get()
+                .await
+                .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+            Ok(TargetReadback {
+                users: count_postgres(&client, "root_filesystem_entries", &user_pattern).await?,
+                threads: count_postgres(&client, "root_filesystem_entries", &thread_pattern)
+                    .await?,
+                messages: count_postgres(&client, "root_filesystem_entries", &message_pattern)
+                    .await?
+                    + count_postgres(&client, "root_filesystem_events", &append_pattern).await?,
+                projects: count_postgres(&client, "root_filesystem_entries", &project_pattern)
+                    .await?,
+                triggers: count_postgres_tenant(&client, "trigger_records", tenant).await?,
+                memory_documents: count_postgres_files(&client, &memory_pattern).await?,
+                secrets: count_postgres(&client, "root_filesystem_entries", &secret_pattern)
+                    .await?,
+                identity_records: count_postgres(
+                    &client,
+                    "root_filesystem_entries",
+                    &identity_pattern,
+                )
+                .await?,
+            })
+        }
+        #[cfg(not(feature = "postgres"))]
+        TargetStore::Postgres { .. } => Err(MigrationError::OpenTarget(
+            "binary built without the postgres feature".to_string(),
+        )),
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn count_libsql(
+    connection: &libsql::Connection,
+    table: &str,
+    pattern: &str,
+) -> Result<u64, MigrationError> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE path LIKE ?1");
+    let mut rows = connection
+        .query(&sql, [pattern])
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    let count = rows
+        .next()
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?
+        .ok_or_else(|| MigrationError::OpenTarget("verification count returned no row".into()))?
+        .get::<i64>(0)
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    u64::try_from(count).map_err(|_| MigrationError::OpenTarget("negative target count".into()))
+}
+
+#[cfg(feature = "libsql")]
+async fn count_libsql_tenant(
+    connection: &libsql::Connection,
+    table: &str,
+    tenant: &str,
+) -> Result<u64, MigrationError> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = ?1");
+    let mut rows = connection
+        .query(&sql, [tenant])
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    let count = rows
+        .next()
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?
+        .ok_or_else(|| MigrationError::OpenTarget("verification count returned no row".into()))?
+        .get::<i64>(0)
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    u64::try_from(count).map_err(|_| MigrationError::OpenTarget("negative target count".into()))
+}
+
+#[cfg(feature = "libsql")]
+async fn count_libsql_files(
+    connection: &libsql::Connection,
+    pattern: &str,
+) -> Result<u64, MigrationError> {
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM root_filesystem_entries
+             WHERE path LIKE ?1 AND is_dir = 0
+               AND path NOT LIKE '%.meta'
+               AND path NOT LIKE '%.versions/%'
+               AND path NOT LIKE '%.chunks/%'",
+            [pattern],
+        )
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    let count = rows
+        .next()
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?
+        .ok_or_else(|| MigrationError::OpenTarget("verification count returned no row".into()))?
+        .get::<i64>(0)
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    u64::try_from(count).map_err(|_| MigrationError::OpenTarget("negative target count".into()))
+}
+
+#[cfg(feature = "postgres")]
+async fn count_postgres(
+    client: &deadpool_postgres::Client,
+    table: &str,
+    pattern: &str,
+) -> Result<u64, MigrationError> {
+    let sql = format!("SELECT COUNT(*)::bigint FROM {table} WHERE path LIKE $1");
+    let count: i64 = client
+        .query_one(&sql, &[&pattern])
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?
+        .try_get(0)
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    u64::try_from(count).map_err(|_| MigrationError::OpenTarget("negative target count".into()))
+}
+
+#[cfg(feature = "postgres")]
+async fn count_postgres_tenant(
+    client: &deadpool_postgres::Client,
+    table: &str,
+    tenant: &str,
+) -> Result<u64, MigrationError> {
+    let sql = format!("SELECT COUNT(*)::bigint FROM {table} WHERE tenant_id = $1");
+    let count: i64 = client
+        .query_one(&sql, &[&tenant])
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?
+        .try_get(0)
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    u64::try_from(count).map_err(|_| MigrationError::OpenTarget("negative target count".into()))
+}
+
+#[cfg(feature = "postgres")]
+async fn count_postgres_files(
+    client: &deadpool_postgres::Client,
+    pattern: &str,
+) -> Result<u64, MigrationError> {
+    let count: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::bigint FROM root_filesystem_entries
+             WHERE path LIKE $1 AND is_dir = FALSE
+               AND path NOT LIKE '%.meta'
+               AND path NOT LIKE '%.versions/%'
+               AND path NOT LIKE '%.chunks/%'",
+            &[&pattern],
+        )
+        .await
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?
+        .try_get(0)
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    u64::try_from(count).map_err(|_| MigrationError::OpenTarget("negative target count".into()))
+}
 
 /// The concrete Reborn backend the migration writes into. Both the KV substrate
 /// and the triggers DB share this one handle.
@@ -55,9 +352,9 @@ pub(crate) struct RebornTarget {
     pub(crate) agent_id: AgentId,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) memory_service: Arc<dyn MemoryService>,
+    pub(crate) project_repo: Arc<dyn ProjectRepository>,
     pub(crate) trigger_repo: Arc<dyn TriggerRepository>,
-    pub(crate) extension_store: Arc<dyn ExtensionInstallationStore>,
-    /// Present only when a secrets master key was supplied.
+    /// Present when composition resolved the production target key.
     pub(crate) secret_store: Option<Arc<dyn SecretStore>>,
 }
 
@@ -93,10 +390,12 @@ impl ExtensionOwnershipTarget {
             })?;
         let user_directory = match &backend {
             #[cfg(feature = "libsql")]
-            Backend::LibSql { root, .. } => build_user_directory(root.clone(), tenant_id.clone())?,
+            Backend::LibSql { root, .. } => {
+                build_extension_ownership_user_directory(root.clone(), tenant_id.clone())?
+            }
             #[cfg(feature = "postgres")]
             Backend::Postgres { root, .. } => {
-                build_user_directory(root.clone(), tenant_id.clone())?
+                build_extension_ownership_user_directory(root.clone(), tenant_id.clone())?
             }
         };
 
@@ -110,34 +409,37 @@ impl ExtensionOwnershipTarget {
 
 impl RebornTarget {
     pub(crate) async fn open(options: &MigrationOptions) -> Result<Self, MigrationError> {
-        let crypto = match &options.secret_master_key {
+        // Open the target only after apply preconditions (the lifecycle caller
+        // enforces that ordering), then resolve the exact local-runtime key.
+        // Local key generation writes beside the DB, so it must never happen in
+        // plan mode. PostgreSQL keys arrive already resolved by composition.
+        let backend = open_backend(&options.target).await?;
+        let target_master_key = match (&options.secret_master_key, &options.target) {
+            (Some(key), _) => Some(key.clone()),
+            #[cfg(feature = "libsql")]
+            (None, TargetStore::LibSql { path }) => Some(
+                ironclaw_reborn_composition::resolve_local_migration_target_key(path).map_err(
+                    |error| MigrationError::OpenTarget(format!("secrets master key: {error}")),
+                )?,
+            ),
+            _ => None,
+        };
+        let crypto = match &target_master_key {
             Some(key) => Some(Arc::new(build_crypto(key)?)),
             None => None,
         };
 
-        let backend = open_backend(&options.target).await?;
-        let (thread_service, memory_service, secret_store) = match &backend {
+        let (thread_service, memory_service, project_repo, secret_store) = match &backend {
             #[cfg(feature = "libsql")]
-            Backend::LibSql { root, .. } => build_kv_services(root.clone(), crypto.clone()),
+            Backend::LibSql { root, .. } => {
+                build_kv_services(root.clone(), crypto.clone(), options.agent_id.clone())?
+            }
             #[cfg(feature = "postgres")]
-            Backend::Postgres { root, .. } => build_kv_services(root.clone(), crypto.clone()),
+            Backend::Postgres { root, .. } => {
+                build_kv_services(root.clone(), crypto.clone(), options.agent_id.clone())?
+            }
         };
         let trigger_repo = build_trigger_repo(&backend).await?;
-
-        // Extension installation store is owned by composition; the migration
-        // seam builds it over our root filesystem at the default state path.
-        let root_dyn: Arc<dyn RootFilesystem> = match &backend {
-            #[cfg(feature = "libsql")]
-            Backend::LibSql { root, .. } => root.clone(),
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { root, .. } => root.clone(),
-        };
-        let extension_store =
-            ironclaw_reborn_composition::extension_installation_store_for_migration(root_dyn, None)
-                .await
-                .map_err(|e| {
-                    MigrationError::OpenTarget(format!("extension installation store: {e}"))
-                })?;
 
         Ok(Self {
             backend,
@@ -145,8 +447,8 @@ impl RebornTarget {
             agent_id: options.agent_id.clone(),
             thread_service,
             memory_service,
+            project_repo,
             trigger_repo,
-            extension_store,
             secret_store,
         })
     }
@@ -169,6 +471,60 @@ impl RebornTarget {
             }
         }
     }
+
+    /// Build the canonical user-directory port over the production identity
+    /// mount. The supplied caller id only fills the store's per-user scope;
+    /// canonical user records themselves live in the tenant-shared directory.
+    pub(crate) fn user_directory(&self, caller_id: UserId) -> Arc<dyn RebornUserDirectory> {
+        let tenant = self.tenant_id.clone();
+        let agent = self.agent_id.clone();
+        match &self.backend {
+            #[cfg(feature = "libsql")]
+            Backend::LibSql { root, .. } => {
+                build_user_directory(root.clone(), tenant, caller_id, agent)
+            }
+            #[cfg(feature = "postgres")]
+            Backend::Postgres { root, .. } => {
+                build_user_directory(root.clone(), tenant, caller_id, agent)
+            }
+        }
+    }
+
+    /// Create a trigger only when the deterministic target slot is empty.
+    /// Replays accept an exact match; a different record at the same stable id
+    /// is a migration conflict and must never be overwritten by `upsert`.
+    pub(crate) async fn compare_and_upsert_trigger(
+        &self,
+        source_id: &str,
+        record: ironclaw_triggers::TriggerRecord,
+    ) -> Result<(), MigrationError> {
+        let existing = self
+            .trigger_repo
+            .get_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+            .map_err(|error| MigrationError::WriteTarget {
+                domain: format!("trigger for {source_id}"),
+                reason: format!("read deterministic target slot: {error}"),
+            })?;
+        match existing {
+            Some(existing) if existing == record => Ok(()),
+            Some(_) => Err(MigrationError::WriteTarget {
+                domain: format!("trigger for {source_id}"),
+                reason: format!(
+                    "deterministic trigger id {} already contains divergent state; refusing to overwrite",
+                    record.trigger_id
+                ),
+            }),
+            None => self
+                .trigger_repo
+                .upsert_trigger(record)
+                .await
+                .map_err(|error| MigrationError::WriteTarget {
+                    domain: format!("trigger for {source_id}"),
+                    reason: error.to_string(),
+                }),
+        }
+    }
 }
 
 fn build_crypto(key: &SecretString) -> Result<SecretsCrypto, MigrationError> {
@@ -180,37 +536,46 @@ fn build_crypto(key: &SecretString) -> Result<SecretsCrypto, MigrationError> {
 type KvServices = (
     Arc<dyn SessionThreadService>,
     Arc<dyn MemoryService>,
+    Arc<dyn ProjectRepository>,
     Option<Arc<dyn SecretStore>>,
 );
 
 /// Build the filesystem-backed KV services over one concrete backend, returning
 /// them as trait objects.
-fn build_kv_services<F>(root: Arc<F>, crypto: Option<Arc<SecretsCrypto>>) -> KvServices
+fn build_kv_services<F>(
+    root: Arc<F>,
+    crypto: Option<Arc<SecretsCrypto>>,
+    agent_id: AgentId,
+) -> Result<KvServices, MigrationError>
 where
     F: RootFilesystem + 'static,
 {
-    let threads_scoped = Arc::new(ScopedFilesystem::new(
+    let scoped = Arc::new(ScopedFilesystem::new(
         root.clone(),
-        mounts::threads_mount_view,
+        mounts::production_mount_view,
     ));
     let thread_service: Arc<dyn SessionThreadService> =
-        Arc::new(FilesystemSessionThreadService::new(threads_scoped));
+        Arc::new(FilesystemSessionThreadService::new(scoped.clone()));
+
+    let migration_user = UserId::new("reborn-migration").map_err(|error| {
+        MigrationError::OpenTarget(format!("migration project repository caller: {error}"))
+    })?;
+    let project_repo: Arc<dyn ProjectRepository> = Arc::new(FilesystemProjectRepository::new(
+        scoped.clone(),
+        migration_user,
+        agent_id,
+    ));
 
     let root_dyn: Arc<dyn RootFilesystem> = root.clone();
     let memory_service: Arc<dyn MemoryService> =
         Arc::new(NativeMemoryService::from_filesystem(root_dyn, None));
 
     let secret_store: Option<Arc<dyn SecretStore>> = crypto.map(|crypto| {
-        let secrets_scoped = Arc::new(ScopedFilesystem::new(
-            root.clone(),
-            mounts::secrets_mount_view,
-        ));
-        let store: Arc<dyn SecretStore> =
-            Arc::new(FilesystemSecretStore::new(secrets_scoped, crypto));
+        let store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::new(scoped, crypto));
         store
     });
 
-    (thread_service, memory_service, secret_store)
+    Ok((thread_service, memory_service, project_repo, secret_store))
 }
 
 #[allow(dead_code)] // wired for the identity row-by-row follow-up
@@ -223,7 +588,7 @@ fn build_identity_store<F>(
 where
     F: RootFilesystem + 'static,
 {
-    let scoped = Arc::new(ScopedFilesystem::new(root, mounts::identity_mount_view));
+    let scoped = Arc::new(ScopedFilesystem::new(root, mounts::production_mount_view));
     let project_id: Option<ProjectId> = None;
     let store: Arc<dyn RebornIdentityResolver> = Arc::new(FilesystemRebornIdentityStore::new(
         scoped, tenant_id, user_id, agent_id, project_id,
@@ -232,6 +597,21 @@ where
 }
 
 fn build_user_directory<F>(
+    root: Arc<F>,
+    tenant_id: TenantId,
+    caller_id: UserId,
+    agent_id: AgentId,
+) -> Arc<dyn RebornUserDirectory>
+where
+    F: RootFilesystem + 'static,
+{
+    let scoped = Arc::new(ScopedFilesystem::new(root, mounts::production_mount_view));
+    Arc::new(FilesystemRebornIdentityStore::new(
+        scoped, tenant_id, caller_id, agent_id, None,
+    ))
+}
+
+fn build_extension_ownership_user_directory<F>(
     root: Arc<F>,
     tenant_id: TenantId,
 ) -> Result<Arc<dyn RebornUserDirectory>, MigrationError>

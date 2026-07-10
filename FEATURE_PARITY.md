@@ -712,9 +712,22 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Gmail pub/sub | ✅ | ❌ | P3 | |
 | Inferred follow-up commitments | ✅ | ❌ | P3 | Heartbeat-delivered reminders; opt-in batched extraction |
 
-**State migration (v1/engine-v2 → Reborn):** `crates/ironclaw_reborn_migration`
-converts persisted automations. Cron routines and cron missions convert to
-Reborn `TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).
+**State migration (v1/engine-v2 → Reborn):** `ironclaw-reborn migrate v1`
+provides an explicit `plan → apply/resume → verify → status` workflow through a
+same-version companion in the Docker image and paired source builds. Native
+installers do not yet package the pair. Planning uses a read-only source adapter
+and does not open the target; apply requires a stopped-source snapshot, a fresh
+target, and the sealed source fingerprint. The versioned manifest inventories
+known v1 tables/home artifacts and labels each category as imported, converted,
+archive-only, reset, re-auth/reinstall, or unsupported. `archive-only` currently
+means the source category and count remain visible in the manifest; it does not
+export or retain the source payload. The companion is resolved beside the
+primary executable rather than from `PATH`, and database URLs/master keys remain
+environment-only. See
+`docs/reborn/v1-migration.md` for cutover and rollback.
+
+The current conversion layer maps cron routines and cron missions to Reborn
+`TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).
 Because Reborn's `TriggerSourceKind` is `Schedule`-only, **event / system-event /
 webhook / manual routines and non-cron mission cadences have no `TriggerRecord`
 target** and are recorded in the migration manifest rather than converted — even
@@ -722,7 +735,11 @@ where the runtime supports the *behavior* via hooks/`event_emit`, the durable
 automation row does not carry over. Guardrails, notify config, run counters,
 `routine_runs` history (no public run-history insert), and mission-only fields
 (focus/approach/success-criteria) likewise have no target. See the crate's
-CLAUDE.md for the full mapping + gap catalog.
+CLAUDE.md and the migration manifest for the full mapping + gap catalog. Current
+verification checks structural counts in production durable tables/paths and
+does not constitute a full production cold-boot/readback test. Intermediate `applied` or `verifying`
+states remain quarantined, and operators must complete a production canary
+before accepting cutover.
 
 ### Owner: _Unassigned_
 

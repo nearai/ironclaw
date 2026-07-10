@@ -7,6 +7,7 @@ pub(crate) mod doctor;
 pub(crate) mod extension;
 pub(crate) mod hooks;
 pub(crate) mod logs;
+pub(crate) mod migrate;
 pub(crate) mod models;
 pub(crate) mod onboard;
 pub(crate) mod profile;
@@ -42,6 +43,8 @@ pub(crate) enum Command {
     Hooks(hooks::HooksCommand),
     /// Inspect Reborn logs.
     Logs(logs::LogsCommand),
+    /// Plan, apply, resume, and verify migrations into Reborn.
+    Migrate(migrate::MigrateCommand),
     /// Inspect Reborn model slots and route status.
     Models(models::ModelsCommand),
     /// Initialize the standalone Reborn home and first-run setup marker.
@@ -82,20 +85,27 @@ impl Command {
             }
             Self::Hooks(command) => command.execute(),
             Self::Logs(command) => command.execute(),
+            Self::Migrate(command) => command.execute(),
             Self::Models(command) => command.execute(),
             Self::Onboard(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Profile(command) => command.execute(),
             Self::Repl(command) => {
-                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+                let context = crate::context::RebornCliContext::resolve_from_env()?;
+                migrate::ensure_activation_allowed(&context)?;
+                command.execute(context)
             }
             Self::Run(command) => {
-                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+                let context = crate::context::RebornCliContext::resolve_from_env()?;
+                migrate::ensure_activation_allowed(&context)?;
+                command.execute(context)
             }
             #[cfg(feature = "webui-v2-beta")]
             Self::Serve(command) => {
-                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+                let context = crate::context::RebornCliContext::resolve_from_env()?;
+                migrate::ensure_activation_allowed(&context)?;
+                command.execute(context)
             }
             Self::Skills(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)

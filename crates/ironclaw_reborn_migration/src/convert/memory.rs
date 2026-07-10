@@ -10,7 +10,10 @@
 //! and is recorded as a loss.
 
 use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope};
-use ironclaw_memory::{DocumentMetadata, MemoryInvocation, MemoryServiceWriteRequest};
+use ironclaw_memory::{
+    DocumentMetadata, MemoryInvocation, MemoryServiceErrorKind, MemoryServiceReadRequest,
+    MemoryServiceWriteRequest,
+};
 
 use crate::error::MigrationError;
 use crate::options::MigrationOptions;
@@ -67,6 +70,38 @@ pub(crate) async fn run(
                 correlation_id: CorrelationId::new(),
             };
             let metadata = DocumentMetadata::from_value(&doc.metadata);
+            match tgt
+                .memory_service
+                .read(
+                    invocation.clone(),
+                    MemoryServiceReadRequest {
+                        path: doc.path.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(existing) if existing.content == doc.content => {
+                    report.stats.memory_documents += 1;
+                    continue;
+                }
+                Ok(_) => {
+                    return Err(MigrationError::WriteTarget {
+                        domain: format!("memory document {}", doc.path),
+                        reason: "deterministic memory path already contains divergent content; refusing to overwrite"
+                            .to_string(),
+                    });
+                }
+                // Native memory reports a missing document as an input error.
+                // The subsequent write remains the authoritative path
+                // validation, so malformed source paths still fail closed.
+                Err(error) if error.kind() == MemoryServiceErrorKind::Input => {}
+                Err(error) => {
+                    return Err(MigrationError::WriteTarget {
+                        domain: format!("memory document {}", doc.path),
+                        reason: format!("read deterministic target slot: {error}"),
+                    });
+                }
+            }
             let request = MemoryServiceWriteRequest {
                 target: doc.path.clone(),
                 content: doc.content.clone(),

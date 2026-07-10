@@ -14,24 +14,54 @@ Reborn binary. It currently:
 3. creates missing `config.toml` and `providers.json` using the same atomic
    writer as `ironclaw-reborn config init`;
 4. preserves existing operator-edited config files unless `--force` is passed;
-5. writes `.onboard-completed.json` in Reborn home; and
-6. prints explicit remaining setup work.
+5. detects non-secret evidence of a default v1 libSQL database or an explicitly
+   configured migration-only PostgreSQL source;
+6. optionally invokes the read-only migration `plan` operation when
+   `--migrate-v1` is explicitly passed;
+7. writes `.onboard-completed.json` in Reborn home; and
+8. prints explicit remaining setup work.
+
+Detection never applies a migration. Without `--migrate-v1`, onboarding only
+records `available` and prints the explicit follow-up command. Normal `run` and
+`serve` startup never invokes migration.
 
 The completion marker schema is:
 
 ```json
 {
-  "schema_version": "ironclaw.reborn.onboarding/v1",
+  "schema_version": "ironclaw.reborn.onboarding/v2",
   "completed_at": "RFC3339 timestamp",
   "reborn_home": "/absolute/path",
   "home_source": "IRONCLAW_REBORN_HOME or default",
   "config_file": "/absolute/path/config.toml",
   "providers_file": "/absolute/path/providers.json",
   "steps_completed": ["reborn_home", "config_files", "completion_marker"],
-  "steps_pending": ["llm_credentials", "model_selection", "channel_setup"],
-  "v1_state": "not-used"
+  "steps_pending": ["llm_credentials", "model_selection", "channel_setup", "v1_migration"],
+  "v1_state": "not-used",
+  "v1_migration": {
+    "state": "not_detected | available | planned | applied | verified | explicitly_skipped",
+    "manifest": "/absolute/path/v1-migration-manifest.json"
+  }
 }
 ```
+
+`v1_state: not-used` remains the Reborn runtime boundary: Reborn does not boot
+from or mutate the v1 state root. `v1_migration.state` separately records the
+onboarding decision. Once apply begins, the lifecycle authority is the
+target-owned `.v1-migration-state.json` marker under Reborn home; this prevents
+a non-default manifest path from bypassing startup quarantine.
+
+Use:
+
+```bash
+ironclaw-reborn onboard --migrate-v1
+ironclaw-reborn onboard --skip-v1-migration
+```
+
+`--import-history` remains a deprecated hidden alias for `--migrate-v1` and
+prints a warning. It no longer means transcript-only import. For the snapshot,
+review, apply, verification, and rollback workflow, see
+[`v1-migration.md`](v1-migration.md).
 
 ## NEAR AI MCP Auto-Bootstrap
 
@@ -61,10 +91,8 @@ Legacy IronClaw startup also uses the same env pair to bootstrap the persisted
 - No keychain or encrypted secret setup for LLM keys.
 - No model picker.
 - No channel, extension, or WebUI setup flow.
-- No conversation-history import.
-
-Passing `--import-history` records history import as pending and reports it in
-the command output. It does not read external exports or write transcripts yet.
+- No automatic apply, resume, or verification during onboarding.
+- No live-source dual-write or online delta capture.
 
 ## Expected Follow-Up Shape
 
@@ -74,8 +102,9 @@ adding Reborn behavior to v1 setup:
 1. add an interactive prompt layer under `crates/ironclaw_reborn_cli`;
 2. route provider/model writes through `RebornProviderAdmin`;
 3. route product credential setup through Reborn product-auth facades;
-4. add a history-import step after Reborn home/storage initialization; and
-5. only then consider first-run auto-detection before `run`.
+4. expand the migration manifest's supported-domain coverage without weakening
+   its explicit disposition rules; and
+5. keep apply and verification separate from normal runtime startup.
 
 Every new step should keep the Reborn CLI boundary intact: commands may use
 `RebornCliContext` and facade-shaped composition APIs, but must not import v1

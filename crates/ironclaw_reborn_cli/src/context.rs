@@ -1,4 +1,14 @@
 use ironclaw_reborn_config::RebornBootConfig;
+use std::path::PathBuf;
+
+/// Non-secret evidence that a v1 source may be available for migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum V1MigrationSourceCandidate {
+    LibSql(PathBuf),
+    /// The URL remains in `MIGRATION_SOURCE_POSTGRES`; only its presence is
+    /// represented here so it cannot leak into CLI diagnostics or argv.
+    PostgresEnvironment,
+}
 
 /// Per-invocation context shared by Reborn CLI commands.
 #[derive(Debug, Clone)]
@@ -33,5 +43,20 @@ impl RebornCliContext {
 
     pub(crate) fn boot_config(&self) -> &RebornBootConfig {
         &self.boot_config
+    }
+
+    pub(crate) fn v1_migration_source_candidate(&self) -> Option<V1MigrationSourceCandidate> {
+        if std::env::var_os("MIGRATION_SOURCE_POSTGRES").is_some_and(|value| !value.is_empty()) {
+            return Some(V1MigrationSourceCandidate::PostgresEnvironment);
+        }
+
+        let v1_base = match std::env::var_os("IRONCLAW_BASE_DIR") {
+            Some(path) if !path.is_empty() => PathBuf::from(path),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".ironclaw"),
+        };
+        let database = v1_base.join("ironclaw.db");
+        database
+            .is_file()
+            .then_some(V1MigrationSourceCandidate::LibSql(database))
     }
 }

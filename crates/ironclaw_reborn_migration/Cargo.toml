@@ -13,8 +13,8 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-# Keep out of cargo-dist release packaging; this is an operator/migration tool,
-# not a shipped product binary (mirrors ironclaw_reborn_cli).
+# Docker/source builds ship this beside `ironclaw-reborn`. Keep cargo-dist
+# disabled until one native installer can guarantee the sibling pair.
 [package.metadata.dist]
 dist = false
 
@@ -59,12 +59,14 @@ ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_memory_native = { path = "../ironclaw_memory_native" }
+ironclaw_projects = { path = "../ironclaw_projects" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = [
     "migration-support",
 ] }
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity" }
 
 # ── shared ──────────────────────────────────────────────────────────────────
@@ -96,4 +98,9 @@ tempfile = "3"
 [[test]]
 name = "migration_roundtrip"
 path = "tests/migration_roundtrip.rs"
+required-features = ["libsql"]
+
+[[test]]
+name = "project_migration"
+path = "tests/project_migration.rs"
 required-features = ["libsql"]

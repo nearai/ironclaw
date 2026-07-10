@@ -3,10 +3,11 @@
 //! v1 and Reborn both use AES-256-GCM but bind ciphertext to *different* schemes,
 //! so migration must **decrypt** each v1 secret and **re-encrypt** through
 //! Reborn's `SecretStore::put`. Decryption uses the v1 secrets store constructed
-//! with the supplied master key (`--secret-master-key`); the same key builds the
-//! Reborn crypto in `RebornTarget::secret_store`. Without a master key, secrets
-//! are skipped with a recorded loss. A secret whose decrypt fails (e.g. expired,
-//! or wrong key) is recorded per-secret and skipped rather than aborting the run.
+//! with the independently supplied source key; `RebornTarget::secret_store` is
+//! already built with the separately resolved target key. Without a source key,
+//! secrets are skipped with a recorded loss. A secret whose decrypt fails (e.g.
+//! expired or wrong key) is recorded per-secret and skipped rather than aborting
+//! the run.
 
 use std::sync::Arc;
 

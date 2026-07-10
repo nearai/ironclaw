@@ -14,11 +14,13 @@ use ironclaw::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuar
 use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
 use ironclaw::db::{Database, DatabaseHandles, UserIdentityRecord, connect_with_handles};
 use ironclaw::secrets::{CreateSecretParams, SecretsCrypto, create_secrets_store};
-use ironclaw::tools::wasm::{
-    LibSqlWasmToolStore, StoreToolParams, ToolStatus, TrustLevel, WasmToolStore,
-};
+use ironclaw::tools::wasm::{LibSqlWasmToolStore, StoreToolParams, TrustLevel, WasmToolStore};
 use ironclaw_host_api::TenantId;
-use ironclaw_reborn_migration::{Domain, MigrationOptions, SourceDb, TargetStore, run_migration};
+use ironclaw_reborn_migration::{
+    ApplyAcknowledgements, Domain, MigrationOptions, MigrationSecretInputs, MigrationStatus,
+    SourceDb, TargetStore, apply_migration, plan_migration, resume_migration, run_migration,
+    verify_migration,
+};
 use ironclaw_triggers::{LibSqlTriggerRepository, TriggerRepository, TriggerSchedule};
 use secrecy::SecretString;
 use uuid::Uuid;
@@ -26,7 +28,9 @@ use uuid::Uuid;
 const TENANT: &str = "acme";
 const AGENT: &str = "assistant";
 const USER: &str = "alice";
-const USER_BOB: &str = "bob";
+const SUSPENDED_USER: &str = "bob";
+const DEACTIVATED_USER: &str = "carol";
+const LEGACY_DATA_OWNER: &str = "legacy-owner";
 /// 64-char string ≥ 32 bytes (used verbatim as HKDF IKM by v1 + Reborn crypto).
 const MASTER_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -236,6 +240,15 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
     db.set_all_settings(USER, &settings)
         .await
         .expect("seed settings");
+    db.set_all_settings(
+        LEGACY_DATA_OWNER,
+        &std::collections::HashMap::from([(
+            "legacy_timezone".to_string(),
+            serde_json::json!("UTC"),
+        )]),
+    )
+    .await
+    .expect("seed pre-users-table data owner");
 
     seed_identities(db.as_ref(), &handles).await;
     seed_secret(&handles).await;
@@ -256,27 +269,67 @@ async fn seed_identities(db: &dyn Database, handles: &DatabaseHandles) {
         .expect("connect");
     // Raw users insert — `get_or_create_user` would additionally seed an
     // assistant thread (a real v1 behavior, but it would perturb the thread
-    // counts this test pins), so insert the rows directly.
-    for (user_id, email, display_name) in [
-        (USER, "alice@example.com", "Alice"),
-        (USER_BOB, "bob@example.com", "Bob"),
-    ] {
-        conn.execute(
-            "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, metadata) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
-            (
-                user_id.to_string(),
-                email.to_string(),
-                display_name.to_string(),
-                "active".to_string(),
-                "member".to_string(),
-                now.to_rfc3339(),
-                "{}".to_string(),
-            ),
-        )
-        .await
-        .expect("seed user row");
-    }
+    // counts this test pins), so insert the row directly.
+    conn.execute(
+        "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, metadata) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+        (
+            USER.to_string(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "active".to_string(),
+            "member".to_string(),
+            now.to_rfc3339(),
+            "{}".to_string(),
+        ),
+    )
+    .await
+    .expect("seed user row");
+
+    // Case-insensitive historical values, lifecycle fields, creator relation,
+    // and object metadata must survive the canonical user import.
+    conn.execute(
+        "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, ?7, ?8)",
+        (
+            SUSPENDED_USER.to_string(),
+            "bob@example.com".to_string(),
+            "Bob".to_string(),
+            "SUSPENDED".to_string(),
+            "ADMIN".to_string(),
+            now.to_rfc3339(),
+            USER.to_string(),
+            serde_json::json!({"team": "infra"}).to_string(),
+        ),
+    )
+    .await
+    .expect("seed suspended admin user");
+    conn.execute(
+        "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, created_by, metadata) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)",
+        (
+            DEACTIVATED_USER.to_string(),
+            "carol@example.com".to_string(),
+            "Carol".to_string(),
+            "deactivated".to_string(),
+            "member".to_string(),
+            now.to_rfc3339(),
+            SUSPENDED_USER.to_string(),
+            serde_json::json!({"team": "operations", "quota": 3}).to_string(),
+        ),
+    )
+    .await
+    .expect("seed deactivated user");
+
+    db.create_api_token(
+        USER,
+        "migration-fixture-token",
+        &[0xAB; 32],
+        "deadbeef",
+        None,
+    )
+    .await
+    .expect("seed API token hash");
 
     db.create_identity(&UserIdentityRecord {
         id: Uuid::new_v4(),
@@ -321,105 +374,37 @@ async fn seed_secret(handles: &DatabaseHandles) {
 async fn seed_wasm_tool(handles: &DatabaseHandles) {
     let db = handles.libsql_db.clone().expect("libsql handle");
     let store = LibSqlWasmToolStore::new(db.clone());
-    // Same-named installs for two users exercise canonicalization. The
-    // disagreeing source states must produce one disabled canonical row.
-    for user_id in [USER, USER_BOB] {
-        let tool = store
-            .store(StoreToolParams {
-                user_id: user_id.to_string(),
-                name: "weather".to_string(),
-                version: "1.0.0".to_string(),
-                wit_version: "0.1.0".to_string(),
-                description: "Weather lookup".to_string(),
-                wasm_binary: b"\0asm-fake-binary".to_vec(),
-                parameters_schema: serde_json::json!({"type": "object"}),
-                source_url: None,
-                trust_level: TrustLevel::User,
-            })
-            .await
-            .expect("seed wasm tool");
-        store
-            .update_status(
-                user_id,
-                "weather",
-                if user_id == USER {
-                    ToolStatus::Active
-                } else {
-                    ToolStatus::Disabled
-                },
-            )
-            .await
-            .expect("seed tool status");
-
-        // Seed tool_capabilities with an allowed secret (no trait writer
-        // exists) so both source rows contribute the same credential binding.
-        let conn = db.connect().expect("connect");
-        conn.execute(
-            "INSERT INTO tool_capabilities (id, wasm_tool_id, allowed_secrets) VALUES (?1, ?2, ?3)",
-            (
-                Uuid::new_v4().to_string(),
-                tool.id.to_string(),
-                serde_json::json!(["openai_api_key"]).to_string(),
-            ),
-        )
+    // A default (Active) install so the migration derives Enabled activation.
+    let tool = store
+        .store(StoreToolParams {
+            user_id: USER.to_string(),
+            name: "weather".to_string(),
+            version: "1.0.0".to_string(),
+            wit_version: "0.1.0".to_string(),
+            description: "Weather lookup".to_string(),
+            wasm_binary: b"\0asm-fake-binary".to_vec(),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            source_url: None,
+            trust_level: TrustLevel::User,
+        })
         .await
-        .expect("seed tool capabilities");
-    }
-}
+        .expect("seed wasm tool");
 
-async fn set_wasm_tool_status(path: &Path, user_id: &str, status: ToolStatus) {
-    let db = Arc::new(
-        libsql::Builder::new_local(path)
-            .build()
-            .await
-            .expect("open v1 fixture for status update"),
-    );
-    let store = LibSqlWasmToolStore::new(db);
-    store
-        .update_status(user_id, "weather", status)
-        .await
-        .expect("update wasm tool status");
-}
-
-async fn set_wasm_tool_description(path: &Path, user_id: &str, description: &str) {
-    let db = libsql::Builder::new_local(path)
-        .build()
-        .await
-        .expect("open v1 fixture for metadata update");
+    // Seed tool_capabilities with an allowed secret (no trait writer exists) so
+    // the migration derives a credential binding to the migrated secret and
+    // records the capability-config gap. `openai_api_key` matches the seeded
+    // secret above.
     let conn = db.connect().expect("connect");
-    let changed = conn
-        .execute(
-            "UPDATE wasm_tools SET description = ?1 WHERE user_id = ?2 AND name = ?3",
-            (
-                description.to_string(),
-                user_id.to_string(),
-                "weather".to_string(),
-            ),
-        )
-        .await
-        .expect("update wasm tool description");
-    assert_eq!(changed, 1, "expected one source tool metadata row");
-}
-
-async fn set_wasm_tool_allowed_secret(path: &Path, user_id: &str, secret: &str) {
-    let db = libsql::Builder::new_local(path)
-        .build()
-        .await
-        .expect("open v1 fixture for credential update");
-    let conn = db.connect().expect("connect");
-    let changed = conn
-        .execute(
-            "UPDATE tool_capabilities SET allowed_secrets = ?1 \
-             WHERE wasm_tool_id = (SELECT id FROM wasm_tools WHERE user_id = ?2 AND name = ?3)",
-            (
-                serde_json::json!([secret]).to_string(),
-                user_id.to_string(),
-                "weather".to_string(),
-            ),
-        )
-        .await
-        .expect("update wasm tool credentials");
-    assert_eq!(changed, 1, "expected one source tool capability row");
+    conn.execute(
+        "INSERT INTO tool_capabilities (id, wasm_tool_id, allowed_secrets) VALUES (?1, ?2, ?3)",
+        (
+            Uuid::new_v4().to_string(),
+            tool.id.to_string(),
+            serde_json::json!(["openai_api_key"]).to_string(),
+        ),
+    )
+    .await
+    .expect("seed tool capabilities");
 }
 
 fn cron(expr: &str) -> Trigger {
@@ -447,6 +432,7 @@ fn options(src: PathBuf, dst: PathBuf, dry_run: bool) -> MigrationOptions {
     MigrationOptions {
         source: SourceDb::LibSql { path: src },
         target: TargetStore::LibSql { path: dst },
+        profile: "test-migration".to_string(),
         tenant_id: TenantId::new(TENANT).unwrap(),
         agent_id: ironclaw_host_api::AgentId::new(AGENT).unwrap(),
         secret_master_key: Some(SecretString::from(MASTER_KEY)),
@@ -473,9 +459,10 @@ async fn reborn_entry_count(path: &Path, like: &str) -> i64 {
     row.get::<i64>(0).expect("count")
 }
 
-/// Read the `contents` blob of the first Reborn entry matching a LIKE pattern,
-/// as UTF-8 — used to assert the shape of a written installation/thread doc.
-async fn reborn_entry_content(path: &Path, like: &str) -> String {
+/// Count append-log records. Finalized assistant messages are durably appended
+/// to the production thread service's message log and indexed, rather than
+/// always materialized as an entry row; both representations are first-class.
+async fn reborn_event_count(path: &Path, like: &str) -> i64 {
     let db = libsql::Builder::new_local(path)
         .build()
         .await
@@ -483,14 +470,69 @@ async fn reborn_entry_content(path: &Path, like: &str) -> String {
     let conn = db.connect().expect("connect");
     let mut rows = conn
         .query(
-            "SELECT contents FROM root_filesystem_entries WHERE path LIKE ?1 LIMIT 1",
+            "SELECT count(*) FROM root_filesystem_events WHERE path LIKE ?1",
+            [like],
+        )
+        .await
+        .expect("query events");
+    let row = rows.next().await.expect("row").expect("some row");
+    row.get::<i64>(0).expect("count")
+}
+
+async fn reborn_message_count(path: &Path) -> i64 {
+    reborn_entry_count(path, "/tenants/acme/users/alice/threads/%/messages/%.json").await
+        + reborn_event_count(path, "/tenants/acme/users/alice/threads/%/message_appends").await
+}
+
+/// Whether any persisted entry under `like` contains a UTF-8 payload fragment.
+async fn reborn_entry_contains(path: &Path, like: &str, needle: &str) -> bool {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open reborn db");
+    let conn = db.connect().expect("connect");
+    let mut rows = conn
+        .query(
+            "SELECT contents FROM root_filesystem_entries WHERE path LIKE ?1",
             [like],
         )
         .await
         .expect("query entry contents");
-    let row = rows.next().await.expect("row").expect("some row");
-    let blob = row.get::<Vec<u8>>(0).expect("contents blob");
-    String::from_utf8(blob).expect("utf-8 contents")
+    while let Some(row) = rows.next().await.expect("row") {
+        let blob = row.get::<Vec<u8>>(0).expect("contents blob");
+        if String::from_utf8_lossy(&blob).contains(needle) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn reborn_entry_json(path: &Path, entry_path: &str) -> serde_json::Value {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open reborn db");
+    let conn = db.connect().expect("connect");
+    let mut rows = conn
+        .query(
+            "SELECT contents FROM root_filesystem_entries WHERE path = ?1",
+            [entry_path],
+        )
+        .await
+        .expect("query entry contents");
+    let row = rows.next().await.expect("row").expect("persisted entry");
+    serde_json::from_slice(&row.get::<Vec<u8>>(0).expect("contents blob")).expect("entry JSON")
+}
+
+fn reborn_user_entry_path(user_id: &str) -> String {
+    let encoded = match user_id {
+        USER => "YWxpY2U",
+        SUSPENDED_USER => "Ym9i",
+        DEACTIVATED_USER => "Y2Fyb2w",
+        LEGACY_DATA_OWNER => "bGVnYWN5LW93bmVy",
+        other => panic!("missing expected base64url fixture path for {other}"),
+    };
+    format!("/tenants/{TENANT}/shared/reborn-identity/users/{encoded}.json")
 }
 
 async fn reborn_triggers(path: &Path) -> Vec<ironclaw_triggers::TriggerRecord> {
@@ -507,36 +549,57 @@ async fn reborn_triggers(path: &Path) -> Vec<ironclaw_triggers::TriggerRecord> {
         .expect("list triggers")
 }
 
-/// Count thread.json documents in the Reborn store via a fresh connection
-/// (proves on-disk durability independent of the migration's live handles).
-async fn reborn_thread_doc_count(path: &Path) -> i64 {
+async fn overwrite_trigger_prompt(path: &Path, name: &str, prompt: &str) {
     let db = libsql::Builder::new_local(path)
         .build()
         .await
         .expect("open reborn db");
     let conn = db.connect().expect("connect");
-    let mut rows = conn
-        .query(
-            "SELECT count(*) FROM root_filesystem_entries WHERE path LIKE '%/thread.json'",
-            (),
-        )
-        .await
-        .expect("query thread docs");
-    let row = rows.next().await.expect("row").expect("some row");
-    row.get::<i64>(0).expect("count")
+    conn.execute(
+        "UPDATE trigger_records SET prompt = ?1 WHERE tenant_id = ?2 AND name = ?3",
+        (prompt, TENANT, name),
+    )
+    .await
+    .expect("mutate trigger collision fixture");
 }
 
 #[tokio::test]
 async fn migrates_v1_and_engine_v2_state_without_loss() {
     let dir = tempfile::tempdir().unwrap();
     let src = seed_v1_fixture(dir.path()).await;
-    let dst = dir.path().join("reborn.db");
+    // Keep the Reborn home distinct from the v1 source home. Target-owned
+    // database/key artifacts must never become new source inventory on resume.
+    let dst = dir.path().join("reborn/reborn.db");
 
-    let report = run_migration(options(src.clone(), dst.clone(), false))
+    let migration_options = options(src.clone(), dst.clone(), false);
+    let manifest = plan_migration(&migration_options)
         .await
-        .expect("migration runs");
+        .expect("migration plan");
+    let blockers: Vec<_> = manifest
+        .inventory
+        .iter()
+        .filter(|item| item.blocker.is_some())
+        .collect();
+    assert!(
+        blockers.is_empty(),
+        "the known-source fixture must have an explicit disposition for every category: {blockers:#?}"
+    );
+    let report = apply_migration(
+        migration_options,
+        &manifest,
+        MigrationSecretInputs {
+            source_master_key: Some(SecretString::from(MASTER_KEY)),
+            // Local Reborn composition resolves/persists its own production
+            // target key after apply preconditions.
+            target_master_key: None,
+        },
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect("migration runs");
 
     // ── converted counts ──
+    assert_eq!(report.stats.users, 4, "users: {:?}", report.stats);
     // 2 conversations + 1 mission thread.
     assert_eq!(report.stats.threads, 3, "threads: {:?}", report.stats);
     // 2 cron routines converted (event/sysevent/webhook/manual do not).
@@ -555,6 +618,10 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     // dropped (or newly-recovered) value fails the build. Counts are pinned to
     // the fixture above; see the inline breakdown per domain. ──
     let expected_losses = [
+        // deactivated -> suspended and one non-string metadata value -> JSON text.
+        (Domain::User, 2),
+        // Hash-only API tokens cannot be converted and require re-authentication.
+        (Domain::ApiToken, 1),
         // owner/thread/mission ids are all valid → no thread-identity losses.
         (Domain::Thread, 0),
         // conv1's single "system" transcript message (no first-class append path).
@@ -573,15 +640,15 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         (Domain::Memory, 1),
         // the seeded secret decrypts, re-encrypts, and carries no expiry → 0.
         (Domain::Secret, 0),
-        // the two source installs each record manifest_fidelity + capabilities.
-        // They merge into one canonical installation row.
-        (Domain::Extension, 4),
+        // the migrated wasm tool: manifest_fidelity + capabilities (2).
+        // Unknown v1 WASM is report-only: package reinstall + capabilities.
+        (Domain::Extension, 2),
         // unconditional pairing_requests gap (both identities adopt cleanly).
         (Domain::Identity, 1),
-        // unconditional heartbeat_state gap.
-        (Domain::Heartbeat, 1),
-        // one gap per seeded setting key (model, timezone).
-        (Domain::Setting, 2),
+        // one heartbeat-state gap per discovered canonical/data-owner user.
+        (Domain::Heartbeat, 4),
+        // one gap per seeded setting key (model, timezone, legacy_timezone).
+        (Domain::Setting, 3),
     ];
     for (domain, expected) in expected_losses {
         assert_eq!(
@@ -614,7 +681,7 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     for (domain, field) in [
         (Domain::Mission, "cadence.on_event"),
         (Domain::Mission, "status.failed"),
-        (Domain::Extension, "manifest_fidelity"),
+        (Domain::Extension, "package"),
         (Domain::Extension, "capabilities"),
     ] {
         assert!(
@@ -631,51 +698,28 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     assert_eq!(report.stats.secrets, 1, "secrets: {:?}", report.stats);
     // 1 OAuth identity + 1 channel identity adopted.
     assert_eq!(report.stats.identities, 2, "identities: {:?}", report.stats);
-    // 2 same-named user installs → 1 canonical ExtensionInstallation.
-    assert_eq!(report.stats.extensions, 1, "extensions: {:?}", report.stats);
-
-    // Extension installation invariants: the on-disk installation record must
-    // carry the canonical id, both private owners, fail-closed Disabled
-    // activation, and the merged credential binding.
-    let installation_doc =
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
-    let installation_state: serde_json::Value =
-        serde_json::from_str(&installation_doc).expect("installation state JSON");
-    let installations = installation_state["installations"]
-        .as_array()
-        .expect("installation array");
-    assert_eq!(
-        installations.len(),
-        1,
-        "same-named source installs must canonicalize to one row"
+    // Unknown executable artifacts are accounted for but never installed.
+    assert_eq!(report.stats.extensions, 0, "extensions: {:?}", report.stats);
+    let report_json = report.to_json().expect("report JSON");
+    assert!(!report_json.contains("deadbeef"), "token prefix leaked");
+    assert!(!report_json.contains(&"ab".repeat(32)), "token hash leaked");
+    assert!(
+        dst.parent()
+            .expect("target parent")
+            .join(".reborn-local-dev-secrets-master-key")
+            .is_file(),
+        "apply must persist the same local target key a production Reborn boot resolves"
     );
-    let installation = &installations[0];
-    assert_eq!(installation["installation_id"], "weather");
-    assert_eq!(installation["extension_id"], "weather");
-    assert_eq!(installation["activation_state"], "disabled");
-    assert_eq!(installation["owner"]["kind"], "users");
-    assert_eq!(
-        installation["owner"]["user_ids"],
-        serde_json::json!([USER, USER_BOB])
-    );
-    assert_eq!(
-        installation["credential_bindings"]
-            .as_array()
-            .expect("credential binding array")
-            .len(),
-        1,
-        "agreeing duplicate credential bindings must be merged"
-    );
-    assert!(installation_doc.contains("openai_api_key"));
 
     // On-disk durability of the deferred domains (fresh connection).
     assert!(
         reborn_entry_count(&dst, "%/secrets/%openai_api_key.json").await >= 1,
         "expected the migrated secret document on disk"
     );
-    assert!(
-        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await >= 1,
-        "expected the extension installation state document on disk"
+    assert_eq!(
+        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await,
+        0,
+        "an incompatible placeholder installation must never be persisted"
     );
 
     // ── round-trip through the Reborn triggers repo ──
@@ -692,154 +736,162 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         other => panic!("expected cron schedule, got {other:?}"),
     }
 
-    // ── on-disk durability of threads (fresh connection) ──
+    // ── production-path durability of threads (fresh connection) ──
+    assert_eq!(
+        reborn_entry_count(&dst, "/tenants/acme/users/alice/threads/%/thread.json").await,
+        3,
+        "migration must use composition's production tenant/user mount layout"
+    );
+    assert_eq!(
+        reborn_message_count(&dst).await,
+        6,
+        "expected exactly the supported transcript rows across production's row and append-log representations"
+    );
     assert!(
-        reborn_thread_doc_count(&dst).await >= 3,
-        "expected >=3 persisted thread.json docs"
+        reborn_entry_count(&dst, "/tenants/acme/shared/reborn-identity/%").await >= 2,
+        "identity rows must use production's tenant-shared mount, not the legacy global path"
+    );
+    assert_eq!(
+        reborn_entry_count(&dst, "/tenants/acme/shared/reborn-identity/users/%.json").await,
+        4,
+        "all canonical and synthesized users must use the tenant-shared production path"
+    );
+    let bob = reborn_entry_json(&dst, &reborn_user_entry_path(SUSPENDED_USER)).await;
+    assert_eq!(bob["status"], "suspended");
+    assert_eq!(bob["role"], "admin");
+    assert_eq!(bob["created_by"], USER);
+    assert_eq!(bob["tenant_id"], TENANT);
+    assert_eq!(bob["last_login_at"], "2024-01-02T03:04:05+00:00");
+    assert_eq!(bob["metadata"]["team"], "infra");
+    let carol = reborn_entry_json(&dst, &reborn_user_entry_path(DEACTIVATED_USER)).await;
+    assert_eq!(carol["status"], "suspended");
+    assert_eq!(carol["role"], "member");
+    assert_eq!(carol["created_by"], SUSPENDED_USER);
+    assert_eq!(carol["metadata"]["quota"], "3");
+    let legacy = reborn_entry_json(&dst, &reborn_user_entry_path(LEGACY_DATA_OWNER)).await;
+    assert_eq!(legacy["status"], "active");
+    assert_eq!(legacy["role"], "member");
+    assert_eq!(legacy["created_at"], "1970-01-01T00:00:00+00:00");
+    assert_eq!(legacy["metadata"]["migration.synthesized"], "true");
+    assert_eq!(
+        reborn_entry_count(&dst, "/tenant-shared/%").await,
+        0,
+        "migration must not write identity data to an unscoped global mount"
+    );
+    assert!(
+        reborn_entry_contains(&dst, "%/thread.json", "session started").await,
+        "non-user/assistant content must be retained in the migration archive metadata"
     );
 
-    // ── idempotency: re-running the migration into the same target re-adopts
-    // identities (first-writer-wins) and upserts the extension installation by
-    // its deterministic id, so no duplicate installation doc is written. (Trigger
-    // ids are freshly minted per run, so triggers are intentionally not
-    // deduplicated — the tool is a one-shot converter.) ──
-    let report2 = run_migration(options(src, dst.clone(), false))
-        .await
-        .expect("second migration run");
+    // ── idempotency: resume replays the same sealed source identity and must
+    // compare-and-apply without duplicating triggers or transcript rows. ──
+    let applied_manifest = report.manifest.clone().expect("applied manifest");
+    let replay_options = options(src.clone(), dst.clone(), false);
+    let report2 = resume_migration(
+        replay_options,
+        &applied_manifest,
+        MigrationSecretInputs {
+            source_master_key: Some(SecretString::from(MASTER_KEY)),
+            target_master_key: None,
+        },
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect("migration resume");
     assert_eq!(
         report2.stats.identities, 2,
         "re-run must re-adopt the same 2 identities"
     );
+    assert_eq!(report2.stats.users, 4, "resume must replay exact users");
     assert_eq!(
-        report2.stats.extensions, 1,
-        "re-run must upsert the same installation, not duplicate"
+        reborn_entry_count(&dst, "/tenants/acme/shared/reborn-identity/users/%.json").await,
+        4,
+        "resume duplicated users"
     );
     assert_eq!(
-        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await,
-        1,
-        "re-run must not write a second installation state document"
+        report2.stats.extensions, 0,
+        "resume must not install incompatible extensions"
     );
-    assert_eq!(
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await,
-        installation_doc,
-        "re-run must preserve deterministic canonical extension state"
-    );
-}
-
-/// Caller-level migration coverage: run the public converter and reopen the
-/// persisted extension state, proving that two agreeing active source rows
-/// stay enabled after the shared canonical reducer merges their owners.
-#[tokio::test]
-async fn migrates_all_active_duplicate_users_as_enabled() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = seed_v1_fixture(dir.path()).await;
-    set_wasm_tool_status(&src, USER_BOB, ToolStatus::Active).await;
-    let dst = dir.path().join("reborn-all-active.db");
-
-    let report = run_migration(options(src, dst.clone(), false))
-        .await
-        .expect("migration runs");
-
-    assert_eq!(report.stats.extensions, 1);
-    let installation_doc =
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
-    let state: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
-    let installations = state["installations"].as_array().unwrap();
-    assert_eq!(installations.len(), 1);
-    assert_eq!(installations[0]["activation_state"], "enabled");
-    assert_eq!(installations[0]["owner"]["kind"], "users");
-    assert_eq!(
-        installations[0]["owner"]["user_ids"],
-        serde_json::json!([USER, USER_BOB])
-    );
-}
-
-/// Caller-level migration coverage for incompatible source metadata: the
-/// grouped source rows are reported and skipped before a manifest is written.
-#[tokio::test]
-async fn migration_records_metadata_conflict_without_partial_extension() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = seed_v1_fixture(dir.path()).await;
-    set_wasm_tool_description(&src, USER_BOB, "Different weather metadata").await;
-    let dst = dir.path().join("reborn-metadata-conflict.db");
-
-    let report = run_migration(options(src, dst.clone(), false))
-        .await
-        .expect("migration runs");
-
-    assert_eq!(report.stats.extensions, 0);
-    assert_eq!(report.losses_in(Domain::Extension), 5);
-    assert!(report.lossy.iter().any(|loss| {
-        loss.domain == Domain::Extension
-            && loss.field == "canonicalization"
-            && loss.detail.contains("no partial canonical installation")
-    }));
     assert_eq!(
         reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await,
         0,
-        "metadata conflict must not write a partial canonical installation"
+        "resume must not write placeholder installation state"
     );
-}
+    assert_eq!(
+        reborn_triggers(&dst).await.len(),
+        3,
+        "resume duplicated triggers"
+    );
+    assert_eq!(
+        reborn_message_count(&dst).await,
+        6,
+        "resume duplicated transcript messages"
+    );
 
-/// Caller-level migration coverage for distinct v1 allowed secrets: because
-/// v1 stores secret names rather than a separate credential-handle mapping,
-/// distinct names are distinct target bindings and must merge safely. The
-/// shared reducer's conflicting-handle fail-closed policy is covered at the
-/// persisted-store seam, where legacy rows can contain that ambiguity.
-#[tokio::test]
-async fn migration_merges_distinct_credential_bindings() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = seed_v1_fixture(dir.path()).await;
-    set_wasm_tool_allowed_secret(&src, USER_BOB, "different_api_key").await;
-    let dst = dir.path().join("reborn-credential-conflict.db");
+    let verified = verify_migration(
+        &options(src.clone(), dst.clone(), false),
+        report2.manifest.as_ref().expect("resume manifest"),
+    )
+    .await
+    .expect("cold target verification");
+    assert_eq!(verified.status, MigrationStatus::Verified);
 
-    let report = run_migration(options(src, dst.clone(), false))
-        .await
-        .expect("migration runs");
-
-    assert_eq!(report.stats.extensions, 1);
-    assert_eq!(report.losses_in(Domain::Extension), 4);
-    let installation_doc =
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
-    let state: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
-    let bindings = state["installations"][0]["credential_bindings"]
-        .as_array()
-        .unwrap();
-    assert_eq!(bindings.len(), 2);
-    assert!(bindings.iter().any(|binding| {
-        binding["credential_handle"] == "openai_api_key"
-            && binding["secret_handle"] == "openai_api_key"
-    }));
-    assert!(bindings.iter().any(|binding| {
-        binding["credential_handle"] == "different_api_key"
-            && binding["secret_handle"] == "different_api_key"
-    }));
+    // A deterministic target slot containing different data is a conflict,
+    // not an invitation for migration to overwrite operator/runtime state.
+    overwrite_trigger_prompt(&dst, "cron-light", "divergent target prompt").await;
+    let resume_manifest = report2.manifest.as_ref().expect("resume manifest");
+    let collision = resume_migration(
+        options(src, dst.clone(), false),
+        resume_manifest,
+        MigrationSecretInputs {
+            source_master_key: Some(SecretString::from(MASTER_KEY)),
+            target_master_key: None,
+        },
+        ApplyAcknowledgements::offline_snapshot(),
+    )
+    .await
+    .expect_err("divergent deterministic target must fail closed");
+    assert!(
+        collision.to_string().contains("refusing to overwrite"),
+        "unexpected collision error: {collision}"
+    );
+    assert_eq!(
+        reborn_triggers(&dst)
+            .await
+            .into_iter()
+            .find(|trigger| trigger.name == "cron-light")
+            .expect("cron-light trigger")
+            .prompt,
+        "divergent target prompt",
+        "migration must not overwrite a divergent deterministic slot"
+    );
 }
 
 #[tokio::test]
 async fn dry_run_reports_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let src = seed_v1_fixture(dir.path()).await;
-    let dst = dir.path().join("reborn-dry.db");
+    let target_parent = dir.path().join("missing-target");
+    let dst = target_parent.join("reborn-dry.db");
 
     let report = run_migration(options(src, dst.clone(), true))
         .await
         .expect("dry run");
 
-    // Same counts as a real run …
-    assert_eq!(report.stats.threads, 3);
-    assert_eq!(report.stats.routines, 2);
-    assert_eq!(report.stats.missions, 2);
+    // Planning reports inventory through the manifest without invoking writers.
+    let manifest = report.manifest.expect("plan manifest");
+    assert!(
+        manifest
+            .inventory
+            .iter()
+            .any(|item| item.source_name == "conversations" && item.count >= 2)
+    );
     assert!(report.dry_run);
 
-    // … but nothing was written to the Reborn store.
+    // No read helper is invoked here: opening libSQL would itself create state.
     assert!(
-        reborn_triggers(&dst).await.is_empty(),
-        "dry run wrote triggers"
-    );
-    assert_eq!(
-        reborn_thread_doc_count(&dst).await,
-        0,
-        "dry run wrote thread docs"
+        !dst.exists() && !target_parent.exists(),
+        "planning created the target path or its parent"
     );
 }
+

@@ -3,6 +3,10 @@
 `ironclaw-reborn` is the standalone executable boundary for Reborn. It is separate from the current `ironclaw` binary so Reborn boot, config, state, and runtime composition can evolve without accidentally invoking v1 runtime paths.
 
 This binary is available as the workspace package `ironclaw_reborn_cli` and builds the executable named `ironclaw-reborn`.
+The Reborn Docker image also builds `ironclaw_reborn_migration`, whose
+`ironclaw-reborn-migration` executable is installed beside the primary binary.
+Source builds can do the same; native `cargo-dist` installers do not yet package
+the pair.
 
 ## Current status
 
@@ -30,6 +34,11 @@ ironclaw-reborn hooks list --verbose
 ironclaw-reborn logs
 ironclaw-reborn logs --json
 ironclaw-reborn logs --verbose
+ironclaw-reborn migrate v1 plan --help
+ironclaw-reborn migrate v1 apply --help
+ironclaw-reborn migrate v1 resume --help
+ironclaw-reborn migrate v1 verify --help
+ironclaw-reborn migrate v1 status --help
 ironclaw-reborn models list
 ironclaw-reborn models list --json
 ironclaw-reborn models status
@@ -38,7 +47,8 @@ ironclaw-reborn models set-provider openai --model gpt-5-mini
 ironclaw-reborn onboard
 ironclaw-reborn onboard --dry-run
 ironclaw-reborn onboard --force
-ironclaw-reborn onboard --import-history   # flag parsed, but history import not wired yet
+ironclaw-reborn onboard --migrate-v1       # plan only; never auto-applies
+ironclaw-reborn onboard --skip-v1-migration
 ironclaw-reborn profile list
 ironclaw-reborn profile list --json
 ironclaw-reborn repl
@@ -58,7 +68,7 @@ It intentionally does not yet support:
 
 - replacing `ironclaw` behavior;
 - daemon/service installation;
-- v1 config, DB, settings, or secrets migration;
+- live/zero-downtime v1 migration or reverse migration;
 - production extension/tool execution;
 - long-lived Reborn runtime services.
 
@@ -68,6 +78,11 @@ compiled behind that feature, so without it `serve` does not exist in the binary
 at all — it will not appear in `--help` and `ironclaw-reborn serve` errors as an
 unknown subcommand. It is an early beta operator surface, not a production
 gateway. See [Running with the WebUI (`serve`)](#running-with-the-webui-serve).
+
+The v1 migration command uses a same-release companion installed beside the
+primary binary. It never searches `PATH`; PostgreSQL URLs and source/target
+master keys remain in environment variables. See
+[`docs/reborn/v1-migration.md`](reborn/v1-migration.md) before using it.
 
 ## Running with the WebUI (`serve`)
 
@@ -359,12 +374,14 @@ config, v1 channels, or v1 import state.
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard --dry-run
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard --force
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard --migrate-v1
 ```
 
 `--dry-run` reports what would be initialized without writing files.
-`--import-history` reserves the history-import step in the summary (not wired
-yet). See `docs/reborn/onboarding.md` for the full slice description and the
-completion-marker schema.
+`--migrate-v1` explicitly runs only the migration planning step after detecting
+a source; it never applies automatically. `--import-history` is a deprecated
+hidden alias. See `docs/reborn/onboarding.md` for the completion-marker schema
+and `docs/reborn/v1-migration.md` for cutover and rollback.
 
 ### `models list` / `models status` / `models set-provider`
 

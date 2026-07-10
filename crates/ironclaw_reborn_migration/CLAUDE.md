@@ -1,111 +1,97 @@
 # ironclaw_reborn_migration
 
-Standalone tool + library that converts **IronClaw v1 / engine-v2 persisted
-state** into the **Reborn** state substrate. Ships as its own binary
-(`ironclaw-reborn-migration`); the conversion engine is a library
-(`run_migration`) so it can later be wired into `ironclaw-reborn` startup.
+Transitional v1/engine-v2 migration bridge for Reborn. It ships as the
+same-version `ironclaw-reborn-migration` companion and is invoked by
+`ironclaw-reborn migrate v1`; do not link the v1 root crate into the normal
+Reborn CLI/runtime.
 
-- **Read side** = the root `ironclaw` crate (`ironclaw::db::connect_with_handles`)
-  — one v1 database (PostgreSQL **or** libSQL). Engine-v2 state is **not** a
-  separate DB: missions/projects/threads were persisted by the v2 bridge as JSON
-  blobs inside the v1 `memory_documents` table under `engine/…` /
-  `.system/engine/…` paths. Parsed via the serde mirrors in `v2_model.rs` (the
-  engine-v2 types were deleted; they survive only at git tag `old_engine_v2`).
-- **Write side** = Reborn domain stores built directly over a `RootFilesystem` /
-  triggers DB in `target.rs`, without booting a `RebornRuntime`. Threads /
-  secrets / identity force a concrete filesystem type, so they are built inside
-  the backend match arm and stored as `#[async_trait]` trait objects.
-- **Philosophy: nothing is silently dropped.** Infrastructure errors abort; a
-  value with no Reborn representation is recorded as a `LossyItem` on the
-  `MigrationReport` (the manifest), with the reason and the Reborn gap named.
+The public lifecycle is:
 
-```
-cargo run -p ironclaw_reborn_migration -- \
-  --source-libsql ~/.ironclaw/ironclaw.db \
-  --target-libsql ./reborn-local-dev.db \
-  --tenant-id default --agent-id default --dry-run
+```rust
+plan_migration(&MigrationOptions)
+apply_migration(MigrationOptions, &MigrationManifest, MigrationSecretInputs, ApplyAcknowledgements)
+resume_migration(MigrationOptions, &MigrationManifest, MigrationSecretInputs, ApplyAcknowledgements)
+verify_migration(&MigrationOptions, &MigrationManifest)
 ```
 
-## What converts, and where losses go
+`run_migration` is a deprecated compatibility wrapper. New code must use the
+explicit lifecycle.
 
-| v1 / engine-v2 source | Reborn target | Status |
-|---|---|---|
-| `conversations` + `conversation_messages` | `SessionThreadRecord` + transcript (orig id preserved via `EnsureThreadRequest.thread_id`; per-message role/ts/id in `metadata_json.legacy_v1`) | **full** |
-| routine `Trigger::Cron` | `TriggerRecord` (`TriggerSchedule::Cron`) via `TriggerRepository::upsert_trigger` | **full** |
-| engine-v2 mission `Cadence::Cron` | `TriggerRecord`; `thread_history` → threads under `ThreadScope.mission_id` | **full** |
-| `memory_documents` (non-engine) | `ironclaw_memory` documents (`MemoryService::write`) | **full** |
-| `secrets` | decrypt via v1 `SecretsStore` → re-encrypt via Reborn `SecretStore::put` (needs `--secret-master-key`) | **full** |
-| `user_identities` (OAuth) + `channel_identities` | `RebornIdentityResolver::adopt_migrated_identity` (`SurfaceKind::Oauth` / `ChannelActor`) | **full** |
-| `wasm_tools` / `wasm_channels` installs | `ExtensionInstallation` (+ synthesized `capability_provider` manifest) via composition's `migration-support` seam; `tool_capabilities.allowed_secrets` → credential bindings | **full (manifest is a placeholder — see below)** |
-| routine `Trigger::{Event,SystemEvent,Webhook,Manual}` | — (Reborn `TriggerSourceKind` = `Schedule` only) | **gap → report** |
-| mission `Cadence::{OnEvent,OnSystemEvent,Webhook,Manual}` | — | **gap → report** |
-| routine guardrails / notify / run counters; mission focus / approach / success-criteria / notify | — (no trigger field / no durable mission entity) | **gap → report** |
-| `routine_runs` history | — (`TriggerRepository` has no public run-history insert) | **gap → report** |
-| routine/mission `Failed` status | `TriggerState::Paused` | **degraded → report** |
-| non-user/assistant transcript messages (system/tool) | retained in thread `metadata_json.legacy_v1`, not a standalone row | **degraded → report** |
-| `settings` (key/value) | — (Reborn config is typed `config.toml`/`providers.json`/`LlmKeyStore`, no generic KV store) | **gap → report** |
-| `memory_document_versions` | — (no per-doc version history in Reborn) | **gap → report** |
-| `agent_jobs` / `job_actions` / `job_events` | — (Reborn has no general job store) | **gap → report** |
-| `heartbeat_state` | — (re-establish as a scheduled trigger) | **gap → report** |
-| extension manifest fidelity + WASM binary; tool capability config; channel→secret binding; `pairing_requests` | — | **degraded/gap → report** |
+## Safety contract
 
-`Domain` + `LossReason` on each `LossyItem` make the manifest greppable; the
-acceptance test asserts the **exact** gap set so a regression that silently drops
-a domain fails the build.
+- Source readers are narrow, read-only adapters. Never use the v1 runtime
+  connection constructor because it runs schema migrations.
+- Planning must not open or create the Reborn target. It may write a manifest
+  only at the explicit operator path.
+- Apply requires a stopped v1 source and a consistent snapshot acknowledgement.
+- The manifest contains redacted locator fingerprints, not database URLs,
+  keys, tokens, or decrypted values.
+- Source and target keys are independent. Source key input is used only for v1
+  decryption; target key resolution follows production Reborn composition.
+- Unknown or incompatible executable artifacts are never enabled.
+- `verify` performs a cold, read-only structural check of supported records in
+  the production persistence tables before transitioning the manifest to
+  `verified`. It does not boot a full Reborn runtime or prove every product
+  service can consume the records. `applying`, `failed`, `applied`, and
+  `verifying` targets remain quarantined.
 
-## Notes on the "full" deferred converters
+## Source and target ownership
 
-- **Secrets** — needs `--secret-master-key` (used verbatim as the HKDF IKM, as
-  in v1). The v1 store is built from the raw `DatabaseHandles`; each secret is
-  listed, decrypted (`get_decrypted`), and re-encrypted through
-  `RebornTarget::secret_store` (`FilesystemSecretStore`). Expiry is preserved; a
-  secret that fails to decrypt (expired / wrong key) is a per-secret loss, not a
-  run abort. Without a key, secrets are skipped with a recorded loss.
-- **Identities** — `user_identities` read via the `Database` trait,
-  `channel_identities` via raw SQL (no trait accessor). Adoption preserves the v1
-  `UserId` and seeds the verified-email index. Idempotent (safe to re-run).
-- **Extensions** — installed tools/channels become `ExtensionInstallation`s with
-  activation from the v1 `status` and credential bindings from
-  `tool_capabilities.allowed_secrets`. The synthesized manifest declares
-  `ironclaw.capability_provider/v1` + one `ask`-permission placeholder capability
-  (a non-first-party manifest must declare a host API or capability). **The v1
-  capability contract and WASM binary are NOT carried over** — the manifest is a
-  migration placeholder, recorded as a `manifest_fidelity` loss per installation.
-  The store is opened through the composition `migration-support` seam
-  `extension_installation_store_for_migration` (mirrors composition's
-  `*_for_test` accessors; ships zero bytes without the feature).
+`source.rs` owns supported v1 schema reads for PostgreSQL and libSQL. Engine-v2
+state is stored as JSON documents inside v1 persistence; `v2_model.rs` contains
+the compatibility DTOs.
 
-## Remaining follow-up — wire into `ironclaw-reborn` startup
+Target profile, store, tenant, agent, and encryption configuration come from
+`ironclaw_reborn_composition::resolve_reborn_migration_target`. Mount aliases
+must use composition's production resolver. Do not reintroduce migration-only
+target paths or identity defaults.
 
-Call `run_migration` in `crates/ironclaw_reborn_cli/src/runtime/mod.rs` after the
-storage root is resolved and before `build_reborn_runtime`, mirroring
-`with_run_local_trigger_fire_access_checker`; or add a `Command::Migrate`
-subcommand. The `run --dry-run` output already reserves a `v1_state:` line.
-Deferred per the original PR scope.
+The companion protocol is intentionally small:
 
-## Mount layout caveat
-
-`mounts.rs` reproduces the production alias→path layout (memory `/memory`;
-threads/secrets tenant/user-scoped) because the canonical resolver is **private**
-in `ironclaw_reborn_composition`. It MUST be reconciled with composition when the
-startup wiring lands so the runtime reads back exactly what was migrated. The
-acceptance test verifies round-trip through the **same** services the migration
-writes with, pinning conversion correctness independently of that reconciliation
-(end-to-end runtime-readback is the wiring follow-up).
-
-## Tests
-
-`tests/migration_roundtrip.rs` (`required-features = ["libsql"]`, Docker-free):
-seeds a rich v1+engine-v2 fixture (conversations, every routine trigger variant,
-cron + non-cron missions with a mission thread, memory docs, settings, a secret,
-an OAuth + a channel identity, an installed WASM tool), runs the migration, and
-asserts converted counts (including secrets/identities/extensions), the exact gap
-set, triggers read back through the **public** `LibSqlTriggerRepository`, and
-on-disk durability of thread / secret / extension-installation documents via a
-fresh connection. A second case asserts `--dry-run` reports fully but writes
-nothing. Add a Postgres variant with the `postgres_pool_or_skip()`
-skip-if-no-Docker helper (see `crates/ironclaw_reborn_composition/tests/postgres_substrate.rs`).
-
+```text
+ironclaw-reborn-migration __handshake
+ironclaw-reborn-migration v1 plan|apply|resume|verify|status
 ```
-cargo test -p ironclaw_reborn_migration --features libsql --test migration_roundtrip
+
+PostgreSQL source URLs and source keys come from
+`MIGRATION_SOURCE_POSTGRES` and `MIGRATION_SOURCE_SECRET_MASTER_KEY`.
+Production target URL/key names come from Reborn `config.toml`. They must never
+be accepted as raw CLI values.
+
+## Disposition and fidelity
+
+The versioned inventory is the source of truth. Every known v1 table and
+persistent home artifact must be classified as imported, semantically
+converted, archive-only, re-auth/reinstall, intentionally reset,
+operator-skipped, unsupported, or derived/rebuilt. A new v1 category without a
+registry entry is a blocker, not an implicit skip.
+
+Converters must implement deterministic compare-and-upsert semantics. Exact
+replay is a no-op; a divergent target collision fails without overwriting.
+Unsupported transcript payloads are retained in thread metadata where the
+converter explicitly says so. `archive_only` operational categories currently
+retain inventory counts/checksums and a disposition only; the source payload is
+not copied into a Reborn archive. Do not describe those payloads as archived.
+
+API-token hashes cannot become Reborn signed sessions. Unknown v1 WASM/channel
+packages cannot become runnable Reborn installations. Both require an explicit
+re-auth/reinstall disposition.
+
+## Validation
+
+Minimum focused gates:
+
+```bash
+cargo test -p ironclaw_reborn_migration --no-default-features --features libsql
+cargo test -p ironclaw_reborn_migration --no-default-features --features postgres
+cargo clippy -p ironclaw_reborn_migration --all-targets --all-features -- -D warnings
 ```
+
+Acceptance coverage must prove source immutability, target absence after plan,
+manifest redaction, stopped-snapshot enforcement, idempotent resume, collision
+handling, full inventory disposition, libSQL/PostgreSQL parity, and cold
+structural readback. Full runtime/service readback remains additional work; a
+converter-only roundtrip does not prove that the normal Reborn runtime can see
+all migrated data.
+
+The operator runbook is `docs/reborn/v1-migration.md`.

@@ -5,17 +5,18 @@
 //! become transcript messages in order through `SessionThreadService`. Because
 //! the append APIs assign their own timestamps and carry no per-message
 //! metadata, the original per-message `(role, created_at, id)` provenance is
-//! preserved losslessly in the thread's `metadata_json` under a `legacy_v1`
-//! key — content, ordering, and role all survive.
+//! preserved in the thread's `metadata_json` under a `legacy_v1` key. Roles
+//! without a first-class append port retain their content there as an archive;
+//! user and assistant content lives in first-class transcript rows.
 //!
 //! The reusable [`write_thread`] helper is also used by the automations
 //! converter to migrate engine-v2 mission threads.
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{MissionId, ThreadId, UserId};
+use ironclaw_host_api::{MissionId, ProjectId, ThreadId, UserId};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, EnsureThreadRequest,
-    MessageContent, ThreadScope,
+    LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus, ThreadScope,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -25,6 +26,7 @@ use crate::options::MigrationOptions;
 use crate::report::{Domain, LossReason, MigrationReport};
 use crate::source::V1Source;
 use crate::target::RebornTarget;
+use crate::target::ids;
 
 /// Normalized role of a source transcript message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +62,7 @@ pub(crate) struct ThreadImport {
     pub(crate) thread_id: Uuid,
     pub(crate) owner_user: String,
     pub(crate) title: Option<String>,
+    pub(crate) project_id: Option<Uuid>,
     pub(crate) mission_id: Option<Uuid>,
     /// Provenance stored on the thread (channel, timestamps, source kind…).
     pub(crate) provenance: serde_json::Value,
@@ -97,6 +100,7 @@ pub(crate) async fn run(
                 thread_id: conv.id,
                 owner_user: user_id.clone(),
                 title: conv.title.clone(),
+                project_id: None,
                 mission_id: None,
                 provenance: json!({
                     "channel": conv.channel,
@@ -169,11 +173,21 @@ pub(crate) async fn write_thread(
         },
         None => None,
     };
+    let project_id = match import.project_id {
+        Some(id) => match ProjectId::new(id.to_string()) {
+            Ok(project_id) => Some(project_id),
+            Err(e) => {
+                record_thread_id_loss(report, &import.thread_id, "project_id", e.to_string());
+                return Ok(());
+            }
+        },
+        None => None,
+    };
 
     let scope = ThreadScope {
         tenant_id: tgt.tenant_id.clone(),
         agent_id: tgt.agent_id.clone(),
-        project_id: None,
+        project_id,
         owner_user_id: Some(owner_user),
         mission_id,
     };
@@ -184,48 +198,103 @@ pub(crate) async fn write_thread(
         .unwrap_or_default();
 
     let metadata_json = build_metadata_json(&import)?;
+    let migration_identity = ids::MigrationIdentity::from_report(report)?;
 
-    tgt.thread_service
+    let persisted_thread = tgt
+        .thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: scope.clone(),
             thread_id: Some(thread_id.clone()),
             created_by_actor_id: actor_id.clone(),
             title: import.title.clone(),
-            metadata_json: Some(metadata_json),
+            metadata_json: Some(metadata_json.clone()),
         })
         .await
         .map_err(|e| write_err("thread", &import.thread_id, e.to_string()))?;
+    if persisted_thread.created_by_actor_id != actor_id
+        || persisted_thread.title != import.title
+        || persisted_thread.metadata_json.as_deref() != Some(metadata_json.as_str())
+    {
+        return Err(write_err(
+            "thread",
+            &import.thread_id,
+            "deterministic thread id already contains divergent source data; refusing to overwrite"
+                .to_string(),
+        ));
+    }
 
-    for message in import.messages {
+    let source_binding_id = migration_identity.thread_source_binding(import.thread_id);
+    for (message_index, message) in import.messages.into_iter().enumerate() {
+        let stable_message_key = migration_identity.message_key(
+            import.thread_id,
+            message_index,
+            message.orig_id.as_deref(),
+        );
         match message.role {
             ImportRole::User => {
-                tgt.thread_service
+                let source_content = message.content;
+                let accepted = tgt
+                    .thread_service
                     .accept_inbound_message(AcceptInboundMessageRequest {
                         scope: scope.clone(),
                         thread_id: thread_id.clone(),
                         actor_id: actor_id.clone(),
-                        source_binding_id: None,
+                        source_binding_id: Some(source_binding_id.clone()),
                         reply_target_binding_id: None,
-                        external_event_id: message.orig_id.clone(),
-                        content: MessageContent::text(message.content),
+                        external_event_id: Some(stable_message_key),
+                        content: MessageContent::text(source_content.clone()),
                     })
                     .await
                     .map_err(|e| write_err("message", &import.thread_id, e.to_string()))?;
+                if accepted.idempotent_replay {
+                    let replay = tgt
+                        .thread_service
+                        .load_context_messages(LoadContextMessagesRequest {
+                            scope: scope.clone(),
+                            thread_id: thread_id.clone(),
+                            message_ids: vec![accepted.message_id],
+                        })
+                        .await
+                        .map_err(|e| write_err("message", &import.thread_id, e.to_string()))?;
+                    let exact_replay = replay.messages.iter().any(|persisted| {
+                        persisted.message_id == Some(accepted.message_id)
+                            && persisted.kind == MessageKind::User
+                            && persisted.content == source_content
+                    });
+                    if !exact_replay {
+                        return Err(write_err(
+                            "message",
+                            &import.thread_id,
+                            "idempotency key already contains divergent user-message data; refusing to overwrite"
+                                .to_string(),
+                        ));
+                    }
+                }
                 report.stats.messages += 1;
             }
             ImportRole::Assistant => {
-                tgt.thread_service
+                let source_content = message.content;
+                let persisted = tgt
+                    .thread_service
                     .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
                         scope: scope.clone(),
                         thread_id: thread_id.clone(),
-                        turn_run_id: message
-                            .orig_id
-                            .clone()
-                            .unwrap_or_else(|| import.thread_id.to_string()),
-                        content: MessageContent::text(message.content),
+                        turn_run_id: stable_message_key,
+                        content: MessageContent::text(source_content.clone()),
                     })
                     .await
                     .map_err(|e| write_err("message", &import.thread_id, e.to_string()))?;
+                if persisted.kind != MessageKind::Assistant
+                    || persisted.status != MessageStatus::Finalized
+                    || persisted.content.as_deref() != Some(source_content.as_str())
+                {
+                    return Err(write_err(
+                        "message",
+                        &import.thread_id,
+                        "deterministic assistant-message key already contains divergent data; refusing to overwrite"
+                            .to_string(),
+                    ));
+                }
                 report.stats.messages += 1;
             }
             ImportRole::Other => {
@@ -250,6 +319,10 @@ fn build_metadata_json(import: &ThreadImport) -> Result<String, MigrationError> 
                 "role": m.raw_role,
                 "created_at": m.created_at.to_rfc3339(),
                 "orig_id": m.orig_id,
+                // User/assistant content lives in first-class transcript rows.
+                // Roles without an append port are archived here so their
+                // payload is never silently reduced to metadata-only claims.
+                "archived_content": (m.role == ImportRole::Other).then_some(&m.content),
             })
         })
         .collect();

@@ -86,6 +86,26 @@ impl LibSqlBackend {
         })
     }
 
+    /// Open an existing local database with SQLite's read-only flag.
+    ///
+    /// This is intentionally separate from [`Self::new_local`]: it neither
+    /// creates parent directories nor creates the database and is used by
+    /// offline inspection/migration tooling that must not mutate its source.
+    pub async fn new_local_read_only(path: &Path) -> Result<Self, DatabaseError> {
+        let db = libsql::Builder::new_local(path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .map_err(|e| {
+                DatabaseError::Pool(format!("Failed to open read-only libSQL database: {e}"))
+            })?;
+
+        Ok(Self {
+            db: Arc::new(db),
+            write_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
     /// Create a new in-memory database (for testing).
     pub async fn new_memory() -> Result<Self, DatabaseError> {
         let db = libsql::Builder::new_local(":memory:")
@@ -511,6 +531,36 @@ mod tests {
 
     use crate::db::Database;
     use crate::db::libsql::{LibSqlBackend, fmt_ts, normalize_notify_user, parse_timestamp};
+
+    #[tokio::test]
+    async fn test_read_only_backend_rejects_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.db");
+        let writable = LibSqlBackend::new_local(&path).await.unwrap();
+        writable.run_migrations().await.unwrap();
+        drop(writable);
+        let bytes_before = std::fs::read(&path).unwrap();
+
+        let read_only = LibSqlBackend::new_local_read_only(&path).await.unwrap();
+        let connection = read_only.connect().await.unwrap();
+        connection
+            .query("SELECT COUNT(*) FROM settings", ())
+            .await
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO settings (user_id, key, value) VALUES ('u', 'k', 'v')",
+                    (),
+                )
+                .await
+                .is_err(),
+            "read-only source backend accepted a write"
+        );
+        drop(connection);
+        drop(read_only);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes_before);
+    }
 
     #[test]
     fn test_normalize_notify_user_treats_legacy_default_as_missing() {

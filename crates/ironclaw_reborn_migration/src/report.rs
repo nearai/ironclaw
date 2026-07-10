@@ -1,31 +1,43 @@
 //! Migration outcome accounting.
 //!
-//! Two shapes: [`MigrationStats`] counts what was converted per domain, and
-//! [`LossyItem`] records every source field/entity that could **not** be
-//! represented in Reborn. Together they form the [`MigrationReport`], which is
-//! JSON-serializable so an operator (or a follow-up in-process migration step)
-//! can inspect exactly what carried over and what was dropped. Nothing is ever
-//! silently lost: a value that has no Reborn home lands here as a `LossyItem`.
+//! [`MigrationStats`] and [`LossyItem`] retain converter-level accounting while
+//! the attached versioned [`crate::manifest::MigrationManifest`] carries the
+//! complete source inventory, lifecycle status, and checkpoints. Both are
+//! JSON-serializable; values without a Reborn representation must appear in one
+//! of these explicit accounting surfaces rather than being silently dropped.
 
 use ironclaw_host_api::UserId;
 use serde::{Deserialize, Serialize};
 
 /// The domain a converted item or a loss belongs to. Keeps report entries
 /// grouped and greppable rather than free-text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Domain {
+    User,
+    ApiToken,
     Thread,
     Message,
+    ConversationBinding,
+    Project,
     Routine,
     Mission,
+    Trigger,
     Job,
     Memory,
     Secret,
+    SecurityAudit,
     Extension,
+    Skill,
     Identity,
+    Pairing,
     Heartbeat,
     Setting,
+    Provider,
+    WorkspaceFile,
+    OperationalState,
+    SchemaMetadata,
+    Unknown,
 }
 
 /// Why a source value did not fully carry over into Reborn.
@@ -61,10 +73,14 @@ pub struct LossyItem {
 /// Per-domain counts of successfully converted source entities.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationStats {
+    pub users: usize,
     pub threads: usize,
     pub messages: usize,
+    pub projects: usize,
     pub routines: usize,
     pub missions: usize,
+    /// Durable Reborn trigger records created from supported routines/missions.
+    pub triggers: usize,
     pub trigger_runs: usize,
     pub jobs: usize,
     pub memory_documents: usize,
@@ -83,6 +99,10 @@ pub struct MigrationReport {
     pub dry_run: bool,
     pub stats: MigrationStats,
     pub lossy: Vec<LossyItem>,
+    /// The lifecycle manifest that produced this report. Older callers may
+    /// omit it while the compatibility wrapper is being retired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<crate::manifest::MigrationManifest>,
 }
 
 impl MigrationReport {

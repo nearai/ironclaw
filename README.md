@@ -62,6 +62,14 @@ cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
 ./target/debug/ironclaw-reborn --help
 ```
 
+To use `migrate`, build the same-version companion into the same target
+directory too:
+
+```bash
+cargo build -p ironclaw_reborn_cli -p ironclaw_reborn_migration
+./target/debug/ironclaw-reborn migrate v1 --help
+```
+
 The default Reborn home is `$HOME/.ironclaw/reborn`. Override it with an
 absolute path when you want isolated state:
 
@@ -73,6 +81,29 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 `config path` and `doctor` are safe diagnostics; they report the resolved home,
 profile, `config.toml`, `providers.json`, and `v1_state: not-used`.
 They do not create Reborn state or seed config files.
+
+### Migrate an existing v1 installation
+
+The Reborn Docker image includes a same-version migration companion. Source
+builds must build both executables into the same target directory. Native
+`cargo-dist` installers do not yet package the pair. Use the companion through
+the primary binary; normal `run`, `serve`, and container startup never import
+v1 automatically:
+
+```bash
+ironclaw-reborn migrate v1 plan \
+  --source-libsql /backups/ironclaw-v1.db \
+  --manifest /secure/migration-v1.json
+
+ironclaw-reborn migrate v1 status \
+  --manifest /secure/migration-v1.json
+```
+
+Final apply requires v1 to be stopped and a consistent source snapshot. API
+tokens and incompatible credentials require re-authentication; unsupported
+executables are never enabled as placeholders. Review the complete backup,
+apply, verification, and rollback procedure in
+[`docs/reborn/v1-migration.md`](docs/reborn/v1-migration.md) before cutover.
 
 ### Configure the model route
 

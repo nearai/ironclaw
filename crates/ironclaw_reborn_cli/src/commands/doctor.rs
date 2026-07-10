@@ -55,6 +55,26 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
         detail: report.profile().to_string(),
     });
 
+    checks.push(DoctorCheck {
+        name: "v1_state".to_string(),
+        category: CheckCategory::Core,
+        outcome: CheckOutcome::Pass,
+        detail: report.v1_state().to_string(),
+    });
+
+    checks.push(DoctorCheck {
+        name: "v1_migration_state".to_string(),
+        category: CheckCategory::Core,
+        outcome: CheckOutcome::Pass,
+        detail: migration_state(context).unwrap_or_else(|| {
+            if context.v1_migration_source_candidate().is_some() {
+                "available".to_string()
+            } else {
+                "not_detected".to_string()
+            }
+        }),
+    });
+
     let config_path = context.boot_config().home().config_file_path();
     checks.push(check_config_file(&config_path));
 
@@ -207,6 +227,48 @@ impl Renderable for DoctorDto {
         )?;
         Ok(())
     }
+}
+
+fn migration_state(context: &RebornCliContext) -> Option<String> {
+    let target_state = context
+        .boot_config()
+        .home()
+        .path()
+        .join(crate::commands::migrate::MIGRATION_STATE_MARKER_FILE);
+    if target_state.exists() {
+        return crate::commands::migrate::read_target_state_status(&target_state)
+            .or_else(|| Some("invalid".to_string()));
+    }
+
+    let marker = crate::commands::onboard::onboarding_marker_path(context.boot_config().home());
+    let body = std::fs::read_to_string(marker).ok()?;
+    let document: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let recorded = document
+        .pointer("/v1_migration/state")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)?;
+    let Some(manifest_path) = document
+        .pointer("/v1_migration/manifest")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Some(recorded);
+    };
+    status_from_document(std::path::Path::new(manifest_path)).or(Some(recorded))
+}
+
+fn status_from_document(path: &std::path::Path) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let document = serde_json::from_str::<serde_json::Value>(&body).ok()?;
+    document
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .filter(|status| {
+            matches!(
+                *status,
+                "planned" | "applying" | "failed" | "applied" | "verifying" | "verified"
+            )
+        })
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

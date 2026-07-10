@@ -14,15 +14,63 @@ pub struct MigrationOptions {
     pub source: SourceDb,
     /// Where to write Reborn state.
     pub target: TargetStore,
+    /// Effective production Reborn profile selected by composition.
+    pub profile: String,
     /// Reborn tenant that all migrated state belongs to.
     pub tenant_id: TenantId,
     /// Reborn agent that migrated threads/triggers/memory are scoped to.
     pub agent_id: AgentId,
-    /// Secrets master key (v1 ciphertext re-encrypts under Reborn's ported
-    /// AES-256-GCM scheme). Required only when migrating secrets.
+    /// Legacy single-key compatibility input used only by `run_migration`.
+    /// New lifecycle callers must use [`MigrationSecretInputs`] so v1
+    /// decryption and Reborn encryption resolve independently.
     pub secret_master_key: Option<SecretString>,
     /// Report only; write nothing to the Reborn store.
     pub dry_run: bool,
+}
+
+/// Secret material used by the two sides of an apply operation.
+///
+/// v1 ciphertext and Reborn ciphertext do not have to use the same master key.
+/// Keeping the values in a separate, non-`Debug` input also makes it harder for
+/// a lifecycle request or serialized manifest to accidentally disclose them.
+#[derive(Clone, Default)]
+pub struct MigrationSecretInputs {
+    /// Key used only while decrypting values read from the v1 snapshot.
+    pub source_master_key: Option<SecretString>,
+    /// Key used only while encrypting values written to Reborn.
+    pub target_master_key: Option<SecretString>,
+}
+
+impl MigrationSecretInputs {
+    /// Build the split input from the legacy single-key option.
+    ///
+    /// This exists only for the temporary [`crate::run_migration`]
+    /// compatibility wrapper. New callers should resolve both sides
+    /// independently and construct this type directly.
+    pub fn from_legacy(options: &MigrationOptions) -> Self {
+        Self {
+            source_master_key: options.secret_master_key.clone(),
+            target_master_key: options.secret_master_key.clone(),
+        }
+    }
+}
+
+/// Operator assertions required before the first-release offline apply path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApplyAcknowledgements {
+    /// The source v1 process and every other writer have been stopped.
+    pub source_is_stopped: bool,
+    /// The selected source is an operator-created, consistent snapshot.
+    pub source_is_snapshot: bool,
+}
+
+impl ApplyAcknowledgements {
+    pub const fn offline_snapshot() -> Self {
+        Self {
+            source_is_stopped: true,
+            source_is_snapshot: true,
+        }
+    }
 }
 
 /// v1 source database selector. Mirrors `ironclaw::config::DatabaseConfig`

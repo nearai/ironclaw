@@ -117,6 +117,19 @@ pub trait RebornUserDirectory: Send + Sync {
         created_by: &UserId,
     ) -> Result<RebornUser, RebornIdentityError>;
 
+    /// Import a canonical user from a historical store without minting a new
+    /// id or changing any supplied profile/lifecycle fields.
+    ///
+    /// This writes only the user record. It deliberately does not create a
+    /// verified-email index; external identity adoption remains the sole
+    /// migration path that may establish verified-email linking. Replaying an
+    /// exact record succeeds, while an existing divergent record returns
+    /// [`RebornIdentityError::UserImportConflict`] without overwriting it.
+    async fn import_migrated_user(
+        &self,
+        user: RebornUser,
+    ) -> Result<RebornUser, RebornIdentityError>;
+
     /// Apply a partial profile update. Errors with
     /// [`RebornIdentityError::UserNotFound`] if the user does not exist.
     async fn update_profile(

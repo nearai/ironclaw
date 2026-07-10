@@ -74,6 +74,27 @@ fn status_from_stored(status: StoredUserStatus) -> RebornUserStatus {
     }
 }
 
+fn to_stored_user(user: &RebornUser) -> StoredUser {
+    StoredUser {
+        email: user.email.clone(),
+        display_name: user.display_name.clone(),
+        created_at: user.created_at.clone(),
+        updated_at: user.updated_at.clone(),
+        status: status_to_stored(user.status),
+        role: role_to_stored(user.role),
+        created_by: user
+            .created_by
+            .as_ref()
+            .map(|created_by| created_by.as_str().to_string()),
+        last_login_at: user.last_login_at.clone(),
+        tenant_id: user
+            .tenant_id
+            .as_ref()
+            .map(|tenant_id| tenant_id.as_str().to_string()),
+        metadata: user.metadata.clone(),
+    }
+}
+
 /// Map a persisted row to the public domain type, validating the persisted
 /// `user_id` / `created_by` / `tenant_id` strings on the way out (a malformed
 /// persisted id is a backend inconsistency, surfaced rather than dropped).
@@ -353,6 +374,49 @@ where
         .await
         .map_err(backend)?;
         to_reborn_user(new_user_id.as_str().to_string(), record)
+    }
+
+    async fn import_migrated_user(
+        &self,
+        user: RebornUser,
+    ) -> Result<RebornUser, RebornIdentityError> {
+        let path = user_path(user.user_id.as_str())?;
+        let record = to_stored_user(&user);
+
+        if let Some(existing) = self.read_record::<StoredUser>(&path).await? {
+            return if existing == record {
+                Ok(user)
+            } else {
+                Err(RebornIdentityError::UserImportConflict(
+                    user.user_id.as_str().to_string(),
+                ))
+            };
+        }
+
+        match self
+            .write_record(&path, &record, CasExpectation::Absent)
+            .await
+        {
+            Ok(()) => Ok(user),
+            Err(FilesystemError::VersionMismatch { .. }) => {
+                let existing = self
+                    .read_record::<StoredUser>(&path)
+                    .await?
+                    .ok_or_else(|| {
+                        RebornIdentityError::Backend(
+                            "migrated user record vanished during reconciliation".to_string(),
+                        )
+                    })?;
+                if existing == record {
+                    Ok(user)
+                } else {
+                    Err(RebornIdentityError::UserImportConflict(
+                        user.user_id.as_str().to_string(),
+                    ))
+                }
+            }
+            Err(error) => Err(backend(error)),
+        }
     }
 
     async fn update_profile(

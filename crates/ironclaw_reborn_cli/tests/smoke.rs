@@ -151,6 +151,21 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
         !dockerfile.contains("\nVOLUME "),
         "Railway's Dockerfile builder rejects Docker VOLUME instructions; configure Railway volumes outside the image: {dockerfile}"
     );
+    assert!(
+        dockerfile.contains("--package ironclaw_reborn_migration")
+            && dockerfile.contains("--bin ironclaw-reborn-migration")
+            && dockerfile.contains(
+                "COPY --from=builder /app/target/dist/ironclaw-reborn-migration /usr/local/bin/ironclaw-reborn-migration"
+            ),
+        "Dockerfile.reborn must build and install the same-image migration companion: {dockerfile}"
+    );
+    assert!(
+        dockerfile.matches("COPY src/ src/").count() == 2
+            && dockerfile.matches("COPY build.rs build.rs").count() == 2
+            && dockerfile.contains("channels-src/telegram/telegram.capabilities.json")
+            && dockerfile.contains("channels-src/discord/discord.capabilities.json"),
+        "Dockerfile.reborn must provide the legacy library sources and compile-time assets needed by the migration companion: {dockerfile}"
+    );
 }
 
 #[test]
@@ -265,6 +280,40 @@ fn docker_reborn_entrypoint_uses_railway_volume_mount_for_home() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("args=--help"), "stdout: {stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_does_not_seed_target_for_migration_commands() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let reborn_home = temp.path().join("missing-reborn-home");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .args(["migrate", "v1", "--help"])
+        .env_clear()
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("args=migrate v1 --help"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !reborn_home.exists(),
+        "migration dispatch must not create target state"
+    );
 }
 
 #[cfg(unix)]
@@ -443,6 +492,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("extension"), "stdout: {stdout}");
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
+    assert!(stdout.contains("migrate"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
     assert!(stdout.contains("onboard"), "stdout: {stdout}");
     assert!(stdout.contains("profile"), "stdout: {stdout}");
@@ -1929,6 +1979,39 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
 }
 
 #[test]
+fn run_fails_closed_for_a_non_default_applied_migration_manifest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir(&reborn_home).expect("Reborn home");
+    let non_default_manifest = temp.path().join("operator-selected-manifest.json");
+    std::fs::write(&non_default_manifest, r#"{"status":"applied"}"#).expect("migration manifest");
+    std::fs::write(
+        reborn_home.join(".v1-migration-state.json"),
+        serde_json::json!({
+            "schema_version": "ironclaw.reborn.migration-state/v1",
+            "migration_protocol_version": 1,
+            "release_version": env!("CARGO_PKG_VERSION"),
+            "status": "applied",
+            "manifest": non_default_manifest,
+        })
+        .to_string(),
+    )
+    .expect("target-owned migration state");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "--dry-run"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn run should fail closed");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("target is quarantined"), "stderr: {stderr}");
+    assert!(stderr.contains("status is `applied`"), "stderr: {stderr}");
+}
+
+#[test]
 fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
@@ -1963,6 +2046,56 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     assert!(
         !reborn_home.exists(),
         "doctor should not create state directories"
+    );
+}
+
+#[test]
+fn doctor_reports_the_status_from_onboardings_migration_manifest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir(&reborn_home).expect("Reborn home");
+    let manifest = reborn_home.join("v1-migration-manifest.json");
+    std::fs::write(&manifest, r#"{"status":"applied"}"#).expect("manifest");
+    std::fs::write(
+        reborn_home.join(".v1-migration-state.json"),
+        serde_json::json!({
+            "schema_version": "ironclaw.reborn.migration-state/v1",
+            "migration_protocol_version": 1,
+            "release_version": env!("CARGO_PKG_VERSION"),
+            "status": "applied",
+            "manifest": manifest,
+        })
+        .to_string(),
+    )
+    .expect("target-owned migration state");
+    std::fs::write(
+        reborn_home.join(".onboard-completed.json"),
+        serde_json::json!({
+            "v1_migration": {
+                "state": "planned",
+                "manifest": manifest,
+            }
+        })
+        .to_string(),
+    )
+    .expect("onboarding marker");
+
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("v1_migration_state: applied"),
+        "stdout: {stdout}"
     );
 }
 
@@ -2877,11 +3010,53 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     assert!(marker_path.exists(), "onboarding marker missing");
     let marker_text = std::fs::read_to_string(marker_path).expect("read marker");
     let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
-    assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
+    assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v2");
     assert_eq!(marker["v1_state"], "not-used");
+    assert_eq!(marker["v1_migration"]["state"], "not_detected");
     assert!(
         !v1_home.exists(),
         "onboard must not create or read explicit v1 state"
+    );
+}
+
+#[test]
+fn onboard_reports_detected_v1_without_starting_migration() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let v1_home = temp.path().join("v1-home");
+    std::fs::create_dir(&v1_home).expect("v1 home");
+    std::fs::write(v1_home.join("ironclaw.db"), b"snapshot evidence")
+        .expect("v1 database evidence");
+
+    let output = Command::new(reborn_bin())
+        .arg("onboard")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_BASE_DIR", &v1_home)
+        .output()
+        .expect("ironclaw-reborn onboard should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("v1_migration_state: available"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("ironclaw-reborn migrate v1 plan --help"),
+        "stdout: {stdout}"
+    );
+    let marker_text =
+        std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
+    let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("marker JSON");
+    assert_eq!(marker["v1_migration"]["state"], "available");
+    assert!(
+        !reborn_home.join("v1-migration-manifest.json").exists(),
+        "detection must not run plan automatically"
     );
 }
 
@@ -2908,7 +3083,7 @@ fn onboard_dry_run_is_read_only() {
         "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("import_history_requested: true"),
+        stdout.contains("migrate_v1_requested: true"),
         "stdout: {stdout}"
     );
     assert!(!reborn_home.exists(), "dry-run must not create Reborn home");
@@ -2944,16 +3119,16 @@ fn onboard_dry_run_reports_existing_marker_as_preserved() {
 }
 
 #[test]
-fn onboard_import_history_records_pending_step() {
+fn onboard_can_record_an_explicit_v1_migration_skip() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
     let output = Command::new(reborn_bin())
-        .args(["onboard", "--import-history"])
+        .args(["onboard", "--skip-v1-migration"])
         .env_clear()
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
-        .expect("ironclaw-reborn onboard --import-history should run");
+        .expect("ironclaw-reborn onboard --skip-v1-migration should run");
 
     assert!(
         output.status.success(),
@@ -2963,13 +3138,9 @@ fn onboard_import_history_records_pending_step() {
     let marker_text =
         std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
     let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
-    let pending = marker["steps_pending"]
-        .as_array()
-        .expect("pending steps array");
-    assert!(
-        pending.iter().any(|step| step == "history_import"),
-        "marker should record history import as pending: {marker_text}"
-    );
+    assert_eq!(marker["v1_migration"]["state"], "explicitly_skipped");
+    let pending = marker["steps_pending"].as_array().expect("pending steps");
+    assert!(!pending.iter().any(|step| step == "v1_migration"));
 }
 
 #[test]
@@ -3059,7 +3230,7 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
     assert!(config_text.contains("api_version = \"ironclaw.runtime/v1\""));
     assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
     let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
-    assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
+    assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v2");
 }
 
 #[test]

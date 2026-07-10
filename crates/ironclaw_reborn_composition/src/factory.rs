@@ -3425,7 +3425,7 @@ fn validate_resolved_master_key(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn resolve_local_dev_secret_master_key(
+pub(crate) fn resolve_local_dev_secret_master_key(
     root: &Path,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
     // Fail closed on an explicitly-set-but-unusable master key: only an

@@ -815,10 +815,63 @@ struct ResolvedPostgresStorage {
 }
 
 #[cfg(feature = "postgres")]
+struct ResolvedPostgresTargetConfig {
+    url: ironclaw_secrets::SecretMaterial,
+    secret_master_key: ironclaw_secrets::SecretMaterial,
+}
+
+#[cfg(feature = "postgres")]
 fn resolve_postgres_storage_from_config_and_env(
     profile: RebornCompositionProfile,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> Result<ResolvedPostgresStorage, RebornBuildError> {
+    let ResolvedPostgresTargetConfig {
+        url: database_url,
+        secret_master_key,
+    } = resolve_postgres_target_config(profile, config_file)?;
+    let process_local_resource_governor_singleton =
+        require_postgres_resource_governor_singleton_env()?;
+    let storage = config_file
+        .and_then(|file| file.storage.as_ref())
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "profile={profile} requires [storage] backend = \"postgres\" with url_env naming \
+                 an environment variable such as {DEFAULT_REBORN_POSTGRES_URL_ENV}"
+            ),
+        })?;
+    let (pool_max_size, pool_max_size_source) =
+        resolve_postgres_pool_max_size(storage.pool_max_size)?;
+    tracing::debug!(
+        %profile,
+        pool_max_size,
+        pool_max_size_source,
+        "resolved Reborn PostgreSQL pool size"
+    );
+    let tls_options = postgres_pool_tls_options_from_env()?;
+    let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
+        database_url.clone(),
+        pool_max_size,
+        tls_options,
+    )?;
+
+    Ok(ResolvedPostgresStorage {
+        pool,
+        url: database_url,
+        tls_options,
+        secret_master_key,
+        process_local_resource_governor_singleton,
+    })
+}
+
+/// Resolve the production target locator and encryption key without opening a
+/// pool or enforcing runtime-worker settings. Both runtime construction and
+/// migration target discovery use this function so their storage selection
+/// cannot drift.
+#[cfg(feature = "postgres")]
+fn resolve_postgres_target_config(
+    profile: RebornCompositionProfile,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> Result<ResolvedPostgresTargetConfig, RebornBuildError> {
     let storage = config_file
         .and_then(|file| file.storage.as_ref())
         .ok_or_else(|| RebornBuildError::InvalidConfig {
@@ -857,30 +910,29 @@ fn resolve_postgres_storage_from_config_and_env(
         "Reborn secret master key",
         "storage.secret_master_key_env",
     )?;
-    let process_local_resource_governor_singleton =
-        require_postgres_resource_governor_singleton_env()?;
-    let (pool_max_size, pool_max_size_source) =
-        resolve_postgres_pool_max_size(storage.pool_max_size)?;
-    tracing::debug!(
-        %profile,
-        pool_max_size,
-        pool_max_size_source,
-        "resolved Reborn PostgreSQL pool size"
-    );
-    let tls_options = postgres_pool_tls_options_from_env()?;
-    let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
-        database_url.clone(),
-        pool_max_size,
-        tls_options,
-    )?;
 
-    Ok(ResolvedPostgresStorage {
-        pool,
+    Ok(ResolvedPostgresTargetConfig {
         url: database_url,
-        tls_options,
         secret_master_key,
-        process_local_resource_governor_singleton,
     })
+}
+
+/// Resolve the exact PostgreSQL URL and secret key used by production without
+/// constructing a runtime or starting workers. The migration companion maps
+/// this composition-owned result into its own target types.
+#[cfg(all(feature = "migration-support", feature = "postgres"))]
+pub(crate) fn resolve_postgres_migration_target(
+    profile: RebornCompositionProfile,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> Result<
+    (
+        ironclaw_secrets::SecretMaterial,
+        ironclaw_secrets::SecretMaterial,
+    ),
+    RebornBuildError,
+> {
+    let resolved = resolve_postgres_target_config(profile, config_file)?;
+    Ok((resolved.url, resolved.secret_master_key))
 }
 
 #[cfg(feature = "postgres")]
