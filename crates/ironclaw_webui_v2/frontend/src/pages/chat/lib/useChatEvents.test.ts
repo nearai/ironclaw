@@ -2066,6 +2066,35 @@ test("useChatEvents: stale completed status after current failure does not clear
   ]);
 });
 
+test("useChatEvents: unprotected historical success does not clear current failure banner", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "run failed",
+  });
+
+  harness.handleEvent({
+    type: "projection_snapshot",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-current",
+              status: "failed",
+              failure_summary: "The current run failed.",
+            },
+          },
+          { run_status: { run_id: "run-old", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-current");
+  assert.equal(harness.messages[0].content, "The current run failed.");
+});
+
 test("useChatEvents: terminal success settles the run once", () => {
   const harness = createUseChatEventsHarness();
 

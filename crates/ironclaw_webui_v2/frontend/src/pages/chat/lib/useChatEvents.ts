@@ -499,7 +499,10 @@ function applyProjectionItems({
           runId,
           terminalSucceeded,
         );
-        if (terminalSucceeded && (!protectedRunId || runId === protectedRunId)) {
+        // Projection snapshots can include historical successful runs; only a
+        // success for the run the stream already knows is current clears
+        // client-only failure banners.
+        if (terminalSucceeded && streamActiveRunId === runId) {
           sawSuccessfulTerminal = true;
         } else if (status === "failed" || status === "recovery_required") {
           appendRunFailureMessage(setMessages, {
