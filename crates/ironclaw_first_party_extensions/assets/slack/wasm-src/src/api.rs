@@ -9,6 +9,47 @@ use crate::types::*;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 
+/// Emit the host runtime's structured guest-error contract
+/// (`StructuredWasmGuestError { code, kind }`, parsed in
+/// `crates/ironclaw_host_runtime/src/services/wasm_execution.rs`) so a Slack
+/// failure keeps its actionable error code instead of collapsing to a generic
+/// "the tool operation failed". `kind` must be one of the host parser's enum
+/// values: `auth_required` | `input` | `output_too_large` | `executor` |
+/// `network_denied` | `client` | `operation_failed`.
+fn structured_error(code: &str, kind: &'static str) -> String {
+    // Slack error codes are snake_case ASCII identifiers; reduce to that shape
+    // so a hostile response body cannot smuggle free text into the error
+    // channel (the host sanitizes again before anything reaches the model).
+    let code: String = code
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .take(64)
+        .collect();
+    let code = if code.is_empty() {
+        "unknown_error".to_string()
+    } else {
+        code
+    };
+    serde_json::json!({ "code": code, "kind": kind }).to_string()
+}
+
+/// Map a Slack `ok:false` error code onto the host's structured error kinds.
+///
+/// The explicit auth list is matched before the `invalid_` prefix rule so
+/// `invalid_auth` gates on re-authentication rather than reading as bad input.
+fn slack_error_kind(code: &str) -> &'static str {
+    match code {
+        "missing_scope" | "not_authed" | "invalid_auth" | "account_inactive"
+        | "token_revoked" => "auth_required",
+        "ratelimited" | "rate_limited" => "client",
+        "channel_not_found" | "user_not_found" => "input",
+        _ if code.starts_with("invalid_") => "input",
+        _ => "operation_failed",
+    }
+}
+
 /// Percent-encode a string for use as a URL query parameter value.
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -55,19 +96,38 @@ fn slack_api_call(
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        return Err(format!(
-            "Slack API returned status {}: {}",
-            response.status,
-            String::from_utf8_lossy(&response.body)
+        // The raw body may carry private data; keep it in debug logs only.
+        host::log(
+            host::LogLevel::Debug,
+            &format!(
+                "Slack API {} returned status {}: {}",
+                resource,
+                response.status,
+                String::from_utf8_lossy(&response.body)
+            ),
+        );
+        // Slack signals rate limiting at the HTTP layer (429 + Retry-After);
+        // the host's structured error shape carries only {code, kind}, so the
+        // Retry-After value cannot ride along.
+        if response.status == 429 {
+            return Err(structured_error("ratelimited", "client"));
+        }
+        return Err(structured_error(
+            &format!("http_status_{}", response.status),
+            "operation_failed",
         ));
     }
 
     let parsed: serde_json::Value = serde_json::from_slice(&response.body)
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+        .map_err(|_| structured_error("invalid_json_response", "operation_failed"))?;
 
     if !parsed["ok"].as_bool().unwrap_or(false) {
         let error = parsed["error"].as_str().unwrap_or("unknown_error");
-        return Err(format!("Slack API error: {}", error));
+        host::log(
+            host::LogLevel::Debug,
+            &format!("Slack API {} error: {}", resource, error),
+        );
+        return Err(structured_error(error, slack_error_kind(error)));
     }
 
     Ok(parsed)

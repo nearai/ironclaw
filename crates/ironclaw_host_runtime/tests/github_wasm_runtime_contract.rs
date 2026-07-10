@@ -2833,6 +2833,50 @@ async fn slack_whoami_resolves_connected_identity() {
     );
 }
 
+/// Structured guest errors: a Slack `ok:false` code must reach the model as
+/// actionable failure detail, not be erased to a generic "the tool operation
+/// failed". `channel_not_found` is model-fixable (list conversations, pick
+/// another id), so it must classify as InvalidInput AND carry the code in the
+/// model-visible failure message.
+#[tokio::test]
+async fn slack_channel_not_found_surfaces_code_in_model_visible_failure() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "conversations.history",
+        200,
+        r#"{"ok":false,"error":"channel_not_found"}"#,
+    )]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "C0MISSING"}),
+        ))
+        .await
+        .unwrap();
+
+    let failure = match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("expected failed outcome, got {other:?}"),
+    };
+    assert_eq!(
+        failure.kind,
+        RuntimeFailureKind::InvalidInput,
+        "channel_not_found is a model-fixable input error: {failure:?}"
+    );
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("channel_not_found"),
+        "model-visible failure detail must carry the Slack error code, got: {message:?}"
+    );
+}
+
 const SLACK_USER_STATUS_BODY: &str = r#"{"ok":true,"user":{"id":"U0CCC","name":"george","is_bot":false,"tz":"America/New_York","tz_label":"Eastern Daylight Time","profile":{"display_name":"George","real_name":"George Harrison","title":"Guitarist","status_text":"On vacation until July 20","status_emoji":":palm_tree:","status_expiration":1753027199}}}"#;
 
 /// Presence honesty: `get_user_info` must surface the profile fields an
@@ -2842,11 +2886,8 @@ const SLACK_USER_STATUS_BODY: &str = r#"{"ok":true,"user":{"id":"U0CCC","name":"
 async fn slack_get_user_info_surfaces_status_and_timezone() {
     let capability_id = CapabilityId::new("slack.get_user_info").unwrap();
     let scope = sample_scope(InvocationId::new());
-    let network = UrlKeyedSlackEgress::new(vec![(
-        "users.info?user=U0CCC",
-        200,
-        SLACK_USER_STATUS_BODY,
-    )]);
+    let network =
+        UrlKeyedSlackEgress::new(vec![("users.info?user=U0CCC", 200, SLACK_USER_STATUS_BODY)]);
     let secret_store = Arc::new(InMemorySecretStore::new());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
