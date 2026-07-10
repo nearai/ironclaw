@@ -51,7 +51,7 @@ use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
 use crate::slack::slack_personal_binding::{
     RebornUserIdentityBindingError, SlackConnectionEpoch, SlackConnectionOwner,
     SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
-    SlackUserBindingLifecycleError,
+    SlackUserBindingLifecycleError, SlackUserBindingLifecycleStore,
 };
 use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
 use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
@@ -228,18 +228,22 @@ pub(crate) async fn start_extension_oauth_flow(
     {
         Ok(flow) => flow,
         Err(error) => {
-            let _ = binding_config
-                .lifecycle_store
-                .abandon_connection(&connection_owner, connection_epoch)
-                .await;
+            abandon_failed_slack_oauth_start(
+                binding_config.lifecycle_store.as_ref(),
+                &connection_owner,
+                connection_epoch,
+            )
+            .await?;
             return Err(error);
         }
     };
     if let Err(error) = state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at) {
-        let _ = binding_config
-            .lifecycle_store
-            .abandon_connection(&connection_owner, connection_epoch)
-            .await;
+        abandon_failed_slack_oauth_start(
+            binding_config.lifecycle_store.as_ref(),
+            &connection_owner,
+            connection_epoch,
+        )
+        .await?;
         return Err(error);
     }
 
@@ -252,6 +256,24 @@ pub(crate) async fn start_extension_oauth_flow(
         continuation: flow.continuation,
         callback_scope: scope_hint(&scope),
     }))
+}
+
+async fn abandon_failed_slack_oauth_start(
+    lifecycle_store: &dyn SlackUserBindingLifecycleStore,
+    connection_owner: &SlackConnectionOwner,
+    connection_epoch: SlackConnectionEpoch,
+) -> Result<(), ProductAuthRouteFailure> {
+    lifecycle_store
+        .abandon_connection(connection_owner, connection_epoch)
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                %error,
+                %connection_epoch,
+                "failed to abandon Slack OAuth start; durable connecting epoch retained for retry"
+            );
+            slack_lifecycle_start_failure(error)
+        })
 }
 
 pub(crate) fn slack_lifecycle_start_failure(
@@ -327,14 +349,14 @@ fn slack_personal_oauth_abandon_hook(
             .await
         {
             Ok(bindings) if !bindings.is_empty() => {
-                tracing::warn!(
+                tracing::debug!(
                     flow_id = %flow_id,
                     "retaining Slack OAuth lifecycle owner because identity cleanup is still pending"
                 );
                 return;
             }
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     flow_id = %flow_id,
                     "retaining Slack OAuth lifecycle owner because identity cleanup could not be verified"
@@ -368,7 +390,7 @@ async fn abandon_slack_connection_epoch(
         .abandon_connection(&connection_owner, connection_epoch)
         .await
     {
-        tracing::warn!(%error, "failed to abandon terminal Slack OAuth connection epoch");
+        tracing::debug!(%error, "failed to abandon terminal Slack OAuth connection epoch");
     }
 }
 
@@ -402,7 +424,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
     provider_identity: Option<&OAuthProviderIdentity>,
 ) -> Result<OAuthProviderIdentityBindingRollback, AuthProductError> {
     let Some(config) = state.slack_personal_oauth_binding_config() else {
-        tracing::warn!(
+        tracing::debug!(
             "Slack personal OAuth callback reached without a binding config; failing closed"
         );
         return Err(AuthProductError::BackendUnavailable);
@@ -418,7 +440,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
         )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "Slack personal OAuth binding owner lookup failed");
+            tracing::debug!(%error, "Slack personal OAuth binding owner lookup failed");
             AuthProductError::BackendUnavailable
         })?
         .ok_or(AuthProductError::BackendUnavailable)?;
@@ -479,7 +501,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
             )
             .await
         {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "failed to roll back Slack identity binding after OAuth completion failure"
             );
@@ -489,7 +511,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
             .abandon_connection(&rollback_owner, rollback_epoch)
             .await
         {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "failed to roll back Slack connection lifecycle after OAuth completion failure"
             );
@@ -551,7 +573,7 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
             .get()
             .ok_or(AuthProductError::BackendUnavailable)?;
         let (client_id, _client_secret) = service.oauth_credentials().await.map_err(|e| {
-            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
+            tracing::debug!(error = %e, "Slack personal OAuth credentials not configured");
             AuthProductError::BackendUnavailable
         })?;
         let account_label = CredentialAccountLabel::new("slack_personal")?;
@@ -591,7 +613,7 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
             .resolve_personal_connection_scope()
             .await
             .map_err(|error| {
-                tracing::warn!(%error, "Slack personal OAuth connection scope unavailable");
+                tracing::debug!(%error, "Slack personal OAuth connection scope unavailable");
                 AuthProductError::BackendUnavailable
             })?
             .ok_or(AuthProductError::BackendUnavailable)?;

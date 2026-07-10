@@ -138,8 +138,8 @@ impl ProductAuthTurnGateResumeDispatcher {
         let reply_target_binding_ref = state.reply_target_binding_ref;
         let mut binding_id =
             auth_continuation_binding_id(event.flow_id, &run_id, gate_ref.as_str());
-        if resume_disposition.is_some() {
-            binding_id.push_str(&binding_ref_segment("disposition", "denied"));
+        if let Some(disposition) = &resume_disposition {
+            binding_id.push_str(&binding_ref_segment("disposition", disposition.as_str()));
         }
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
 
@@ -643,6 +643,15 @@ mod tests {
         assert_eq!(
             resumes[0].resume_disposition,
             Some(GateResumeDisposition::Denied)
+        );
+        assert!(
+            resumes[0]
+                .idempotency_key
+                .as_str()
+                .contains(&binding_ref_segment(
+                    "disposition",
+                    GateResumeDisposition::Denied.as_str()
+                ))
         );
     }
 

@@ -1714,6 +1714,87 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
+    async fn slack_personal_oauth_start_surfaces_failed_abandon_and_retains_retryable_epoch() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::new(
+            Arc::new(FailingCompletionFlowManager {
+                inner: shared.clone(),
+                fail_create: true,
+            }),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            shared.clone(),
+            Arc::new(RecordingDispatcher::default()),
+        ));
+        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
+        let user_id = UserId::new("user-alpha").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        lifecycle_store.fail_next_abandon();
+        let state = ProductAuthRouteState::new(product_auth, tenant_id.clone(), None, None)
+            .with_slack_personal_oauth(slack_personal_oauth_test_slot().await)
+            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+                binding_service,
+                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                    SlackPersonalConnectionScope { installation_id },
+                ))),
+                binding_store,
+                lifecycle_store.clone(),
+            ));
+
+        let error = extension_oauth_start_handler(
+            State(state),
+            Extension(WebUiAuthenticatedCaller::new(
+                tenant_id, user_id, None, None,
+            )),
+            Path("slack".to_string()),
+            Json(ExtensionOAuthStartRequest {
+                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                account_label: "personal slack".to_string(),
+                scopes: Vec::new(),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+                invocation_id: Some(InvocationId::new().to_string()),
+            }),
+        )
+        .await
+        .expect_err("failed start compensation must be surfaced");
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
+        assert!(error.body.retryable);
+        let (owner, epoch, state) = {
+            let entries = lifecycle_store
+                .entries
+                .lock()
+                .expect("lifecycle entries lock");
+            assert_eq!(entries.len(), 1);
+            (entries[0].owner.clone(), entries[0].epoch, entries[0].state)
+        };
+        assert_eq!(state, SlackConnectionState::Connecting);
+
+        lifecycle_store
+            .abandon_connection(&owner, epoch)
+            .await
+            .expect("durable connecting epoch remains retryable");
+        assert_eq!(
+            lifecycle_store.connection_state(&owner).await.unwrap(),
+            Some((epoch, SlackConnectionState::Disconnected))
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
     async fn slack_personal_oauth_start_rejects_non_slack_requester_extension() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let product_auth = Arc::new(RebornProductAuthServices::from_shared(
@@ -2673,6 +2754,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct TestSlackLifecycleStore {
         entries: Mutex<Vec<TestSlackLifecycleEntry>>,
+        fail_next_abandon: AtomicBool,
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -2686,6 +2768,10 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     impl TestSlackLifecycleStore {
+        fn fail_next_abandon(&self) {
+            self.fail_next_abandon.store(true, Ordering::SeqCst);
+        }
+
         fn activate(&self, owner: &SlackConnectionOwner, epoch: SlackConnectionEpoch) {
             let mut entries = self.entries.lock().expect("lifecycle entries lock");
             let entry = entries
@@ -2865,6 +2951,11 @@ mod tests {
             owner: &SlackConnectionOwner,
             epoch: SlackConnectionEpoch,
         ) -> Result<(), SlackUserBindingLifecycleError> {
+            if self.fail_next_abandon.swap(false, Ordering::SeqCst) {
+                return Err(SlackUserBindingLifecycleError::Backend(
+                    "scripted abandon failure".to_string(),
+                ));
+            }
             let mut entries = self.entries.lock().expect("lifecycle entries lock");
             if let Some(entry) = entries
                 .iter_mut()
@@ -3049,6 +3140,7 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     struct FailingCompletionFlowManager {
         inner: Arc<InMemoryAuthProductServices>,
+        fail_create: bool,
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -3058,6 +3150,9 @@ mod tests {
             &self,
             request: ironclaw_auth::NewAuthFlow,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            if self.fail_create {
+                return Err(AuthProductError::CredentialMissing);
+            }
             self.inner.create_flow(request).await
         }
 
@@ -3156,6 +3251,7 @@ mod tests {
         let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
         let failing_flows = Arc::new(FailingCompletionFlowManager {
             inner: shared.clone(),
+            fail_create: false,
         });
         let product_auth = Arc::new(RebornProductAuthServices::new(
             failing_flows,
@@ -3261,6 +3357,7 @@ mod tests {
         let product_auth = Arc::new(RebornProductAuthServices::new(
             Arc::new(FailingCompletionFlowManager {
                 inner: shared.clone(),
+                fail_create: false,
             }),
             shared.clone(),
             shared.clone(),

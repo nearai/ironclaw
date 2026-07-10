@@ -11,19 +11,42 @@ use crate::{
     InboundMessageContentRef,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct ExternalActorBindingEpoch(String);
 
 impl ExternalActorBindingEpoch {
+    fn validate(value: &str) -> Result<(), crate::InboundTurnError> {
+        crate::ids::validate_external_id("external_actor_binding_epoch", value)
+    }
+
     pub fn new(value: impl Into<String>) -> Result<Self, crate::InboundTurnError> {
         let value = value.into();
-        crate::ids::validate_external_id("external_actor_binding_epoch", &value)?;
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for ExternalActorBindingEpoch {
+    type Error = crate::InboundTurnError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for ExternalActorBindingEpoch {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -33,13 +56,9 @@ impl std::fmt::Display for ExternalActorBindingEpoch {
     }
 }
 
-impl<'de> Deserialize<'de> for ExternalActorBindingEpoch {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+impl From<ExternalActorBindingEpoch> for String {
+    fn from(epoch: ExternalActorBindingEpoch) -> Self {
+        epoch.0
     }
 }
 
