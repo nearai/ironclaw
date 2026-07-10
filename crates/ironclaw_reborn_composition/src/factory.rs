@@ -4366,21 +4366,37 @@ fn ensure_postgres_event_store_config(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn warm_resource_governor_for_composition<F>(
+async fn warm_resource_governor_with_error<F, E, J>(
     resource_governor: FilesystemResourceGovernor<F>,
-) -> Result<FilesystemResourceGovernor<F>, crate::RebornCompositionError>
+    map_join_error: J,
+) -> Result<FilesystemResourceGovernor<F>, E>
 where
     F: RootFilesystem + 'static,
+    E: From<ironclaw_resources::ResourceError>,
+    J: FnOnce(tokio::task::JoinError) -> E,
 {
     let resource_governor = tokio::task::spawn_blocking(move || {
         resource_governor.warm_authority()?;
         Ok::<_, ironclaw_resources::ResourceError>(resource_governor)
     })
     .await
-    .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-        reason: format!("resource governor warm-up task failed: {error}"),
-    })??;
+    .map_err(map_join_error)??;
     Ok(resource_governor)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_for_composition<F>(
+    resource_governor: FilesystemResourceGovernor<F>,
+) -> Result<FilesystemResourceGovernor<F>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
+    warm_resource_governor_with_error(resource_governor, |error| {
+        crate::RebornCompositionError::InvalidConfig {
+            reason: format!("resource governor warm-up task failed: {error}"),
+        }
+    })
+    .await
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -4610,15 +4626,10 @@ async fn warm_resource_governor_for_build<F>(
 where
     F: RootFilesystem + 'static,
 {
-    let resource_governor = tokio::task::spawn_blocking(move || {
-        resource_governor.warm_authority()?;
-        Ok::<_, ironclaw_resources::ResourceError>(resource_governor)
+    warm_resource_governor_with_error(resource_governor, |error| RebornBuildError::InvalidConfig {
+        reason: format!("resource governor warm-up task failed: {error}"),
     })
     .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("resource governor warm-up task failed: {error}"),
-    })??;
-    Ok(resource_governor)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

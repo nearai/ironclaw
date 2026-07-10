@@ -5589,29 +5589,41 @@ output_schema_ref = "schemas/write.output.json"
     const NEARAI_AUTH_CAPTURE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
     #[cfg(feature = "root-llm-provider")]
+    async fn write_nearai_auth_capture_bytes(
+        stream: &mut tokio::net::TcpStream,
+        response: &[u8],
+    ) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+
+        match tokio::time::timeout(NEARAI_AUTH_CAPTURE_IO_TIMEOUT, stream.write_all(response)).await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("write auth capture response failed: {error}")),
+            Err(_) => Err(format!(
+                "write auth capture response timed out after {:?}",
+                NEARAI_AUTH_CAPTURE_IO_TIMEOUT
+            )),
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
     async fn write_nearai_auth_capture_response(
         stream: &mut tokio::net::TcpStream,
         status: &str,
         content_type: &str,
         body: &str,
-    ) {
-        use tokio::io::AsyncWriteExt;
-
+    ) -> Result<(), String> {
         let response = format!(
             "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
-        let _ = tokio::time::timeout(
-            NEARAI_AUTH_CAPTURE_IO_TIMEOUT,
-            stream.write_all(response.as_bytes()),
-        )
-        .await;
+        write_nearai_auth_capture_bytes(stream, response.as_bytes()).await
     }
 
     #[cfg(feature = "root-llm-provider")]
     async fn start_nearai_auth_capture_server() -> (String, tokio::sync::oneshot::Receiver<String>)
     {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncReadExt;
         use tokio::net::TcpSocket;
 
         let socket = TcpSocket::new_v4().expect("test server socket");
@@ -5652,7 +5664,8 @@ output_schema_ref = "schemas/write.output.json"
                                 "text/plain",
                                 "request read timed out",
                             )
-                            .await;
+                            .await
+                            .expect("write auth capture read timeout response");
                             continue 'connections;
                         }
                     };
@@ -5666,7 +5679,8 @@ output_schema_ref = "schemas/write.output.json"
                             "text/plain",
                             "request too large",
                         )
-                        .await;
+                        .await
+                        .expect("write auth capture oversized request response");
                         continue 'connections;
                     }
                     buffer.extend_from_slice(&chunk[..read]);
@@ -5684,7 +5698,8 @@ output_schema_ref = "schemas/write.output.json"
                         "text/plain",
                         "incomplete request headers",
                     )
-                    .await;
+                    .await
+                    .expect("write auth capture incomplete headers response");
                     continue;
                 };
                 let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
@@ -5702,11 +5717,22 @@ output_schema_ref = "schemas/write.output.json"
                                 "text/plain",
                                 "invalid content-length",
                             )
-                            .await;
+                            .await
+                            .expect("write auth capture invalid content-length response");
                             continue;
                         }
                     },
-                    None => 0,
+                    None => {
+                        write_nearai_auth_capture_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "missing content-length",
+                        )
+                        .await
+                        .expect("write auth capture missing content-length response");
+                        continue;
+                    }
                 };
                 let Some(request_len) = header_end.checked_add(content_length) else {
                     write_nearai_auth_capture_response(
@@ -5715,7 +5741,8 @@ output_schema_ref = "schemas/write.output.json"
                         "text/plain",
                         "request too large",
                     )
-                    .await;
+                    .await
+                    .expect("write auth capture overflow response");
                     continue;
                 };
                 if request_len > NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES {
@@ -5725,7 +5752,8 @@ output_schema_ref = "schemas/write.output.json"
                         "text/plain",
                         "request too large",
                     )
-                    .await;
+                    .await
+                    .expect("write auth capture oversized content-length response");
                     continue;
                 }
                 while buffer.len() < request_len {
@@ -5745,7 +5773,8 @@ output_schema_ref = "schemas/write.output.json"
                                 "text/plain",
                                 "request body read timed out",
                             )
-                            .await;
+                            .await
+                            .expect("write auth capture body timeout response");
                             continue 'connections;
                         }
                     };
@@ -5756,7 +5785,8 @@ output_schema_ref = "schemas/write.output.json"
                             "text/plain",
                             "incomplete request body",
                         )
-                        .await;
+                        .await
+                        .expect("write auth capture incomplete body response");
                         continue 'connections;
                     }
                     let remaining = request_len - buffer.len();
@@ -5776,7 +5806,8 @@ output_schema_ref = "schemas/write.output.json"
                                 "text/plain",
                                 "invalid json body",
                             )
-                            .await;
+                            .await
+                            .expect("write auth capture invalid json response");
                             continue;
                         }
                     }
@@ -5805,8 +5836,7 @@ output_schema_ref = "schemas/write.output.json"
                         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{}",
                         body
                     );
-                    stream
-                        .write_all(response.as_bytes())
+                    write_nearai_auth_capture_bytes(&mut stream, response.as_bytes())
                         .await
                         .expect("write test streaming response");
                 } else {
@@ -5820,8 +5850,7 @@ output_schema_ref = "schemas/write.output.json"
                         body.len(),
                         body
                     );
-                    stream
-                        .write_all(response.as_bytes())
+                    write_nearai_auth_capture_bytes(&mut stream, response.as_bytes())
                         .await
                         .expect("write test response");
                 }
@@ -5892,6 +5921,26 @@ output_schema_ref = "schemas/write.output.json"
         assert!(
             response.starts_with("HTTP/1.1 413 Payload Too Large"),
             "expected oversized body to be rejected, got: {response:?}"
+        );
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn nearai_auth_capture_server_rejects_missing_content_length() {
+        let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
+        let response = send_nearai_auth_capture_raw_request(
+            &base_url,
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\n\r\n{}".to_string(),
+        )
+        .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected missing content-length to be rejected, got: {response:?}"
+        );
+        assert!(
+            response.contains("missing content-length"),
+            "expected missing content-length diagnostic, got: {response:?}"
         );
     }
 

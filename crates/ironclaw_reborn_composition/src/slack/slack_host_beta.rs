@@ -4757,7 +4757,7 @@ mod tests {
             last_trigger_state = Some((
                 current.next_run_at,
                 current.last_run_at,
-                current.last_status.clone(),
+                current.last_status,
                 current.active_fire_slot,
                 current.active_run_ref,
             ));

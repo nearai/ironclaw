@@ -1,3 +1,7 @@
+#[cfg(feature = "postgres")]
+#[path = "support/postgres.rs"]
+mod postgres_support;
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -61,6 +65,8 @@ use ironclaw_turns::{
     InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
+#[cfg(feature = "postgres")]
+use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 #[cfg(feature = "libsql")]
 use serde_json::Value;
@@ -628,24 +634,6 @@ async fn postgres_pool_or_skip() -> Option<(
         .build()
         .expect("Postgres pool must build");
     Some((container, pool, database_url))
-}
-
-#[cfg(feature = "postgres")]
-async fn assert_postgres_accepts_connections(database_url: &str) {
-    let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls)
-        .await
-        .expect("Postgres testcontainer must accept connections");
-    let connection_task = tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            eprintln!("Postgres readiness probe connection ended with error: {error}");
-        }
-    });
-    client
-        .simple_query("SELECT 1")
-        .await
-        .expect("Postgres testcontainer must answer readiness query");
-    drop(client);
-    connection_task.abort();
 }
 
 #[cfg(feature = "postgres")]
