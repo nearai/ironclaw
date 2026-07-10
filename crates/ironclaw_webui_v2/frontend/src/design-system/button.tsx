@@ -32,8 +32,16 @@ const PRIMARY_HOVER_BG = "var(--v2-btn-primary-bg-hover)";
 
 const BASE =
   "inline-flex items-center justify-center font-medium select-none " +
-  "transition-[background,border-color,color,box-shadow] " +
+  // Press feedback: a subtle scale-down on :active so the control feels
+  // like it registered the press (Emil Kowalski's 0.95–0.98 range). CSS
+  // (not motion/react) on purpose — transitions are interruptible, run
+  // off the main thread, and the app.css reduced-motion guard already
+  // suppresses them wholesale. No scale on hover, no springs.
+  // `scale` is in the transition list because Tailwind's scale-*
+  // utilities set the standalone `scale` property, not `transform`.
+  "transition-[background,border-color,color,box-shadow,scale] " +
   "duration-[var(--v2-duration-fast)] ease-[var(--v2-ease-standard)] " +
+  "active:scale-[0.97] disabled:active:scale-100 " +
   "disabled:cursor-not-allowed disabled:opacity-50 " +
   "focus-visible:outline-none focus-visible:ring-2 " +
   "focus-visible:ring-[var(--v2-accent)]/50 focus-visible:ring-offset-1 " +

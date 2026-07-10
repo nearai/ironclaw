@@ -1,7 +1,9 @@
 // @ts-nocheck
 import React from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { cn } from "../utils/cn";
 import { Icon } from "./icons";
+import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
 
 let nextSelectMenuId = 0;
 const openSelectMenuEntries = new Set();
@@ -19,6 +21,13 @@ const toneDotClasses = {
 const alignClasses = {
   left: "left-0",
   right: "right-0",
+};
+
+/* Origin-aware entrance: the menu grows out of the trigger's corner, not
+   its own center (Emil Kowalski: popovers scale from their trigger). */
+const alignOriginClasses = {
+  left: "origin-top-left",
+  right: "origin-top-right",
 };
 
 function createSelectMenuId() {
@@ -179,6 +188,7 @@ export function SelectMenu({
   const [activeIndex, setActiveIndex] = React.useState(() =>
     selectedOptionIndex(options, value)
   );
+  const reducedMotion = useReducedMotion();
   const rootRef = React.useRef(null);
   const buttonRef = React.useRef(null);
   const idRef = React.useRef("");
@@ -339,10 +349,23 @@ export function SelectMenu({
         />
       </button>
 
+      <AnimatePresence>
       {open && (
-        <div
+        <motion.div
           id={listboxId}
           role="listbox"
+          // Menu vocabulary: slight scale (0.96 → 1, never from 0) + fade
+          // from the trigger's corner; exit is quicker than entry. Under
+          // prefers-reduced-motion the movement drops and only the fade
+          // remains (gentler, not zero).
+          initial={reducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96 }}
+          animate={reducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1 }}
+          exit={{
+            opacity: 0,
+            ...(reducedMotion ? {} : { scale: 0.98 }),
+            transition: { duration: MOTION_DURATION.exit, ease: MOTION_EASE_OUT },
+          }}
+          transition={{ duration: MOTION_DURATION.menu, ease: MOTION_EASE_OUT }}
           className={cn(
             "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-[10px]",
             "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))]",
@@ -351,6 +374,7 @@ export function SelectMenu({
             // above does the separation, the shadow only lifts the surface.
             "shadow-[var(--v2-shadow-menu)]",
             alignClasses[effectiveAlign],
+            alignOriginClasses[effectiveAlign],
             menuClassName
           )}
         >
@@ -395,8 +419,9 @@ export function SelectMenu({
               </button>
             );
           })}
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </div>
   );
 }

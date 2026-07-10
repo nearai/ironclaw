@@ -23,6 +23,7 @@
     "dompurify": "3.2.3",
     "highlight.js": "11.11.1",
     "marked": "17.0.2",
+    "motion": "12.42.2",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-hook-form": "7.62.0",
