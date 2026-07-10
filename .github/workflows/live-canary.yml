@@ -542,11 +542,74 @@ jobs:
           path: artifacts/live-canary/
           retention-days: 14
 
+  approve-reborn-webui-v2-pr-live-qa:
+    name: Approve PR code for Reborn WebUI v2 live QA
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      inputs.target_ref != '' &&
+      (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: reborn-live-canary-pr
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Require trusted approval for the exact PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_PR: ${{ inputs.target_pr }}
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${TARGET_PR}" =~ ^[0-9]+$ && "${TARGET_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::A valid target_pr and full target_ref are required for PR live QA."
+            exit 1
+          fi
+
+          pr_json="$(gh pr view "${TARGET_PR}" --repo "${REPO}" --json isCrossRepository,headRefOid)"
+          if [[ "$(jq -r '.isCrossRepository' <<< "${pr_json}")" == "true" ]]; then
+            echo "::error::Refusing to run live QA with secrets on a forked PR."
+            exit 1
+          fi
+          if [[ "$(jq -r '.headRefOid' <<< "${pr_json}")" != "${TARGET_REF}" ]]; then
+            echo "::error::target_ref does not match PR #${TARGET_PR} head SHA."
+            exit 1
+          fi
+
+          trusted_approval=""
+          while IFS=$'\t' read -r reviewer commit_id; do
+            [[ "${commit_id}" == "${TARGET_REF}" ]] || continue
+            permission="$(gh api "repos/${REPO}/collaborators/${reviewer}/permission" --jq '.permission')"
+            if [[ "${permission}" == "admin" || "${permission}" == "maintain" || "${permission}" == "write" ]]; then
+              trusted_approval="${reviewer}"
+              break
+            fi
+          done < <(
+            gh api --paginate "repos/${REPO}/pulls/${TARGET_PR}/reviews" \
+              --jq 'sort_by(.submitted_at) | group_by(.user.login) | map(last) | .[] | select(.state == "APPROVED") | [.user.login, .commit_id] | @tsv'
+          )
+
+          if [[ -z "${trusted_approval}" ]]; then
+            echo "::error::PR #${TARGET_PR} head ${TARGET_REF} requires an approving review from a collaborator with write access before live secrets can be used."
+            exit 1
+          fi
+          echo "Trusted approval for ${TARGET_REF} was provided by ${trusted_approval}."
+
   prepare-reborn-webui-v2-live-qa:
     name: Prepare Reborn WebUI v2 live QA binary
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      always() &&
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa') &&
+          (inputs.target_ref == '' || needs.approve-reborn-webui-v2-pr-live-qa.result == 'success')
+        )
+      )
+    needs: approve-reborn-webui-v2-pr-live-qa
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -643,14 +706,22 @@ jobs:
               exit 0
             fi
 
-            gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/reborn-webui-v2-binary.zip"
-            unzip -q "${RUNNER_TEMP}/reborn-webui-v2-binary.zip" -d artifacts/prepared-reborn-webui-v2-binary
-            (cd artifacts/prepared-reborn-webui-v2-binary && sha256sum --check ironclaw-reborn.tar.gz.sha256)
-            jq -e \
-              --arg product_ref "${TARGET_REF}" \
-              --arg features "webui-v2-beta,slack-v2-host-beta" \
-              '.format_version == 1 and .product_ref == $product_ref and .features == $features' \
-              artifacts/prepared-reborn-webui-v2-binary/manifest.json > /dev/null
+            if ! (
+              set -e
+              rm -rf artifacts/prepared-reborn-webui-v2-binary
+              mkdir -p artifacts/prepared-reborn-webui-v2-binary
+              gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/reborn-webui-v2-binary.zip"
+              unzip -q "${RUNNER_TEMP}/reborn-webui-v2-binary.zip" -d artifacts/prepared-reborn-webui-v2-binary
+              python3 scripts/live-canary/validate_reborn_binary_artifact.py \
+                artifacts/prepared-reborn-webui-v2-binary \
+                "${TARGET_REF}" \
+                "webui-v2-beta,slack-v2-host-beta"
+            ); then
+              echo "::warning::The Reborn E2E artifact could not be downloaded or validated; using the canary fallback build."
+              rm -rf artifacts/prepared-reborn-webui-v2-binary
+              mkdir -p artifacts/prepared-reborn-webui-v2-binary
+              exit 0
+            fi
             echo "found=1" >> "${GITHUB_OUTPUT}"
             echo "source=reborn-e2e" >> "${GITHUB_OUTPUT}"
             echo "Using tested Reborn E2E binary from run ${run_id}."

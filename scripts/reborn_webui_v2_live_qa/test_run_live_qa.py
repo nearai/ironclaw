@@ -3598,6 +3598,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("target_ref does not match PR #${TARGET_PR} head SHA", workflow)
+        self.assertIn("approve-reborn-webui-v2-pr-live-qa:", workflow)
+        self.assertIn("environment: reborn-live-canary-pr", workflow)
+        self.assertIn(
+            "requires an approving review from a collaborator with write access",
+            workflow,
+        )
         self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
         self.assertIn(
             "ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}",
@@ -3616,9 +3622,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIsNotNone(prepare_match, "shared live QA binary preparation job missing")
         prepare_body = prepare_match.group("body")
+        self.assertIn("needs: approve-reborn-webui-v2-pr-live-qa", prepare_body)
         self.assertIn("reborn-webui-v2-binary-${TARGET_REF}", prepare_body)
-        self.assertIn(".product_ref == $product_ref", prepare_body)
         self.assertIn("Build fallback Reborn WebUI v2 binary once", prepare_body)
+        self.assertIn("if ! (", prepare_body)
+        self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
+        self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
 
