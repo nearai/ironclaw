@@ -2878,7 +2878,15 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
     );
     let requests = host.model_requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].capability_view.is_none());
+    let explanation_capability_view = requests[1]
+        .capability_view
+        .as_ref()
+        .expect("failure explanation model request must suppress tools");
+    assert!(
+        explanation_capability_view
+            .visible_capability_ids
+            .is_empty()
+    );
     assert!(requests[1].surface_version.is_none());
     assert!(requests[1].model_preference.is_none());
 }
