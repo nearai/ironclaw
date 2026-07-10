@@ -143,7 +143,6 @@ async function sendMessage() {
   const userMsg = addMessage('user', displayContent, {
     attachments: pendingAttachmentsForDisplay,
     copyText: pendingCopyText,
-    liveTurnActivityAnchor: true,
   });
   if (attachedImageDataUrls.length > 0) {
     appendImagesToMessage(userMsg, attachedImageDataUrls);

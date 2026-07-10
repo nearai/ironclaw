@@ -3,10 +3,40 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { createChatContainer, createMessageElement } from "./test-dom.mjs";
+function messageElement(role, content = "") {
+  return {
+    role,
+    content,
+    classList: {
+      contains: (name) => name === role || name === "message",
+      add: () => {},
+      remove: () => {},
+    },
+    getAttribute: () => "",
+    setAttribute: () => {},
+    removeAttribute: () => {},
+  };
+}
+
+function createChatContainer(messages) {
+  return {
+    querySelectorAll(selector) {
+      if (selector === ".message.assistant, .message.system") {
+        return messages.filter((message) =>
+          message.role === "assistant" || message.role === "system"
+        );
+      }
+      if (selector === ".message" || selector === "#chat-messages .message") {
+        return messages;
+      }
+      return [];
+    },
+    querySelector: () => null,
+  };
+}
 
 function createHarness() {
-  const container = createChatContainer([createMessageElement("user", "hello")]);
+  const messages = [messageElement("user", "hello")];
   let source = null;
   const timers = [];
   const calls = [];
@@ -52,20 +82,19 @@ function createHarness() {
       updateJob: () => {},
     },
     addMessage: (role, content) => {
-      container.appendChild(createMessageElement(role, content));
+      messages.push(messageElement(role, content));
     },
     clearInterval: () => {},
     clearTimeout: () => {},
-    clearLiveTurnActivityAnchors: () => calls.push("clearLiveTurnActivityAnchors"),
     cleanupConnectionState: () => {},
     console,
     currentThreadId: "thread-1",
     debouncedLoadThreads: () => calls.push("debouncedLoadThreads"),
     document: {
       getElementById: (id) =>
-        id === "chat-messages" ? container : null,
+        id === "chat-messages" ? createChatContainer(messages) : null,
       querySelector: () => null,
-      querySelectorAll: (selector) => container.querySelectorAll(selector),
+      querySelectorAll: () => [],
     },
     enableChatInput: () => calls.push("enableChatInput"),
     encodeURIComponent,
@@ -91,7 +120,7 @@ function createHarness() {
   };
 
   vm.runInNewContext(
-    readFileSync(new URL("../../static/js/core/sse.js", import.meta.url), "utf8"),
+    readFileSync(new URL("./sse.js", import.meta.url), "utf8"),
     context,
   );
 
@@ -100,7 +129,7 @@ function createHarness() {
   return {
     calls,
     context,
-    messages: container.children,
+    messages,
     source: () => source,
     async runTimers() {
       for (const timer of timers.splice(0)) timer();
@@ -122,10 +151,6 @@ test("connectSSE appends fallback when Done has no response and history stays si
   assert.deepEqual(harness.calls.filter((call) => call === "loadHistory"), [
     "loadHistory",
   ]);
-  assert.deepEqual(
-    harness.calls.filter((call) => call === "clearLiveTurnActivityAnchors"),
-    ["clearLiveTurnActivityAnchors"],
-  );
   assert.equal(harness.messages.length, 2);
   assert.equal(harness.messages[1].role, "system");
   assert.equal(

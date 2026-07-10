@@ -421,7 +421,6 @@ function connectSSE(lastEventIdOverride) {
         }
       }
       _turnResponseReceived = false;
-      clearLiveTurnActivityAnchors();
     }
   });
 
@@ -503,7 +502,6 @@ function connectSSE(lastEventIdOverride) {
       if (data.thread_id) activeWorkStore.clearThread(data.thread_id);
       if (!isCurrentThread(data.thread_id)) return;
       finalizeActivityGroup();
-      clearLiveTurnActivityAnchors();
       addMessage('system', 'Error: ' + data.message);
       enableChatInput();
     }
