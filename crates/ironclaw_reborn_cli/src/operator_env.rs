@@ -84,15 +84,17 @@ mod tests {
 
     #[test]
     fn truncate_keeps_short_values_intact() {
-        assert_eq!(truncate_env_value_for_display("12"), "12");
+        let out = truncate_env_value_for_display("12");
+        assert!(out == "12"); // safety: truncation contract assertion in test module.
     }
 
     #[test]
     fn truncate_appends_ellipsis_when_over_limit() {
         let long = "x".repeat(100);
         let out = truncate_env_value_for_display(&long);
-        assert!(out.ends_with('…'));
+        assert!(out.ends_with('…')); // safety: truncation contract assertion in test module.
         // 64 chars + the ellipsis.
-        assert_eq!(out.chars().count(), 65);
+        let char_count = out.chars().count();
+        assert!(char_count == 65); // safety: truncation contract assertion in test module.
     }
 }

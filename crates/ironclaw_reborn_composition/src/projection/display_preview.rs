@@ -347,7 +347,8 @@ fn capability_display_preview_resolution_from_store(
             activity.status,
             CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
         ) {
-            failed_capability_display_preview(activity)
+            let running_input = store.running_input(activity.invocation_id);
+            failed_capability_display_preview(activity, running_input.as_ref())
         } else if store.has_pending_input_for_activity(activity)
             && completed_preview_may_still_arrive(activity)
         {
@@ -389,11 +390,19 @@ fn completed_preview_may_still_arrive(activity: &CapabilityActivityProjection) -
 
 fn failed_capability_display_preview(
     activity: &CapabilityActivityProjection,
+    running_input: Option<&CapabilityRunningInput>,
 ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
     let summary = activity
-        .error_kind
+        .error_summary
         .as_deref()
-        .map(|kind| format!("tool failed: {}", sanitize_text(kind)))
+        .map(sanitize_text)
+        .filter(|summary| !summary.trim().is_empty())
+        .or_else(|| {
+            activity
+                .error_kind
+                .as_deref()
+                .map(|kind| format!("tool failed: {}", sanitize_text(kind)))
+        })
         .unwrap_or_else(|| "tool failed".to_string());
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
         timeline_message_id: None,
@@ -408,8 +417,8 @@ fn failed_capability_display_preview(
             CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
         )
         .text,
-        subtitle: None,
-        input_summary: None,
+        subtitle: running_input.and_then(|input| input.subtitle.clone()),
+        input_summary: running_input.and_then(|input| input.input_summary.clone()),
         output_summary: Some(summary.clone()),
         output_preview: Some(summary),
         output_kind: Some("text".to_string()),

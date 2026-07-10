@@ -2,8 +2,8 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityDisplayOutputPreview;
 use ironclaw_product_adapters::{
-    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView, ProductAdapterError,
-    RedactedString,
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityActivityViewInput, CapabilityDisplayPreviewView, ProductAdapterError, RedactedString,
 };
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
@@ -56,6 +56,7 @@ async fn completed_preview_for_input(
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -180,6 +181,7 @@ async fn capability_display_preview_error_does_not_drop_activity_payload() {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                error_summary: None,
                 first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
@@ -243,6 +245,7 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
             process_id: None,
             output_bytes: Some(42),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -295,6 +298,7 @@ async fn capability_display_preview_store_summarizes_shell_command_safely() {
             process_id: None,
             output_bytes: Some(2),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -667,6 +671,7 @@ async fn capability_display_preview_store_admits_workspace_and_project_scoped_pa
                 process_id: None,
                 output_bytes: Some(4),
                 error_kind: None,
+                error_summary: None,
                 first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
@@ -714,6 +719,7 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -775,6 +781,7 @@ async fn capability_display_preview_store_redacts_camel_case_api_key_json() {
             process_id: None,
             output_bytes: Some(128),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -842,6 +849,7 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -861,6 +869,7 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
@@ -936,6 +945,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -955,6 +965,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
@@ -1037,6 +1048,7 @@ async fn capability_display_preview_marks_json_depth_truncation() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -1070,6 +1082,7 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
             process_id: None,
             output_bytes: None,
             error_kind: Some("operation_failed".to_string()),
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -1088,6 +1101,116 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
             .as_deref()
             .is_some_and(|summary| summary.contains("operation_failed"))
     );
+
+    let backend_preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::new(),
+            run_id: None,
+            capability_id: CapabilityId::new("builtin.shell").unwrap(),
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Failed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some("backend".to_string()),
+            error_summary: Some("process execution failed: command not found".to_string()),
+            first_cursor: ironclaw_events::EventCursor::new(2),
+            last_cursor: ironclaw_events::EventCursor::new(2),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        backend_preview.output_summary.as_deref(),
+        Some("process execution failed: command not found")
+    );
+    assert_ne!(
+        backend_preview.output_summary.as_deref(),
+        Some("tool failed: backend")
+    );
+}
+
+#[tokio::test]
+async fn failed_live_activity_and_refresh_preview_share_visible_tool_fields() {
+    let store = CapabilityDisplayPreviewStore::default();
+    let run_id = TurnRunId::new();
+    let invocation_id = InvocationId::new();
+    let capability_id = CapabilityId::new("builtin.shell").unwrap();
+    let thread_id = ThreadId::new("webui-preview-thread").unwrap();
+    let input_ref = preview_input_ref("failed-parity-input");
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "builtin.shell",
+        &serde_json::json!({
+            "command": "cargo test",
+            "timeout_ms": 1000
+        }),
+    );
+    store.record_running_invocation(invocation_id, &input_ref);
+
+    let activity = CapabilityActivityProjection {
+        invocation_id,
+        run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+        capability_id,
+        thread_id: Some(thread_id),
+        status: ironclaw_event_projections::CapabilityActivityStatus::Failed,
+        provider: None,
+        runtime: Some(RuntimeKind::FirstParty),
+        process_id: None,
+        output_bytes: Some(0),
+        error_kind: Some("backend".to_string()),
+        error_summary: Some("process execution failed: command not found".to_string()),
+        first_cursor: ironclaw_events::EventCursor::new(7),
+        last_cursor: ironclaw_events::EventCursor::new(7),
+        updated_at: chrono::Utc::now(),
+    };
+    let running_input = store
+        .running_input(invocation_id)
+        .expect("failed activity keeps staged input");
+    let live = CapabilityActivityView::new(CapabilityActivityViewInput {
+        invocation_id: activity.invocation_id,
+        turn_run_id: activity
+            .run_id
+            .map(|run_id| TurnRunId::from_uuid(run_id.as_uuid())),
+        thread_id: activity.thread_id.clone(),
+        capability_id: activity.capability_id.clone(),
+        status: CapabilityActivityStatusView::Failed,
+        provider: activity.provider.clone(),
+        runtime: activity.runtime,
+        process_id: activity.process_id,
+        output_bytes: activity.output_bytes,
+        error_kind: activity.error_kind.clone(),
+        error_summary: activity.error_summary.clone(),
+        subtitle: running_input.subtitle.clone(),
+        input_summary: running_input.input_summary.clone(),
+        updated_at: activity.updated_at,
+        activity_order: Some(activity.activity_order_cursor().as_u64()),
+    })
+    .expect("live failed activity view");
+    let preview = store
+        .preview(&activity)
+        .await
+        .expect("failed preview should resolve")
+        .expect("failed preview should be ready");
+
+    assert_eq!(live.invocation_id, preview.invocation_id);
+    assert_eq!(live.turn_run_id, preview.turn_run_id);
+    assert_eq!(live.thread_id, preview.thread_id);
+    assert_eq!(live.capability_id, preview.capability_id);
+    assert_eq!(live.status, preview.status);
+    assert_eq!(live.output_bytes, preview.output_bytes);
+    assert_eq!(live.error_kind, preview.error_kind);
+    assert_eq!(
+        live.error_summary.as_deref(),
+        preview.output_summary.as_deref()
+    );
+    assert_eq!(live.subtitle, preview.subtitle);
+    assert_eq!(live.input_summary, preview.input_summary);
+    assert_eq!(live.activity_order, preview.activity_order);
 }
 
 #[tokio::test]
@@ -1122,6 +1245,7 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
             process_id: None,
             output_bytes: Some(2048),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
@@ -1185,6 +1309,7 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
             process_id: None,
             output_bytes: Some(32),
             error_kind: None,
+            error_summary: None,
             first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),

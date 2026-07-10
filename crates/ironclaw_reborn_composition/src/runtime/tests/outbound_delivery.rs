@@ -169,7 +169,7 @@ fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelErro
     HostManagedModelError::safe(HostManagedModelErrorKind::Unavailable, safe_summary)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_create() {
     let root = tempfile::tempdir().expect("tempdir");
     let host_home = root.path().join("host-home");

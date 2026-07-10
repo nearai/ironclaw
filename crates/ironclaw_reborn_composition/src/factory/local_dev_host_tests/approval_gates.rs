@@ -31,7 +31,7 @@ use crate::approval_test_support::disable_global_auto_approve;
 
 #[tokio::test]
 async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one_shot_lease() {
-    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-approval-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
@@ -102,7 +102,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
 
 #[tokio::test]
 async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
-    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let transport = Arc::new(RecordingSandboxTransport::default());
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
         transport.clone(),
@@ -169,7 +169,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
 
 #[tokio::test]
 async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() {
-    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
     let services = build_reborn_services(
@@ -224,7 +224,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
 
 #[tokio::test]
 async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-auto-approve-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
@@ -282,22 +282,22 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
     // Caller-level proof of the PR's promise: a fresh user (auto-approve setting
     // never written → defaults ON) has an eligible tool auto-approved at
     // dispatch, with no approval gate. No disable call — the default must carry.
-    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
+    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-echo-default-on", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
-    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
+    .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
+        .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
         .host_runtime
         .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only service fixture invariant.
-    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: constant capability id.
+        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: test-only helper in #[cfg(test)] module.
     let context =
         echo_spawn_execution_context("local-dev-echo-default-on", "thread-echo-default-on");
 
@@ -310,7 +310,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
             trust_decision(echo_spawn_allowed_effects()),
         ))
         .await
-        .expect("echo invocation resolves"); // safety: test-only capability invocation assertion.
+        .expect("echo invocation resolves"); // safety: test-only helper in #[cfg(test)] module.
 
     if !matches!(outcome, RuntimeCapabilityOutcome::Completed(_)) {
         panic!(
@@ -318,9 +318,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
         );
     }
     let pending_count = pending_approval_count(local_runtime, &context).await;
-    if pending_count != 0 {
-        panic!("default-on auto-approve must not create a pending approval");
-    }
+    assert!(pending_count == 0); // safety: test-only assertion in #[cfg(test)] module.
 }
 
 #[tokio::test]

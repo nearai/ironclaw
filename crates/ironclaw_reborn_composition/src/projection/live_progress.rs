@@ -212,6 +212,7 @@ pub(super) fn product_items_for_live_update(
                 runtime,
                 output_bytes,
                 error_kind,
+                error_summary,
             } => {
                 let running = display_previews.running_input(*invocation_id);
                 match CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -225,6 +226,7 @@ pub(super) fn product_items_for_live_update(
                     process_id: None,
                     output_bytes: *output_bytes,
                     error_kind: error_kind.clone(),
+                    error_summary: error_summary.clone(),
                     subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                     input_summary: running.and_then(|input| input.input_summary),
                     updated_at: Utc::now(),
@@ -323,6 +325,7 @@ impl LiveProgressMilestoneSink {
                 runtime: terminal.runtime,
                 output_bytes: terminal.output_bytes,
                 error_kind: terminal.error_kind,
+                error_summary: terminal.error_summary,
             },
         );
     }
@@ -444,6 +447,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: Some(*runtime),
                         output_bytes: Some(*output_bytes),
                         error_kind: None,
+                        error_summary: None,
                     },
                 );
             }
@@ -453,6 +457,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                safe_summary,
             } => {
                 self.publish_capability_activity(
                     &milestone,
@@ -464,6 +469,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: *runtime,
                         output_bytes: None,
                         error_kind: Some(reason_kind.as_str().to_string()),
+                        error_summary: safe_summary.as_ref().map(|summary| summary.to_string()),
                     },
                 );
             }
@@ -482,6 +488,7 @@ struct TerminalCapabilityActivity {
     runtime: Option<RuntimeKind>,
     output_bytes: Option<u64>,
     error_kind: Option<String>,
+    error_summary: Option<String>,
 }
 
 fn live_capability_activity_status(

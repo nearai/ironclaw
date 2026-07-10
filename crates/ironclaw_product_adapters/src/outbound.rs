@@ -125,6 +125,84 @@ fn validate_optional_display_text(
     Ok(())
 }
 
+/// Sensitive markers that must never appear in a boundary-facing safe summary.
+///
+/// Kept deliberately aligned with the forbidden-pattern set that
+/// `validate_loop_safe_summary` in `ironclaw_turns`'s run-profile host applies
+/// to the upstream `error_summary` producer. That upstream list is a private
+/// inline array, so this is an independent second copy rather than a shared
+/// source of truth: the two can drift. This local denylist exists as
+/// defense-in-depth so a producer regression (or a different producer that
+/// skips the upstream guard) still cannot leak raw secrets, host paths, or
+/// backend detail to the browser — it is not a proof of exact parity. Update
+/// both sites together when either changes.
+const SAFE_SUMMARY_FORBIDDEN_MARKERS: &[&str] = &[
+    "access token",
+    "api key",
+    "api_key",
+    "apikey",
+    "authorization:",
+    "bearer ",
+    "host path",
+    "invalid api key",
+    "invalid_api_key",
+    "password",
+    "passwd",
+    "provider error",
+    "raw runtime",
+    "secret",
+    "stack trace",
+    "tool input",
+    "tool_input",
+    "traceback",
+];
+
+/// Validate an optional boundary-facing safe summary (`error_summary`).
+///
+/// Beyond the length + control-character guard of [`validate_bounded_text`],
+/// this applies the [`SAFE_SUMMARY_FORBIDDEN_MARKERS`] denylist plus the
+/// payload/path-delimiter and API-key-token rejection. The intent is to keep
+/// this adapter boundary no weaker than the upstream `validate_loop_safe_summary`
+/// producer; the alignment is maintained by convention (see
+/// [`SAFE_SUMMARY_FORBIDDEN_MARKERS`]), not enforced by a shared source.
+fn validate_optional_safe_summary(
+    kind: &'static str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<(), ProductAdapterError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_bounded_text(kind, value, max)?;
+    if value.chars().any(|character| {
+        matches!(
+            character,
+            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+        )
+    }) {
+        return Err(invalid(
+            kind,
+            "must not contain raw payload or path delimiters",
+        ));
+    }
+    let lower = value.to_ascii_lowercase();
+    for forbidden in SAFE_SUMMARY_FORBIDDEN_MARKERS {
+        if lower.contains(forbidden) {
+            return Err(invalid(
+                kind,
+                format!("must not contain sensitive marker `{forbidden}`"),
+            ));
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+    {
+        return Err(invalid(kind, "must not contain API-key-like tokens"));
+    }
+    Ok(())
+}
+
 fn validate_display_preview(value: Option<&str>) -> Result<(), ProductAdapterError> {
     let Some(value) = value else {
         return Ok(());
@@ -227,6 +305,7 @@ pub struct CapabilityActivityView {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
     /// Inline primary-argument detail for the activity row, surfaced while the
     /// invocation is still running (the completed card carries its own).
     pub subtitle: Option<String>,
@@ -258,6 +337,8 @@ impl Serialize for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            error_summary: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             subtitle: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             input_summary: &'a Option<String>,
@@ -277,6 +358,7 @@ impl Serialize for CapabilityActivityView {
             process_id: &self.process_id,
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
+            error_summary: &self.error_summary,
             subtitle: &self.subtitle,
             input_summary: &self.input_summary,
             updated_at: &self.updated_at,
@@ -299,6 +381,7 @@ impl CapabilityActivityView {
             process_id: input.process_id,
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
+            error_summary: input.error_summary,
             subtitle: input.subtitle,
             input_summary: input.input_summary,
             updated_at: input.updated_at,
@@ -312,6 +395,11 @@ impl CapabilityActivityView {
         if let Some(error_kind) = self.error_kind.as_deref() {
             validate_error_kind("capability_activity_error_kind", error_kind)?;
         }
+        validate_optional_safe_summary(
+            "capability_activity_error_summary",
+            self.error_summary.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
         // The running-frame input fields are sanitized/byte-bounded upstream;
         // re-validate them at the product boundary (as `error_kind` is) so an
         // upstream regression can't leak unbounded/control-char text to the
@@ -342,6 +430,7 @@ pub struct CapabilityActivityViewInput {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -367,6 +456,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: Option<String>,
             #[serde(default)]
+            error_summary: Option<String>,
+            #[serde(default)]
             subtitle: Option<String>,
             #[serde(default)]
             input_summary: Option<String>,
@@ -385,6 +476,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: wire.process_id,
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
+            error_summary: wire.error_summary,
             subtitle: wire.subtitle,
             input_summary: wire.input_summary,
             updated_at: wire.updated_at,
@@ -1574,6 +1666,7 @@ mod tests {
                     process_id: None,
                     output_bytes: None,
                     error_kind: None,
+                    error_summary: None,
                     subtitle: None,
                     input_summary: None,
                     updated_at: Utc::now(),
@@ -1978,6 +2071,7 @@ mod tests {
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2234,6 +2328,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2278,6 +2373,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2311,5 +2407,74 @@ mod tests {
         };
 
         assert!(serde_json::to_value(view).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_unsafe_error_summary() {
+        // The adapter boundary must re-apply the upstream
+        // `validate_loop_safe_summary` strength rather than trust the producer:
+        // path/payload delimiters, sensitive markers, and API-key-like tokens
+        // are all rejected even though they pass the weaker bounded-text guard.
+        for leak in [
+            "failed reading /tmp/private-host-path",
+            "missing api key for provider",
+            "rejected secret value",
+            "panicked: stack trace follows",
+            "authorization: Bearer abc",
+            "token sk-live-deadbeef rejected",
+            "payload {\"k\":\"v\"} was malformed",
+        ] {
+            let input = CapabilityActivityViewInput {
+                status: CapabilityActivityStatusView::Failed,
+                error_summary: Some(leak.to_string()),
+                ..capability_activity_view_input_for_detail_test()
+            };
+            assert!(
+                CapabilityActivityView::new(input).is_err(),
+                "error_summary leak should be rejected: {leak:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_unsafe_error_summary_on_deserialize() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-activity",
+            "capability_id": "nearai.web_search",
+            "status": "failed",
+            "provider": null,
+            "runtime": null,
+            "process_id": null,
+            "output_bytes": null,
+            "error_kind": null,
+            "error_summary": "leaked secret token sk-live-deadbeef",
+            "updated_at": Utc::now(),
+        });
+
+        assert!(serde_json::from_value::<CapabilityActivityView>(json).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_oversized_error_summary() {
+        let oversized = "a".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1);
+        let input = CapabilityActivityViewInput {
+            status: CapabilityActivityStatusView::Failed,
+            error_summary: Some(oversized),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(input).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_accepts_sanitized_error_summary() {
+        let input = CapabilityActivityViewInput {
+            status: CapabilityActivityStatusView::Failed,
+            error_kind: Some(CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND.to_string()),
+            error_summary: Some("the web search provider was temporarily unavailable".to_string()),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        let view = CapabilityActivityView::new(input).expect("sanitized summary is accepted");
+        assert!(serde_json::to_value(view).is_ok());
     }
 }

@@ -918,6 +918,7 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         // Free-form raw text with a path-like fragment — exactly what the
         // redaction invariant forbids in durable storage.
         error_kind: Some("/Users/alice/token=secret raw error".to_string()),
+        error_summary: None,
         hook_id: None,
         hook_point: None,
         hook_trust_class: None,

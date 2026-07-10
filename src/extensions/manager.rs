@@ -756,7 +756,6 @@ struct CargoTomlPackage {
     name: Option<String>,
 }
 
-/// Read `[package].name` from the `Cargo.toml` at `source_dir`. Returns
 /// `Ok(None)` if the manifest is valid but lacks a package name, allowing
 /// callers to fall back to the extension name in that case.
 fn read_crate_name_from_cargo_toml(
