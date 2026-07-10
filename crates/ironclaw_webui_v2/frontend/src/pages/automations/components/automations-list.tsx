@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { Button } from "../../../design-system/button";
+import { Card } from "../../../design-system/card";
 import { Icon } from "../../../design-system/icons";
 import { EmptyPanel } from "../../../design-system/primitives";
 import { SelectMenu } from "../../../design-system/select-menu";
@@ -19,22 +20,20 @@ import { AutomationRow, ROW_COLUMNS } from "./automation-row";
 import { AutomationsEmptyState } from "./automations-empty-state";
 import { AutomationsSummaryStrip } from "./automations-summary-strip";
 
-// The header subtitle is contextual: it describes the currently selected
-// filter tab instead of repeating a static tagline. "All" gets a count-aware
-// line; the status filters reuse the same localized descriptions the summary
-// cards show, so both surfaces can never disagree.
-function filterSubtext(filter, summary, t) {
-  if (filter === "active") return t("automations.summary.activeDetail");
-  if (filter === "running") return t("automations.summary.runningDetail");
-  if (filter === "failures") return t("automations.summary.failuresDetail");
-  if (filter === "paused") return t("automations.summary.pausedDetail");
-  if (filter === "completed") return t("automations.subtext.completed");
-  const count = summary?.scheduled ?? 0;
-  const active = summary?.active ?? 0;
-  return count === 1
-    ? t("automations.subtext.one", { active })
-    : t("automations.subtext.all", { count, active });
-}
+// The header subtitle describes what the selected view IS — what these
+// automations do — rather than reading back counts or states. One functional
+// line per filter tab, switched as the filter changes.
+const SUBTEXT_KEYS = {
+  all: "automations.subtext.all",
+  active: "automations.subtext.active",
+  running: "automations.subtext.running",
+  failures: "automations.subtext.failures",
+  paused: "automations.subtext.paused",
+  completed: "automations.subtext.completed",
+};
+
+const COLUMN_LABEL_CLASS =
+  "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]";
 
 export function AutomationsList({
   automations,
@@ -71,6 +70,17 @@ export function AutomationsList({
     label: t(item.labelKey),
   }));
 
+  const sortControl = (
+    <SelectMenu
+      value={sort}
+      options={sortOptions}
+      onChange={setSort}
+      prefix={t("automations.sort.label")}
+      ariaLabel={t("automations.sort.label")}
+      className="min-w-[10rem]"
+    />
+  );
+
   return (
     <div className="space-y-5">
       <div className="min-w-0">
@@ -78,143 +88,144 @@ export function AutomationsList({
           {t("automations.title")}
         </h2>
         <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
-          {filterSubtext(filter, summary, t)}
+          {t(SUBTEXT_KEYS[filter] ?? SUBTEXT_KEYS.all)}
         </p>
       </div>
 
       <AutomationsSummaryStrip summary={summary} nextRunAt={nextRunAt} />
 
-      {/* Toolbar. Desktop/tablet: underline filter tabs sharing one baseline
-          with the sort select and delivery-defaults button. Mobile swaps the
-          tab row for a dropdown — no shrunken or scrolling tab strips. */}
-      <div className="hidden flex-wrap items-end justify-between gap-x-4 gap-y-2 border-b border-[var(--v2-panel-border)] sm:flex">
-        <Tabs
-          bordered={false}
-          tabs={filterOptions}
-          value={filter}
-          onChange={onFilterChange}
-          ariaLabel={t("automations.filterLabel")}
-          className="min-w-0"
-        />
-        <div className="flex items-center gap-2 pb-2">
-          <label className="flex items-center gap-1.5">
-            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
-              {t("automations.sort.label")}
-            </span>
-            <SelectMenu
-              value={sort}
-              options={sortOptions}
-              onChange={setSort}
-              ariaLabel={t("automations.sort.label")}
-              className="min-w-[8.5rem]"
-            />
-          </label>
-          {deliveryState && (
-            <Button
-              variant="secondary"
-              size="md"
-              className="shrink-0"
-              onClick={() => setDeliveryOpen(true)}
-            >
-              <Icon name="gear" className="mr-1.5 h-4 w-4" />
-              {t("automations.delivery.setDefaults")}
-            </Button>
-          )}
-        </div>
-      </div>
-      <div className="flex flex-wrap items-center gap-2 sm:hidden">
-        <SelectMenu
-          value={filter}
-          options={filterOptions}
-          onChange={onFilterChange}
-          ariaLabel={t("automations.filterLabel")}
-          align="left"
-          className="min-w-0 flex-1"
-          buttonClassName="w-full"
-        />
-        <SelectMenu
-          value={sort}
-          options={sortOptions}
-          onChange={setSort}
-          ariaLabel={t("automations.sort.label")}
-          className="min-w-0 flex-1"
-          buttonClassName="w-full"
-        />
-        {deliveryState && (
-          <Button
-            variant="secondary"
-            size="md"
-            className="shrink-0"
-            onClick={() => setDeliveryOpen(true)}
-          >
-            <Icon name="gear" className="mr-1.5 h-4 w-4" />
-            {t("automations.delivery.setDefaults")}
-          </Button>
-        )}
-      </div>
-
-      {!filtered.length ? (
-        hasAutomations ? (
-          <EmptyPanel
-            title={t("automations.empty.matchingTitle")}
-            description={t("automations.empty.matchingDescription")}
-          />
-        ) : (
-          <AutomationsEmptyState />
-        )
+      {!hasAutomations ? (
+        <AutomationsEmptyState />
       ) : (
-        /* Below sm each automation is its own card on the canvas; from sm up
-           the rows fuse into one Card-styled panel with a column-header label
-           row (Name / Status / Last run) and hairline dividers. */
-        <div
-          className={cn(
-            "flex flex-col gap-3",
-            "sm:gap-0 sm:overflow-hidden sm:rounded-[1.25rem] md:rounded-[1.5rem]",
-            "sm:border sm:border-[var(--v2-card-border)] sm:bg-[var(--v2-card-bg)]",
-            "sm:shadow-[var(--v2-card-shadow)]"
-          )}
-        >
+        <>
+          {/* Mobile equivalent of the table-card header: the filter dropdown,
+              sort, and delivery entrypoint live in their own flat card at the
+              top of the card stack. */}
+          <Card variant="flat" radius="sm" className="space-y-2 p-3 sm:hidden">
+            <SelectMenu
+              value={filter}
+              options={filterOptions}
+              onChange={onFilterChange}
+              prefix={t("automations.filter.prefix")}
+              ariaLabel={t("automations.filterLabel")}
+              align="left"
+              className="w-full"
+              buttonClassName="w-full"
+            />
+            <div className="flex items-center gap-2">
+              <SelectMenu
+                value={sort}
+                options={sortOptions}
+                onChange={setSort}
+                prefix={t("automations.sort.label")}
+                ariaLabel={t("automations.sort.label")}
+                align="left"
+                className="min-w-0 flex-1"
+                buttonClassName="w-full"
+              />
+              {deliveryState && (
+                <Button
+                  variant="secondary"
+                  size="icon"
+                  className="shrink-0"
+                  aria-label={t("automations.delivery.setDefaults")}
+                  title={t("automations.delivery.setDefaults")}
+                  onClick={() => setDeliveryOpen(true)}
+                >
+                  <Icon name="gear" className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+          </Card>
+
+          {/* The table card. Below sm it dissolves into the loose stack of
+              row cards; from sm up it is one flat card whose header carries
+              the filter tabs (left) and sort + delivery controls (right),
+              with the column-label row beneath. */}
           <div
             className={cn(
-              ROW_COLUMNS.frame,
-              "hidden border-b border-[var(--v2-panel-border)] px-5 py-2.5 sm:flex"
+              "flex flex-col gap-3",
+              "sm:gap-0 sm:overflow-hidden sm:rounded-[1.25rem] md:rounded-[1.5rem]",
+              "sm:border sm:border-[var(--v2-panel-border)] sm:bg-[var(--v2-card-bg)]"
             )}
-            aria-hidden="true"
           >
+            {/* Card header: on lg+ tabs and controls share one baseline; below
+                lg the controls sit on their own line above the tabs so the tab
+                underline always merges with the header rule. */}
+            <div className="hidden border-b border-[var(--v2-panel-border)] px-5 sm:flex sm:flex-col lg:flex-row lg:items-stretch lg:justify-between lg:gap-x-4">
+              {/* The tab row stretches to the toolbar's full height so tab
+                  labels sit vertically centered against the controls while
+                  the active underline stays on the header hairline. */}
+              <div className="order-2 flex min-w-0 items-stretch lg:order-1">
+                <Tabs
+                  bordered={false}
+                  tabs={filterOptions}
+                  value={filter}
+                  onChange={onFilterChange}
+                  ariaLabel={t("automations.filterLabel")}
+                  className="min-w-0"
+                />
+              </div>
+              <div className="order-1 flex items-center justify-end gap-2 pb-2 pt-2.5 lg:order-2 lg:py-2">
+                {sortControl}
+                {deliveryState && (
+                  <Button
+                    variant="secondary"
+                    size="md"
+                    className="shrink-0"
+                    onClick={() => setDeliveryOpen(true)}
+                  >
+                    <Icon name="gear" className="mr-1.5 h-4 w-4" />
+                    {t("automations.delivery.setDefaults")}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* Column labels */}
             <div
               className={cn(
-                ROW_COLUMNS.name,
-                "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]"
+                ROW_COLUMNS.frame,
+                "hidden border-b border-[var(--v2-panel-border)] px-5 py-2.5 sm:flex"
               )}
+              aria-hidden="true"
             >
-              {t("automations.table.name")}
+              <div className={cn(ROW_COLUMNS.name, COLUMN_LABEL_CLASS)}>
+                {t("automations.table.name")}
+              </div>
+              <div className={cn(ROW_COLUMNS.schedule, COLUMN_LABEL_CLASS)}>
+                {t("automations.table.schedule")}
+              </div>
+              <div className={cn(ROW_COLUMNS.status, COLUMN_LABEL_CLASS)}>
+                {t("automations.table.status")}
+              </div>
+              <div className={cn(ROW_COLUMNS.lastRun, COLUMN_LABEL_CLASS)}>
+                {t("automations.table.lastRun")}
+              </div>
+              <span className={ROW_COLUMNS.chevron} />
             </div>
-            <div
-              className={cn(
-                ROW_COLUMNS.status,
-                "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]"
-              )}
-            >
-              {t("automations.table.status")}
-            </div>
-            <div
-              className={cn(
-                ROW_COLUMNS.lastRun,
-                "font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]"
-              )}
-            >
-              {t("automations.table.lastRun")}
-            </div>
-            <span className={ROW_COLUMNS.chevron} />
+
+            {filtered.length ? (
+              filtered.map((automation) => (
+                <AutomationRow
+                  key={automation.automation_id}
+                  automation={automation}
+                  onOpen={setOpenId}
+                />
+              ))
+            ) : (
+              /* Filter matched nothing: keep the card (and its header, so the
+                 filter stays reachable) and show the empty message inside. */
+              <div className="rounded-[14px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-5 py-8 sm:rounded-none sm:border-0 sm:bg-transparent">
+                <EmptyPanel
+                  boxed={false}
+                  title={t("automations.empty.matchingTitle")}
+                  description={t("automations.empty.matchingDescription")}
+                />
+              </div>
+            )}
           </div>
-          {filtered.map((automation) => (
-            <AutomationRow
-              key={automation.automation_id}
-              automation={automation}
-              onOpen={setOpenId}
-            />
-          ))}
-        </div>
+        </>
       )}
 
       <AutomationDetailModal

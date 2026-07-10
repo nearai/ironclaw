@@ -36,7 +36,7 @@ export function Tabs({
       role="tablist"
       aria-label={ariaLabel}
       className={cn(
-        "flex max-w-full items-end gap-1",
+        "flex max-w-full items-stretch gap-1",
         bordered && "border-b border-[var(--v2-panel-border)]",
         className
       )}
@@ -51,7 +51,12 @@ export function Tabs({
             aria-selected={selected ? "true" : "false"}
             onClick={() => onChange(tab.value)}
             className={cn(
-              "-mb-px inline-flex h-[var(--v2-control-h-md)] shrink-0 items-center gap-1.5",
+              // Taller than a plain control so the label keeps breathing room
+              // above the underline; the row stretches further when a parent
+              // toolbar is taller, keeping the label vertically centered
+              // against adjacent controls while the underline stays on the
+              // shared hairline.
+              "-mb-px inline-flex min-h-[calc(var(--v2-control-h-md)+var(--v2-control-px-sm))] shrink-0 items-center gap-1.5",
               "border-b-2 px-[var(--v2-control-px-sm)] text-[13px] font-medium",
               "transition-colors focus-visible:outline-none focus-visible:ring-2",
               "focus-visible:ring-inset focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_40%,transparent)]",

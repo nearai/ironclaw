@@ -137,6 +137,57 @@ export function automationIcon(automation) {
   return "clock"; // daily / hourly at a fixed time
 }
 
+// Schedule clauses stripped out of an automation's prompt when deriving the
+// short description shown under the row name. The cadence already has its own
+// column, so repeating "every 10 minutes" in the description is noise.
+const SCHEDULE_CLAUSE_PATTERNS = [
+  // "every 10 minutes", "every weekday", "each morning", "every Monday at 9am"
+  // (longer units first so "weekday" is not half-eaten by "week")
+  /\b(?:every|each)\s+(?:other\s+)?(?:\d+\s+)?(?:weekdays?|weekends?|mornings?|afternoons?|evenings?|nights?|minutes?|hours?|days?|weeks?|months?|mon(?:day)?s?|tues?(?:day)?s?|wed(?:nesday)?s?|thu(?:rsday)?s?|fri(?:day)?s?|sat(?:urday)?s?|sun(?:day)?s?)\b(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?/gi,
+  // "at 9am", "at 15:30", "at 3 pm tomorrow"
+  /\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b(?:\s+tomorrow|\s+today)?/gi,
+  // bare cadence adverbs
+  /\b(?:daily|hourly|weekly|monthly|nightly)\b/gi,
+  // "on weekdays", "on Mondays"
+  /\bon\s+(?:weekdays?|weekends?|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|satur|sun)(?:days?)?\b/gi,
+];
+
+// Derive a short human description from the automation's stored prompt, when
+// one is attached and parseable: strip the scheduling clauses (the cadence has
+// its own column), tidy the leftover connectors, and sentence-case the result.
+// Returns null — never the raw prompt — when there is nothing usable: no
+// prompt, nothing left after stripping, or a leftover too long to be a
+// one-line summary.
+export function automationDescription(automation) {
+  const prompt =
+    typeof automation?.prompt === "string" ? automation.prompt.trim() : "";
+  if (!prompt) return null;
+
+  let text = prompt;
+  for (const pattern of SCHEDULE_CLAUSE_PATTERNS) {
+    text = text.replace(pattern, " ");
+  }
+  text = text
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;])/g, "$1")
+    // Drop a leading connector orphaned by a stripped leading clause
+    // ("Every weekday, and send…" → "send…"). Mid-sentence connectors are
+    // legitimate prose and stay.
+    .replace(/^[\s,.;-]+/, "")
+    .replace(/^(?:and|then|also)\b\s*/i, "")
+    .replace(/[\s,;-]+$/, "")
+    .trim();
+  if (!text) return null;
+
+  // Keep it a one-liner: prefer the first sentence, and give up rather than
+  // render a paragraph under the name.
+  const firstSentence = text.split(/(?<=[.!?])\s+/)[0] || text;
+  const summary = firstSentence.replace(/[.!?]+$/, "").trim();
+  if (summary.length < 8 || summary.length > 120) return null;
+
+  return summary.charAt(0).toUpperCase() + summary.slice(1);
+}
+
 export function automationSummary(automations) {
   // Exclude completed (soft-completed one-shots) from summary cards so that
   // fetching with include_completed=true does not inflate the counts shown on
@@ -429,6 +480,7 @@ function normalizeAutomation(automation, t, locale) {
   return {
     ...normalized,
     display_name: automation.name || tx("automations.untitled"),
+    description_label: automationDescription(automation),
     icon: automationIcon(automation),
     schedule_timezone: automation.source?.timezone || "UTC",
     schedule_label: automationScheduleLabel(automation.source, t, locale),

@@ -775,10 +775,20 @@ registerPack("en", {
   "automations.eyebrow": "Scheduled work",
   "automations.title": "Automations",
   "automations.description": "Scheduled automations only.",
-  "automations.subtext.all": "{count} automations, {active} active.",
-  "automations.subtext.one": "1 automation, {active} active.",
-  "automations.subtext.completed": "One-time automations that already finished.",
+  "automations.subtext.all":
+    "Scheduled jobs that watch, summarize, and act for you in the background.",
+  "automations.subtext.active":
+    "Live schedules, armed and waiting for their next run.",
+  "automations.subtext.running":
+    "Automations doing work right now — each run opens as a chat you can inspect.",
+  "automations.subtext.failures":
+    "Automations whose recent runs hit errors and may need your attention.",
+  "automations.subtext.paused":
+    "Schedules on hold — they keep their setup but won't fire until resumed.",
+  "automations.subtext.completed":
+    "One-time automations that did their job and retired.",
   "automations.filterLabel": "Automation status filter",
+  "automations.filter.prefix": "Filter",
   "automations.filter.all": "All",
   "automations.filter.active": "Active",
   "automations.filter.running": "Running",

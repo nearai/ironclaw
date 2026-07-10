@@ -99,7 +99,7 @@ export function AutomationDetailPage({
       <div className="v2-page-entrance flex-1 space-y-5 p-4 sm:p-6">
         {backButton}
 
-        <Panel className="p-4 sm:p-5">
+        <Panel variant="flat" className="p-4 sm:p-5">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex min-w-0 items-start gap-3">
               <span className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text)]">
@@ -161,7 +161,7 @@ export function AutomationDetailPage({
           </div>
         </Panel>
 
-        <Panel className="p-4 sm:p-5">
+        <Panel variant="flat" className="p-4 sm:p-5">
           <AutomationDetailBody
             automation={automation}
             onOpenRun={navigate}

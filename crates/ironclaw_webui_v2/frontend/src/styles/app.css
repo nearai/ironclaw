@@ -43,7 +43,14 @@
   /* Card tokens — used by Card component */
   --v2-card-bg:     #ffffff;
   --v2-card-border: rgba(0, 0, 0, 0.08);
-  --v2-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+
+  /* Elevation scale for floating surfaces. Deliberately restrained
+     (Linear/Vercel-style): a hairline border does most of the separation
+     work and the shadow only lifts the surface slightly. Menus/popovers/
+     tooltips share --v2-shadow-menu; modal dialogs sit a step higher. */
+  --v2-shadow-menu:  0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --v2-shadow-modal: 0 16px 40px -8px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
 
   /* Panel border (nav items, dividers, form borders) */
   --v2-panel-border: rgba(0, 0, 0, 0.08);
@@ -93,10 +100,18 @@
   --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.03));
   --v2-surface-muted: rgba(255, 255, 255, 0.07);
 
-  /* Card tokens in dark: transparent border + drop shadow */
+  /* Card tokens in dark: a hairline border does the separation work and
+     the shadow stays minimal — dark surfaces read through contrast, not
+     large blurs. */
   --v2-card-bg:     #1b1b1f;
-  --v2-card-border: rgba(255, 255, 255, 0);
-  --v2-card-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  --v2-card-border: rgba(255, 255, 255, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+
+  /* Elevation scale in dark: shadows barely register on a near-black
+     canvas, so floating surfaces lean on their border + lighter fill and
+     keep only a soft, tight shadow for depth. */
+  --v2-shadow-menu:  0 4px 16px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --v2-shadow-modal: 0 16px 48px -8px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
 
   --v2-panel-border: rgba(255, 255, 255, 0.1);
 

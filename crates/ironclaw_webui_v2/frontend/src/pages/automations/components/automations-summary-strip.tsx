@@ -107,6 +107,7 @@ export function AutomationsSummaryStrip({ summary, nextRunAt }) {
       {cells.map((cell) => (
         <Card
           key={cell.key}
+          variant="flat"
           radius="sm"
           className={cn("flex min-w-0 flex-col p-4", cell.span)}
         >

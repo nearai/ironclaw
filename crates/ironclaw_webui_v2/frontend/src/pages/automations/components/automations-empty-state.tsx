@@ -73,7 +73,7 @@ export function AutomationsEmptyState() {
   const navigate = useNavigate();
 
   return (
-    <Panel className="p-6 sm:p-8">
+    <Panel variant="flat" className="p-6 sm:p-8">
       <div className="max-w-2xl">
         <h2 className="text-2xl font-semibold tracking-tight text-[var(--v2-text-strong)]">
           {t("automations.empty.onboardingTitle")}
