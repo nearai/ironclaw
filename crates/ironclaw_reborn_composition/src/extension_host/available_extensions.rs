@@ -2392,6 +2392,42 @@ mod tests {
         );
     }
 
+    /// Raw-entity hygiene pin (live canary qa_10i): the model narrates raw
+    /// Slack ids into replies ("… user id U0BDC16TML3 …") unless the ONLY
+    /// model-visible guidance — capability descriptions — forbids it
+    /// explicitly. Every slack read surface must carry the imperative
+    /// "tool calls only … never include" raw-id rule.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_read_descriptions_forbid_raw_ids_in_replies() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        for capability_id in [
+            "slack.search_messages",
+            "slack.list_conversations",
+            "slack.get_conversation_history",
+            "slack.get_thread_replies",
+            "slack.get_user_info",
+            "slack.whoami",
+        ] {
+            let capability = package
+                .package
+                .manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("slack manifest declares {capability_id}"));
+            assert!(
+                capability.description.contains("tool calls only")
+                    && capability.description.contains("never include"),
+                "{capability_id} description must forbid raw ids in user-facing replies: {}",
+                capability.description
+            );
+        }
+    }
+
     /// Honesty pin: the slack_personal OAuth grant does not include
     /// users:read.email, so `get_user_info` can never return an email —
     /// the model-visible description must not promise one.
