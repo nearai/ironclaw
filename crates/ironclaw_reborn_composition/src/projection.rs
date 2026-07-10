@@ -402,13 +402,62 @@ impl WebuiRuntimeProjectionStream {
         let mut cursor = origin_cursor;
         let is_resuming_runtime_payloads = cursor.runtime_payloads_delivered > 0;
         let mut turn_wakes = self.turn_event_wake_source.subscribe();
-        let first = tokio::select! {
-            _ = sender.closed() => return,
-            item = subscription.next() => {
-                let Some(item) = item else {
-                    return;
-                };
-                item
+        if !is_resuming_runtime_payloads {
+            let mut batch = WebuiProjectionBatch::new(cursor.clone());
+            if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+                send_projection_subscription_error(&sender, error).await;
+                return;
+            }
+            if !self
+                .send_subscription_batch(batch, &request, &sender, &mut cursor)
+                .await
+            {
+                return;
+            }
+        }
+        let first = loop {
+            tokio::select! {
+                _ = sender.closed() => return,
+                item = subscription.next() => {
+                    let Some(item) = item else {
+                        return;
+                    };
+                    break item;
+                }
+                wake = turn_wakes.recv() => {
+                    match wake {
+                        Ok(wake) if !turn_wake_matches_request(&wake, &request) => {
+                            continue;
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return;
+                        }
+                    }
+
+                    let mut batch = WebuiProjectionBatch::new(cursor.clone());
+                    if let Err(error) = consume_buffered_runtime_items(
+                        &mut subscription,
+                        &mut batch,
+                        &request.scope,
+                        self.display_previews.as_ref(),
+                    )
+                    .await
+                    {
+                        send_projection_subscription_error(&sender, error).await;
+                        return;
+                    }
+                    if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+                        send_projection_subscription_error(&sender, error).await;
+                        return;
+                    }
+                    if !self
+                        .send_subscription_batch(batch, &request, &sender, &mut cursor)
+                        .await
+                    {
+                        return;
+                    }
+                }
             }
         };
         let mut batch = WebuiProjectionBatch::new(cursor.clone());
