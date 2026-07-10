@@ -42,7 +42,7 @@ use ironclaw_host_api::{
     HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
     RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass,
+    TenantId, TrustClass, UserId,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -116,7 +116,7 @@ pub struct HookSectionEntryV2 {
 }
 
 /// Loader-supplied source for a manifest. Never read from TOML.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ManifestSource {
     /// Compiled or bundled with the host binary. Only source eligible for
     /// effective FirstParty/System trust and runtime.
@@ -127,11 +127,21 @@ pub enum ManifestSource {
     /// Installed from registry/catalog with digest/signature metadata. Never
     /// eligible for effective FirstParty/System in v2.
     RegistryInstalled,
+    /// Registered by a specific user through the MCP-registration store
+    /// (`/system/extensions/registered/<tenant>/<owner>/<id>/`). Never
+    /// eligible for effective FirstParty/System.
+    ///
+    /// This is REGISTRATION PROVENANCE ONLY: who may re-register/revoke and
+    /// what egress gating keys on. It makes no visibility decisions for
+    /// installed packages — that is `InstallationOwner` on the installation
+    /// row, always stamped `InstallationOwner::user(owner)` for a
+    /// user-registered package at install time (never `derive_owner`).
+    UserRegistered { tenant_id: TenantId, owner: UserId },
 }
 
 impl ManifestSource {
     /// True if the source is allowed to assert FirstParty/System trust/runtime.
-    pub fn allows_first_party(self) -> bool {
+    pub fn allows_first_party(&self) -> bool {
         matches!(self, Self::HostBundled)
     }
 }
@@ -671,8 +681,12 @@ impl ExtensionManifestV2 {
             });
         }
         let document = RawManifestDocumentV2::parse(input)?;
-        let mut manifest =
-            Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
+        let mut manifest = Self::from_raw(
+            document.raw,
+            source.clone(),
+            host_port_catalog,
+            &document.sections,
+        )?;
         if manifest.host_apis.is_empty() {
             if let Some(key) = document.sections.first_non_envelope_top_level_key() {
                 return Err(ManifestV2Error::Parse {
@@ -739,7 +753,16 @@ impl ExtensionManifestV2 {
                 reason: "description must not be empty".to_string(),
             });
         }
-        if raw.capabilities.is_empty() && raw.host_api.is_empty() {
+        // A user-registered hosted-MCP server declares no static capabilities; it
+        // discovers its tools at activation. Gated on provenance AND the raw runtime
+        // variant, never `runtime.kind() == Mcp` alone — that also covers
+        // `transport = "stdio"`, admitting a zero-capability stdio descriptor from an
+        // `InstalledLocal` drop-in.
+        let is_zero_content_registered_mcp =
+            matches!(source, ManifestSource::UserRegistered { .. })
+                && matches!(raw.runtime, RawRuntimeV2::Mcp { .. });
+        if raw.capabilities.is_empty() && raw.host_api.is_empty() && !is_zero_content_registered_mcp
+        {
             return Err(ManifestV2Error::Invalid {
                 reason: "at least one host_api contract or legacy capability is required"
                     .to_string(),

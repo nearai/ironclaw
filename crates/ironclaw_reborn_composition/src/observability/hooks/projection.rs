@@ -65,7 +65,7 @@ impl HookProjection {
         Some(Self {
             extension_id: package.manifest.id.clone(),
             version: package.manifest.version.clone(),
-            source: package.manifest.source,
+            source: package.manifest.source.clone(),
             root: package.root.clone(),
             hooks: package.manifest.hooks.clone(),
         })

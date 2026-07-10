@@ -1946,7 +1946,7 @@ fn prepare_install(
     // first-party trust and the bundled hash-migration path below.
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        available.source,
+        available.source.clone(),
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -1995,7 +1995,7 @@ fn prepare_manifest_migration(
     // whose on-disk manifest changed fails closed instead of migrating.
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        available.source,
+        available.source.clone(),
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
