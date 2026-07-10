@@ -2026,6 +2026,46 @@ test("useChatEvents: stale completed run status does not refetch timeline", () =
   });
 });
 
+test("useChatEvents: stale completed status after current failure does not clear the failure banner", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "run failed",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-current", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-current",
+              status: "failed",
+              failure_summary: "The current run failed.",
+            },
+          },
+          { run_status: { run_id: "run-old", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-current");
+  assert.equal(harness.messages[0].content, "The current run failed.");
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-current", success: false },
+  ]);
+});
+
 test("useChatEvents: terminal success settles the run once", () => {
   const harness = createUseChatEventsHarness();
 
@@ -2056,6 +2096,110 @@ test("useChatEvents: terminal success settles the run once", () => {
   });
 
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
+test("useChatEvents: terminal success clears prior run failure banner", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "run failed",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-failed",
+              status: "failed",
+              failure_summary: "The previous run failed.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-failed");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-success", status: "running" } }],
+      },
+    },
+  });
+
+  assert.equal(
+    harness.messages.some((message) => message.id === "err-run-failed"),
+    true,
+    "the failure notice stays visible while the follow-up is still running",
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-success", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(
+    harness.messages.some((message) => message.id === "err-run-failed"),
+    false,
+  );
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-failed", success: false },
+    { runId: "run-success", success: true },
+  ]);
+});
+
+test("useChatEvents: final reply clears prior run failure banner", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "err-run-failed",
+      role: "error",
+      content: "The previous run failed.",
+      timestamp: "2026-06-03T11:44:43Z",
+    },
+    {
+      id: "system-keep",
+      role: "system",
+      content: "System notices are not run-failure banners.",
+      timestamp: "2026-06-03T11:44:44Z",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-success",
+        text: "Recovered.",
+        generated_at: "2026-06-03T11:44:45Z",
+      },
+    },
+  });
+
+  assert.equal(
+    harness.messages.some((message) => message.id === "err-run-failed"),
+    false,
+  );
+  assert.equal(
+    harness.messages.some((message) => message.id === "system-keep"),
+    true,
+  );
+  assert.equal(
+    harness.messages.some((message) => message.id === "reply-run-success"),
+    true,
+  );
 });
 
 test("useChatEvents: terminal failure settles the run as not successful", () => {

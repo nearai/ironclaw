@@ -164,6 +164,7 @@ export function useChatEvents({
           setMessages((prev) =>
             replaceAssistantReplyForRun(prev, replyMessage, turnRunId),
           );
+          clearRunFailureMessages(setMessages);
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
@@ -369,6 +370,7 @@ function applyProjectionItems({
     }
   }
   let activeRunId = latestRunIdRef?.current ?? null;
+  let sawSuccessfulTerminal = false;
   for (const item of items) {
     if (item.run_status) {
       const {
@@ -383,7 +385,8 @@ function applyProjectionItems({
       const isStaleLocalRunStatus = Boolean(
         runId && locallyPinnedRunId && locallyPinnedRunId !== runId,
       );
-      const streamActiveRunId = activeRunId ?? latestRunIdRef?.current ?? null;
+      const streamActiveRunId =
+        activeRunId ?? latestRunIdRef?.current ?? protectedRunId ?? null;
       const isStaleTerminalStatus = Boolean(
         isTerminalStatus &&
           runId &&
@@ -472,6 +475,7 @@ function applyProjectionItems({
         promptRunIdRef.current = null;
       }
       if (isTerminalStatus) {
+        const terminalSucceeded = SUCCESS_RUN_STATUSES.has(status);
         setIsProcessing(false);
         setPendingGate(null);
         setActiveRun?.(null);
@@ -493,9 +497,11 @@ function applyProjectionItems({
           settledRunsRef,
           onRunSettled,
           runId,
-          SUCCESS_RUN_STATUSES.has(status),
+          terminalSucceeded,
         );
-        if (status === "failed" || status === "recovery_required") {
+        if (terminalSucceeded && (!protectedRunId || runId === protectedRunId)) {
+          sawSuccessfulTerminal = true;
+        } else if (status === "failed" || status === "recovery_required") {
           appendRunFailureMessage(setMessages, {
             runId,
             status,
@@ -613,6 +619,9 @@ function applyProjectionItems({
       }
     }
   }
+  if (sawSuccessfulTerminal) {
+    clearRunFailureMessages(setMessages);
+  }
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
@@ -645,7 +654,9 @@ function settleTerminalRunAfterResolvedPrompt({
     promptRunIdRef.current = null;
   }
   settleRun(settledRunsRef, onRunSettled, runId, success);
-  if (status === "failed" || status === "recovery_required") {
+  if (success) {
+    clearRunFailureMessages(setMessages);
+  } else if (status === "failed" || status === "recovery_required") {
     appendRunFailureMessage(setMessages, {
       runId,
       status,
@@ -654,6 +665,20 @@ function settleTerminalRunAfterResolvedPrompt({
       connectionContextForRunFailure,
     });
   }
+}
+
+function clearRunFailureMessages(setMessages) {
+  setMessages((prev) => {
+    const next = prev.filter(
+      (message) =>
+        !(
+          message?.role === "error" &&
+          typeof message.id === "string" &&
+          message.id.startsWith("err-")
+        ),
+    );
+    return next.length === prev.length ? prev : next;
+  });
 }
 
 function failureCategoryFromRunState(runState) {
