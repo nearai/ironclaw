@@ -227,7 +227,7 @@ test("normalizeAutomations does not treat a running fire timestamp as last compl
   assert.equal(automations[0].current_run.run_id, "run-running");
 });
 
-test("normalizeAutomations falls back to terminal run timestamp when completed_at is missing", () => {
+test("normalizeAutomations uses a legacy terminal run timestamp beside an active run", () => {
   const automations = normalizeAutomations({
     automations: [
       {
@@ -247,7 +247,6 @@ test("normalizeAutomations falls back to terminal run timestamp when completed_a
           },
           {
             status: "ok",
-            fire_slot: "2026-06-04T16:00:00Z",
             submitted_at: "2026-06-04T16:00:01Z",
             thread_id: "thread-ok",
             run_id: "run-ok",
@@ -259,8 +258,11 @@ test("normalizeAutomations falls back to terminal run timestamp when completed_a
 
   assert.equal(automations.length, 1);
   assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.doesNotMatch(automations[0].last_run_label, /Jun 5/);
   assert.equal(automations[0].last_status_label, "Done");
   assert.equal(automations[0].success_rate_label, "100% visible runs");
+  assert.equal(automations[0].recent_runs[1].completed_label, "Not completed");
+  assert.equal(automations[0].recent_runs[1].timestamp_source, "2026-06-04T16:00:01Z");
   assert.equal(automations[0].current_run.run_id, "run-running");
 });
 
