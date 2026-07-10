@@ -3627,7 +3627,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa._outbound_final_reply_targets(Path(tmp)), {}
             )
 
-    def test_exactly_once_case_specs_gate_on_personal_auth_and_stay_dispatch_only(self):
+    def test_exactly_once_case_specs_gate_on_personal_auth_and_run_by_default(self):
         for case_name in (
             "qa_9b_routine_dm_delivery_exactly_once",
             "qa_9d_routine_per_trigger_delivery_target",
@@ -3644,10 +3644,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_9c_slack_digest_names_not_ids",
             "qa_9d_routine_per_trigger_delivery_target",
         ):
-            self.assertFalse(
+            self.assertTrue(
                 run_live_qa.CASES[case_name].default_enabled,
-                f"{case_name} is expected-red on pre-fix servers and must "
-                "stay out of bare local default runs until promoted",
+                f"{case_name} is promoted (delivery-routing fixes merged and "
+                "live-verified green) and must run in bare local default runs",
             )
 
     def test_exc_text_preserves_type_for_empty_str_exceptions(self):
@@ -4195,7 +4195,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ):
                 run_live_qa._require_slack_second_user_token(self._dummy_ctx())
 
-    def test_qa_10_case_specs_gate_and_stay_dispatch_only(self):
+    def test_qa_10_case_specs_gate_and_run_by_default(self):
         qa_10_cases = [
             "qa_10a_slack_self_attribution",
             "qa_10b_slack_ooo_status",
@@ -4223,10 +4223,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 f"{case_name} seeds/reads with the personal token; without "
                 "the workspace-mismatch gate its arms are structurally blind",
             )
-            self.assertFalse(
+            self.assertTrue(
                 spec.default_enabled,
-                f"{case_name} is expected-red on pre-fix hosts and must stay "
-                "out of bare local default runs until promoted",
+                f"{case_name} is promoted (tool-surface fixes merged and "
+                "live-verified 9/9 green) and must run in bare local default "
+                "runs",
             )
             self.assertEqual(
                 spec.requires_slack_target,
@@ -4682,6 +4683,27 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(sharded_cases), len(set(sharded_cases)))
         self.assertEqual(sharded_cases, selected_cases)
+        # QA 9/10 are promoted: no shard in the matrix is dispatch_only any
+        # more, so every shard (qa-9/qa-10 included) runs on the 3-hourly
+        # schedule and on a default cases=all dispatch. The resolve-step
+        # guard itself stays for any FUTURE expected-red shard.
+        matrix_match = re.search(
+            r"(?ms)^\s+include:\n(?P<matrix>.*?)^\s+env:", match.group("body")
+        )
+        self.assertIsNotNone(matrix_match, "live QA shard matrix missing")
+        self.assertNotIn(
+            "dispatch_only",
+            matrix_match.group("matrix"),
+            "no live QA shard is dispatch_only; qa-9/qa-10 are promoted into "
+            "the cron rotation — only add dispatch_only for a NEW "
+            "expected-red shard",
+        )
+        self.assertIn(
+            "Shard is dispatch_only; skipping on schedule.",
+            match.group("body"),
+            "keep the resolve-step dispatch_only guard for future "
+            "expected-red shards",
+        )
         all_shard_cases_match = re.search(
             r"(?ms)^\s+ALL_SHARD_CASES:\s*>-\n(?P<cases>.*?)(?=^\s+run:\s*\|)",
             match.group("body"),
