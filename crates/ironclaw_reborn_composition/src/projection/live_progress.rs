@@ -357,7 +357,7 @@ impl LiveTextProjectionCoalescer {
         match self.states.lock() {
             Ok(states) => states,
             Err(poisoned) => {
-                tracing::warn!("live text projection coalescer lock recovered after panic");
+                tracing::debug!("live text projection coalescer lock recovered after panic");
                 self.states.clear_poison();
                 poisoned.into_inner()
             }
@@ -368,7 +368,7 @@ impl LiveTextProjectionCoalescer {
         match self.publication_order.lock() {
             Ok(order) => order,
             Err(poisoned) => {
-                tracing::warn!("live text projection publication lock recovered after panic");
+                tracing::debug!("live text projection publication lock recovered after panic");
                 self.publication_order.clear_poison();
                 poisoned.into_inner()
             }
