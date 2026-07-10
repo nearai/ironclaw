@@ -313,9 +313,9 @@ function nextCursorAfterFullRefresh(
   currentNextCursor,
 ) {
   if (!freshNextCursor) return null;
-  const oldestFreshSequence = oldestTimelineSequence(fresh);
-  if (oldestFreshSequence === null) return freshNextCursor;
-  return hasLoadedOlderTimelineMessage(current, oldestFreshSequence)
+  const freshSequenceWindow = timelineSequenceWindow(fresh);
+  if (!freshSequenceWindow) return freshNextCursor;
+  return hasConnectedLoadedOlderTimelineMessage(current, freshSequenceWindow)
     ? currentNextCursor || null
     : freshNextCursor;
 }
@@ -329,7 +329,10 @@ function mergeFullRefresh(fresh, current, options = {}) {
     current,
   );
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
-  const oldestFreshSequence = oldestTimelineSequence(hydratedFresh);
+  const freshSequenceWindow = timelineSequenceWindow(hydratedFresh);
+  const preserveLoadedOlderTimelineMessages =
+    freshSequenceWindow &&
+    currentTimelineWindowConnectsToFresh(current, freshSequenceWindow);
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
@@ -342,7 +345,12 @@ function mergeFullRefresh(fresh, current, options = {}) {
       return false;
     }
     if (isSeededOptimisticMessage(message)) return true;
-    if (isLoadedOlderTimelineMessage(message, oldestFreshSequence)) return true;
+    if (
+      preserveLoadedOlderTimelineMessages &&
+      isLoadedOlderTimelineMessage(message, freshSequenceWindow.oldest)
+    ) {
+      return true;
+    }
     return preserveClientOnly && message.id.startsWith("err-");
   });
   return preserved.length > 0
@@ -365,20 +373,49 @@ function isLoadedOlderTimelineMessage(message, oldestFreshSequence) {
   return sequence !== null && sequence < oldestFreshSequence;
 }
 
-function hasLoadedOlderTimelineMessage(messages, oldestFreshSequence) {
+function hasConnectedLoadedOlderTimelineMessage(messages, freshSequenceWindow) {
+  if (!currentTimelineWindowConnectsToFresh(messages, freshSequenceWindow)) {
+    return false;
+  }
   return (messages || []).some((message) =>
-    isLoadedOlderTimelineMessage(message, oldestFreshSequence),
+    isLoadedOlderTimelineMessage(message, freshSequenceWindow.oldest),
   );
 }
 
-function oldestTimelineSequence(messages) {
+function currentTimelineWindowConnectsToFresh(messages, freshSequenceWindow) {
+  let newestBeforeFresh = null;
+  for (const message of messages || []) {
+    const sequence = timelineSequence(message);
+    if (sequence === null) continue;
+    if (
+      sequence >= freshSequenceWindow.oldest &&
+      sequence <= freshSequenceWindow.newest
+    ) {
+      return true;
+    }
+    if (sequence < freshSequenceWindow.oldest) {
+      newestBeforeFresh =
+        newestBeforeFresh === null
+          ? sequence
+          : Math.max(newestBeforeFresh, sequence);
+    }
+  }
+  return (
+    newestBeforeFresh !== null &&
+    newestBeforeFresh + 1 === freshSequenceWindow.oldest
+  );
+}
+
+function timelineSequenceWindow(messages) {
   let oldest = null;
+  let newest = null;
   for (const message of messages || []) {
     const sequence = timelineSequence(message);
     if (sequence === null) continue;
     oldest = oldest === null ? sequence : Math.min(oldest, sequence);
+    newest = newest === null ? sequence : Math.max(newest, sequence);
   }
-  return oldest;
+  return oldest === null ? null : { oldest, newest };
 }
 
 function timelineSequence(message) {

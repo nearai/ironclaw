@@ -647,6 +647,28 @@ test("mergeFullRefresh preserves paginated older timeline messages", () => {
   );
 });
 
+test("mergeFullRefresh drops older timeline messages when the fresh page skipped ahead", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-fresh-user", role: "user", sequence: 151 },
+      { id: "msg-fresh-assistant", role: "assistant", sequence: 200 },
+    ],
+    [
+      { id: "msg-stale-user", role: "user", sequence: 51 },
+      { id: "msg-stale-assistant", role: "assistant", sequence: 100 },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-fresh-user,msg-fresh-assistant",
+  );
+});
+
 test("nextCursorAfterFullRefresh does not rewind past loaded older pages", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
@@ -673,6 +695,38 @@ test("nextCursorAfterFullRefresh does not rewind past loaded older pages", () =>
       null,
     ),
     "cursor-for-page-two",
+  );
+});
+
+test("nextCursorAfterFullRefresh uses the fresh cursor after a non-overlapping refresh", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { nextCursorAfterFullRefresh } = context.globalThis.__testExports;
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [
+        { id: "msg-fresh-start", sequence: 151 },
+        { id: "msg-fresh-end", sequence: 200 },
+      ],
+      [
+        { id: "msg-current-start", sequence: 51 },
+        { id: "msg-current-end", sequence: 100 },
+      ],
+      "cursor-before-151",
+      "cursor-before-51",
+    ),
+    "cursor-before-151",
+  );
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [{ id: "msg-fresh", sequence: 151 }],
+      [{ id: "msg-current-adjacent", sequence: 150 }],
+      "cursor-before-151",
+      "cursor-before-150",
+    ),
+    "cursor-before-150",
   );
 });
 
