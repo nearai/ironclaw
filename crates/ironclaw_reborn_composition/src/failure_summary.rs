@@ -188,7 +188,7 @@ pub(crate) enum InvalidModelOutputFailureDetail {
     OutsideCapabilitySurface,
     ToolUseFinishWithoutToolCalls,
     UnsupportedToolCallsForTextOnlyLoop,
-    InvalidProviderToolName,
+    InvalidReturnedToolName,
     InvalidToolCallArguments,
     MalformedToolCallArguments,
 }
@@ -213,7 +213,7 @@ impl InvalidModelOutputFailureDetail {
             "model returned unsupported tool calls for a text-only loop" => {
                 Some(Self::UnsupportedToolCallsForTextOnlyLoop)
             }
-            "model returned an invalid provider tool name" => Some(Self::InvalidProviderToolName),
+            "model returned an invalid provider tool name" => Some(Self::InvalidReturnedToolName),
             "model returned invalid tool-call arguments" => Some(Self::InvalidToolCallArguments),
             _ if detail.starts_with("failed to parse tool-call arguments JSON:") => {
                 Some(Self::MalformedToolCallArguments)
@@ -239,7 +239,7 @@ impl InvalidModelOutputFailureDetail {
             Self::UnsupportedToolCallsForTextOnlyLoop => {
                 "The run failed because the model tried to call a tool when this turn required a text answer. Retry with a clearer request or choose a different model."
             }
-            Self::InvalidProviderToolName => {
+            Self::InvalidReturnedToolName => {
                 "The run failed because the model returned an invalid tool name. Retry the run or choose a different model."
             }
             Self::InvalidToolCallArguments => {
