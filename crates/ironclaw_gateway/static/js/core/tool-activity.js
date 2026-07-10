@@ -254,6 +254,22 @@ function createActivityGroupFromEntries(entries, options) {
   return group;
 }
 
+function trailingAssistantMessageAnchor(container) {
+  if (!container || !container.children) return null;
+  const child = container.children[container.children.length - 1];
+  if (!child?.classList?.contains('message')) return null;
+  return child.classList.contains('assistant') ? child : null;
+}
+
+function appendActivityGroupInTurnOrder(container, group) {
+  const anchor = trailingAssistantMessageAnchor(container);
+  if (anchor) {
+    container.insertBefore(group, anchor);
+  } else {
+    container.appendChild(group);
+  }
+}
+
 function createToolActivityController(options) {
   let activeGroup = null;
   let activeEntries = [];
@@ -324,7 +340,7 @@ function createToolActivityController(options) {
     if (!container) return null;
     activeGroup = document.createElement('div');
     activeGroup.className = 'activity-group';
-    container.appendChild(activeGroup);
+    appendActivityGroupInTurnOrder(container, activeGroup);
     scrollToBottom();
     return activeGroup;
   }
