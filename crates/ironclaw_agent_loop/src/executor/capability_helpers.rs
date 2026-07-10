@@ -255,7 +255,7 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
-        model_observation: model_visible_capability_success_observation(call, result)?,
+        model_observation: model_visible_capability_success_observation(call, result),
     })
     .await
     .map_err(capability_host_error)?;
@@ -265,16 +265,15 @@ pub(super) async fn append_capability_result_ref(
 fn model_visible_capability_success_observation(
     call: &CapabilityCallCandidate,
     result: &CapabilityResultMessage,
-) -> Result<Option<ModelVisibleToolObservation>, AgentLoopExecutorError> {
+) -> Option<ModelVisibleToolObservation> {
     if call.provider_replay.is_none() {
-        return Ok(None);
+        return None;
     }
-    let failure_kind = CapabilityFailureKind::unknown("none").map_err(|_| {
-        AgentLoopExecutorError::PlannerContract {
-            detail: "invalid failure kind for success observation",
-        }
-    })?;
-    Ok(Some(ModelVisibleToolObservation {
+    // "none" is the static sentinel for successful capability observations and
+    // satisfies CapabilityFailureKind's validation invariants.
+    let failure_kind = CapabilityFailureKind::unknown("none")
+        .expect("static success observation failure kind must be valid");
+    Some(ModelVisibleToolObservation {
         schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
         summary: result.safe_summary.clone(),
@@ -285,7 +284,7 @@ fn model_visible_capability_success_observation(
         artifacts: Vec::new(),
         recovery: None,
         trust: ObservationTrust::UntrustedToolOutput,
-    }))
+    })
 }
 
 pub(super) fn provider_tool_call_reference(
