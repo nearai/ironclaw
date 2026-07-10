@@ -2826,6 +2826,184 @@ async fn slack_list_conversations_dms_carry_counterpart_display_names() {
     );
 }
 
+/// `conversations.list` reality check: Slack returns channels you can SEE,
+/// not only ones you're in. The tool must surface `is_member` per channel
+/// (absent for DMs, which have no membership axis), pass an input `cursor`
+/// through, and return `next_cursor` so the model can page instead of
+/// concluding from the first page.
+#[tokio::test]
+async fn slack_list_conversations_surfaces_membership_and_pagination() {
+    let capability_id = CapabilityId::new("slack.list_conversations").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "conversations.list",
+        200,
+        r#"{"ok":true,"channels":[
+            {"id":"C0IN","name":"general","is_channel":true,"is_private":false,"is_im":false,"is_mpim":false,"is_member":true},
+            {"id":"C0OUT","name":"random","is_channel":true,"is_private":false,"is_im":false,"is_mpim":false,"is_member":false},
+            {"id":"D0FIRAT","is_im":true,"is_channel":false,"is_private":false,"is_mpim":false,"user":"U0AAA"}
+        ],"response_metadata":{"next_cursor":"dXNlcjpVMEc5V0ZYTlo="}}"#,
+    )]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"types": "public_channel,im", "cursor": "page-two-cursor"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let list_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("conversations.list"))
+        .expect("list_conversations must call conversations.list");
+    assert!(
+        list_request.url.contains("cursor=page-two-cursor"),
+        "input cursor must be passed through to Slack: {}",
+        list_request.url
+    );
+
+    let conversations = output["conversations"].as_array().expect("conversations");
+    assert_eq!(conversations[0]["is_member"], json!(true));
+    assert_eq!(
+        conversations[1]["is_member"],
+        json!(false),
+        "channels merely visible to the token must be marked non-member: {output}"
+    );
+    assert!(
+        conversations[2].get("is_member").is_none(),
+        "DMs have no membership axis; is_member must be absent, not fabricated: {output}"
+    );
+    assert_eq!(
+        output["next_cursor"],
+        json!("dXNlcjpVMEc5V0ZYTlo="),
+        "next_cursor must surface so the model can page: {output}"
+    );
+}
+
+/// Slack rejects `limit=1000` (the real maximum is 999). The guest must clamp
+/// out-of-range limits instead of letting the read fail on an avoidable
+/// invalid_limit round-trip.
+#[tokio::test]
+async fn slack_history_limit_is_clamped_to_slack_maximum() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.history", 200, SLACK_HISTORY_BODY),
+        ("users.info", 200, SLACK_USER_AAA_BODY),
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "D0FIRAT", "limit": 5000}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(_) => {}
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let history_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("conversations.history"))
+        .expect("history must call conversations.history");
+    assert!(
+        history_request.url.contains("limit=999"),
+        "out-of-range limits must clamp to Slack's real maximum of 999: {}",
+        history_request.url
+    );
+}
+
+/// `search.messages` matches must carry the same author enrichment as history
+/// (`user_display_name`), surface `thread_ts` so threaded hits can be followed
+/// up with slack.get_thread_replies, and pass an input `page` through to
+/// Slack's paging.
+#[tokio::test]
+async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "search.messages",
+            200,
+            r#"{"ok":true,"query":"deploy","messages":{"total":2,"matches":[
+                {"iid":"1","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0AAA","username":"firat","ts":"1751970001.000100","text":"deploy went fine","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970001000100","thread_ts":"1751960000.000100"},
+                {"iid":"2","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0BBB","username":"ada","ts":"1751970002.000100","text":"deploying again","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970002000100"}
+            ]}}"#,
+        ),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+    ]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "deploy", "page": 3}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let search_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("search.messages"))
+        .expect("search must call search.messages");
+    assert!(
+        search_request.url.contains("page=3"),
+        "input page must be passed through to Slack paging: {}",
+        search_request.url
+    );
+
+    let matches = output["matches"].as_array().expect("matches array");
+    assert_eq!(
+        matches[0]["user_display_name"],
+        json!("Firat"),
+        "search matches must resolve author display names like history does: {output}"
+    );
+    assert_eq!(
+        matches[1]["user_display_name"],
+        json!("Ada Lovelace"),
+        "empty display_name must fall back to real_name: {output}"
+    );
+    assert_eq!(
+        matches[0]["thread_ts"],
+        json!("1751960000.000100"),
+        "threaded search hits must surface thread_ts for follow-up: {output}"
+    );
+    assert!(
+        matches[1].get("thread_ts").is_none(),
+        "non-threaded matches must not fabricate thread_ts: {output}"
+    );
+}
+
 /// Enrichment is best-effort: a failing `users.info` (missing scope, outage)
 /// must never break the read itself — raw ids still return, names are simply
 /// absent.

@@ -91,14 +91,27 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     );
 
     let result = match action {
-        SlackUserAction::SearchMessages { query, count, sort } => {
-            let result =
-                api::search_messages(&query, count, sort.as_ref().map(|sort| sort.as_str()))?;
+        SlackUserAction::SearchMessages {
+            query,
+            count,
+            sort,
+            page,
+        } => {
+            let result = api::search_messages(
+                &query,
+                count,
+                sort.as_ref().map(|sort| sort.as_str()),
+                page,
+            )?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackUserAction::ListConversations { types, limit } => {
-            let result = api::list_conversations(&types, limit)?;
+        SlackUserAction::ListConversations {
+            types,
+            limit,
+            cursor,
+        } => {
+            let result = api::list_conversations(&types, limit, cursor.as_deref())?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 

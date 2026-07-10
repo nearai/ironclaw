@@ -138,6 +138,7 @@ pub fn search_messages(
     query: &str,
     count: u32,
     sort: Option<&str>,
+    page: Option<u32>,
 ) -> Result<SearchMessagesResult, String> {
     let count = count.clamp(1, 100);
     let mut url = format!(
@@ -148,12 +149,15 @@ pub fn search_messages(
     if let Some(sort) = sort {
         url.push_str(&format!("&sort={}", url_encode(sort)));
     }
+    if let Some(page) = page {
+        url.push_str(&format!("&page={}", page));
+    }
 
     let parsed = slack_api_call("GET", &url, None)?;
 
     let messages = &parsed["messages"];
     let total = messages["total"].as_u64().unwrap_or(0);
-    let matches = messages["matches"]
+    let mut matches: Vec<SearchMatch> = messages["matches"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -161,14 +165,29 @@ pub fn search_messages(
                     ts: m["ts"].as_str().unwrap_or("").to_string(),
                     text: m["text"].as_str().unwrap_or("").to_string(),
                     user: m["user"].as_str().map(|s| s.to_string()),
+                    user_display_name: None,
                     username: m["username"].as_str().map(|s| s.to_string()),
                     channel_id: m["channel"]["id"].as_str().map(|s| s.to_string()),
                     channel_name: m["channel"]["name"].as_str().map(|s| s.to_string()),
+                    thread_ts: m["thread_ts"].as_str().map(|s| s.to_string()),
                     permalink: m["permalink"].as_str().map(|s| s.to_string()),
                 })
                 .collect()
         })
         .unwrap_or_default();
+
+    // Resolve match authors to display names, same contract as history:
+    // best-effort, one users.info per distinct author, budget-capped.
+    let author_ids: Vec<String> = matches
+        .iter()
+        .filter_map(|search_match| search_match.user.clone())
+        .collect();
+    let names = resolve_user_display_names(author_ids);
+    for search_match in &mut matches {
+        if let Some(user_id) = &search_match.user {
+            search_match.user_display_name = names.get(user_id).cloned();
+        }
+    }
 
     Ok(SearchMessagesResult {
         ok: true,
@@ -280,13 +299,21 @@ fn resolve_user_display_names(
     names
 }
 
-/// List conversations the user belongs to (channels, DMs, group DMs).
-pub fn list_conversations(types: &str, limit: u32) -> Result<ListConversationsResult, String> {
-    let url = format!(
+/// List conversations visible to the user token (channels, DMs, group DMs);
+/// `is_member` marks which channels the connected account belongs to.
+pub fn list_conversations(
+    types: &str,
+    limit: u32,
+    cursor: Option<&str>,
+) -> Result<ListConversationsResult, String> {
+    let mut url = format!(
         "conversations.list?types={}&limit={}&exclude_archived=true",
         url_encode(types),
         limit
     );
+    if let Some(cursor) = cursor {
+        url.push_str(&format!("&cursor={}", url_encode(cursor)));
+    }
 
     let parsed = slack_api_call("GET", &url, None)?;
 
@@ -301,6 +328,9 @@ pub fn list_conversations(types: &str, limit: u32) -> Result<ListConversationsRe
                     is_private: c["is_private"].as_bool().unwrap_or(false),
                     is_im: c["is_im"].as_bool().unwrap_or(false),
                     is_mpim: c["is_mpim"].as_bool().unwrap_or(false),
+                    // Absent when Slack omits it (DMs have no membership axis)
+                    // — never fabricated.
+                    is_member: c["is_member"].as_bool(),
                     user: c["user"].as_str().map(|s| s.to_string()),
                     user_display_name: None,
                 })
@@ -322,9 +352,16 @@ pub fn list_conversations(types: &str, limit: u32) -> Result<ListConversationsRe
         }
     }
 
+    // Slack signals "no more pages" with an empty next_cursor.
+    let next_cursor = parsed["response_metadata"]["next_cursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| cursor.to_string());
+
     Ok(ListConversationsResult {
         ok: true,
         conversations,
+        next_cursor,
     })
 }
 
@@ -335,6 +372,8 @@ pub fn get_conversation_history(
     latest: Option<&str>,
     oldest: Option<&str>,
 ) -> Result<ConversationHistoryResult, String> {
+    // Slack rejects limit=1000; 999 is the real maximum.
+    let limit = limit.clamp(1, 999);
     let mut url = format!(
         "conversations.history?channel={}&limit={}",
         url_encode(channel),

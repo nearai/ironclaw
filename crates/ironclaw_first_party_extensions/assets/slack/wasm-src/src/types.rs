@@ -32,18 +32,25 @@ pub enum SlackUserAction {
         /// Sort by relevance (default) or recency.
         #[serde(default)]
         sort: Option<SearchSort>,
+        /// Result page to fetch (1-based), passed through to Slack paging.
+        #[serde(default)]
+        page: Option<u32>,
     },
 
-    /// List conversations you belong to: channels, private channels,
-    /// DMs, and group DMs. Use this to discover DM conversation IDs.
+    /// List conversations visible to you: channels, private channels,
+    /// DMs, and group DMs (`is_member` marks which channels you belong
+    /// to). Use this to discover DM conversation IDs.
     ListConversations {
         /// Comma-separated conversation types to include. Defaults to
-        /// `public_channel,private_channel,im,mpim` (everything you're in).
+        /// `public_channel,private_channel,im,mpim`.
         #[serde(default = "default_conversation_types")]
         types: String,
         /// Maximum number of conversations to return (default: 200).
         #[serde(default = "default_list_limit")]
         limit: u32,
+        /// Pagination cursor from a previous call's `next_cursor`.
+        #[serde(default)]
+        cursor: Option<String>,
     },
 
     /// Read message history from any conversation you can see — a channel,
@@ -51,7 +58,8 @@ pub enum SlackUserAction {
     GetConversationHistory {
         /// Conversation ID (e.g. `C123...` for a channel, `D123...` for a DM).
         channel: String,
-        /// Maximum number of messages to return (default: 50).
+        /// Maximum number of messages to return (default: 50, max: 999 —
+        /// Slack rejects 1000; out-of-range values are clamped).
         #[serde(default = "default_history_limit")]
         limit: u32,
         /// Only return messages before this timestamp (pagination cursor).
@@ -138,12 +146,21 @@ pub struct SearchMatch {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Human-readable name for `user`, resolved via `users.info`
+    /// (best-effort: absent when the lookup fails). Use this in user-facing
+    /// output instead of the raw user ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<String>,
+    /// Present on threaded matches: the thread parent's ts — follow up with
+    /// `get_thread_replies` to read the thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_ts: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permalink: Option<String>,
 }
@@ -166,6 +183,11 @@ pub struct Conversation {
     pub is_private: bool,
     pub is_im: bool,
     pub is_mpim: bool,
+    /// Whether the connected account is a member of this channel. Slack lists
+    /// channels you can SEE, not only ones you're in — this marks the
+    /// difference. Absent for DMs (no membership axis).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_member: Option<bool>,
     /// For DMs (`im`), the user ID on the other side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
@@ -181,6 +203,9 @@ pub struct Conversation {
 pub struct ListConversationsResult {
     pub ok: bool,
     pub conversations: Vec<Conversation>,
+    /// Cursor for the next page (pass as `cursor`). Absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// A message from conversation history.
