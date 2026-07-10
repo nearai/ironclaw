@@ -593,7 +593,20 @@ impl Agent {
             let llm = deps.cheap_llm.clone().unwrap_or_else(|| deps.llm.clone());
             let memory =
                 Arc::new(crate::agent::session_memory::SessionMemory::new(llm, ws));
-            session_manager.set_session_memory(memory);
+            session_manager.set_session_memory(memory.clone());
+
+            // Startup backstop sweep: summarize any recently-ended conversation
+            // that was never summarized (e.g. a crash before idle-prune). Only
+            // when a raw store is present; fire-and-forget + fail-soft.
+            if let Some(db) = deps.store.clone() {
+                tokio::spawn(async move {
+                    let since = chrono::Utc::now() - chrono::Duration::hours(24);
+                    let n = memory.sweep(&db, since).await;
+                    if n > 0 {
+                        tracing::debug!("startup: episodic sweep summarized {n} conversation(s)");
+                    }
+                });
+            }
         }
 
         let mut scheduler = Scheduler::new(
@@ -1302,6 +1315,20 @@ impl Agent {
                             None
                         }
                     } else {
+                        // Episodic-memory backstop sweep on each heartbeat tick,
+                        // wired only when both a workspace and a raw store exist.
+                        let session_memory = self.deps.store.as_ref().map(|db| {
+                            let llm = self
+                                .deps
+                                .cheap_llm
+                                .clone()
+                                .unwrap_or_else(|| self.deps.llm.clone());
+                            let mem = Arc::new(crate::agent::session_memory::SessionMemory::new(
+                                llm,
+                                workspace.clone(),
+                            ));
+                            (mem, Arc::clone(db))
+                        });
                         Some(spawn_heartbeat(
                             config,
                             hygiene,
@@ -1309,6 +1336,7 @@ impl Agent {
                             self.cheap_llm().clone(),
                             Some(notify_tx),
                             self.system_store(),
+                            session_memory,
                         ))
                     }
                 } else {

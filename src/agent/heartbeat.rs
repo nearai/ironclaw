@@ -183,6 +183,11 @@ pub struct HeartbeatRunner {
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: Option<SystemScope>,
+    /// Episodic-memory backstop sweep dependencies. Both must be present for
+    /// the per-tick sweep to run: the coordinator that writes summaries and the
+    /// raw database handle used to enumerate conversations + load their turns.
+    session_memory: Option<Arc<crate::agent::session_memory::SessionMemory>>,
+    session_store: Option<Arc<dyn crate::db::Database>>,
     consecutive_failures: u32,
 }
 
@@ -201,6 +206,8 @@ impl HeartbeatRunner {
             llm,
             response_tx: None,
             store: None,
+            session_memory: None,
+            session_store: None,
             consecutive_failures: 0,
         }
     }
@@ -214,6 +221,20 @@ impl HeartbeatRunner {
     /// Set the system-scoped database store for persistent heartbeat conversations.
     pub fn with_store(mut self, store: SystemScope) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Wire the episodic-memory backstop sweep. On each tick the runner will
+    /// fire-and-forget `SessionMemory::sweep` (since = now-24h) to summarize any
+    /// recently-ended conversations that were never summarized (e.g. a crash
+    /// between conversation end and idle-prune). Both handles are required.
+    pub fn with_session_memory(
+        mut self,
+        memory: Arc<crate::agent::session_memory::SessionMemory>,
+        store: Arc<dyn crate::db::Database>,
+    ) -> Self {
+        self.session_memory = Some(memory);
+        self.session_store = Some(store);
         self
     }
 
@@ -282,6 +303,21 @@ impl HeartbeatRunner {
                     );
                 }
             });
+
+            // Episodic-memory backstop: summarize any recently-ended
+            // conversation that has no per-session file yet. Fire-and-forget so
+            // it never delays the heartbeat checklist; idempotent + fail-soft.
+            if let (Some(mem), Some(store)) =
+                (self.session_memory.clone(), self.session_store.clone())
+            {
+                tokio::spawn(async move {
+                    let since = chrono::Utc::now() - chrono::Duration::hours(24);
+                    let n = mem.sweep(&store, since).await;
+                    if n > 0 {
+                        tracing::debug!("heartbeat: episodic sweep summarized {n} conversation(s)");
+                    }
+                });
+            }
 
             match self.check_heartbeat().await {
                 HeartbeatResult::Ok => {
@@ -495,6 +531,8 @@ fn strip_html_comments(content: &str) -> String {
 /// Spawn the heartbeat runner as a background task.
 ///
 /// Returns a handle that can be used to stop the runner.
+#[allow(clippy::too_many_arguments)]
+// arch-exempt: too_many_args, heartbeat spawn threads optional deps individually; a bundle struct is a future cleanup, plan 2026-07-09-episodic-memory
 pub fn spawn_heartbeat(
     config: HeartbeatConfig,
     hygiene_config: HygieneConfig,
@@ -502,6 +540,10 @@ pub fn spawn_heartbeat(
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: Option<SystemScope>,
+    session_memory: Option<(
+        Arc<crate::agent::session_memory::SessionMemory>,
+        Arc<dyn crate::db::Database>,
+    )>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
@@ -509,6 +551,9 @@ pub fn spawn_heartbeat(
     }
     if let Some(s) = store {
         runner = runner.with_store(s);
+    }
+    if let Some((mem, db)) = session_memory {
+        runner = runner.with_session_memory(mem, db);
     }
 
     tokio::spawn(async move {
@@ -900,8 +945,9 @@ mod tests {
     #[test]
     fn test_spawn_heartbeat_accepts_store_param() {
         // Regression: spawn_heartbeat must accept an optional Database store
-        // for persisting heartbeat notifications to a dedicated conversation.
-        // Compile-time check: the 7th parameter is `Option<Arc<dyn Database>>`.
+        // (6th param) for persisting heartbeat notifications to a dedicated
+        // conversation, plus the optional episodic-memory backstop-sweep pair
+        // (7th param: `SessionMemory` + raw `Database`).
         #[allow(clippy::type_complexity)]
         let _fn_ptr: fn(
             HeartbeatConfig,
@@ -910,6 +956,10 @@ mod tests {
             Arc<dyn ironclaw_llm::LlmProvider>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
             Option<SystemScope>,
+            Option<(
+                Arc<crate::agent::session_memory::SessionMemory>,
+                Arc<dyn crate::db::Database>,
+            )>,
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
         let _ = _fn_ptr;
     }

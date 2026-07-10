@@ -102,6 +102,28 @@ fn has_open(entry: &str) -> bool {
     entry.contains("_open:_")
 }
 
+/// Fold a chronological message list into `(user_input, assistant_response?)`
+/// turn pairs. A `user` message opens a turn; the next `assistant` message
+/// closes it. Consecutive user messages start fresh turns; a leading assistant
+/// message (no preceding user) is ignored.
+fn pair_turns(messages: &[crate::history::ConversationMessage]) -> Vec<(String, Option<String>)> {
+    let mut turns: Vec<(String, Option<String>)> = Vec::new();
+    for m in messages {
+        match m.role.as_str() {
+            "user" => turns.push((m.content.clone(), None)),
+            "assistant" => {
+                if let Some(last) = turns.last_mut()
+                    && last.1.is_none()
+                {
+                    last.1 = Some(m.content.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    turns
+}
+
 /// Rebuild `memory/recent.md`: prepend `new_entry` to the entries parsed out
 /// of `existing`, cap the entry count, then cap total size — preferring to
 /// drop fully-wrapped entries (no open threads) before dropping open ones.
@@ -309,6 +331,59 @@ impl SessionMemory {
         }
     }
 
+    /// Backstop sweep: for each of the owner's conversations touched since
+    /// `since` that has no per-session summary file yet, load its turns from
+    /// the durable store and summarize them. Returns the number of new
+    /// summaries written. Idempotent — the per-session-file check inside
+    /// [`Self::summarize_and_store`] guards against double-writes, so a repeat
+    /// sweep is a no-op. Fail-soft: every store error is logged, never
+    /// propagated into a conversation turn.
+    ///
+    /// The owner is taken from the workspace this `SessionMemory` was built
+    /// for; `store` is the shared database handle used to enumerate the
+    /// conversations and load their message pairs.
+    pub async fn sweep(
+        &self,
+        store: &std::sync::Arc<dyn crate::db::Database>,
+        since: DateTime<Utc>,
+    ) -> usize {
+        let user_id = self.workspace.user_id().to_string();
+        // Enumerate the owner's recent conversations across all channels.
+        let convos = match store.list_conversations_all_channels(&user_id, 200).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("memory sweep: list conversations failed: {e}");
+                return 0;
+            }
+        };
+        let mut n = 0;
+        for c in convos {
+            // Only conversations touched within the window.
+            if c.last_activity < since {
+                continue;
+            }
+            let stem = format!("{}-{}", c.last_activity.format("%Y-%m-%d"), c.id);
+            if self.file_exists(&sessions_path(&stem)).await {
+                continue;
+            }
+            let messages = match store.list_conversation_messages(c.id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("memory sweep: load messages for {} failed: {e}", c.id);
+                    continue;
+                }
+            };
+            let turns = pair_turns(&messages);
+            if turns.is_empty() {
+                continue;
+            }
+            self.summarize_and_store(&c.id.to_string(), &c.channel, c.last_activity, &turns)
+                .await;
+            n += 1;
+        }
+        n
+    }
+
     /// True if a document already exists at `path` (any read error other than
     /// "found" is treated as absent — the backstop sweep will retry).
     async fn file_exists(&self, path: &str) -> bool {
@@ -483,6 +558,57 @@ mod tests {
             1,
             "idempotent: no double-append"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn sweep_summarizes_unsummarized_conversation() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("sweep_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: std::sync::Arc<dyn Database> = std::sync::Arc::new(backend);
+
+        // Seed a conversation with a couple of messages, owned by the sweep user.
+        let user_id = "sweep_user";
+        let conv_id = db
+            .create_conversation("cli", user_id, None)
+            .await
+            .expect("create conversation");
+        db.add_conversation_message(conv_id, "user", "how do I set up voice?")
+            .await
+            .expect("add user msg");
+        db.add_conversation_message(conv_id, "assistant", "Wire the Wyoming engines.")
+            .await
+            .expect("add assistant msg");
+
+        let ws = std::sync::Arc::new(crate::workspace::Workspace::new_with_db(
+            user_id,
+            std::sync::Arc::clone(&db),
+        ));
+        let llm = std::sync::Arc::new(crate::testing::StubLlm::new(
+            r#"{"title":"Voice","gist":"Set up voice.","open_threads":["test pwa"]}"#,
+        ));
+        let mem = SessionMemory::new(llm, ws);
+
+        // First sweep summarizes the un-summarized conversation.
+        let since = chrono::Utc::now() - chrono::Duration::hours(24);
+        let n = mem.sweep(&db, since).await;
+        assert_eq!(n, 1, "one conversation summarized on first sweep");
+
+        let recent = mem.workspace_read(RECENT_PATH).await;
+        assert!(recent.contains("— Voice"), "recent.md updated by sweep");
+
+        // Second sweep is idempotent — the per-session file already exists.
+        let n2 = mem.sweep(&db, since).await;
+        assert_eq!(n2, 0, "idempotent: no new summaries on second sweep");
     }
 
     #[cfg(feature = "libsql")]
