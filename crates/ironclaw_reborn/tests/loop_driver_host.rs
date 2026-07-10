@@ -1235,6 +1235,70 @@ impl CommunicationContextProvider for RecordingCommunicationContextProvider {
     }
 }
 
+#[tokio::test]
+async fn webui_origin_skips_communication_context_fetch_for_plain_chat_prompt() {
+    let mut fixture = HostFixture::new("thread-webui-comm-skip", "hello webui").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::WebUi,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-webui-comm-skip").unwrap(),
+                },
+            ));
+    let recording_provider = RecordingCommunicationContextProvider::new();
+
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: loop_run_context.clone(),
+        })
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    assert!(
+        recording_provider.thread_id().is_none(),
+        "WebUI plain-chat host build should not fetch advisory communication context"
+    );
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    let rendered = requests[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Run origin: WebUI chat; replies render in this chat."),
+        "WebUI origin line must remain in the prompt"
+    );
+    assert!(
+        !rendered.contains("Connected channels:"),
+        "WebUI plain-chat prompt should not include advisory connected-channel context"
+    );
+    assert!(
+        !rendered.contains("Outbound delivery target:"),
+        "WebUI plain-chat prompt should not include advisory outbound-delivery context"
+    );
+}
+
 // f-test-5: when the visible surface includes BOTH builtin.outbound_delivery_target_set
 // AND builtin.outbound_delivery_targets_list, the host derives delivery_tools_visible=true
 // and stamps it onto the resolved communication context. Asserted end-to-end via the
@@ -5055,6 +5119,18 @@ impl HostUserProfileSource for FixedUserProfileSource {
     }
 }
 
+struct NeverUserProfileSource;
+
+#[async_trait::async_trait]
+impl HostUserProfileSource for NeverUserProfileSource {
+    async fn resolve_user_profile(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Option<UserProfileContext> {
+        std::future::pending().await
+    }
+}
+
 #[tokio::test]
 async fn text_only_host_factory_threads_user_profile_source_to_runtime_context() {
     // Prove that `with_user_profile_source` stores the source and that the
@@ -5146,6 +5222,60 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
         runtime_ctx_message.content.contains("locale=ja-JP"),
         "host factory must thread FixedUserProfileSource locale into runtime context: {:?}",
         runtime_ctx_message.content
+    );
+}
+
+#[tokio::test]
+async fn text_only_host_factory_does_not_block_on_slow_optional_user_profile_source() {
+    let fixture = HostFixture::new("thread-host-user-profile-timeout", "hello reborn").await;
+    let source = Arc::new(NeverUserProfileSource);
+    let host = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        fixture
+            .factory()
+            .with_user_profile_source(source)
+            .build_text_only_host(RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            }),
+    )
+    .await
+    .expect("optional user profile source must not block host construction")
+    .unwrap();
+
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    host_dyn
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("User profile:")),
+        "slow optional profile source must degrade to no-profile context"
     );
 }
 
@@ -6728,6 +6858,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
         )
         .await
         .unwrap();
+    assert_eq!(runtime.visible_request_count(), 1);
 
     runtime.set_surface(host_runtime_surface_with_version(
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -6752,6 +6883,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
         .unwrap();
 
     assert_eq!(prompt.surface_version, Some(refreshed_surface.version));
+    assert_eq!(runtime.visible_request_count(), 2);
 }
 
 #[tokio::test]
@@ -7777,6 +7909,7 @@ struct RecordingHostRuntime {
     outcomes: Mutex<Vec<RuntimeCapabilityOutcome>>,
     errors: Mutex<Vec<HostRuntimeError>>,
     invocations: Mutex<Vec<RuntimeCapabilityRequest>>,
+    visible_requests: Mutex<usize>,
 }
 
 impl RecordingHostRuntime {
@@ -7786,6 +7919,7 @@ impl RecordingHostRuntime {
             outcomes: Mutex::new(Vec::new()),
             errors: Mutex::new(Vec::new()),
             invocations: Mutex::new(Vec::new()),
+            visible_requests: Mutex::new(0),
         }
     }
 
@@ -7803,6 +7937,10 @@ impl RecordingHostRuntime {
 
     fn invocations(&self) -> Vec<RuntimeCapabilityRequest> {
         self.invocations.lock().unwrap().clone()
+    }
+
+    fn visible_request_count(&self) -> usize {
+        *self.visible_requests.lock().unwrap()
     }
 }
 
@@ -7833,6 +7971,7 @@ impl HostRuntime for RecordingHostRuntime {
         &self,
         _request: ironclaw_host_runtime::VisibleCapabilityRequest,
     ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
+        *self.visible_requests.lock().unwrap() += 1;
         Ok(self.surface.lock().unwrap().clone())
     }
 

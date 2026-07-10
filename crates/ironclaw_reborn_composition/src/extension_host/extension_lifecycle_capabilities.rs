@@ -120,11 +120,9 @@ fn lifecycle_manifest(
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         resource_profile: Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(100),
-                output_bytes: Some(16 * 1024),
-                ..ResourceEstimate::default()
-            },
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(100)
+                .set_output_bytes(16 * 1024),
             hard_ceiling: None,
         }),
     })
@@ -300,10 +298,8 @@ fn display_channel_name(channel: &str) -> String {
 }
 
 fn resource_usage(started: Instant) -> ResourceUsage {
-    ResourceUsage {
-        wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        ..ResourceUsage::default()
-    }
+    ResourceUsage::default()
+        .set_wall_clock_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
 }
 
 fn credential_stage_error(error: CredentialStageError) -> FirstPartyCapabilityError {

@@ -47,15 +47,15 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
     let backend = Arc::new(
         RepositoryMemoryBackend::new(Arc::clone(&repository))
             .without_prompt_write_safety_policy()
-            .with_capabilities(MemoryBackendCapabilities {
-                file_documents: true,
-                metadata: true,
-                versioning: true,
-                full_text_search: true,
-                vector_search: false,
-                embeddings: false,
-                ..MemoryBackendCapabilities::default()
-            })
+            .with_capabilities(
+                MemoryBackendCapabilities::default()
+                    .set_file_documents(true)
+                    .set_metadata(true)
+                    .set_versioning(true)
+                    .set_full_text_search(true)
+                    .set_vector_search(false)
+                    .set_embeddings(false),
+            )
             .with_indexer(indexer)
             .with_memory_event_sink(Arc::clone(&memory_events)),
     );

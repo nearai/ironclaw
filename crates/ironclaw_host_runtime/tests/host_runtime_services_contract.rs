@@ -339,20 +339,11 @@ async fn with_filesystem_resource_governor_persists_reservations_across_handles(
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
     let reservation = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
+        .reserve(scope, ResourceEstimate::default().set_concurrency_slots(1))
         .unwrap();
     governor.release(reservation.id).unwrap();
 }
@@ -392,17 +383,11 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     let reservation_id = ResourceReservationId::new();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
     governor
@@ -4165,12 +4150,10 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                network_egress_bytes: Some(10),
-                output_bytes: Some(100),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_network_egress_bytes(10)
+                .set_output_bytes(100),
             payload.clone(),
             trust_decision_with_dispatch_authority(),
         ))
@@ -4244,11 +4227,9 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
     let run_state = Arc::new(InMemoryRunStateStore::new());
@@ -4283,11 +4264,9 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(1024),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(1024),
             input,
             trust_decision_with_dispatch_authority(),
         ))
@@ -4318,10 +4297,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
     let run_state = Arc::new(InMemoryRunStateStore::new());
@@ -4347,10 +4323,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
         .invoke_capability(RuntimeCapabilityRequest::new(
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_concurrency_slots(1),
             json!({"message": "missing runtime after reservation"}),
             trust_decision_with_dispatch_authority(),
         ))
@@ -5121,11 +5094,9 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
     );
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1);
     governor
         .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
         .unwrap();
@@ -5284,11 +5255,9 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
     let process_id = ProcessId::new();
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1);
     governor
         .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
         .unwrap();

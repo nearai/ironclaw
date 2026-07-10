@@ -443,10 +443,7 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
         LoopFailureKind::IterationLimit,
         exit_id("exit:max-iterations"),
     )
-    .validate(LoopExitValidationPolicy {
-        failure_evidence_verified: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    .validate(LoopExitValidationPolicy::default().with_host_verified_failure_evidence());
 
     assert_eq!(
         decision.mapping,
@@ -566,11 +563,11 @@ fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
 
     // Before the final checkpoint is host-verified the failed exit is a
     // protocol violation.
-    let rejected = exit.clone().validate(LoopExitValidationPolicy {
-        require_final_checkpoint: true,
-        failure_evidence_verified: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    let rejected = exit.clone().validate(
+        LoopExitValidationPolicy::default()
+            .require_final_checkpoint()
+            .with_host_verified_failure_evidence(),
+    );
     assert_eq!(
         rejected.violation.as_ref().map(LoopExitViolation::kind),
         Some(LoopExitViolationKind::MissingFinalCheckpoint)
@@ -585,12 +582,12 @@ fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
 
     // After verification, the trusted failed outcome surfaces the sanitized
     // failure category.
-    let accepted = exit.validate(LoopExitValidationPolicy {
-        require_final_checkpoint: true,
-        final_checkpoint_verified: true,
-        failure_evidence_verified: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    let accepted = exit.validate(
+        LoopExitValidationPolicy::default()
+            .require_final_checkpoint()
+            .with_host_verified_final_checkpoint()
+            .with_host_verified_failure_evidence(),
+    );
     assert_eq!(accepted.violation, None);
     assert_eq!(
         accepted.mapping,
@@ -900,10 +897,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             state_ref: state_ref.clone(),
             exit_id: exit_id("exit:blocked-variant"),
         })
-        .validate(LoopExitValidationPolicy {
-            blocked_evidence_verified: true,
-            ..LoopExitValidationPolicy::default()
-        });
+        .validate(LoopExitValidationPolicy::default().with_host_verified_blocked_evidence());
 
         let expected_reason = match kind {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
@@ -996,12 +990,8 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
     }
 
     for (kind, expected_category) in variants {
-        let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant")).validate(
-            LoopExitValidationPolicy {
-                failure_evidence_verified: true,
-                ..LoopExitValidationPolicy::default()
-            },
-        );
+        let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant"))
+            .validate(LoopExitValidationPolicy::default().with_host_verified_failure_evidence());
 
         assert_eq!(
             decision.violation, None,
@@ -1046,10 +1036,8 @@ fn cancelled_with_checkpoint_and_interrupted_refs_maps_to_cancelled_outcome() {
         exit_id: exit_id("exit:cancelled-with-checkpoint"),
     });
 
-    let decision = exit.validate(LoopExitValidationPolicy {
-        host_cancellation_observed: true,
-        ..LoopExitValidationPolicy::default()
-    });
+    let decision =
+        exit.validate(LoopExitValidationPolicy::default().with_host_cancellation_observed());
 
     assert_eq!(decision.violation, None);
     assert_eq!(decision.mapping, TurnRunnerOutcome::Cancelled.into());

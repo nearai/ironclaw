@@ -59,6 +59,15 @@ enum PathClass {
     Artifacts,
     Turns,
     Resources,
+    Approvals,
+    Authorization,
+    Events,
+    Processes,
+    RunState,
+    Secrets,
+    Skills,
+    System,
+    Threads,
     Other,
 }
 
@@ -70,6 +79,15 @@ impl PathClass {
             Self::Artifacts => "artifacts",
             Self::Turns => "turns",
             Self::Resources => "resources",
+            Self::Approvals => "approvals",
+            Self::Authorization => "authorization",
+            Self::Events => "events",
+            Self::Processes => "processes",
+            Self::RunState => "run_state",
+            Self::Secrets => "secrets",
+            Self::Skills => "skills",
+            Self::System => "system",
+            Self::Threads => "threads",
             Self::Other => "other",
         }
     }
@@ -82,16 +100,51 @@ fn scoped_path_class(path: &ScopedPath) -> PathClass {
         Some("artifacts") => PathClass::Artifacts,
         Some("turns") => PathClass::Turns,
         Some("resources") => PathClass::Resources,
+        Some("approvals") => PathClass::Approvals,
+        Some("authorization") => PathClass::Authorization,
+        Some("events") => PathClass::Events,
+        Some("processes") => PathClass::Processes,
+        Some("run-state") => PathClass::RunState,
+        Some("secrets") => PathClass::Secrets,
+        Some("skills") => PathClass::Skills,
+        Some("system") => PathClass::System,
+        Some("threads") => PathClass::Threads,
         _ => PathClass::Other,
     }
 }
 
 fn scoped_path_detail(path: &ScopedPath) -> &'static str {
-    match path.as_str() {
-        "/turns/state.json" => "turn_state_snapshot",
-        "/resources/snapshot.json" => "resource_governor_snapshot",
-        "/resources/budget-gates.json" => "budget_gate_snapshot",
-        _ => "unknown",
+    let segments = path
+        .as_str()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["turns", "state.json"] => "turn_state_snapshot",
+        ["resources", "snapshot.json"] => "resource_governor_snapshot",
+        ["resources", "budget-gates.json"] => "budget_gate_snapshot",
+        ["approvals", "capability-permissions", ..] => "approval_capability_permissions",
+        ["approvals", "auto-approve", ..] => "approval_auto_approve",
+        ["approvals", "persistent", ..] => "approval_persistent_policy",
+        ["authorization", "leases", ..] => "authorization_leases",
+        ["events", ..] => "events",
+        ["processes", ..] => "processes",
+        ["run-state", ..] => "run_state",
+        ["secrets", ..] => "secrets",
+        ["skills", ..] => "skill_bundles",
+        ["system", "skills", ..] => "system_skill_bundles",
+        ["threads", ..] => "threads",
+        ["turns", ..]
+        | ["resources", ..]
+        | ["approvals", ..]
+        | ["authorization", ..]
+        | ["system", ..] => "unknown",
+        _ => match segments.len() {
+            0 => "root",
+            1 => "top_level",
+            2 => "one_level",
+            _ => "nested",
+        },
     }
 }
 

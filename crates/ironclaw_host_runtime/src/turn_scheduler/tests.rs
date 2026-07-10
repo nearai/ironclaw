@@ -5,6 +5,7 @@
 //! `services.rs` / `services/tests.rs` pattern in this crate).
 
 use std::{
+    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -121,6 +122,140 @@ struct LockingTransitionPort {
     state_lock: Arc<tokio::sync::Mutex<()>>,
     heartbeat_started_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     heartbeat_count: AtomicUsize,
+}
+
+struct BatchClaimTransitionPort {
+    claims: tokio::sync::Mutex<VecDeque<ClaimedTurnRun>>,
+    requested_max_runs: AtomicUsize,
+    claim_calls: AtomicUsize,
+}
+
+impl BatchClaimTransitionPort {
+    fn new(claims: Vec<ClaimedTurnRun>) -> Self {
+        Self {
+            claims: tokio::sync::Mutex::new(claims.into()),
+            requested_max_runs: AtomicUsize::new(0),
+            claim_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn requested_max_runs(&self) -> usize {
+        self.requested_max_runs.load(Ordering::SeqCst)
+    }
+
+    fn claim_calls(&self) -> usize {
+        self.claim_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for BatchClaimTransitionPort {
+    async fn claim_next_run(
+        &self,
+        _request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        Ok(self.claims.lock().await.pop_front())
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ironclaw_turns::runner::ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        self.claim_calls.fetch_add(1, Ordering::SeqCst);
+        self.requested_max_runs
+            .fetch_max(request.max_runs, Ordering::SeqCst);
+        let mut claims = self.claims.lock().await;
+        let mut claimed = Vec::new();
+        for _ in 0..request.max_runs {
+            let Some(next) = claims.pop_front() else {
+                break;
+            };
+            claimed.push(next);
+        }
+        Ok(claimed)
+    }
+
+    async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+        Ok(EventCursor(1))
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        _request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn complete_run(&self, _request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn relinquish_run(
+        &self,
+        _request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        _request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+}
+
+struct CountingExecutor {
+    executed: AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+impl CountingExecutor {
+    fn new() -> Self {
+        Self {
+            executed: AtomicUsize::new(0),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn executed(&self) -> usize {
+        self.executed.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TurnRunExecutor for CountingExecutor {
+    async fn execute_claimed_run(
+        &self,
+        _claimed: ClaimedTurnRun,
+        _transitions: Arc<dyn TurnRunTransitionPort>,
+    ) -> Result<(), TurnRunExecutorError> {
+        self.executed.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
+        Ok(())
+    }
 }
 
 impl LockingTransitionPort {
@@ -278,6 +413,56 @@ async fn claimed_test_run(thread_id: &str) -> ClaimedTurnRun {
         runner_id: TurnRunnerId::new(),
         lease_token: TurnLeaseToken::new(),
     }
+}
+
+#[tokio::test]
+async fn scheduler_batches_claims_up_to_available_permits() {
+    let claimed_a = claimed_test_run("thread-batch-a").await;
+    let claimed_b = claimed_test_run("thread-batch-b").await;
+    let claimed_c = claimed_test_run("thread-batch-c").await;
+    let wake = TurnRunWake {
+        scope: claimed_a.state.scope.clone(),
+        run_id: claimed_a.state.run_id,
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(0),
+    };
+    let transitions = Arc::new(BatchClaimTransitionPort::new(vec![
+        claimed_a, claimed_b, claimed_c,
+    ]));
+    let executor = Arc::new(CountingExecutor::new());
+    let config = TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(3)
+        .with_poll_interval(Duration::from_secs(3600))
+        .with_lease_recovery_interval(Duration::from_secs(3600))
+        .with_runner_heartbeat_interval(Duration::from_secs(3600));
+    let scheduler = TurnRunScheduler::new(transitions.clone(), executor.clone(), config);
+    let handle = scheduler.start();
+
+    use ironclaw_turns::TurnRunWakeNotifier;
+    handle
+        .wake_notifier()
+        .notify_queued_run(wake)
+        .expect("wake should be accepted");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while executor.executed() < 3 {
+            executor.notify.notified().await;
+        }
+    })
+    .await
+    .expect("scheduler should spawn every claimed run in the batch");
+
+    assert_eq!(
+        transitions.requested_max_runs(),
+        3,
+        "scheduler must ask the store for all currently available permits"
+    );
+    assert!(
+        transitions.claim_calls() >= 1,
+        "scheduler should claim through the batched claim path"
+    );
+
+    handle.shutdown().await;
 }
 
 #[tokio::test]
