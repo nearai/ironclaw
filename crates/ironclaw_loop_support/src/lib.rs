@@ -2201,9 +2201,19 @@ fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
 }
 
 fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
+    // The host-managed *model provider* summary is the highest-leak-risk error
+    // string in the system — provider errors routinely embed prompt text, tool
+    // input, host paths, and keys. When it fails strict validation it is
+    // dropped for a fixed category sentence and deliberately NOT carried on the
+    // model-visible detail channel: the value-level scrubber removes secret
+    // tokens but not paths or `tool_input`, so carrying it would leak (see the
+    // text-only host-factory sanitization contract in
+    // `ironclaw_reborn/tests/loop_driver_host.rs`). Genuine structured
+    // `error.detail`, which producers scrub deliberately, still flows through.
     let safe_summary = if LoopSafeSummary::new(error.safe_summary.clone()).is_ok() {
         error.safe_summary
     } else {
+        tracing::debug!("host-managed model summary rejected; using fixed fallback");
         safe_model_summary(error.kind).to_string()
     };
     let mut host_error = AgentLoopHostError::new(model_error_kind(error.kind), safe_summary);

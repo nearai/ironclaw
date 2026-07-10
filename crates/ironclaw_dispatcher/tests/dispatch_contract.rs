@@ -163,7 +163,8 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
     assert!(matches!(
         err,
         DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure
+            kind: RuntimeDispatchErrorKind::ExitFailure,
+            ..
         }
     ));
     let message = err.to_string();
@@ -479,9 +480,18 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            safe_summary: None,
+        },
+        RuntimeKind::Script => DispatchError::Script {
+            kind,
+            safe_summary: None,
+        },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind,
+            safe_summary: None,
+        },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
             capability: CapabilityId::new("system.unsupported").unwrap(),
             runtime,

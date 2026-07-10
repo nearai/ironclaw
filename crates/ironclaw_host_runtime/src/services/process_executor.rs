@@ -484,18 +484,21 @@ mod tests {
             (
                 DispatchError::Script {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 },
                 "resource",
             ),
             (
                 DispatchError::Mcp {
                     kind: RuntimeDispatchErrorKind::NetworkDenied,
+                    safe_summary: None,
                 },
                 "network_denied",
             ),
             (
                 DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
+                    safe_summary: None,
                 },
                 "output_decode",
             ),

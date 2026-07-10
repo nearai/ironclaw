@@ -3323,18 +3323,33 @@ mod tests {
                     && failure.safe_summary == RuntimeDispatchErrorKind::InputEncode.human_summary()
         ));
 
+        // Phase 1 regression: an unsafe (path/JSON-bearing) invalid-input cause
+        // is dropped from the strict card summary but must survive on the
+        // model-visible Diagnostic detail.
+        let raw_invalid_input = "invalid JSON: expected value near {invalid";
         let unsafe_invalid_input = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
             capability_id.clone(),
             RuntimeFailureKind::InvalidInput,
-            Some("invalid JSON: expected value near {invalid".to_string()),
+            Some(raw_invalid_input.to_string()),
         ))
         .expect("convert unsafe invalid input runtime summary");
-        assert!(matches!(
-            unsafe_invalid_input,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::InvalidInput
-                    && failure.safe_summary == RuntimeDispatchErrorKind::InputEncode.human_summary()
-        ));
+        let CapabilityOutcome::Failed(unsafe_invalid_input) = unsafe_invalid_input else {
+            panic!("expected invalid input failure");
+        };
+        assert_eq!(
+            unsafe_invalid_input.error_kind,
+            CapabilityFailureKind::InvalidInput
+        );
+        assert_eq!(
+            unsafe_invalid_input.safe_summary,
+            RuntimeDispatchErrorKind::InputEncode.human_summary()
+        );
+        assert_eq!(
+            unsafe_invalid_input.detail,
+            Some(CapabilityFailureDetail::Diagnostic {
+                text: raw_invalid_input.to_string(),
+            })
+        );
 
         let issue =
             DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::MissingRequired)

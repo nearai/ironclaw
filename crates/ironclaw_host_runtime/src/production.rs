@@ -48,7 +48,6 @@ use ironclaw_run_state::{
 };
 use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
-use ironclaw_turns::run_profile::LoopSafeSummary;
 
 fn trace_capability_latency_ok(
     operation: &'static str,
@@ -2205,14 +2204,13 @@ fn failure_from(
     failure
 }
 
-/// Returns a stable, redacted summary message for a capability invocation
-/// failure.
+/// Returns the failure message carried toward the loop-support boundary.
 ///
 /// Variants that wrap inner errors (`Lease`, `RunState`, `Process`,
 /// `InvocationFingerprint`) or that surface free-form storage/runtime
-/// strings are mapped to fixed, infrastructure-opaque labels. Variants whose
-/// `Display` impl is itself stable (capability id + enum discriminator) flow
-/// through unchanged.
+/// strings are mapped to fixed, infrastructure-opaque labels. Dispatch causes
+/// remain raw at this host-internal layer so loop support can split them into
+/// a strict fallback card summary and a secret-value-scrubbed Diagnostic.
 fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String> {
     use CapabilityInvocationError::*;
     match error {
@@ -2245,13 +2243,14 @@ fn dispatch_failure_message(
     safe_summary: Option<&str>,
     kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
-    // Prefer a host-authored safe summary; otherwise fall back to a plain
-    // human sentence for the failure category rather than the stable category
-    // token (e.g. "the tool input could not be encoded" instead of
-    // "dispatch failed: InputEncode").
+    // Preserve the raw cause until loop support can split it into a strict
+    // card summary and a secret-value-scrubbed Diagnostic. Strict validation
+    // here would discard path/JSON-bearing causes before the detail channel
+    // (`runtime_failure_diagnostic_detail` in `ironclaw_loop_support`) can
+    // retain them. The card channels downstream still strict-validate this
+    // message and fall back safely, so no unscrubbed cause reaches them.
     safe_summary
-        .and_then(|summary| LoopSafeSummary::new(summary).ok())
-        .map(|summary| summary.to_string())
+        .map(str::to_string)
         .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
@@ -2782,18 +2781,20 @@ output_schema_ref = "schemas/test.output.json"
     }
 
     #[test]
-    fn sanitized_failure_message_rejects_unsafe_dispatch_safe_summary() {
+    fn sanitized_failure_message_retains_dispatch_cause_for_detail_consumer() {
+        // Phase 1: a dispatch cause containing path/JSON delimiters (which the
+        // strict card-summary validator rejects) must survive at this
+        // host-internal layer so the downstream Diagnostic channel keeps it.
+        // Secret-value scrubbing happens in loop support, not here.
+        let cause = "read_file failed at /workspace/{config}";
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            safe_summary: Some("read_file failed for path workspace api_key.txt".to_string()),
+            safe_summary: Some(cause.to_string()),
             detail: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        // The unsafe safe_summary is rejected, so the message falls back to the
-        // host-authored human summary for the kind (not the raw category token).
-        assert_eq!(message, "the tool operation failed");
-        assert!(!message.contains("api_key"));
+        assert_eq!(message, cause);
     }
 
     #[test]

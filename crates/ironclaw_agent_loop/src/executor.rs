@@ -53,6 +53,7 @@ use mapping::{
     capability_error_failure_category, capability_failure_kind, capability_host_error,
     checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind, model_error_class,
     model_error_failure_category, model_preference_to_host, sanitized_strategy_summary,
+    sanitized_strategy_summary_or_fallback,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};

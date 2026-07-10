@@ -116,6 +116,11 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
     let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
     let gate_ref = error.gate_ref;
+    // Text-only legacy driver: keep the model-provider error fully sanitized
+    // (fixed fallback, no raw cause on detail). The provider summary is the
+    // highest-leak-risk string and this path has an explicit sanitization
+    // contract (`ironclaw_reborn/tests/loop_driver_host.rs`). Phase-1 detail
+    // recovery targets the planned driver in `crate::model_gateway`, not here.
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
@@ -124,6 +129,7 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
             reason_kind: None,
             gate_ref: None,
             diagnostic_ref: None,
+            detail: None,
         },
     };
     if let Some(reason_kind) = reason_kind {

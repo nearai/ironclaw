@@ -476,7 +476,7 @@ async fn invalid_model_output_is_retried_before_accepting_next_valid_reply() {
         model_responses: VecDeque::from([
             ScriptedModelResponse::ErrorWithSummary {
                 kind: AgentLoopHostErrorKind::Unavailable,
-                safe_summary: "model output was structurally invalid",
+                safe_summary: "model output was invalid at /tmp/{response}",
             },
             ScriptedModelResponse::Reply {
                 text: "recovered after invalid model output".to_string(),

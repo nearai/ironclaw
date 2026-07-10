@@ -5,10 +5,16 @@ use super::{
     LoopCheckpointKind, LoopCompactionError, LoopExecutionState, LoopExit, LoopFailureKind,
     LoopGateRef, LoopResultRef, LoopSafeSummary, MockHost, active_task_preserving_compaction_index,
     calls_response, empty_gate_state, family_with_compaction_strategy, family_with_gate_outcome,
-    family_with_iteration_limit, family_with_reply_admission, final_staged_state, reply_response,
-    reply_response_with_text,
+    family_with_iteration_limit, family_with_reply_admission, final_staged_state,
+    provider_calls_response, reply_response, reply_response_with_text,
 };
-use ironclaw_turns::run_profile::LoopRunInfoPort;
+use ironclaw_turns::run_profile::{
+    AppendCapabilityResultRef, CapabilityFailureDetail, LoopRunInfoPort, ToolObservationDetail,
+    ToolObservationStatus,
+};
+
+const PERMANENT_CAPABILITY_DETAIL: &str = "permanent failure at /runtime/{dispatch}";
+const INVALID_OUTPUT_CAPABILITY_DETAIL: &str = "MCP dispatch failed at /tmp/{socket}";
 
 #[derive(Clone, Copy)]
 struct MatrixRow {
@@ -61,6 +67,7 @@ struct ObservedTerminal {
     final_assistant_refs: Option<Vec<ironclaw_turns::LoopMessageRef>>,
     finalized_assistant_messages: Vec<String>,
     model_request_count: usize,
+    appended_result_refs: Vec<AppendCapabilityResultRef>,
 }
 
 #[derive(Debug)]
@@ -270,7 +277,9 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 ironclaw_turns::run_profile::CapabilityFailure {
                     error_kind: CapabilityFailureKind::Permanent,
                     safe_summary: "permanent protocol failure".to_string(),
-                    detail: None,
+                    detail: Some(CapabilityFailureDetail::Diagnostic {
+                        text: PERMANENT_CAPABILITY_DETAIL.to_string(),
+                    }),
                 },
             ))]);
             run_local(crate::families::default(), host, None).await
@@ -288,12 +297,17 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
         }
         FailureSetup::CapabilityInvalidOutputRecoverable => {
             let host = MockHost::new(vec![
-                calls_response(),
+                provider_calls_response(),
                 reply_response_with_text("completed after invalid output"),
             ])
-            .with_batch_outcomes(vec![batch_outcome(failed_capability(
-                CapabilityFailureKind::InvalidOutput,
-                "invalid tool output",
+            .with_batch_outcomes(vec![batch_outcome(CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidOutput,
+                    safe_summary: INVALID_OUTPUT_CAPABILITY_DETAIL.to_string(),
+                    detail: Some(CapabilityFailureDetail::Diagnostic {
+                        text: INVALID_OUTPUT_CAPABILITY_DETAIL.to_string(),
+                    }),
+                },
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -424,6 +438,7 @@ async fn run_local(
         final_assistant_refs,
         finalized_assistant_messages: host.finalized_assistant_messages(),
         model_request_count: host.model_requests().len(),
+        appended_result_refs: host.appended_result_refs(),
     }
 }
 
@@ -454,6 +469,17 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 row.label
             );
             assert_explanation_refs(row, &failed.explanation_message_refs);
+            if matches!(row.setup, FailureSetup::CapabilityProtocolError) {
+                assert_eq!(
+                    failed
+                        .safe_summary
+                        .as_ref()
+                        .and_then(|failure| failure.detail()),
+                    Some(PERMANENT_CAPABILITY_DETAIL),
+                    "{}: terminal capability cause should survive on detail",
+                    row.label
+                );
+            }
             let final_refs = observed
                 .final_assistant_refs
                 .as_ref()
@@ -517,6 +543,30 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 "{}: completed divergence row should still checkpoint final state",
                 row.label
             );
+            if matches!(row.setup, FailureSetup::CapabilityInvalidOutputRecoverable) {
+                // Phase 1: the capability failure's safe_summary carries `/`
+                // and `{` and fails strict validation. The run must NOT bork —
+                // it recovers (two model requests) and the real cause survives
+                // on the model-visible observation detail.
+                assert_eq!(
+                    observed.model_request_count, 2,
+                    "{}: malformed summary must remain recoverable",
+                    row.label
+                );
+                let observation = observed
+                    .appended_result_refs
+                    .iter()
+                    .find_map(|result| result.model_observation.as_ref())
+                    .expect("provider result should carry a model-visible observation");
+                assert_eq!(observation.status, ToolObservationStatus::Error);
+                assert!(matches!(
+                    &observation.detail,
+                    ToolObservationDetail::GenericFailure {
+                        failure_kind: CapabilityFailureKind::InvalidOutput,
+                        detail: Some(detail),
+                    } if detail == INVALID_OUTPUT_CAPABILITY_DETAIL
+                ));
+            }
         }
         _ => panic!(
             "{}: expected {:?}, observed {:?}",

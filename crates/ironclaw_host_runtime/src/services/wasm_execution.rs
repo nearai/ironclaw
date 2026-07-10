@@ -216,8 +216,9 @@ where
         None => request
             .governor
             .reserve(request.scope.clone(), request.estimate.clone())
-            .map_err(|_| DispatchError::Wasm {
+            .map_err(|error| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: Some(error.to_string()),
             })?,
     };
     // Hold the reservation in an RAII guard from here on. The guard is carried
@@ -228,13 +229,15 @@ where
     let guard = ReservationGuard::new(request.governor, reservation.id);
     let wasm_resource_error = || DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::Resource,
+        safe_summary: None,
     };
     let input_json = match serde_json::to_string(&request.input) {
         Ok(json) => json,
-        Err(_) => {
+        Err(error) => {
             // Dropping `guard` releases the reservation.
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::InputEncode,
+                safe_summary: Some(error.to_string()),
             });
         }
     };
@@ -267,6 +270,7 @@ where
             )?;
             return Err(DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
+                safe_summary: Some(error.to_string()),
             });
         }
     };
@@ -279,14 +283,16 @@ where
         guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
+            safe_summary: Some("WASM execution returned no output".to_string()),
         });
     };
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
-        Err(_) => {
+        Err(error) => {
             guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
+                safe_summary: Some(error.to_string()),
             });
         }
     };
@@ -402,7 +408,10 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
         },
-        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
+        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
+            kind,
+            safe_summary: Some(error.to_string()),
+        },
     }
 }
 
@@ -636,6 +645,7 @@ mod tests {
         let receipt = guard
             .reconcile(accountable_usage(), || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })
             .expect("reconcile must succeed");
         assert_eq!(receipt.status, ReservationStatus::Reconciled);
@@ -656,6 +666,7 @@ mod tests {
         guard
             .account_failed(Some(&accountable_usage()), || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })
             .expect("account_failed with accountable usage must reconcile");
         assert_eq!(governor.reconcile_calls(), 1);
@@ -675,6 +686,7 @@ mod tests {
         guard
             .account_failed(None, || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })
             .expect("account_failed with no usage releases and returns Ok");
         assert_eq!(

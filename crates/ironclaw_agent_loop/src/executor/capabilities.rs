@@ -9,7 +9,8 @@ use ironclaw_turns::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
-        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
+        ModelVisibleToolObservation, ToolObservationDetail, VisibleCapabilitySurface,
     },
 };
 
@@ -33,7 +34,7 @@ use super::{
     capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
     clear_matching_pending_external_tool_resume, failed_exit, honor_retry_alteration,
     model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
-    sanitized_strategy_summary,
+    sanitized_strategy_summary, sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -538,12 +539,34 @@ fn prefixed_capability_summary(
     safe_summary: String,
 ) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
     let safe_summary = strategy_safe_capability_summary_detail(safe_summary);
-    let detail = sanitized_strategy_summary(safe_summary)?;
+    // Fail soft: a capability summary that fails strict validation degrades to
+    // a fixed fallback instead of aborting the run. The real cause still rides
+    // the model-visible Diagnostic detail via the paired observation, so no
+    // information is lost by degrading the card summary here.
+    let (detail, _) = sanitized_strategy_summary_or_fallback(
+        safe_summary,
+        "the tool failure details were redacted",
+    );
     let detail = truncate_summary_detail(
         detail.as_str(),
         MAX_SAFE_SUMMARY_BYTES.saturating_sub(prefix.len()),
     );
     sanitized_strategy_summary(format!("{prefix}{detail}"))
+}
+
+/// Extract the secret-scrubbed model-visible diagnostic text from a tool
+/// observation, if any, so a terminal capability failure can carry the real
+/// cause on `SanitizedFailure.detail` for the failure explainer.
+fn model_observation_diagnostic_detail(
+    observation: Option<&ModelVisibleToolObservation>,
+) -> Option<String> {
+    match observation.map(|observation| &observation.detail) {
+        Some(ToolObservationDetail::GenericFailure {
+            detail: Some(detail),
+            ..
+        }) => Some(detail.clone()),
+        _ => None,
+    }
 }
 
 fn strategy_safe_capability_summary_detail(safe_summary: String) -> String {
@@ -882,6 +905,8 @@ impl CapabilityStage {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
+                    let terminal_detail =
+                        model_observation_diagnostic_detail(model_observation.as_ref());
                     append_blocked_capability_error_result(
                         ctx.host,
                         &mut state,
@@ -900,6 +925,10 @@ impl CapabilityStage {
                     let checked = CheckpointStage
                         .write(ctx, state, CheckpointKind::Final)
                         .await?;
+                    let mut safe_failure = capability_error_failure_category(summary.class)?;
+                    if let Some(detail) = terminal_detail {
+                        safe_failure = safe_failure.with_detail(detail);
+                    }
                     return Ok(BatchStep::Exit(failed_exit(
                         ctx.host,
                         checked.state,
@@ -907,7 +936,7 @@ impl CapabilityStage {
                         Some(checked.checkpoint_id),
                         FailedExitDetails {
                             diagnostic_ref: summary.diagnostic_ref.clone(),
-                            safe_summary: Some(capability_error_failure_category(summary.class)?),
+                            safe_summary: Some(safe_failure),
                             explanation_message_ref,
                         },
                     )?));
@@ -1022,6 +1051,7 @@ impl CapabilityStage {
             }
         }
 
+        let terminal_detail = model_observation_diagnostic_detail(model_observation.as_ref());
         append_blocked_capability_error_result(
             ctx.host,
             &mut state,
@@ -1041,6 +1071,10 @@ impl CapabilityStage {
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
+        let mut safe_failure = capability_error_failure_category(summary.class)?;
+        if let Some(detail) = terminal_detail {
+            safe_failure = safe_failure.with_detail(detail);
+        }
         Ok(BatchStep::Exit(failed_exit(
             ctx.host,
             checked.state,
@@ -1048,7 +1082,7 @@ impl CapabilityStage {
             Some(checked.checkpoint_id),
             FailedExitDetails {
                 diagnostic_ref: summary.diagnostic_ref.clone(),
-                safe_summary: Some(capability_error_failure_category(summary.class)?),
+                safe_summary: Some(safe_failure),
                 explanation_message_ref,
             },
         )?))

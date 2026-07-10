@@ -135,6 +135,11 @@ pub struct LoopModelGatewayError {
     pub gate_ref: Option<LoopGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
+    /// Secret-value-scrubbed cause text for model recovery and failure
+    /// explanation. Unlike `safe_summary`, path and payload delimiters are
+    /// allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl LoopModelGatewayError {
@@ -148,6 +153,7 @@ impl LoopModelGatewayError {
             reason_kind: None,
             gate_ref: None,
             diagnostic_ref: None,
+            detail: None,
         })
     }
 
@@ -163,6 +169,7 @@ impl LoopModelGatewayError {
             reason_kind: None,
             gate_ref: None,
             diagnostic_ref: None,
+            detail: None,
         }
     }
 
@@ -181,6 +188,11 @@ impl LoopModelGatewayError {
         self
     }
 
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
     pub fn into_host_error(self) -> AgentLoopHostError {
         let mut error = AgentLoopHostError::new(self.kind, self.safe_summary.as_str().to_string());
         if let Some(reason_kind) = self.reason_kind {
@@ -191,6 +203,9 @@ impl LoopModelGatewayError {
         }
         if let Some(diagnostic_ref) = self.diagnostic_ref {
             error = error.with_diagnostic_ref(diagnostic_ref);
+        }
+        if let Some(detail) = self.detail {
+            error = error.with_detail(detail);
         }
         error
     }
@@ -646,5 +661,19 @@ mod tests {
         assert_eq!(emitted, vec![15, 30, 32]);
         assert!(should_emit_fallback_text_delta(14, 14));
         assert!(!should_emit_fallback_text_delta(1, 14));
+    }
+
+    #[test]
+    fn model_gateway_error_detail_round_trips_to_host_error() {
+        let detail = "provider failed at /tmp/{response}";
+        let gateway_error =
+            LoopModelGatewayError::new(AgentLoopHostErrorKind::Unavailable, "model gateway failed")
+                .expect("valid summary")
+                .with_detail(detail);
+
+        assert_eq!(
+            gateway_error.into_host_error().detail.as_deref(),
+            Some(detail)
+        );
     }
 }

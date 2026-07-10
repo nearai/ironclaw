@@ -350,11 +350,20 @@ pub enum DispatchError {
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
     #[error("MCP dispatch failed: {kind}")]
-    Mcp { kind: RuntimeDispatchErrorKind },
+    Mcp {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
     #[error("script dispatch failed: {kind}")]
-    Script { kind: RuntimeDispatchErrorKind },
+    Script {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
     #[error("WASM dispatch failed: {kind}")]
-    Wasm { kind: RuntimeDispatchErrorKind },
+    Wasm {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty {
         kind: RuntimeDispatchErrorKind,
@@ -421,9 +430,9 @@ impl fmt::Debug for DispatchError {
                     ),
                 )
                 .finish(),
-            Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
-            Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
-            Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
+            Self::Mcp { kind, .. } => f.debug_struct("Mcp").field("kind", kind).finish(),
+            Self::Script { kind, .. } => f.debug_struct("Script").field("kind", kind).finish(),
+            Self::Wasm { kind, .. } => f.debug_struct("Wasm").field("kind", kind).finish(),
             Self::FirstParty { kind, .. } => {
                 f.debug_struct("FirstParty").field("kind", kind).finish()
             }
@@ -453,9 +462,9 @@ impl DispatchError {
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
-            Self::Mcp { kind }
-            | Self::Script { kind }
-            | Self::Wasm { kind }
+            Self::Mcp { kind, .. }
+            | Self::Script { kind, .. }
+            | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
     }
@@ -472,9 +481,9 @@ impl DispatchError {
             Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
             Self::UnsupportedRuntime { .. } => "unsupported_runtime",
             Self::AuthRequired { .. } => "auth_required",
-            Self::Mcp { kind }
-            | Self::Script { kind }
-            | Self::Wasm { kind }
+            Self::Mcp { kind, .. }
+            | Self::Script { kind, .. }
+            | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => kind.event_kind(),
         }
     }

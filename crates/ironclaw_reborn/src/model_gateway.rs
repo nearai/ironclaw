@@ -954,16 +954,34 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
     let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
     let gate_ref = error.gate_ref;
-    let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
-        Ok(error) => error,
-        Err(_) => LoopModelGatewayError {
-            kind: error.kind,
-            safe_summary: LoopSafeSummary::model_gateway_failed(),
-            reason_kind: None,
-            gate_ref: None,
-            diagnostic_ref: None,
-        },
-    };
+    let existing_detail = error.detail;
+    let raw_summary = error.safe_summary;
+    let (mut converted, rejected_summary_detail) =
+        match LoopModelGatewayError::new(error.kind, raw_summary.clone()) {
+            Ok(error) => (error, None),
+            Err(validation_error) => {
+                tracing::debug!(
+                    validation_error = %validation_error,
+                    "model gateway summary rejected; using fallback"
+                );
+                (
+                    LoopModelGatewayError {
+                        kind: error.kind,
+                        safe_summary: LoopSafeSummary::model_gateway_failed(),
+                        reason_kind: None,
+                        gate_ref: None,
+                        diagnostic_ref: None,
+                        detail: None,
+                    },
+                    Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+                        raw_summary,
+                    )),
+                )
+            }
+        };
+    if let Some(detail) = existing_detail.or(rejected_summary_detail) {
+        converted = converted.with_detail(detail);
+    }
     if let Some(reason_kind) = reason_kind {
         converted = converted.with_reason_kind(reason_kind);
     }
@@ -974,6 +992,29 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
         converted = converted.with_diagnostic_ref(diagnostic_ref);
     }
     converted
+}
+
+#[cfg(test)]
+mod phase_one_error_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_host_summary_falls_back_and_preserves_cause_as_detail() {
+        let raw = "provider failed at /tmp/{response} using api_key=secret-value";
+        let converted = host_error_to_model_gateway_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            raw,
+        ));
+
+        assert_eq!(converted.safe_summary.as_str(), "model gateway failed");
+        let detail = converted
+            .detail
+            .as_deref()
+            .expect("raw cause should survive");
+        assert!(detail.contains("provider failed at /tmp/{response}"));
+        assert!(!detail.contains("secret-value"));
+        assert!(detail.contains("[redacted]"));
+    }
 }
 
 fn request_model_override<P>(
@@ -1930,8 +1971,14 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
     };
     let mut converted = HostManagedModelError::safe(kind, error.safe_summary);
+    if let Some(reason_kind) = error.reason_kind {
+        converted = converted.with_reason_kind(reason_kind);
+    }
     if let Some(gate_ref) = error.gate_ref {
         converted = converted.with_gate_ref(gate_ref);
+    }
+    if let Some(detail) = error.detail {
+        converted = converted.with_detail(detail);
     }
     converted
 }
@@ -1940,10 +1987,16 @@ fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModel
     match error.kind {
         AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::InvalidInvocation
-        | AgentLoopHostErrorKind::InvalidOutput => HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidOutput,
-            error.safe_summary,
-        ),
+        | AgentLoopHostErrorKind::InvalidOutput => {
+            let mut converted = HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                error.safe_summary,
+            );
+            if let Some(detail) = error.detail {
+                converted = converted.with_detail(detail);
+            }
+            converted
+        }
         _ => map_capability_host_error(error),
     }
 }

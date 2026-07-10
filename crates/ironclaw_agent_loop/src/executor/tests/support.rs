@@ -80,7 +80,7 @@ pub(super) struct MockHost {
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
-    fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostErrorKind)>>>,
+    fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
@@ -349,7 +349,19 @@ impl MockHost {
         kind: LoopCheckpointKind,
         error_kind: AgentLoopHostErrorKind,
     ) -> Self {
-        *self.fail_checkpoint_payload.lock().expect("lock") = Some((kind, error_kind));
+        *self.fail_checkpoint_payload.lock().expect("lock") = Some((
+            kind,
+            AgentLoopHostError::new(error_kind, "scripted checkpoint payload failure"),
+        ));
+        self
+    }
+
+    pub(super) fn fail_checkpoint_payload_with_error(
+        self,
+        kind: LoopCheckpointKind,
+        error: AgentLoopHostError,
+    ) -> Self {
+        *self.fail_checkpoint_payload.lock().expect("lock") = Some((kind, error));
         self
     }
 
@@ -878,18 +890,15 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockHost {
         &self,
         request: StageCheckpointPayloadRequest,
     ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-        if let Some((_, error_kind)) = self
+        if let Some((_, error)) = self
             .fail_checkpoint_payload
             .lock()
             .expect("lock")
             .as_ref()
             .filter(|(kind, _)| *kind == request.kind)
-            .copied()
+            .cloned()
         {
-            return Err(AgentLoopHostError::new(
-                error_kind,
-                "scripted checkpoint payload failure",
-            ));
+            return Err(error);
         }
         self.staged_payloads.lock().expect("lock").push(request);
         LoopCheckpointStateRef::for_run(&self.context, "state")
