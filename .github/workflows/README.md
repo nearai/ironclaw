@@ -119,8 +119,9 @@ Gate, Code Coverage, and Release-plz. Path-filtered workflows — Reborn E2E and
 nearai-bench dispatcher tests — block staging-release promotion when they ran
 for the SHA, but are ignored when their path filters skip them. The
 staging-release update is a normal `git push` to
-`refs/heads/staging-release`, so it fails instead of forcing when
-`staging-release` is not a fast-forward from `main`.
+`refs/heads/staging-release`: it skips when `staging-release` already contains
+the SHA, and fails only when `staging-release` has commits that are not
+ancestors of `main`.
 
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-checks.yml`.

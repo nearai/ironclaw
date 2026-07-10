@@ -225,4 +225,16 @@ jobs:
         if: steps.ci.outputs.ready == 'true'
         run: |
           set -euo pipefail
+          git fetch origin main "${STAGING_BRANCH}"
+
+          if git merge-base --is-ancestor "$HEAD_SHA" "origin/${STAGING_BRANCH}"; then
+            echo "::notice::${STAGING_BRANCH} already contains main ${HEAD_SHA}; nothing to sync."
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "origin/${STAGING_BRANCH}" "origin/main"; then
+            echo "::error::${STAGING_BRANCH} has commits that are not in main; refusing to overwrite or merge automatically."
+            exit 1
+          fi
+
           git push origin "HEAD:refs/heads/${STAGING_BRANCH}"
