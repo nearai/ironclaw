@@ -70,9 +70,8 @@ mod hosted_mcp_test_support;
 mod install_policy;
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage,
-    imported_extension_package, is_internal_extension_package_ref, materialize_available_extension,
-    visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
+    is_internal_extension_package_ref, materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -3440,6 +3439,78 @@ output_schema_ref = "schemas/run.output.json"
         assert!(calls[0].manifest_present);
         assert!(calls[0].installation_present);
         assert_removal_target_preserved(&storage_root, &installation_store, "telegram").await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_extension_removals_run_declared_cleanup_once_under_single_operation_lock() {
+        let adapter = Arc::new(RecordingExtensionRemovalCleanupAdapter::new(
+            "fixture.cleanup",
+        ));
+        let adapter_trait: Arc<dyn ExtensionRemovalCleanupAdapter> = adapter.clone();
+        let registry = Arc::new(
+            ExtensionRemovalCleanupRegistry::try_from_adapters(vec![adapter_trait])
+                .expect("unique cleanup adapter"),
+        );
+        let package = fixture_external_channel_package_with_cleanup(
+            "telegram",
+            "Telegram",
+            removal_cleanup_requirement("fixture.cleanup", "telegram"),
+        );
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_removal_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![package]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                registry,
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install external channel");
+
+        let operation_guard = port.operation_lock.lock().await;
+        let start = Arc::new(tokio::sync::Barrier::new(3));
+        let first_port = Arc::clone(&port);
+        let first_ref = package_ref.clone();
+        let first_start = Arc::clone(&start);
+        let first = tokio::spawn(async move {
+            let scope = hosted_mcp_scope("first-remover");
+            let actor = scope.user_id.clone();
+            first_start.wait().await;
+            first_port.remove(first_ref, &scope, Some(&actor)).await
+        });
+        let second_port = Arc::clone(&port);
+        let second_start = Arc::clone(&start);
+        let second = tokio::spawn(async move {
+            let scope = hosted_mcp_scope("second-remover");
+            let actor = scope.user_id.clone();
+            second_start.wait().await;
+            second_port.remove(package_ref, &scope, Some(&actor)).await
+        });
+        start.wait().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(operation_guard);
+
+        let (first_result, second_result) = tokio::join!(first, second);
+        let results = [
+            first_result.expect("first removal task joins"),
+            second_result.expect("second removal task joins"),
+        ];
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "exactly one concurrent removal succeeds"
+        );
+        assert_eq!(
+            results.iter().filter(|result| result.is_err()).count(),
+            1,
+            "the second concurrent removal observes the package is gone"
+        );
+        assert_eq!(
+            adapter.calls().len(),
+            1,
+            "installation preflight, cleanup, and deletion must share one operation lock"
+        );
     }
 
     #[tokio::test]
