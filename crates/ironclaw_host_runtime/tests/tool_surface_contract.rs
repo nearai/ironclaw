@@ -8,6 +8,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -1274,6 +1275,52 @@ async fn visible_surface_version_is_order_insensitive_for_equivalent_capability_
 }
 
 #[tokio::test]
+async fn visible_surface_preserves_registry_order_when_authorizations_finish_out_of_order() {
+    let context = context_with_grants([
+        (
+            capability_id("echo.say"),
+            vec![EffectKind::DispatchCapability],
+        ),
+        (
+            capability_id("files.read"),
+            vec![EffectKind::ReadFilesystem],
+        ),
+    ]);
+    let runtime = runtime_with(
+        registry_from_manifests([
+            (ECHO_MANIFEST, "/system/extensions/echo"),
+            (FILES_MANIFEST, "/system/extensions/files"),
+        ]),
+        Arc::new(DelayingGrantAuthorizer {
+            slow_capability: capability_id("echo.say"),
+            delay: Duration::from_millis(25),
+        }),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([
+        (
+            "echo",
+            "/system/extensions/echo/manifest.toml",
+            vec![EffectKind::DispatchCapability],
+        ),
+        (
+            "files",
+            "/system/extensions/files/manifest.toml",
+            vec![EffectKind::ReadFilesystem],
+        ),
+    ])));
+
+    let surface = runtime
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        visible_ids(&surface),
+        vec![capability_id("echo.say"), capability_id("files.read")]
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_max_capabilities_stops_authorization_after_limit() {
     let registry = registry_from_manifests([
         (ECHO_MANIFEST, "/system/extensions/echo"),
@@ -2102,6 +2149,29 @@ impl TrustAwareCapabilityDispatchAuthorizer for CountingGrantAuthorizer {
         trust_decision: &TrustDecision,
     ) -> Decision {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        GrantAuthorizer::new()
+            .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+            .await
+    }
+}
+
+struct DelayingGrantAuthorizer {
+    slow_capability: CapabilityId,
+    delay: Duration,
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for DelayingGrantAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if descriptor.id == self.slow_capability {
+            tokio::time::sleep(self.delay).await;
+        }
         GrantAuthorizer::new()
             .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
             .await

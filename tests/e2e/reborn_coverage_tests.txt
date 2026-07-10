@@ -14,6 +14,7 @@
 # provider-fixture or model-tool-choice coverage that should stay in the normal
 # E2E suite but not in this Reborn binary coverage gate.
 tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
+tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_tool_permission_menu_persists_after_reload
 tests/e2e/scenarios/test_reborn_v2_file_download.py
 tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_shape
 tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_openai_compat_route_mounts_require_bearer_served
@@ -26,3 +27,4 @@ tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_v1_lists_co
 tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_api_v1_alias_matches_v1_models
 tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_requires_auth
 tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py
+tests/e2e/scenarios/test_admin_api.py

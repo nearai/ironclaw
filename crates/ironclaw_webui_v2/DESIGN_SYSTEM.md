@@ -89,12 +89,12 @@ hardcoded colors outside the token system (see
 
 | What | Where |
 |---|---|
-| Token values (color, light/dark) | `static/styles/app.css` — `--v2-*` custom properties |
-| Token values (radii, spacing, type, shadows, motion, z) | `static/styles/app.css` — structural token block |
-| Token index (machine-readable) | `static/js/design-system/tokens.js` |
-| Components | `static/js/design-system/*.js` |
-| Composites | `static/js/design-system/primitives.js` |
-| Live gallery | `/v2/playground` (`static/js/pages/playground/`) |
+| Token values (color, light/dark) | `frontend/src/styles/app.css` — `--v2-*` custom properties |
+| Token values (radii, spacing, type, shadows, motion, z) | `frontend/src/styles/app.css` — structural token block |
+| Token index (machine-readable) | `frontend/src/design-system/tokens.js` |
+| Components | `frontend/src/design-system/*.tsx` |
+| Composites | `frontend/src/design-system/primitives.tsx` |
+| Live gallery | `/v2/playground` (`frontend/src/pages/playground/`) |
 
 Everything else derives from these. If a value you need is missing,
 add a token first — do not inline the raw value.
@@ -334,7 +334,7 @@ Before committing a UI change, verify — honestly — each of:
 7. **i18n:** new copy goes through i18n keys, and
    `scripts/check-i18n-parity.sh` still passes.
 8. **Playground:** if you added a component variant/state, add it to
-   the matching gallery in `static/js/pages/playground/` so the
+   the matching gallery in `frontend/src/pages/playground/` so the
    system stays browsable; if you added a token, register it in
    `design-system/tokens.js`.
 9. **Checks:** `node --check` on every touched JS file, and the
@@ -347,9 +347,9 @@ motion, don't improvise — surface it for design review instead.
 ## 9. Enforcement
 
 `scripts/check-design-tokens.mjs` scans
-`crates/ironclaw_webui_v2/static/js/**` (excluding vendor, dist, and
+`crates/ironclaw_webui_v2/frontend/src/**` (excluding vendor, dist, and
 tests) for hardcoded hex / `rgb()` color literals — raw values are
-only legitimate inside `static/styles/app.css`, where the tokens are
+only legitimate inside `frontend/src/styles/app.css`, where the tokens are
 defined. Existing occurrences are grandfathered in
 `scripts/design-tokens-baseline.json`; the check fails only when a
 file *gains* raw colors. Reducing a file's count updates the

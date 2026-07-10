@@ -2852,8 +2852,6 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
         RuntimeFailureKind::Transient => CapabilityFailureKind::Transient,
         RuntimeFailureKind::Unavailable => CapabilityFailureKind::Unavailable,
-        RuntimeFailureKind::Unknown => capability_failure_kind("unknown")?,
-        _ => capability_failure_kind(kind.as_str())?,
     })
 }
 
@@ -3307,13 +3305,6 @@ mod tests {
                 "{runtime:?}"
             );
         }
-
-        assert_eq!(
-            runtime_failure_kind_to_loop(RuntimeFailureKind::Unknown)
-                .expect("unknown failure kind")
-                .as_str(),
-            "unknown"
-        );
     }
 
     #[test]
@@ -8269,10 +8260,7 @@ mod tests {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
-                    usage: ResourceUsage {
-                        output_bytes: RECORDING_OUTPUT_BYTES,
-                        ..ResourceUsage::default()
-                    },
+                    usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
             )))
         }
@@ -8372,10 +8360,7 @@ mod tests {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"resumed": true}),
                     display_preview: None,
-                    usage: ResourceUsage {
-                        output_bytes: RECORDING_OUTPUT_BYTES,
-                        ..ResourceUsage::default()
-                    },
+                    usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
             )))
         }

@@ -17,7 +17,7 @@ use ironclaw_product_adapters::{
 /// so we fail fast with `InvalidJson { message: "... exceeds N bytes" }`
 /// instead of letting a multi-megabyte serde graph land in host memory.
 pub(crate) const MAX_COMPONENT_JSON_BYTES: usize = 1024 * 1024;
-use ironclaw_wasm_sandbox_core::{
+use ironclaw_wasm::wasm_sandbox_core::{
     SandboxError, add_minimal_wasi_to_linker, component_engine,
     configure_store as configure_sandbox_store, elapsed_millis,
 };

@@ -52,7 +52,6 @@ fn slack_host_beta_config(
         .expect("installation id"),
         team_id: SlackTeamId::new("T-TRIGGERED-DELIVERY"),
         installation_selector: SlackInstallationSelector::team("T-TRIGGERED-DELIVERY"),
-        slack_actor: None,
         user_id,
         shared_subject_user_id: None,
         channel_routes: Vec::<SlackHostBetaChannelRoute>::new(),

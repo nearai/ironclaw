@@ -73,6 +73,12 @@ jobs:
 
       - name: Run nightly libsql bottleneck suite
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        # The suite-wide p95 ceiling must clear the model-tail case, which
+        # injects a synthetic 2.0s model wait by design — the previous 1500ms
+        # ceiling was structurally unsatisfiable and failed every nightly scan
+        # (the PR variant of this suite already runs with 3000ms). Per-case
+        # ceilings in ironclaw_stress would be the proper fix if the coarse
+        # global cap keeps biting.
         run: |
           mkdir -p target/ironclaw-stress
           cargo run -p ironclaw_stress --release -- \
@@ -86,7 +92,7 @@ jobs:
             --bottleneck-report \
             --output-jsonl target/ironclaw-stress/nightly-suite.jsonl \
             --max-failure-rate 0.02 \
-            --max-p95-ms 1500 \
+            --max-p95-ms 2500 \
             --max-rss-mb 1024 \
             > target/ironclaw-stress/nightly-suite-summary.json \
             2> target/ironclaw-stress/nightly-suite-report.txt

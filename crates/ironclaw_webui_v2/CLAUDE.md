@@ -64,6 +64,10 @@ browser-reachable.
 | `webui.v2.retry_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
 | `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N&run_limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.pause_automation` | POST | `/api/webchat/v2/automations/{automation_id}/pause` | None | `ProductWorkflow` |
+| `webui.v2.resume_automation` | POST | `/api/webchat/v2/automations/{automation_id}/resume` | None | `ProductWorkflow` |
+| `webui.v2.rename_automation` | POST | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
+| `webui.v2.delete_automation` | DELETE | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
 | `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | None | `ProjectionOnly` |
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
@@ -91,6 +95,27 @@ browser-reachable.
 | `webui.v2.operator.status` | GET | `/api/webchat/v2/operator/status` | None | `ProjectionOnly` |
 | `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
+| `webui.v2.admin.list_users` | GET | `/api/webchat/v2/admin/users` (optional `?status=...`) | None | `ProductWorkflow` |
+| `webui.v2.admin.create_user` | POST | `/api/webchat/v2/admin/users` | None | `ProductWorkflow` |
+| `webui.v2.admin.get_user` | GET | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.update_user` | PATCH | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.delete_user` | DELETE | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.set_user_status` | POST | `/api/webchat/v2/admin/users/{user_id}/status` | None | `ProductWorkflow` |
+| `webui.v2.admin.set_user_role` | POST | `/api/webchat/v2/admin/users/{user_id}/role` | None | `ProductWorkflow` |
+| `webui.v2.admin.list_user_secrets` | GET | `/api/webchat/v2/admin/users/{user_id}/secrets` | None | `ProductWorkflow` |
+| `webui.v2.admin.put_user_secret` | PUT | `/api/webchat/v2/admin/users/{user_id}/secrets/{handle}` | None | `ProductWorkflow` |
+| `webui.v2.admin.delete_user_secret` | DELETE | `/api/webchat/v2/admin/users/{user_id}/secrets/{handle}` | None | `ProductWorkflow` |
+
+The `/api/webchat/v2/admin/*` user-management routes are admin/operator-gated:
+authorization (operator token or admin/owner role) and last-admin protection
+are enforced server-side in `ironclaw_product_workflow::AdminUserService`, and a
+non-admin caller receives `403`. `webui.v2.admin.create_user` returns the new
+user's one-time API bearer exactly once in `api_token`; there is no re-issue
+endpoint for existing users.
+| `webui.v2.trace_credits` | GET | `/api/webchat/v2/traces/credit` | None | `ProductWorkflow` |
+| `webui.v2.trace_account_traces` | GET | `/api/webchat/v2/traces/account` (optional `?limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.trace_account_login_link` | POST | `/api/webchat/v2/traces/account-login-link` | None | `ProductWorkflow` |
+| `webui.v2.authorize_trace_hold` | POST | `/api/webchat/v2/traces/holds/{submission_id}/authorize` | None | `ProductWorkflow` |
 
 `webui.v2.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
 query parameters, mutually exclusive boolean `tail` and `follow` flags from
@@ -176,9 +201,9 @@ existence oracle.
 ### Stream-events (WebSocket)
 
 `stream_events_ws` is the WebSocket transport variant of
-`stream_events`. It drains the same `RebornServicesApi::stream_events`
-facade and emits each `ProductOutboundEnvelope` as a JSON text frame.
-The descriptor declares
+`stream_events`. It uses the same `RebornServicesApi` event stream
+surface as SSE and emits each `ProductOutboundEnvelope` as a JSON text
+frame. The descriptor declares
 `WebSocketOriginPolicy::SameOriginRequired`; host composition runs
 the same-origin check before the upgrade reaches this crate's
 handler.
@@ -227,18 +252,19 @@ boundary test enforces this.
 
 ## Streaming model
 
-`stream_events` is SSE. The facade is drain-only right now, so the
-handler drains, renders each `ProductOutboundEnvelope` into the
-browser-visible `WebChatV2EventFrame` schema with its projection cursor
-as the SSE `id`, then polls again on a 1-second cadence. The frame
-intentionally excludes adapter routing/delivery metadata. When
-`RebornServicesApi::stream_events` gains a true subscription API the
-handler can migrate without changing the descriptor or browser event
-schema.
+`stream_events` is SSE. When the facade advertises subscription support,
+the handler subscribes once through `RebornServicesApi::subscribe_events`,
+renders each `ProductOutboundEnvelope` into the browser-visible
+`WebChatV2EventFrame` schema with its projection cursor as the SSE `id`,
+and waits on the projection/event subscription instead of polling. The
+frame intentionally excludes adapter routing/delivery metadata. The
+fallback path still calls `RebornServicesApi::stream_events` for facades
+that do not support subscriptions.
 
-The per-poll ownership probe goes through `SessionThreadService::read_thread`
+The fallback ownership probe goes through `SessionThreadService::read_thread`
 (metadata-only) rather than `list_thread_history`, so an active stream does
-not reload the full message transcript every second.
+not reload the full message transcript on each drain. Subscription streams
+revalidate caller access before forwarding each envelope.
 
 `capability_activity` SSE frames are projection-derived lifecycle metadata for
 tool/capability execution. They expose the safe activity DTO

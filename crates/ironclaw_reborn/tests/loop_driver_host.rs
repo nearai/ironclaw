@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_hooks::{
     HookId, HookLocalId, HookRegistrar, HookRegistry, HookVersion,
     dispatch::HookDispatcherBuilder,
@@ -25,9 +25,9 @@ use ironclaw_hooks::{
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPath, HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
-    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
+    PackageId, PermissionMode, Principal, ProcessId, ProjectId, ResourceEstimate, ResourceUsage,
+    RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -39,18 +39,18 @@ use ironclaw_host_runtime::{
     TurnRunSchedulerConfig, VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
     HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, HostUserProfileSource,
-    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    HostManagedModelResponse, HostManagedModelStreamSink, HostRuntimeLoopCapabilityPort,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    HostUserProfileSource, IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    identity_message_ref, loop_driver_execution_extension_id,
+    SubagentSpawnGoalStore, identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::app_loop_family::build_loop_family_registry;
@@ -62,8 +62,8 @@ use ironclaw_reborn::loop_driver_host::{
     TextOnlyLoopHostConfig,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
+    AwaitDependentRunEvidenceStore, BlockedEvidenceRequest, CompletionEvidenceRequest,
+    FailureEvidenceRequest, FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
     ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::model_routes::{
@@ -79,7 +79,11 @@ use ironclaw_reborn::runtime::{
     build_default_planned_runtime, build_product_live_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    await_edge::{
+        boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+        store::FilesystemAwaitEdgeStore,
+    },
+    flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriver;
@@ -112,7 +116,7 @@ use ironclaw_turns::{
     RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
     TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
@@ -156,6 +160,73 @@ fn driver_requirements_for(
 
 fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
+}
+
+/// Build a fresh in-memory-backed await-edge store/resolver/boot-recovery
+/// trio for call sites that compose `DefaultPlannedRuntimeParts` directly
+/// (mirrors the production composition's wiring, minus the
+/// `bind_coordinator` call — `build_default_planned_runtime`/
+/// `build_product_live_planned_runtime` perform that internally against
+/// `parts.subagent_await_edge_settler`). The returned store also backs
+/// `subagent_await_edge_evidence`; callers needing a
+/// `ThreadCheckpointLoopExitEvidencePort` should pass a clone of it (coerced
+/// to `Arc<dyn AwaitDependentRunEvidenceStore>`) as that port's fourth
+/// argument, in place of the deleted `BoundedSubagentGateResolutionStore`.
+type TestAwaitEdgeTrio = (
+    Arc<FilesystemAwaitEdgeStore<InMemoryBackend>>,
+    Arc<AwaitEdgeResolver<InMemorySessionThreadService, InMemoryBackend>>,
+    Arc<ScopeRecoveryDriver<InMemorySessionThreadService, InMemoryBackend>>,
+);
+
+fn build_test_await_edge_trio(
+    goal_store: Arc<dyn SubagentSpawnGoalStore>,
+    turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+    result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    thread_service: Arc<InMemorySessionThreadService>,
+) -> TestAwaitEdgeTrio {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let fs = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    let store = Arc::new(FilesystemAwaitEdgeStore::new(fs));
+    let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&store),
+        goal_store,
+        turn_state_store,
+        result_writer,
+        thread_service,
+    ));
+    let driver = Arc::new(ScopeRecoveryDriver::new(
+        Arc::clone(&resolver),
+        Arc::clone(&store),
+    ));
+    (store, resolver, driver)
+}
+
+/// Build a fresh, never-written-to in-memory await-edge store for call sites
+/// that only need `AwaitDependentRunEvidenceStore` (blocked-exit evidence)
+/// and never exercise subagent-spawn await-edge resolution — an empty store
+/// answers `has_awaited_child_gate` as `false`, matching the deleted
+/// `BoundedSubagentGateResolutionStore`'s always-empty behavior at these
+/// call sites (none of them spawn subagents).
+fn in_memory_await_edge_evidence_store() -> Arc<FilesystemAwaitEdgeStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let fs = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    Arc::new(FilesystemAwaitEdgeStore::new(fs))
 }
 
 fn test_safety_context() -> InstructionSafetyContext {
@@ -308,6 +379,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
             "checkpoint_created",
@@ -315,6 +387,76 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         ]
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn text_only_host_stream_model_publishes_progress_before_completion() {
+    use tokio::time::{Duration, sleep, timeout};
+
+    let fixture = HostFixture::new("thread-host-stream-progress", "hello streaming").await;
+    fixture.gateway.set_progress_updates(["partial answer"]);
+    fixture
+        .gateway
+        .set_response_delay(std::time::Duration::from_millis(500));
+    let host = fixture.build_host().await;
+    let prompt_bundle = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    let milestone_sink = Arc::clone(&fixture.milestone_sink);
+
+    let stream_task = tokio::spawn(async move {
+        host.stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if milestone_sink.milestones().iter().any(|milestone| {
+                matches!(
+                    &milestone.kind,
+                    LoopHostMilestoneKind::ModelTextDelta { safe_text }
+                        if safe_text == "partial answer"
+                )
+            }) {
+                break;
+            }
+            assert!(
+                !stream_task.is_finished(),
+                "model call completed before live progress milestone was observed"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("live progress milestone should arrive before model completion");
+    assert!(
+        !stream_task.is_finished(),
+        "gateway response delay should still be holding final completion after progress"
+    );
+
+    let model_response = stream_task
+        .await
+        .expect("stream task should join")
+        .expect("stream model should succeed");
+    let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(reply.content, "model says hi");
 }
 
 #[tokio::test]
@@ -894,6 +1036,7 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
         ]
@@ -1090,6 +1233,70 @@ impl CommunicationContextProvider for RecordingCommunicationContextProvider {
             delivery_tools_visible: false,
         }))
     }
+}
+
+#[tokio::test]
+async fn webui_origin_skips_communication_context_fetch_for_plain_chat_prompt() {
+    let mut fixture = HostFixture::new("thread-webui-comm-skip", "hello webui").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::WebUi,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-webui-comm-skip").unwrap(),
+                },
+            ));
+    let recording_provider = RecordingCommunicationContextProvider::new();
+
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: loop_run_context.clone(),
+        })
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    assert!(
+        recording_provider.thread_id().is_none(),
+        "WebUI plain-chat host build should not fetch advisory communication context"
+    );
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    let rendered = requests[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Run origin: WebUI chat; replies render in this chat."),
+        "WebUI origin line must remain in the prompt"
+    );
+    assert!(
+        !rendered.contains("Connected channels:"),
+        "WebUI plain-chat prompt should not include advisory connected-channel context"
+    );
+    assert!(
+        !rendered.contains("Outbound delivery target:"),
+        "WebUI plain-chat prompt should not include advisory outbound-delivery context"
+    );
 }
 
 // f-test-5: when the visible surface includes BOTH builtin.outbound_delivery_target_set
@@ -1839,7 +2046,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             thread_service.clone(),
             turn_store.clone(),
             loop_checkpoint_store.clone(),
-            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            in_memory_await_edge_evidence_store(),
         ));
     let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
@@ -2071,6 +2278,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
         ]
@@ -2883,6 +3091,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         vec![
             "prompt_bundle_built",
             "model_started",
+            "model_text_delta",
             "model_completed",
             "assistant_reply_finalized",
             "checkpoint_created",
@@ -3320,12 +3529,18 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
-        subagent_gate_store.clone(),
+        await_edge_store.clone() as Arc<dyn AwaitDependentRunEvidenceStore>,
     ));
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
@@ -3340,8 +3555,10 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         capability_factory,
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store,
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3475,12 +3692,18 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
-        subagent_gate_store.clone(),
+        await_edge_store.clone() as Arc<dyn AwaitDependentRunEvidenceStore>,
     ));
     // A 60-second poll interval ensures the scheduler cannot advance the run
     // via fallback polling within the 5-second assertion window. Only a wake
@@ -3497,8 +3720,10 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         capability_factory,
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store,
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3643,12 +3868,18 @@ async fn build_runtime_host_with_optional_hooks(
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
-        subagent_gate_store.clone(),
+        await_edge_store.clone() as Arc<dyn AwaitDependentRunEvidenceStore>,
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
@@ -3662,8 +3893,10 @@ async fn build_runtime_host_with_optional_hooks(
         capability_factory,
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store,
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3996,7 +4229,13 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         ),
     );
 
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -4011,8 +4250,11 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
         )),
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: subagent_gate_store.clone(),
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store.clone()
+            as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4020,7 +4262,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
-            subagent_gate_store,
+            await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4115,7 +4357,13 @@ async fn product_live_parts_for_gate_test(
             ModelRoute::new("nearai", "qwen3-coder").unwrap(),
         ),
     );
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
+        subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
+        turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
+        io.clone() as Arc<dyn LoopCapabilityResultWriter>,
+        fixture.thread_service.clone(),
+    );
     DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -4130,8 +4378,11 @@ async fn product_live_parts_for_gate_test(
             CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
         )),
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: subagent_gate_store.clone(),
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_writer,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store.clone()
+            as Arc<dyn AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4139,7 +4390,7 @@ async fn product_live_parts_for_gate_test(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
-            subagent_gate_store,
+            await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4868,6 +5119,18 @@ impl HostUserProfileSource for FixedUserProfileSource {
     }
 }
 
+struct NeverUserProfileSource;
+
+#[async_trait::async_trait]
+impl HostUserProfileSource for NeverUserProfileSource {
+    async fn resolve_user_profile(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Option<UserProfileContext> {
+        std::future::pending().await
+    }
+}
+
 #[tokio::test]
 async fn text_only_host_factory_threads_user_profile_source_to_runtime_context() {
     // Prove that `with_user_profile_source` stores the source and that the
@@ -4959,6 +5222,60 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
         runtime_ctx_message.content.contains("locale=ja-JP"),
         "host factory must thread FixedUserProfileSource locale into runtime context: {:?}",
         runtime_ctx_message.content
+    );
+}
+
+#[tokio::test]
+async fn text_only_host_factory_does_not_block_on_slow_optional_user_profile_source() {
+    let fixture = HostFixture::new("thread-host-user-profile-timeout", "hello reborn").await;
+    let source = Arc::new(NeverUserProfileSource);
+    let host = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        fixture
+            .factory()
+            .with_user_profile_source(source)
+            .build_text_only_host(RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            }),
+    )
+    .await
+    .expect("optional user profile source must not block host construction")
+    .unwrap();
+
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    host_dyn
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("User profile:")),
+        "slow optional profile source must degrade to no-profile context"
     );
 }
 
@@ -6541,6 +6858,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
         )
         .await
         .unwrap();
+    assert_eq!(runtime.visible_request_count(), 1);
 
     runtime.set_surface(host_runtime_surface_with_version(
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -6565,6 +6883,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
         .unwrap();
 
     assert_eq!(prompt.surface_version, Some(refreshed_surface.version));
+    assert_eq!(runtime.visible_request_count(), 2);
 }
 
 #[tokio::test]
@@ -7590,6 +7909,7 @@ struct RecordingHostRuntime {
     outcomes: Mutex<Vec<RuntimeCapabilityOutcome>>,
     errors: Mutex<Vec<HostRuntimeError>>,
     invocations: Mutex<Vec<RuntimeCapabilityRequest>>,
+    visible_requests: Mutex<usize>,
 }
 
 impl RecordingHostRuntime {
@@ -7599,6 +7919,7 @@ impl RecordingHostRuntime {
             outcomes: Mutex::new(Vec::new()),
             errors: Mutex::new(Vec::new()),
             invocations: Mutex::new(Vec::new()),
+            visible_requests: Mutex::new(0),
         }
     }
 
@@ -7616,6 +7937,10 @@ impl RecordingHostRuntime {
 
     fn invocations(&self) -> Vec<RuntimeCapabilityRequest> {
         self.invocations.lock().unwrap().clone()
+    }
+
+    fn visible_request_count(&self) -> usize {
+        *self.visible_requests.lock().unwrap()
     }
 }
 
@@ -7646,6 +7971,7 @@ impl HostRuntime for RecordingHostRuntime {
         &self,
         _request: ironclaw_host_runtime::VisibleCapabilityRequest,
     ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
+        *self.visible_requests.lock().unwrap() += 1;
         Ok(self.surface.lock().unwrap().clone())
     }
 
@@ -8274,13 +8600,12 @@ fn loop_exit_applier_for_fixture(
     turn_store: Arc<InMemoryTurnStateStore>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new(
             Arc::clone(&fixture.thread_service),
             turn_store.clone(),
             loop_checkpoint_store,
-            subagent_gate_store,
+            in_memory_await_edge_evidence_store(),
         )
         .with_checkpoint_state_store(fixture.checkpoint_state_store.clone()),
     );
@@ -8701,33 +9026,47 @@ fn assert_string_omits(label: &str, wire: &str, forbidden: &[&str]) {
     }
 }
 
+const FORBIDDEN_SENSITIVE_PUBLIC_PAYLOADS: &[&str] = &[
+    "RAW_CHECKPOINT_PAYLOAD",
+    "RAW_PROMPT_TEXT_SENTINEL",
+    "RAW_PROVIDER_ERROR",
+    "invalid api key",
+    "sk-secret",
+    "sk-prompt-secret",
+    "sk-provider-secret",
+    "/host/path",
+    "tool_input",
+];
+
 fn assert_serialized_or_debug_hides_raw_payloads(wire: &str) {
-    for forbidden in [
-        "RAW_CHECKPOINT_PAYLOAD",
-        "RAW_PROMPT_TEXT_SENTINEL",
-        "RAW_PROVIDER_ERROR",
-        "invalid api key",
-        "sk-secret",
-        "sk-prompt-secret",
-        "sk-provider-secret",
-        "/host/path",
-        "tool_input",
-        "model says hi",
-    ] {
-        assert!(
-            !wire.contains(forbidden),
-            "public output leaked {forbidden}"
-        );
-    }
+    assert_string_omits("public output", wire, FORBIDDEN_SENSITIVE_PUBLIC_PAYLOADS);
+    assert_string_omits("public output", wire, &["model says hi"]);
 }
 
 fn assert_public_milestones_hide_raw_payloads(milestones: &[LoopHostMilestone]) {
-    // Milestones are public progress metadata: they may carry durable refs and
-    // safe summaries, never raw model text, checkpoint bytes, tool input,
-    // secrets, or host paths. Drivers must rehydrate content through scoped
-    // stores instead of learning it from milestone JSON.
-    let wire = serde_json::to_string(milestones).unwrap();
+    // Milestones are public progress metadata: text deltas are intentionally
+    // browser-visible, but all other milestone payloads must stay ref/summary
+    // shaped instead of leaking private model text or scoped host data.
+    let non_text_milestones = milestones
+        .iter()
+        .filter(|milestone| {
+            !matches!(
+                &milestone.kind,
+                LoopHostMilestoneKind::ModelTextDelta { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let wire = serde_json::to_string(&non_text_milestones).unwrap();
     assert_serialized_or_debug_hides_raw_payloads(&wire);
+    for milestone in milestones {
+        if let LoopHostMilestoneKind::ModelTextDelta { safe_text } = &milestone.kind {
+            assert_string_omits(
+                "public model text delta",
+                safe_text,
+                FORBIDDEN_SENSITIVE_PUBLIC_PAYLOADS,
+            );
+        }
+    }
 }
 
 struct FailingLoopCheckpointStore;
@@ -8882,6 +9221,7 @@ struct RecordingGateway {
     response: Mutex<Result<HostManagedModelResponse, HostManagedModelError>>,
     queued_responses: Mutex<VecDeque<Result<HostManagedModelResponse, HostManagedModelError>>>,
     response_delay: Mutex<Option<std::time::Duration>>,
+    progress_updates: Mutex<Vec<String>>,
 }
 
 impl RecordingGateway {
@@ -8891,6 +9231,7 @@ impl RecordingGateway {
             response: Mutex::new(Ok(HostManagedModelResponse::assistant_reply(content))),
             queued_responses: Mutex::new(VecDeque::new()),
             response_delay: Mutex::new(None),
+            progress_updates: Mutex::new(Vec::new()),
         }
     }
 
@@ -8908,6 +9249,10 @@ impl RecordingGateway {
 
     fn set_response_delay(&self, delay: std::time::Duration) {
         *self.response_delay.lock().unwrap() = Some(delay);
+    }
+
+    fn set_progress_updates(&self, updates: impl IntoIterator<Item = impl Into<String>>) {
+        *self.progress_updates.lock().unwrap() = updates.into_iter().map(Into::into).collect();
     }
 
     fn respond_with_capability_calls(&self) {
@@ -8973,6 +9318,27 @@ impl HostManagedModelGateway for RecordingGateway {
             return response;
         }
         self.response.lock().unwrap().clone()
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let progress_updates = self.progress_updates.lock().unwrap().clone();
+        for update in progress_updates {
+            sink.safe_text_update(update).await;
+        }
+        self.stream_model(request).await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model_with_progress(request, sink).await
     }
 }
 

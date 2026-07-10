@@ -75,37 +75,25 @@ fn sample_record(
 
 #[test]
 fn worker_config_rejects_noop_or_unsupported_settings() {
-    let config = TriggerPollerWorkerConfig {
-        poll_interval: Duration::ZERO,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_poll_interval(Duration::ZERO);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
     ));
 
-    let config = TriggerPollerWorkerConfig {
-        fires_per_tick: 0,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_fires_per_tick(0);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
     ));
 
-    let config = TriggerPollerWorkerConfig {
-        max_concurrent_fires_per_trigger: 2,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_max_concurrent_fires_per_trigger(2);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
     ));
 
-    let config = TriggerPollerWorkerConfig {
-        claim_only_recovery_grace: Duration::ZERO,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_claim_only_recovery_grace(Duration::ZERO);
     assert!(matches!(
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
@@ -114,10 +102,7 @@ fn worker_config_rejects_noop_or_unsupported_settings() {
 
 #[test]
 fn worker_new_rejects_invalid_config() {
-    let config = TriggerPollerWorkerConfig {
-        fires_per_tick: 0,
-        ..TriggerPollerWorkerConfig::default()
-    };
+    let config = TriggerPollerWorkerConfig::default().set_fires_per_tick(0);
     let result = TriggerPollerWorker::new(
         config,
         TriggerPollerWorkerDeps {
@@ -830,10 +815,7 @@ async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_report = worker.tick_once(first_slot).await.expect("first tick");
@@ -915,10 +897,7 @@ async fn tick_active_cleanup_cursor_wraps_to_start_when_page_is_empty() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_report = worker.tick_once(first_slot).await.expect("first tick");
@@ -965,10 +944,7 @@ async fn tick_active_cleanup_cursor_wraps_to_empty_page_succeeds_with_zero_activ
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Nonterminal,
         )),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 1,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
     );
 
     let first_report = worker.tick_once(fire_slot).await.expect("first tick");
@@ -1001,10 +977,7 @@ async fn tick_fails_when_wrap_refetch_returns_backend_error() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Nonterminal,
         )),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 1,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
     );
 
     let first_report = worker.tick_once(fire_slot).await.expect("first tick");
@@ -1064,10 +1037,7 @@ async fn tick_retries_active_page_when_clear_fails_before_advancing_cursor() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup,
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_error = worker.tick_once(first_slot).await.expect_err("clear fails");
@@ -1271,10 +1241,7 @@ async fn tick_retries_active_lookup_error_before_advancing_cursor() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 2,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(2),
     );
 
     let first_report = worker.tick_once(failed_slot).await.expect("first tick");
@@ -1556,10 +1523,7 @@ async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
         materializer.clone(),
         submitter.clone(),
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            claim_only_recovery_grace: Duration::from_secs(60),
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_claim_only_recovery_grace(Duration::from_secs(60)),
     );
 
     let report = worker
@@ -1629,10 +1593,7 @@ async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
         materializer,
         submitter,
         active_lookup.clone(),
-        TriggerPollerWorkerConfig {
-            fires_per_tick: 1,
-            ..TriggerPollerWorkerConfig::default()
-        },
+        TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
     );
 
     let first_report = worker.tick_once(claim_only_slot).await.expect("first tick");

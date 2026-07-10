@@ -2,12 +2,12 @@
 /**
  * check-design-tokens.mjs — design-token ratchet for the WebUI v2.
  *
- * Scans crates/ironclaw_webui_v2/static/js/** (excluding vendor/,
- * dist/, and colocated *.test.{js,mjs} files) for:
+ * Scans crates/ironclaw_webui_v2/frontend/src/** (excluding vendor/,
+ * dist/, node_modules/, and colocated *.test.* files) for:
  *
  * 1. Hardcoded color literals — hex (#abc / #aabbcc / #aabbccdd) and
  *    rgb()/rgba() calls. Colors must come from the --v2-* custom
- *    properties defined in static/styles/app.css.
+ *    properties defined in frontend/src/styles/app.css.
  * 2. Legacy alias utility classes (text-white, bg-white/*, iron-* /
  *    signal / copper / mint palette classes, red-* status classes).
  *    These are compat shims remapped by app.css to theme tokens —
@@ -32,7 +32,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SCAN_ROOT = join(REPO_ROOT, "crates/ironclaw_webui_v2/static/js");
+const SCAN_ROOT = join(REPO_ROOT, "crates/ironclaw_webui_v2/frontend/src");
 const BASELINE_PATH = join(REPO_ROOT, "scripts/design-tokens-baseline.json");
 
 // color-mix(...) over --v2-* vars is sanctioned; bare rgb()/rgba()
@@ -51,16 +51,19 @@ const RGB_RE = /(?<![A-Za-z0-9-])rgba?\(/g;
 const LEGACY_ALIAS_RE =
   /(?<![A-Za-z0-9_/[-])(?:text-white|(?:text|bg|border)-(?:iron-\d+|signal|copper|mint|red-\d+)|(?:bg|border)-white\/)/g;
 
+const SOURCE_EXTENSIONS = [".js", ".mjs", ".jsx", ".ts", ".tsx"];
+const TEST_MARKERS = [".test.", ".spec."];
+
 function collectJsFiles(dir, out = []) {
   for (const entry of readdirSync(dir)) {
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) {
-      if (entry === "vendor" || entry === "dist") continue;
+      if (entry === "vendor" || entry === "dist" || entry === "node_modules") continue;
       collectJsFiles(path, out);
     } else if (
-      path.endsWith(".js") &&
-      !path.endsWith(".test.js") &&
-      !path.endsWith(".test.mjs")
+      SOURCE_EXTENSIONS.some((ext) => path.endsWith(ext)) &&
+      !TEST_MARKERS.some((marker) => entry.includes(marker)) &&
+      !path.endsWith(".d.ts")
     ) {
       out.push(path);
     }
