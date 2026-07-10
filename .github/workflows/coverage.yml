@@ -34,6 +34,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: code-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
@@ -316,8 +320,14 @@ jobs:
 
             if [[ "$result" == "cancelled" ]] &&
               [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-              echo "$name was cancelled on push to main; treating as non-blocking"
-              return 0
+              if git fetch --no-tags --depth=2 origin +refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1; then
+                local latest_sha
+                latest_sha="$(git rev-parse refs/remotes/origin/main)"
+                if [[ "${{ github.sha }}" != "$latest_sha" ]]; then
+                  echo "$name was cancelled on a superseded push-to-main run; treating as non-blocking"
+                  return 0
+                fi
+              fi
             fi
 
             return 1
