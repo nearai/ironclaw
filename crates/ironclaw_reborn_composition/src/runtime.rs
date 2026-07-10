@@ -1402,6 +1402,31 @@ impl RebornRuntime {
         &self.services
     }
 
+    /// Seed a bare `secret_handle` secret for an owner scope so keyed
+    /// capabilities (network + `use_secret`) can resolve their
+    /// `InjectSecretOnce` obligation. `serve` uses this to write the value of
+    /// an `IRONCLAW_REBORN_DEV_SECRET__<handle>` env var into the tenant-shared
+    /// admin-managed scope, so one operator-provisioned key serves every user of
+    /// the tenant (SSO users included) without per-user provisioning. The secret
+    /// store is composition-private, so this is the single narrow write seam.
+    pub async fn seed_local_dev_secret(
+        &self,
+        owner: ResourceScope,
+        handle: ironclaw_host_api::SecretHandle,
+        secret_value: String,
+    ) -> Result<(), ironclaw_secrets::SecretStoreError> {
+        self.services
+            .secret_store()
+            .put(
+                owner,
+                handle,
+                ironclaw_secrets::SecretMaterial::from(secret_value),
+                None,
+            )
+            .await
+            .map(|_| ())
+    }
+
     pub(crate) fn webui_tenant_id(&self) -> &TenantId {
         &self.thread_scope.tenant_id
     }
@@ -5973,7 +5998,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6078,7 +6106,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -7607,7 +7638,10 @@ output_schema_ref = "schemas/write.output.json"
         let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
             .expect("valid notion ref");
         extension_management
-            .install(notion_ref.clone())
+            .install(
+                notion_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Notion MCP");
         extension_management
@@ -10423,9 +10457,12 @@ output_schema_ref = "schemas/write.output.json"
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                         .expect("valid github ref");
+                // #5459 P1: act as the runtime owner (the tenant operator) so
+                // the install is tenant-shared and visible to the run's
+                // surface user — a non-operator install would now be private.
                 let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
-                    user_id: UserId::new("user-multi-tool-surface").expect("user id"),
+                    user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
                     agent_id: None,
                     project_id: None,
                 });

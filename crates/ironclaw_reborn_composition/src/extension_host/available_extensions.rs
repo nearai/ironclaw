@@ -1,8 +1,11 @@
+// arch-exempt: large_file, first-party asset catalog remains 2.9k lines after import/materialization extraction; future asset-registry split, plan #5499
+use std::sync::Arc;
+
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_extensions::{
-    CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifestRecord,
-    ExtensionPackage, ExtensionRuntime, ManifestSource,
+    CapabilityDeclV2, CapabilityVisibility, ExtensionManifestRecord, ExtensionPackage,
+    ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
@@ -27,6 +30,10 @@ use crate::extension_host::host_api_contracts::product_extension_host_api_contra
 use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
+};
+
+pub(crate) use super::available_extension_import::{
+    imported_extension_package, inline_extension_dir_assets, materialize_available_extension,
 };
 
 const GITHUB_MANIFEST: &str =
@@ -144,16 +151,27 @@ pub(crate) struct AvailableExtensionAsset {
     pub(crate) content: AvailableExtensionAssetContent,
 }
 
+/// Catalog entries are self-contained: every asset travels as inline bytes so
+/// remove -> reinstall re-materializes from the entry alone (a `Filesystem`
+/// path-pointer variant existed before that invariant and dangled after
+/// `remove` deleted the extension dir).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
-    Filesystem(VirtualPath),
 }
 
 #[derive(Debug)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
+    /// The loader-supplied [`ManifestSource`] this package was validated
+    /// under. Carried so install/migration re-parses (`prepare_install`,
+    /// `prepare_manifest_migration`) validate with the SAME source the
+    /// package entered the catalog with: an uploaded bundle validated as
+    /// `InstalledLocal` must never be re-validated (and persisted) as
+    /// `HostBundled`, which is the only source eligible for
+    /// first-party/system trust and runtime claims.
+    pub(crate) source: ManifestSource,
     pub(crate) package: ExtensionPackage,
     /// Surface kinds projected once from the manifest record at construction and
     /// cached here. Deliberately not re-derived in `summary()`: the projection
@@ -368,12 +386,14 @@ fn credential_requirement_name(
 
 #[derive(Debug, Default)]
 pub(crate) struct AvailableExtensionCatalog {
-    packages: Vec<AvailableExtensionPackage>,
+    packages: Vec<Arc<AvailableExtensionPackage>>,
 }
 
 impl AvailableExtensionCatalog {
     pub(crate) fn from_packages(packages: Vec<AvailableExtensionPackage>) -> Self {
-        Self { packages }
+        Self {
+            packages: packages.into_iter().map(Arc::new).collect(),
+        }
     }
 
     #[cfg(test)]
@@ -433,22 +453,24 @@ impl AvailableExtensionCatalog {
     pub(crate) fn search<'a>(
         &'a self,
         query: &str,
-    ) -> impl Iterator<Item = &'a AvailableExtensionPackage> + 'a {
+    ) -> impl Iterator<Item = Arc<AvailableExtensionPackage>> + 'a {
         let normalized_query = query.trim().to_ascii_lowercase();
         self.packages
             .iter()
             .filter(|package| !is_internal_extension_package_ref(&package.package_ref))
             .filter(move |package| package_matches_search(package, &normalized_query))
+            .cloned()
     }
 
     pub(crate) fn resolve(
         &self,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<&AvailableExtensionPackage, ProductWorkflowError> {
+    ) -> Result<Arc<AvailableExtensionPackage>, ProductWorkflowError> {
         package_ref.require_kind(LifecyclePackageKind::Extension)?;
         self.packages
             .iter()
             .find(|package| &package.package_ref == package_ref)
+            .cloned()
             .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
@@ -763,13 +785,14 @@ fn bundled_extension_package(
     Ok(AvailableExtensionPackage {
         package_ref,
         manifest_toml: record.raw_toml().to_string(),
+        source: ManifestSource::HostBundled,
         package,
         surface_kinds,
         assets,
     })
 }
 
-fn surface_kinds_from_manifest_record(
+pub(crate) fn surface_kinds_from_manifest_record(
     record: &ExtensionManifestRecord,
     label: &str,
 ) -> Result<Vec<LifecycleExtensionSurfaceKind>, ProductWorkflowError> {
@@ -1548,79 +1571,10 @@ fn slack_bot_assets() -> Vec<AvailableExtensionAsset> {
     vec![bytes_asset("manifest.toml", SLACK_BOT_MANIFEST.as_bytes())]
 }
 
-fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
+pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     AvailableExtensionAsset {
         path: path.to_string(),
         content: AvailableExtensionAssetContent::Bytes(bytes.to_vec()),
-    }
-}
-
-pub(crate) async fn materialize_available_extension<F>(
-    fs: &F,
-    extension: &AvailableExtensionPackage,
-) -> Result<(), ProductWorkflowError>
-where
-    F: RootFilesystem + ?Sized,
-{
-    let mut written_paths = Vec::new();
-    for asset in &extension.assets {
-        let path = extension_asset_path(&extension.package.id, &asset.path)?;
-        let bytes = match &asset.content {
-            AvailableExtensionAssetContent::Bytes(bytes) => bytes.clone(),
-            AvailableExtensionAssetContent::Filesystem(source_path) => {
-                match fs.read_file(source_path).await {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        for written_path in written_paths.iter().rev() {
-                            if let Err(error) = fs.delete(written_path).await {
-                                tracing::debug!(
-                                    ?error,
-                                    "best-effort extension asset rollback cleanup failed"
-                                );
-                            }
-                        }
-                        return Err(ProductWorkflowError::Transient {
-                            reason: format!(
-                                "failed to read available extension asset {}: {error}",
-                                asset.path
-                            ),
-                        });
-                    }
-                }
-            }
-        };
-        if existing_asset_matches(fs, &path, &bytes).await {
-            continue;
-        }
-        if let Err(error) = fs.write_file(&path, &bytes).await {
-            for written_path in written_paths.iter().rev() {
-                if let Err(error) = fs.delete(written_path).await {
-                    tracing::debug!(
-                        ?error,
-                        "best-effort extension asset rollback cleanup failed"
-                    );
-                }
-            }
-            return Err(ProductWorkflowError::Transient {
-                reason: format!(
-                    "failed to materialize extension asset {}: {error}",
-                    asset.path
-                ),
-            });
-        }
-        written_paths.push(path);
-    }
-    Ok(())
-}
-
-async fn existing_asset_matches<F>(fs: &F, path: &VirtualPath, bytes: &[u8]) -> bool
-where
-    F: RootFilesystem + ?Sized,
-{
-    match fs.read_file(path).await {
-        Ok(existing) => existing == bytes,
-        Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => false,
-        Err(_) => false,
     }
 }
 
@@ -1689,7 +1643,7 @@ where
         })?;
         let record = ExtensionManifestRecord::from_toml_with_contracts(
             manifest_toml,
-            ManifestSource::HostBundled,
+            ManifestSource::InstalledLocal,
             &host_ports,
             None,
             &contracts,
@@ -1703,25 +1657,30 @@ where
             .map_err(map_binding_error)?;
         let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
             .map_err(map_binding_error)?;
-        let mut assets = vec![AvailableExtensionAsset {
-            path: "manifest.toml".to_string(),
-            content: AvailableExtensionAssetContent::Bytes(record.raw_toml().as_bytes().to_vec()),
-        }];
-        if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime {
-            let module_path = module
-                .resolve_under(&package.root)
-                .map_err(map_binding_error)?;
-            assets.push(AvailableExtensionAsset {
-                path: module.as_str().to_string(),
-                content: AvailableExtensionAssetContent::Filesystem(module_path),
-            });
-        }
+        // Catalog EVERY file in the extension dir as inline bytes, exactly
+        // like a fresh import. Assets stored as `Filesystem(path)` pointers
+        // into the extension's own materialized dir dangle after `remove`
+        // (which deletes that dir) and break the intended
+        // remove -> available -> reinstall flow with
+        // "failed to read available extension asset"; and cataloging only
+        // manifest + wasm module would lose schemas/prompt docs on reinstall.
+        let assets = inline_extension_dir_assets(fs, &package.root).await?;
         packages.push(AvailableExtensionPackage {
             package_ref: LifecyclePackageRef::new(
                 LifecyclePackageKind::Extension,
                 package.id.as_str(),
             )?,
             manifest_toml: record.raw_toml().to_string(),
+            // Everything discovered on the filesystem is `InstalledLocal`, per
+            // the `ManifestSource` contract ("Locally installed extension under
+            // `/system/extensions/`"). `HostBundled` — the only tier eligible
+            // for first-party/system trust — is reserved for extensions
+            // compiled into the host binary (`from_first_party_assets`), whose
+            // reserved ids the scan skips above. Uploaded tool bundles
+            // materialize under this root, so stamping discovery `HostBundled`
+            // would let a process restart launder an untrusted upload into
+            // first-party trust (#5459 review: import → restart → install).
+            source: ManifestSource::InstalledLocal,
             package,
             surface_kinds,
             assets,
@@ -1730,26 +1689,14 @@ where
     Ok(packages)
 }
 
-fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
+pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
         "github" | "notion" | "web-access" | "slack_bot" | NEARAI_EXTENSION_ID
     ) || is_gsuite_extension_id(extension_id)
 }
 
-fn extension_asset_path(
-    extension_id: &ExtensionId,
-    asset_path: &str,
-) -> Result<VirtualPath, ProductWorkflowError> {
-    let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
-        .map_err(map_binding_error)?;
-    ExtensionAssetPath::new(asset_path.to_string())
-        .map_err(map_binding_error)?
-        .resolve_under(&root)
-        .map_err(map_binding_error)
-}
-
-fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
+pub(crate) fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
     ProductWorkflowError::InvalidBindingRequest {
         reason: error.to_string(),
     }
@@ -1800,6 +1747,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::extension_host::available_extension_import::extension_asset_path;
     #[test]
     fn visible_capability_ids_include_write_effects() {
         let extension = test_extension_package();
@@ -1895,12 +1843,15 @@ mod tests {
             "google-drive",
             "google-sheets",
             "google-slides",
-        ]);
+        ])
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
 
         for query in ["google", "gsuite", "workspace"] {
             let ids = catalog
                 .search(query)
-                .map(|package| package.package_ref.id.as_str())
+                .map(|package| package.package_ref.id.as_str().to_string())
                 .collect::<BTreeSet<_>>();
 
             assert!(
@@ -1917,7 +1868,7 @@ mod tests {
         for query in ["google sheets", "google sheet", "spreadsheet"] {
             let ids = catalog
                 .search(query)
-                .map(|package| package.package_ref.id.as_str())
+                .map(|package| package.package_ref.id.as_str().to_string())
                 .collect::<BTreeSet<_>>();
 
             assert!(
@@ -1998,9 +1949,7 @@ mod tests {
             .iter()
             .find(|asset| asset.path == "prompts/web-access/search.md")
             .expect("web access search prompt");
-        let AvailableExtensionAssetContent::Bytes(bytes) = &prompt_asset.content else {
-            panic!("web access prompt should be bundled bytes");
-        };
+        let AvailableExtensionAssetContent::Bytes(bytes) = &prompt_asset.content;
         let prompt = std::str::from_utf8(bytes).expect("prompt should be UTF-8");
         assert!(
             prompt.contains("prefer the GitHub extension capabilities"),
@@ -2635,7 +2584,7 @@ handle = "web_token"
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
         let github = catalog.resolve(&package_ref).unwrap();
 
-        materialize_available_extension(&fs, github).await.unwrap();
+        materialize_available_extension(&fs, &github).await.unwrap();
 
         let get_repo_schema = fs
             .read_file(
@@ -2787,9 +2736,7 @@ handle = "web_token"
         let extension = test_extension_package();
         for asset in &extension.assets {
             let path = extension_asset_path(&extension.package.id, &asset.path).unwrap();
-            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content else {
-                panic!("test fixture assets are byte-backed");
-            };
+            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content;
             fs.files
                 .lock()
                 .unwrap()
@@ -2807,97 +2754,23 @@ handle = "web_token"
     }
 
     #[tokio::test]
-    async fn filesystem_catalog_loads_manifest_and_runtime_assets() {
-        let fs = InMemoryBackend::default();
-        let extension = test_extension_package();
-        for asset in &extension.assets {
-            let path = extension_asset_path(&extension.package.id, &asset.path).unwrap();
-            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content else {
-                panic!("test fixture assets are byte-backed");
-            };
-            fs.write_file(&path, bytes).await.unwrap();
-        }
-
-        let catalog = AvailableExtensionCatalog::from_filesystem_root(
-            &fs,
-            &VirtualPath::new("/system/extensions").unwrap(),
-        )
-        .await
-        .unwrap();
-        let results = catalog.search("fixture").collect::<Vec<_>>();
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].package_ref, extension.package_ref);
-        assert_eq!(
-            results[0]
-                .assets
-                .iter()
-                .map(|asset| asset.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["manifest.toml", "wasm/fixture.wasm"]
-        );
-    }
-
-    #[tokio::test]
-    async fn filesystem_catalog_skips_extension_dirs_without_manifest() {
-        let fs = InMemoryBackend::default();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/incomplete/cache/leftover").unwrap(),
-            b"stale",
-        )
-        .await
-        .unwrap();
-
-        let catalog = AvailableExtensionCatalog::from_filesystem_root(
-            &fs,
-            &VirtualPath::new("/system/extensions").unwrap(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(catalog.search("").count(), 0);
-    }
-
-    #[tokio::test]
-    async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
-        let fs = InMemoryBackend::default();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/gmail/manifest.toml").unwrap(),
-            b"not parsed because gmail is host-bundled",
-        )
-        .await
-        .unwrap();
-        fs.write_file(
-            &VirtualPath::new("/system/extensions/slack_bot/manifest.toml").unwrap(),
-            b"not parsed because slack_bot is host-bundled",
-        )
-        .await
-        .unwrap();
-
-        let catalog = AvailableExtensionCatalog::from_filesystem_root(
-            &fs,
-            &VirtualPath::new("/system/extensions").unwrap(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(catalog.search("").count(), 0);
-        assert_eq!(catalog.search("slack_bot").count(), 0);
-    }
-
-    #[tokio::test]
     async fn filesystem_manifest_external_channel_surface_kind_projects_to_lifecycle_surface() {
+        // Filesystem-discovered manifests validate as `InstalledLocal`, which
+        // forbids first-party trust/runtime claims — so the fixture is a
+        // third-party wasm channel adapter. (First-party channel adapters like
+        // Slack ship compiled into the binary via `from_first_party_assets`,
+        // not via filesystem discovery.)
         const MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "channel-ext"
 name = "Channel Ext"
 version = "0.1.0"
 description = "A filesystem-discovered external channel extension."
-trust = "first_party_requested"
+trust = "third_party"
 
 [runtime]
-kind = "first_party"
-service = "channel_ext_host"
+kind = "wasm"
+module = "wasm/channel.wasm"
 
 [[host_api]]
 id = "ironclaw.product_adapter/v1"
@@ -3121,6 +2994,7 @@ output_schema_ref = "schemas/write.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .unwrap(),
             manifest_toml: MANIFEST.to_string(),
+            source: ManifestSource::HostBundled,
             package,
             surface_kinds: Vec::new(),
             assets: vec![

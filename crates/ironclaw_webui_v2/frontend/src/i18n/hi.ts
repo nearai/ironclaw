@@ -862,6 +862,10 @@ registerPack("hi", {
   "ext.registry.emptyDesc": "सभी उपलब्ध एक्सटेंशन पहले से इंस्टॉल हैं, या कोई रजिस्ट्री कॉन्फ़िगर नहीं है।",
   "ext.registry.availableTitle": "उपलब्ध एक्सटेंशन",
   "ext.registry.noMatch": "फ़िल्टर से मेल खाने वाला कोई एक्सटेंशन नहीं।",
+  "ext.registry.import": "आयात करें",
+  "ext.registry.importing": "आयात हो रहा है…",
+  "ext.registry.importSuccess": "टूल आयात हो गया — इसे रजिस्ट्री से इंस्टॉल करें।",
+  "ext.registry.importFailed": "आयात विफल",
 
   // Chat — history
   "chat.history.loading": "लोड हो रहा है...",
@@ -1208,6 +1212,8 @@ registerPack("hi", {
   "extensions.reconfigure": "पुन: कॉन्फ़िगर करें",
   "extensions.configureName": "{name} कॉन्फ़िगर करें",
   "extensions.allInstalled": "सभी स्थापित एक्सटेंशन",
+  "extensions.scope.shared": "साझा",
+  "extensions.scope.private": "मेरे",
   "mcp.installed": "स्थापित MCP सर्वर",
   "extensions.oneCapability": "1 क्षमता",
   "extensions.pluralCapabilities": "{count} क्षमताएं",
