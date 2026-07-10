@@ -3,7 +3,7 @@
 //! Mirrors `HostIdentityContextSource`: the trait lives here so the loop driver
 //! depends only on a neutral port, while the concrete implementation (which
 //! reads `context/profile.json` from the memory backend) lives in
-//! `ironclaw_host_runtime`, keeping `ironclaw_memory` out of `ironclaw_reborn`.
+//! `ironclaw_host_runtime`, keeping `ironclaw_memory` out of `ironclaw_runner`.
 
 use async_trait::async_trait;
 use ironclaw_turns::run_profile::{LoopRunContext, UserProfileContext};

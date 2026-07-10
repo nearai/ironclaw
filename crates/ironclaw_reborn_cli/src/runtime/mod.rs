@@ -52,7 +52,7 @@ pub(crate) fn init_tracing() {
     // guarded from third-party debug floods unless those targets are explicit.
     let stderr_filter = reborn_env_filter(
         "IRONCLAW_REBORN_LOG",
-        "info,ironclaw_reborn=info,ironclaw_reborn_composition=info",
+        "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
     );
     // Operator Logs buffer: captures run diagnostics at `debug` for the
     // ironclaw run-path crates so the scoped (thread/run) Logs panel is
@@ -62,7 +62,7 @@ pub(crate) fn init_tracing() {
     // so the browser log buffer is not filled by low-level protocol crates.
     let operator_filter = reborn_env_filter(
         "IRONCLAW_REBORN_OPERATOR_LOG",
-        "info,ironclaw_reborn=debug,ironclaw_host_runtime=debug",
+        "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",
     );
     let _ = tracing_subscriber::registry()
         .with(
@@ -1104,7 +1104,7 @@ fn resolve_worker_count(
 /// path resolves to `None` (sized to exactly `MAX_PERMITS`, which tokio
 /// accepts), so the unlimited sentinel stays the way to ask for "no bound".
 ///
-/// `ironclaw_reborn`'s `scheduler_permit_count` additionally saturates at the
+/// `ironclaw_runner`'s `scheduler_permit_count` additionally saturates at the
 /// ceiling as an infallible backstop for direct composition callers; this gate
 /// is the operator-facing fail-loud half of that defense.
 fn ensure_worker_count_within_ceiling(

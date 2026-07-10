@@ -210,7 +210,7 @@ the current branch.
 | `IRONCLAW_RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH` | Optional `true`/`1`/`yes`/`on` toggle that skips durable resource-governor reserve/reconcile/release writes when no finite limits are configured. Defaults to false so production keeps durable accounting unless this is explicitly enabled. |
 | `IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS` | Optional startup wait window for Postgres filesystem migration connection retries. Defaults to 300 seconds. |
 | `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
-| `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
+| `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_runner=trace`. |
 
 `run` and `repl` currently support local-runtime composition through
 `local-dev`, `local-dev-yolo`, and `hosted-single-tenant-volume`.

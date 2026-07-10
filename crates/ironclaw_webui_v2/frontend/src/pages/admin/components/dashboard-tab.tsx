@@ -10,6 +10,8 @@ import {
   formatRelativeTime,
   statusTone,
   roleTone,
+  formatUserRole,
+  formatUserStatus,
   summarizeUsers,
 } from "../lib/admin-presenters";
 
@@ -51,10 +53,10 @@ function RecentUsersTable({ users, onSelectUser }) {
                     {u.display_name || u.id}
                   </button>
                 </td>
-                <td className="py-3 pr-4"><StatusPill tone={roleTone(u.role)} label={u.role || "member"} /></td>
-                <td className="py-3 pr-4"><StatusPill tone={statusTone(u.status)} label={u.status || "active"} /></td>
+                <td className="py-3 pr-4"><StatusPill tone={roleTone(u.role)} label={formatUserRole(u.role, t)} /></td>
+                <td className="py-3 pr-4"><StatusPill tone={statusTone(u.status)} label={formatUserStatus(u.status, t)} /></td>
                 <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{u.job_count ?? 0}</td>
-                <td className="py-3 text-xs text-iron-300">{formatRelativeTime(u.last_active_at)}</td>
+                <td className="py-3 text-xs text-iron-300">{formatRelativeTime(u.last_active_at, t)}</td>
               </tr>
             )
           )}

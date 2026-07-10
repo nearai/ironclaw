@@ -35,8 +35,8 @@ use ironclaw_host_runtime::{
     RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason, RuntimeCapabilityCompleted,
     RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId,
-    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind, TurnRunScheduler,
-    TurnRunSchedulerConfig, VisibleCapability, VisibleCapabilityAccess,
+    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind,
+    VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
@@ -53,32 +53,33 @@ use ironclaw_loop_support::{
     SubagentSpawnGoalStore, identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
-use ironclaw_reborn::app_loop_family::build_loop_family_registry;
-use ironclaw_reborn::driver_registry::{
+use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_runner::app_loop_family::build_loop_family_registry;
+use ironclaw_runner::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey, RequirementLevel,
 };
-use ironclaw_reborn::loop_driver_host::{
+use ironclaw_runner::loop_driver_host::{
     RebornLoopDriverHost, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
     TextOnlyLoopHostConfig,
 };
-use ironclaw_reborn::loop_exit_applier::{
+use ironclaw_runner::loop_exit_applier::{
     AwaitDependentRunEvidenceStore, BlockedEvidenceRequest, CompletionEvidenceRequest,
     FailureEvidenceRequest, FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
     ThreadCheckpointLoopExitEvidencePort,
 };
-use ironclaw_reborn::model_routes::{
+use ironclaw_runner::model_routes::{
     ModelRoute, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode, ModelSlot,
     StaticModelRouteResolver,
 };
-use ironclaw_reborn::planned_driver::PlannedDriver;
-use ironclaw_reborn::planned_driver_factory::{
+use ironclaw_runner::planned_driver::PlannedDriver;
+use ironclaw_runner::planned_driver_factory::{
     SUBAGENT_PLANNED_PROFILE_ID, default_planned_run_profile_resolver,
 };
-use ironclaw_reborn::runtime::{
+use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, SchedulerWakeWiring,
     build_default_planned_runtime, build_product_live_planned_runtime,
 };
-use ironclaw_reborn::subagent::{
+use ironclaw_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
@@ -86,10 +87,10 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
-use ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriver;
-use ironclaw_reborn::turn_run_executor::RebornTurnRunExecutor;
-use ironclaw_reborn::turn_runner::{HostFactory, HostFactoryError};
-use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_runner::text_loop_driver::TextOnlyModelReplyDriver;
+use ironclaw_runner::turn_run_executor::RebornTurnRunExecutor;
+use ironclaw_runner::turn_runner::{HostFactory, HostFactoryError};
+use ironclaw_runner::turn_scheduler::{TurnRunScheduler, TurnRunSchedulerConfig};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -1891,7 +1892,7 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     // We verify that at least one line contains the "turn run started" message
     // together with the expected thread_id and run_id correlation fields, which
     // are emitted as explicit event fields on the `debug!` call in
-    // `ironclaw_host_runtime::turn_scheduler::spawn_executor_task`.
+    // `ironclaw_runner::turn_scheduler::spawn_executor_task`.
     logs_assert(|lines: &[&str]| {
         let found = lines.iter().any(|line| {
             line.contains("turn run started")
@@ -3829,7 +3830,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
 /// just needs a stable, distinct builtin identity for the host-plumbing doubles
 /// (see the note at the `first_party_only_hook_factory` definition below); the
 /// path string is opaque and need not match any real type.
-const E2E_NOOP_OBSERVER_PATH: &str = "ironclaw_reborn::tests::loop_driver_host::E2eNoOpObserver";
+const E2E_NOOP_OBSERVER_PATH: &str = "ironclaw_runner::tests::loop_driver_host::E2eNoOpObserver";
 
 #[derive(Debug, Default)]
 struct E2eNoOpObserver;
@@ -3846,7 +3847,7 @@ impl ObserverHook for E2eNoOpObserver {
 async fn build_runtime_host_with_optional_hooks(
     thread_label: &str,
     allowed_id: &CapabilityId,
-    hook_factory: Option<ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory>,
+    hook_factory: Option<ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory>,
 ) -> (
     Box<dyn AgentLoopDriverHost + Send + Sync>,
     Arc<RecordingHostRuntime>,
@@ -3948,7 +3949,7 @@ async fn build_runtime_host_with_optional_hooks(
 }
 
 // NOTE (review item #6): the two builder factories below are HAND-BUILT test
-// doubles that exercise the `ironclaw_reborn` host-factory PLUMBING — i.e. that
+// doubles that exercise the `ironclaw_runner` host-factory PLUMBING — i.e. that
 // a dispatcher minted by a builder factory is wired through
 // `HookedLoopCapabilityPort` and that a deny short-circuits the inner runtime
 // port. They are deliberately NOT a substitute for activation coverage: they do
@@ -3962,7 +3963,7 @@ async fn build_runtime_host_with_optional_hooks(
 /// First-party-only builder factory: installs just the no-op observer, mirroring
 /// the composition's first-party-only state. Host-plumbing double only — see the
 /// note above.
-fn first_party_only_hook_factory() -> ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory
+fn first_party_only_hook_factory() -> ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory
 {
     Arc::new(|| {
         let hook_id = HookId::for_builtin(E2E_NOOP_OBSERVER_PATH, HookVersion::ONE);
@@ -3984,7 +3985,7 @@ fn first_party_only_hook_factory() -> ironclaw_reborn::loop_driver_host::HookDis
 fn extension_deny_hook_factory(
     extension: &str,
     deny_target: &str,
-) -> ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory {
+) -> ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory {
     let extension = extension.to_string();
     let deny_target = deny_target.to_string();
     Arc::new(move || {
@@ -7077,7 +7078,7 @@ async fn text_only_host_rejects_mismatched_capability_authority_context() {
 
     assert!(matches!(
         error,
-        ironclaw_reborn::loop_driver_host::RebornLoopDriverHostError::InvalidRequest { .. }
+        ironclaw_runner::loop_driver_host::RebornLoopDriverHostError::InvalidRequest { .. }
     ));
     assert!(runtime.invocations().is_empty());
 }

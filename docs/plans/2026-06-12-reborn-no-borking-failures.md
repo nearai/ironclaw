@@ -25,12 +25,12 @@ with no usable explanation and no recovery affordance. Target end state:
 | Failed exit construction | `crates/ironclaw_agent_loop/src/executor/exit_helpers.rs:33` (`failed_exit`) | **Drops `state` entirely; `diagnostic_ref: None` always.** |
 | Exit validation w/ evidence | `crates/ironclaw_turns/src/loop_exit.rs:97-247` (`LoopExitApplier`, `LoopExitEvidencePort::verify_failure_evidence`) | Driver claims are validated against durable evidence before transitions. |
 | Failed outcome | `crates/ironclaw_turns/src/runner.rs:116` (`TurnRunnerOutcome::Failed { failure: SanitizedFailure }`) | Constructed by `validate_failed_exit` (`loop_exit.rs:805-824`). |
-| Driver error mapping | `crates/ironclaw_reborn/src/planned_driver.rs:222-268` (`map_executor_error`) | `HostUnavailable` → `AgentLoopDriverError::Unavailable`; model-stage diagnostics → categories. |
-| Failure categories | `crates/ironclaw_reborn/src/failure_categories.rs`, `model_failure_mapping.rs` | e.g. `model_credits_exhausted`, `model_credentials_unavailable`. |
+| Driver error mapping | `crates/ironclaw_runner/src/planned_driver.rs:222-268` (`map_executor_error`) | `HostUnavailable` → `AgentLoopDriverError::Unavailable`; model-stage diagnostics → categories. |
+| Failure categories | `crates/ironclaw_runner/src/failure_categories.rs`, `model_failure_mapping.rs` | e.g. `model_credits_exhausted`, `model_credentials_unavailable`. |
 | User-facing failure sentences | `crates/ironclaw_reborn_composition/src/projection/` (`FailureExplanationProvider`; tests in `projection/tests/failure_explanation.rs`) | Maps category strings → sentences ("The run failed because its runner lease expired."). |
 | Blocked-run resume (template for retry) | `LoopBlocked.checkpoint_id` → `TurnCoordinator::resume_turn` (`coordinator.rs:305`) → `PlannedDriver::resume` (`planned_driver.rs:121`) | Failed runs have **no** equivalent; `resumable_checkpoint_kind_from_host` (`planned_driver.rs:313`) rejects `Final`/`BeforeSideEffect`. |
 | Transcript finalize port | `crates/ironclaw_turns/src/run_profile/host.rs:1814-1840` (`LoopTranscriptPort::finalize_assistant_message` → `LoopMessageRef`) | The mechanism WS-2 uses to write the explanation message. |
-| Test fixtures | `crates/ironclaw_agent_loop/src/test_support/` (`MockAgentLoopDriverHost`, `MockHostCall`, `finalized_assistant_messages()`), `crates/ironclaw_reborn/tests/` | Failure injection: `fail_model_with: Option<AgentLoopHostErrorKind>`. |
+| Test fixtures | `crates/ironclaw_agent_loop/src/test_support/` (`MockAgentLoopDriverHost`, `MockHostCall`, `finalized_assistant_messages()`), `crates/ironclaw_runner/tests/` | Failure injection: `fail_model_with: Option<AgentLoopHostErrorKind>`. |
 
 ## 3. Gaps this PR closes
 
@@ -171,7 +171,7 @@ outside their listed crates.
    extra model call; cancellation pre-empts explanation; partial
    `assistant_refs` always carried.
 
-### WS-3 — Retry-from-failed (crates/ironclaw_turns store/runner impls + crates/ironclaw_reborn + concrete turn-store adapters)
+### WS-3 — Retry-from-failed (crates/ironclaw_turns store/runner impls + crates/ironclaw_runner + concrete turn-store adapters)
 1. Find the concrete `TurnRunTransitionPort`/turn store implementations
    (search workspace for implementors; both PostgreSQL and libSQL backends
    must be updated if both exist — see `.claude/rules/database.md`).
@@ -208,7 +208,7 @@ outside their listed crates.
    retryable; webui_v2 handler test for retry endpoint (happy, non-retryable,
    idempotent-replay).
 
-### WS-5 — Integration tests + gate (crates/ironclaw_reborn/tests + workspace)
+### WS-5 — Integration tests + gate (crates/ironclaw_runner/tests + workspace)
 End-to-end scenarios through the runner/driver/composition stack:
 1. Transient model error → invisible recovery → `Completed` (no failure
    artifacts).
