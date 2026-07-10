@@ -436,7 +436,7 @@ impl WebuiRuntimeProjectionStream {
                     }
 
                     let mut batch = WebuiProjectionBatch::new(cursor.clone());
-                    if let Err(error) = consume_buffered_runtime_items(
+                    let keep_consuming = match consume_buffered_runtime_items(
                         &mut subscription,
                         &mut batch,
                         &request.scope,
@@ -444,9 +444,12 @@ impl WebuiRuntimeProjectionStream {
                     )
                     .await
                     {
-                        send_projection_subscription_error(&sender, error).await;
-                        return;
-                    }
+                        Ok(keep_consuming) => keep_consuming,
+                        Err(error) => {
+                            send_projection_subscription_error(&sender, error).await;
+                            return;
+                        }
+                    };
                     if let Err(error) = self.append_turn_events(&mut batch, &request).await {
                         send_projection_subscription_error(&sender, error).await;
                         return;
@@ -455,6 +458,9 @@ impl WebuiRuntimeProjectionStream {
                         .send_subscription_batch(batch, &request, &sender, &mut cursor)
                         .await
                     {
+                        return;
+                    }
+                    if !keep_consuming {
                         return;
                     }
                 }
@@ -481,18 +487,21 @@ impl WebuiRuntimeProjectionStream {
                 return;
             }
         };
-        if keep_consuming
-            && !is_resuming_runtime_payloads
-            && let Err(error) = consume_buffered_runtime_items(
+        if keep_consuming && !is_resuming_runtime_payloads {
+            keep_consuming = match consume_buffered_runtime_items(
                 &mut subscription,
                 &mut batch,
                 &request.scope,
                 self.display_previews.as_ref(),
             )
             .await
-        {
-            send_projection_subscription_error(&sender, error).await;
-            return;
+            {
+                Ok(keep_consuming) => keep_consuming,
+                Err(error) => {
+                    send_projection_subscription_error(&sender, error).await;
+                    return;
+                }
+            };
         }
         if let Err(error) = self.append_turn_events(&mut batch, &request).await {
             send_projection_subscription_error(&sender, error).await;
@@ -558,7 +567,7 @@ impl WebuiRuntimeProjectionStream {
                     }
 
                     let mut batch = WebuiProjectionBatch::new(cursor.clone());
-                    if let Err(error) = consume_buffered_runtime_items(
+                    keep_consuming = match consume_buffered_runtime_items(
                         &mut subscription,
                         &mut batch,
                         &request.scope,
@@ -566,9 +575,12 @@ impl WebuiRuntimeProjectionStream {
                     )
                     .await
                     {
-                        send_projection_subscription_error(&sender, error).await;
-                        return;
-                    }
+                        Ok(keep_consuming) => keep_consuming,
+                        Err(error) => {
+                            send_projection_subscription_error(&sender, error).await;
+                            return;
+                        }
+                    };
                     if let Err(error) = self.append_turn_events(&mut batch, &request).await {
                         send_projection_subscription_error(&sender, error).await;
                         return;
@@ -577,6 +589,9 @@ impl WebuiRuntimeProjectionStream {
                         .send_subscription_batch(batch, &request, &sender, &mut cursor)
                         .await
                     {
+                        return;
+                    }
+                    if !keep_consuming {
                         return;
                     }
                 }
@@ -682,13 +697,28 @@ async fn consume_buffered_runtime_items(
     batch: &mut WebuiProjectionBatch,
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
-) -> Result<(), ProductAdapterError> {
-    for item in collect_buffered_runtime_items(subscription) {
+) -> Result<bool, ProductAdapterError> {
+    consume_runtime_items(
+        collect_buffered_runtime_items(subscription),
+        batch,
+        scope,
+        display_previews,
+    )
+    .await
+}
+
+async fn consume_runtime_items(
+    items: impl IntoIterator<Item = ProjectionStreamItem>,
+    batch: &mut WebuiProjectionBatch,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<bool, ProductAdapterError> {
+    for item in items {
         if !push_runtime_item(batch, item, scope, display_previews).await? {
-            break;
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn collect_buffered_runtime_items(

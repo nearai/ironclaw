@@ -1834,6 +1834,111 @@ async fn webui_event_stream_bounds_large_activity_history_before_dto_constructio
 }
 
 #[tokio::test]
+async fn consume_runtime_items_reports_page_capacity_boundary() {
+    let tenant_id = TenantId::new("webui-consume-cap-tenant").unwrap();
+    let user_id = UserId::new("webui-consume-cap-user").unwrap();
+    let agent_id = AgentId::new("webui-consume-cap-agent").unwrap();
+    let thread_id = ThreadId::new("webui-consume-cap-thread").unwrap();
+    let capability = CapabilityId::new("script.echo").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let actor = TurnActor::new(user_id.clone());
+    let projection_scope = runtime_projection_scope(&actor, &scope);
+    let first_cursor = EventProjectionCursor::for_scope(
+        projection_scope.clone(),
+        ironclaw_events::EventCursor::new(WEBUI_PROJECTION_PAGE_LIMIT as u64),
+    );
+    let second_cursor = EventProjectionCursor::for_scope(
+        projection_scope,
+        ironclaw_events::EventCursor::new(WEBUI_PROJECTION_PAGE_LIMIT as u64 + 1),
+    );
+    let first_snapshot = ProjectionSnapshot {
+        timeline: ThreadTimeline {
+            entries: Vec::new(),
+        },
+        runs: vec![RunStatusProjection {
+            invocation_id: InvocationId::new(),
+            capability_id: capability.clone(),
+            thread_id: Some(thread_id.clone()),
+            status: RunProjectionStatus::Running,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        }],
+        capability_activities: (0..WEBUI_PROJECTION_PAGE_LIMIT)
+            .map(|index| CapabilityActivityProjection {
+                invocation_id: InvocationId::new(),
+                run_id: None,
+                capability_id: capability.clone(),
+                thread_id: Some(thread_id.clone()),
+                status: CapabilityActivityStatus::Running,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: None,
+                error_kind: None,
+                error_detail: None,
+                first_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
+                last_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
+                updated_at: chrono::Utc::now(),
+            })
+            .collect(),
+        next_cursor: first_cursor.clone(),
+        truncated: false,
+    };
+    let second_snapshot = ProjectionSnapshot {
+        timeline: ThreadTimeline {
+            entries: Vec::new(),
+        },
+        runs: vec![RunStatusProjection {
+            invocation_id: InvocationId::new(),
+            capability_id: capability,
+            thread_id: Some(thread_id),
+            status: RunProjectionStatus::Running,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(WEBUI_PROJECTION_PAGE_LIMIT as u64 + 1),
+            updated_at: chrono::Utc::now(),
+        }],
+        capability_activities: Vec::new(),
+        next_cursor: second_cursor,
+        truncated: false,
+    };
+    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor::default());
+    let keep_consuming = consume_runtime_items(
+        vec![
+            ProjectionStreamItem::Snapshot(ProductProjectionEnvelope::ThreadSnapshot(
+                first_snapshot,
+            )),
+            ProjectionStreamItem::Snapshot(ProductProjectionEnvelope::ThreadSnapshot(
+                second_snapshot,
+            )),
+        ],
+        &mut batch,
+        &scope,
+        &NoopCapabilityDisplayPreviewSource,
+    )
+    .await
+    .unwrap();
+
+    assert!(!keep_consuming);
+    assert_eq!(
+        batch.runtime_payloads_pushed,
+        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS
+    );
+    assert_eq!(batch.cursor().runtime.as_ref(), Some(&first_cursor));
+}
+
+#[tokio::test]
 async fn webui_event_stream_mints_resumable_cursors_for_long_valid_scope_ids() {
     let tenant_id = TenantId::new(long_test_id("tenant", 't')).unwrap();
     let user_id = UserId::new(long_test_id("user", 'u')).unwrap();
