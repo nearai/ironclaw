@@ -9,7 +9,10 @@ use ironclaw_turns::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
-        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+        ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+        ToolObservationStatus, VisibleCapabilitySurface,
     },
 };
 
@@ -399,6 +402,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         result_ref,
                         safe_summary,
                         byte_len,
+                        model_observation,
                         ..
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
@@ -409,9 +413,12 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             ctx.host,
                             &mut state,
                             &call,
-                            result_ref,
-                            safe_summary,
-                            byte_len,
+                            ChildResultAppendInput {
+                                result_ref,
+                                safe_summary,
+                                byte_len,
+                                model_observation,
+                            },
                             &mut capability_batch,
                         )
                         .await?;
@@ -421,6 +428,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         result_ref,
                         safe_summary,
                         byte_len,
+                        model_observation,
                     } if coalesced_gate_step
                         .as_ref()
                         .is_some_and(|(gate, _)| gate == &gate_ref) =>
@@ -429,6 +437,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
                         clear_matching_pending_external_tool_resume(&mut state, &call);
+                        let model_observation = model_observation.or_else(|| {
+                            Some(child_result_reference_observation(&result_ref, byte_len))
+                        });
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
@@ -436,7 +447,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             terminate_hint: false,
                             byte_len,
                             output_digest: None,
-                            model_observation: None,
+                            model_observation,
                         };
                         append_completed_capability_result(
                             ctx.host,
@@ -615,6 +626,7 @@ impl CapabilityStage {
                 result_ref,
                 safe_summary,
                 byte_len,
+                model_observation,
                 ..
             } => {
                 clear_matching_pending_approval_resume(&mut state, &call);
@@ -624,9 +636,12 @@ impl CapabilityStage {
                     ctx.host,
                     &mut state,
                     &call,
-                    result_ref,
-                    safe_summary,
-                    byte_len,
+                    ChildResultAppendInput {
+                        result_ref,
+                        safe_summary,
+                        byte_len,
+                        model_observation,
+                    },
                     capability_batch,
                 )
                 .await?;
@@ -729,7 +744,10 @@ impl CapabilityStage {
                 result_ref,
                 safe_summary,
                 byte_len,
+                model_observation,
             } => {
+                let model_observation = model_observation
+                    .or_else(|| Some(child_result_reference_observation(&result_ref, byte_len)));
                 let resolved_result = CapabilityResultMessage {
                     result_ref,
                     safe_summary,
@@ -737,7 +755,7 @@ impl CapabilityStage {
                     terminate_hint: false,
                     byte_len,
                     output_digest: None,
-                    model_observation: None,
+                    model_observation,
                 };
                 AwaitDependentRunGateStage
                     .process(
@@ -1268,26 +1286,62 @@ fn auth_resume_for_gate(
     }
 }
 
+struct ChildResultAppendInput {
+    result_ref: LoopResultRef,
+    safe_summary: String,
+    byte_len: u64,
+    model_observation: Option<ModelVisibleToolObservation>,
+}
+
 async fn append_spawned_child_result(
     host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
-    result_ref: LoopResultRef,
-    safe_summary: String,
-    byte_len: u64,
+    input: ChildResultAppendInput,
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
-    let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
+    let safe_summary = sanitized_strategy_summary(input.safe_summary)?.into_inner();
+    let model_observation = input.model_observation.or_else(|| {
+        Some(child_result_reference_observation(
+            &input.result_ref,
+            input.byte_len,
+        ))
+    });
     let result = CapabilityResultMessage {
-        result_ref,
+        result_ref: input.result_ref,
         safe_summary,
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
-        byte_len,
+        byte_len: input.byte_len,
         output_digest: None,
-        model_observation: None,
+        model_observation,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
+}
+
+fn child_result_reference_observation(
+    result_ref: &LoopResultRef,
+    byte_len: u64,
+) -> ModelVisibleToolObservation {
+    ModelVisibleToolObservation {
+        schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed; use result_read with the result reference for more output."
+            .to_string(),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref: result_ref.as_str().to_string(),
+            byte_len,
+            preview: None,
+            total_bytes: None,
+            next_offset: None,
+        },
+        artifacts: vec![ModelVisibleArtifact {
+            artifact_ref: result_ref.as_str().to_string(),
+            summary: "Stored tool result".to_string(),
+        }],
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    }
 }
 
 async fn append_blocked_capability_error_result(
@@ -1414,6 +1468,7 @@ mod tests {
             result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
             safe_summary: "summary".to_string(),
             byte_len: 0,
+            model_observation: None,
         }
     }
 

@@ -1067,6 +1067,7 @@ impl SubagentSpawnCapabilityPort {
             result_ref,
             safe_summary: safe_summary("subagent spawned; waiting for completion"),
             byte_len: write_result.byte_len,
+            model_observation: write_result.model_observation,
         })
     }
 

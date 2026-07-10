@@ -1155,6 +1155,7 @@ fn scripted_capability_outcome(
             result_ref: loop_result_ref(&result_ref),
             safe_summary: "await dependent run".to_string(),
             byte_len,
+            model_observation: None,
         }),
         ScriptedCapabilityOutcome::SpawnedChildRun {
             child_run_id,
@@ -1166,6 +1167,7 @@ fn scripted_capability_outcome(
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
             safe_summary: "spawned child run".to_string(),
             byte_len,
+            model_observation: None,
         }),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
