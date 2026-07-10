@@ -108,6 +108,7 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     SLACK_OAUTH_CLIENT_SECRET_ENV,
     SLACK_PERSONAL_ACCESS_TOKEN_ENV,
     SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES,
+    SLACK_SECOND_USER_TOKEN_ENV,
     SLACK_SIGNING_SECRET_ENV,
     _disable_slack_in_config,
     _discover_slack_dm_route_channel,
@@ -2114,6 +2115,17 @@ def _slack_personal_token(extra_env: dict[str, str]) -> str | None:
         if value:
             return value
     return None
+
+
+def _slack_second_user_token(extra_env: dict[str, str]) -> str | None:
+    """Optional SECOND human Slack identity (future dedicated canary user).
+
+    The bot token is actor B wherever a bot can act (seeding DM/channel
+    fixtures); an arm that strictly needs a second HUMAN must go through
+    ``_require_slack_second_user_token`` so an unprovisioned environment
+    fails the case loudly instead of skipping silently.
+    """
+    return _env_value(SLACK_SECOND_USER_TOKEN_ENV, extra_env)
 
 
 async def _installed_active_extension_ids(ctx: LiveQaContext) -> dict[str, object]:
@@ -4691,6 +4703,69 @@ def _raw_slack_user_ids_in_text(text: str) -> list[str]:
     ]
 
 
+# Slack conversation ids (C… channel / D… DM / G… group) in the
+# second-char-digit form real workspaces mint (C0…, D0…, G1…): requiring the
+# digit keeps all-caps prose words (DELIVERED, CHANNELS, GENERAL) from
+# false-positiving while every real leaked id still matches.
+RAW_SLACK_CONVERSATION_ID_PATTERN = re.compile(r"\b[CDG][0-9][A-Z0-9]{7,}\b")
+
+
+def _raw_slack_conversation_ids_in_text(text: str) -> list[str]:
+    """Raw Slack conversation ids (C…/D…/G…) leaked into user-facing text."""
+    return RAW_SLACK_CONVERSATION_ID_PATTERN.findall(text or "")
+
+
+# Encoded Slack mention markup as stored in raw message text. Both the bare
+# (<@U123…>) and labelled (<@U123…|name>) forms actually notify the target;
+# a literal "@Display Name" renders as inert text and notifies nobody.
+ENCODED_SLACK_MENTION_PATTERN = re.compile(r"<@U[A-Z0-9]+(?:\|[^>]*)?>")
+
+
+EMAIL_ADDRESS_PATTERN = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
+
+
+def _email_addresses_in_text(text: str) -> list[str]:
+    """Email addresses appearing in user-facing text (hallucination guard)."""
+    return EMAIL_ADDRESS_PATTERN.findall(text or "")
+
+
+def _display_name_tokens(name: str) -> list[str]:
+    """Display-name tokens (>=3 chars) for word-boundary person matching —
+    the same token rule the qa_9c digest ground-truth check applies, so
+    "Benjamin Kurrek" accepts "Ben Kurrek" / "benjamin" answer forms."""
+    return [
+        token
+        for token in re.split(r"[^a-z0-9]+", (name or "").lower())
+        if len(token) >= 3
+    ]
+
+
+def _name_token_in_text(text: str, name: str) -> bool:
+    """True when any (>=3 char) token of ``name`` appears word-bounded in
+    ``text`` — the computable "named the person" check."""
+    lowered = (text or "").lower()
+    return any(
+        re.search(rf"\b{re.escape(token)}\b", lowered)
+        for token in _display_name_tokens(name)
+    )
+
+
+def _channel_name_mentioned(text: str, channel_name: str) -> bool:
+    """Word-boundary channel-name match that treats ``-`` as part of the name.
+
+    Plain ``\\b`` matching would find non-member "general" inside a mention of
+    member "general-updates" (hyphen is a regex non-word char) and false-red
+    the membership probe; hyphen-aware boundaries keep both arms exact.
+    """
+    name = (channel_name or "").strip().lower()
+    if not name:
+        return False
+    pattern = rf"(?<![a-z0-9_-]){re.escape(name)}(?![a-z0-9_-])"
+    return re.search(pattern, (text or "").lower()) is not None
+
+
 async def case_qa_9a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
     return await _slack_connect_case(ctx, case_name="qa_9a_slack_connect")
 
@@ -4772,8 +4847,9 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
     )
     excerpt = str(result.details.get("text_excerpt") or "")
     if excerpt:
-        result.details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
-            "U_REDACTED", excerpt
+        result.details["text_excerpt"] = RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
+            "C_REDACTED",
+            RAW_SLACK_USER_ID_PATTERN.sub("U_REDACTED", excerpt),
         )
     leaked_ids = _raw_slack_user_ids_in_text(reply_text)
     if leaked_ids:
@@ -4791,6 +4867,25 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
             },
         )
     result.details["leaked_raw_user_ids"] = []
+    # Channel-ID arm (companion to qa_10i): a digest that surfaces raw C…/D…/G…
+    # conversation ids instead of conversation names has the same raw-entity
+    # hygiene failure as raw user ids.
+    leaked_conversation_ids = _raw_slack_conversation_ids_in_text(reply_text)
+    if leaked_conversation_ids:
+        return _result(
+            case_name,
+            False,
+            started,
+            {
+                **result.details,
+                "error": (
+                    "digest leaked raw Slack conversation ids instead of names: "
+                    f"{sorted(set(leaked_conversation_ids))}"
+                ),
+                "leaked_raw_conversation_ids": sorted(set(leaked_conversation_ids)),
+            },
+        )
+    result.details["leaked_raw_conversation_ids"] = []
     # Positive arm: the digest must actually NAME someone. Ground truth comes
     # from the Slack API with the personal token, so a cop-out answer ("you
     # have no DMs") cannot pass vacuously when human DM history exists.
@@ -4869,6 +4964,1171 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
         expect_one_shot_schedule=True,
         follow_up_timezone_instruction="Use the UTC timezone for the schedule.",
     )
+
+
+# --- QA 10 family: Slack tool-correctness probes -----------------------------
+#
+# Every case seeds computable ground truth through the Slack Web API with the
+# harness tokens BEFORE the chat prompt (per-run ms-suffix nonces on every
+# seeded message), asserts its preconditions INSIDE the case try with distinct
+# "probe precondition failed: …" messages, and judges the FULL reply text —
+# no fuzzy heuristics, no vacuous passes, no shard crashes.
+
+
+async def _slack_api_get(
+    token: str, method: str, params: dict[str, str] | None = None
+) -> dict[str, object]:
+    """GET a Slack Web API method; never raises.
+
+    Transport/parse failures come back as ``{"ok": False, "error": …}`` (via
+    ``_exc_text``) so probe arms turn them into distinct case failures instead
+    of crashing the shard runner (guarded-httpx rule).
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                f"https://slack.com/api/{method}",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params or {},
+            )
+        payload = response.json()
+    except Exception as exc:
+        return {"ok": False, "error": _exc_text(exc)}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": f"non-object Slack {method} response"}
+    return payload
+
+
+async def _slack_api_post(
+    token: str, method: str, payload: dict[str, object]
+) -> dict[str, object]:
+    """POST a Slack Web API method (JSON body); never raises — same
+    guarded-httpx contract as ``_slack_api_get``."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                f"https://slack.com/api/{method}",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+        body = response.json()
+    except Exception as exc:
+        return {"ok": False, "error": _exc_text(exc)}
+    if not isinstance(body, dict):
+        return {"ok": False, "error": f"non-object Slack {method} response"}
+    return body
+
+
+async def _slack_post_as(
+    token: str, channel: str, text: str, thread_ts: str | None = None
+) -> dict[str, object]:
+    """chat.postMessage as the identity behind ``token`` (personal token =
+    the connected user, bot token = actor B)."""
+    payload: dict[str, object] = {"channel": channel, "text": text}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    return await _slack_api_post(token, "chat.postMessage", payload)
+
+
+async def _slack_auth_identity(token: str) -> dict[str, object]:
+    """auth.test identity for ``token``: {ok, user_id, team_id} or
+    {ok: False, error}."""
+    payload = await _slack_api_get(token, "auth.test")
+    if not payload.get("ok"):
+        return {
+            "ok": False,
+            "error": str(payload.get("error") or "slack_auth_test_failed"),
+        }
+    return {
+        "ok": True,
+        "user_id": str(payload.get("user_id") or ""),
+        "team_id": str(payload.get("team_id") or ""),
+    }
+
+
+def _slack_status_profile(
+    text: str, emoji: str, expiration: int = 0
+) -> dict[str, object]:
+    """users.profile.set payload shape; ``("", "", 0)`` is the restore/clear
+    form the status probe's finally block must always send."""
+    return {
+        "status_text": text,
+        "status_emoji": emoji,
+        "status_expiration": expiration,
+    }
+
+
+async def _slack_set_own_status(
+    token: str, text: str, emoji: str, expiration: int = 0
+) -> dict[str, object]:
+    """Set (or, with empty text/emoji, clear) the token owner's own Slack
+    status via users.profile.set."""
+    return await _slack_api_post(
+        token,
+        "users.profile.set",
+        {"profile": _slack_status_profile(text, emoji, expiration)},
+    )
+
+
+async def _slack_display_name(token: str, user_id: str) -> dict[str, object]:
+    """Best display name for ``user_id`` via users.info (display_name →
+    real_name → name fallback, same precedence as the qa_9c ground truth)."""
+    payload = await _slack_api_get(token, "users.info", {"user": user_id})
+    if not payload.get("ok"):
+        return {
+            "ok": False,
+            "error": str(payload.get("error") or "slack_users_info_failed"),
+        }
+    user = payload.get("user")
+    user = user if isinstance(user, dict) else {}
+    profile = user.get("profile")
+    profile = profile if isinstance(profile, dict) else {}
+    for candidate in (
+        profile.get("display_name"),
+        profile.get("real_name"),
+        user.get("real_name"),
+        user.get("name"),
+    ):
+        if candidate:
+            return {"ok": True, "display_name": str(candidate)}
+    return {"ok": False, "error": f"user {user_id} has no display name"}
+
+
+async def _slack_membership_view(token: str) -> dict[str, object]:
+    """Membership ground truth for the connected user.
+
+    ``member_channel_ids``/``member_channels`` come from users.conversations
+    (the user's OWN memberships) paginated to exhaustion — an incomplete
+    member list would misclassify a real membership as a lie and false-red
+    the membership probe, so hitting the page cap is a hard error. ``listed``
+    is the workspace public-channel directory from conversations.list, first
+    pages only: truncation there merely SHRINKS the non-member candidate
+    pool, it can never flip a verdict.
+    """
+    member_channels: list[dict[str, str]] = []
+    cursor = ""
+    for _ in range(20):
+        params = {
+            "types": "public_channel",
+            "exclude_archived": "true",
+            "limit": "200",
+        }
+        if cursor:
+            params["cursor"] = cursor
+        payload = await _slack_api_get(token, "users.conversations", params)
+        if not payload.get("ok"):
+            return {
+                "ok": False,
+                "error": str(
+                    payload.get("error") or "slack_users_conversations_failed"
+                ),
+            }
+        for channel in payload.get("channels") or []:
+            if not isinstance(channel, dict):
+                continue
+            channel_id = str(channel.get("id") or "")
+            if channel_id:
+                member_channels.append(
+                    {"id": channel_id, "name": str(channel.get("name") or "")}
+                )
+        cursor = str(
+            (payload.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not cursor:
+            break
+    else:
+        return {
+            "ok": False,
+            "error": "users.conversations pagination exceeded the page cap",
+        }
+    listed: list[dict[str, object]] = []
+    cursor = ""
+    for _ in range(5):
+        params = {
+            "types": "public_channel",
+            "exclude_archived": "true",
+            "limit": "200",
+        }
+        if cursor:
+            params["cursor"] = cursor
+        payload = await _slack_api_get(token, "conversations.list", params)
+        if not payload.get("ok"):
+            return {
+                "ok": False,
+                "error": str(
+                    payload.get("error") or "slack_conversations_list_failed"
+                ),
+            }
+        for channel in payload.get("channels") or []:
+            if not isinstance(channel, dict):
+                continue
+            channel_id = str(channel.get("id") or "")
+            if not channel_id:
+                continue
+            entry: dict[str, object] = {
+                "id": channel_id,
+                "name": str(channel.get("name") or ""),
+            }
+            if "is_member" in channel:
+                entry["is_member"] = bool(channel.get("is_member"))
+            listed.append(entry)
+        cursor = str(
+            (payload.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not cursor:
+            break
+    return {
+        "ok": True,
+        "member_channel_ids": [channel["id"] for channel in member_channels],
+        "member_channels": member_channels,
+        "listed": listed,
+    }
+
+
+def _slack_non_member_public_channels(
+    view: dict[str, object],
+) -> list[dict[str, str]]:
+    """Listed public channels the user is provably NOT a member of.
+
+    Pure ground-truth diff for the membership probe. Belt and braces: a
+    listing row flagged ``is_member=True`` is excluded even if the paginated
+    users.conversations scan somehow missed it — the negative arm must never
+    call a real membership a lie.
+    """
+    member_ids = {
+        str(channel_id) for channel_id in view.get("member_channel_ids") or []
+    }
+    non_members: list[dict[str, str]] = []
+    for channel in view.get("listed") or []:
+        if not isinstance(channel, dict):
+            continue
+        channel_id = str(channel.get("id") or "")
+        name = str(channel.get("name") or "")
+        if not channel_id or not name:
+            continue
+        if channel_id in member_ids or channel.get("is_member") is True:
+            continue
+        non_members.append({"id": channel_id, "name": name})
+    return non_members
+
+
+async def _slack_dm_counterpart(token: str, channel_id: str) -> dict[str, object]:
+    """The OTHER member of a DM, resolved deterministically.
+
+    Uses auth.test + conversations.members rather than the im object's
+    perspective-dependent ``user`` field, and rather than
+    ``_slack_personal_dm_counterpart_names`` (which deliberately filters out
+    bot users — the seeded delivery DM's counterpart IS the app's bot user).
+    """
+    identity = await _slack_auth_identity(token)
+    if not identity.get("ok"):
+        return {"ok": False, "error": f"auth.test failed: {identity.get('error')}"}
+    own_user_id = str(identity.get("user_id") or "")
+    members_payload = await _slack_api_get(
+        token, "conversations.members", {"channel": channel_id, "limit": "10"}
+    )
+    if not members_payload.get("ok"):
+        return {
+            "ok": False,
+            "error": str(
+                members_payload.get("error") or "slack_conversations_members_failed"
+            ),
+        }
+    members = [str(member) for member in members_payload.get("members") or []]
+    others = [member for member in members if member and member != own_user_id]
+    if len(others) != 1:
+        return {
+            "ok": False,
+            "error": f"expected exactly one DM counterpart, got {others!r}",
+        }
+    counterpart_id = others[0]
+    name_lookup = await _slack_display_name(token, counterpart_id)
+    if not name_lookup.get("ok"):
+        return {
+            "ok": False,
+            "error": f"users.info failed for the counterpart: {name_lookup.get('error')}",
+        }
+    return {
+        "ok": True,
+        "user_id": counterpart_id,
+        "display_name": str(name_lookup.get("display_name") or ""),
+        "own_user_id": own_user_id,
+    }
+
+
+def _require_slack_personal_token(ctx: LiveQaContext) -> str:
+    token = _slack_personal_token(ctx.env)
+    if not token:
+        raise AssertionError(
+            "probe precondition failed: Slack personal token not provisioned "
+            f"({SLACK_PERSONAL_ACCESS_TOKEN_ENV})"
+        )
+    return token
+
+
+def _require_slack_bot_token(ctx: LiveQaContext) -> str:
+    token = _slack_bot_token(ctx.env)
+    if not token:
+        raise AssertionError(
+            "probe precondition failed: Slack bot token not provisioned "
+            f"({SLACK_BOT_TOKEN_ENV})"
+        )
+    return token
+
+
+def _require_seeded_dm_channel(ctx: LiveQaContext) -> str:
+    channel_id = _slack_delivery_channel_id(ctx)
+    if not channel_id:
+        raise AssertionError(
+            "probe precondition failed: seeded Slack DM channel could not be "
+            "resolved from preflight/preferences"
+        )
+    return channel_id
+
+
+def _require_slack_second_user_token(ctx: LiveQaContext) -> str:
+    """Assert the optional second-HUMAN identity is provisioned.
+
+    Any future arm that strictly needs a second human (not the bot) MUST call
+    this and fail red — silently skipping would hollow out the arm forever.
+    """
+    token = _slack_second_user_token(ctx.env)
+    if not token:
+        raise AssertionError(
+            "probe precondition failed: second-identity token not provisioned "
+            "(AUTH_LIVE_SLACK_SECOND_USER_TOKEN)"
+        )
+    return token
+
+
+async def _seed_slack_fixture_message(
+    token: str,
+    channel_id: str,
+    text: str,
+    *,
+    label: str,
+    actor: str,
+    thread_ts: str | None = None,
+) -> str:
+    """Seed one fixture message via the Slack Web API and return its ts.
+
+    A rejected post raises a distinct "probe precondition failed" message: the
+    chat arm must never run against an unseeded conversation (that would be a
+    red with a fabricated cause, or worse a vacuous pass).
+    """
+    posted = await _slack_post_as(token, channel_id, text, thread_ts=thread_ts)
+    if not posted.get("ok"):
+        raise AssertionError(
+            f"probe precondition failed: seeding {label} via the {actor} token "
+            f"failed: {posted.get('error')!r}"
+        )
+    ts = str(posted.get("ts") or "")
+    if not ts:
+        raise AssertionError(
+            f"probe precondition failed: seeding {label} via the {actor} token "
+            "returned no message ts"
+        )
+    return ts
+
+
+async def _wait_for_authored_slack_message(
+    token: str,
+    *,
+    channel_id: str,
+    marker: str,
+    author_user_id: str,
+    oldest_epoch: float,
+    timeout: float = 90.0,
+) -> dict[str, object]:
+    """Poll conversations.history for a marker message authored by the given
+    HUMAN user and return its raw text (mention-encoding ground truth).
+
+    Guarded like every probe API arm: transient errors keep the poll alive
+    and only the last error is reported — never raised, never a shard crash.
+    Marker messages from OTHER identities are reported as ``author_mismatch``
+    so a wrong-identity post fails with its real cause.
+    """
+    deadline = time.monotonic() + timeout
+    last_error: str | None = None
+    wrong_authors: list[dict[str, object]] = []
+    while True:
+        payload = await _slack_api_get(
+            token,
+            "conversations.history",
+            {
+                "channel": channel_id,
+                "oldest": f"{oldest_epoch:.6f}",
+                "limit": "100",
+                "inclusive": "true",
+            },
+        )
+        if payload.get("ok"):
+            messages = payload.get("messages")
+            wrong_authors = []
+            for message in messages if isinstance(messages, list) else []:
+                if not isinstance(message, dict):
+                    continue
+                text = str(message.get("text") or "")
+                if marker not in text:
+                    continue
+                is_bot = bool(message.get("bot_id"))
+                if str(message.get("user") or "") == author_user_id and not is_bot:
+                    return {"found": True, "text": text, "ts": message.get("ts")}
+                wrong_authors.append({"ts": message.get("ts"), "bot": is_bot})
+        else:
+            last_error = str(payload.get("error") or "slack_history_failed")
+        if time.monotonic() >= deadline:
+            result: dict[str, object] = {"found": False, "error": last_error}
+            if wrong_authors:
+                result["author_mismatch"] = wrong_authors
+            return result
+        await asyncio.sleep(5.0)
+
+
+async def _slack_correctness_chat_reply(
+    ctx: LiveQaContext,
+    *,
+    case_name: str,
+    started: float,
+    prompt: str,
+    answer_marker: str,
+    extra_details: dict[str, object],
+    timeout: float = 240.0,
+) -> tuple[ProbeResult, str]:
+    """Chat arm shared by the QA-10 Slack tool-correctness probes.
+
+    Runs the WebUI chat turn, waits for the per-run answer marker, and hands
+    back the FULL in-memory reply text for content asserts (excerpt
+    truncation must never blind a marker/leak check). The full text is
+    stripped from persisted details on both paths; a failed chat result is
+    ready to return as-is with latency re-anchored to the case start.
+    """
+    chat = await _live_chat_case(
+        ctx,
+        case_name=case_name,
+        prompt=prompt,
+        marker=answer_marker,
+        required_text=[],
+        timeout=timeout,
+        extra_details=extra_details,
+        expose_full_reply_text=True,
+    )
+    reply_text = str(
+        chat.details.pop("full_reply_text", None)
+        or chat.details.get("text_excerpt")
+        or ""
+    )
+    chat.latency_ms = int((time.monotonic() - started) * 1000)
+    return chat, reply_text
+
+
+async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
+    """Self-attribution probe: reading a DM, the agent must identify which
+    messages the CONNECTED USER sent and never claim other-author messages
+    as the user's own.
+
+    Pins the no-self-identity gap (Firat audit part 1): the host never
+    surfaces auth.test self-identity to the model, so "messages I sent"
+    cannot be computed from history authorship. Seeds two personal-token
+    messages (mine) and two bot-token messages (not mine), all carrying the
+    per-run nonce, then requires the reply to list exactly the personal
+    markers. Note: a bot actor is still distinguishable via ``bot_id`` even
+    without self-identity, so this arm under-detects relative to a second
+    human actor — the strict variant needs AUTH_LIVE_SLACK_SECOND_USER_TOKEN
+    (see ``_require_slack_second_user_token``) plus a shared channel once a
+    dedicated canary user exists.
+    """
+    case_name = "qa_10a_slack_self_attribution"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10A_SELF_ATTRIBUTION_{suffix}"
+    self_markers = [f"SELFMSG_A_{suffix}", f"SELFMSG_B_{suffix}"]
+    other_markers = [f"OTHERMSG_C_{suffix}", f"OTHERMSG_D_{suffix}"]
+    details: dict[str, object] = {
+        "self_markers": self_markers,
+        "other_markers": other_markers,
+    }
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        bot_token = _require_slack_bot_token(ctx)
+        channel_id = _require_seeded_dm_channel(ctx)
+        for marker_text in self_markers:
+            await _seed_slack_fixture_message(
+                personal_token,
+                channel_id,
+                marker_text,
+                label=marker_text,
+                actor="personal",
+            )
+        for marker_text in other_markers:
+            await _seed_slack_fixture_message(
+                bot_token,
+                channel_id,
+                marker_text,
+                label=marker_text,
+                actor="bot",
+            )
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "Using my connected Slack account, read the recent messages in "
+                f"the Slack conversation with ID {channel_id} and list the "
+                "exact marker codes of only the messages that I myself sent — "
+                "do not include or mention any code from messages sent by "
+                f"anyone else. Include the exact marker {answer_marker} in "
+                "your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        missing_self = [m for m in self_markers if m not in reply_text]
+        details["missing_self_markers"] = missing_self
+        misattributed = [m for m in other_markers if m in reply_text]
+        details["misattributed_other_markers"] = misattributed
+        if missing_self:
+            raise AssertionError(
+                "agent could not attribute the connected user's own messages "
+                f"(no-self-identity gap): reply omitted {missing_self}"
+            )
+        if misattributed:
+            raise AssertionError(
+                "agent misattributed other-author messages as the user's own "
+                f"(no-self-identity gap): reply included {misattributed}"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
+
+
+async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
+    """Own-status readback probe: after the harness sets the connected
+    user's Slack status via users.profile.set, "what does my current status
+    say" must surface the exact status text.
+
+    Pins dropped status fields + self-identity (Firat audit part 2): the
+    host's user lookup strips status_text/status_emoji and the agent cannot
+    resolve which user is "me", so it fabricates or refuses. The canary
+    status is always cleared again in the finally block.
+    """
+    case_name = "qa_10b_slack_ooo_status"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10B_STATUS_{suffix}"
+    status_marker = f"OOO_{suffix}"
+    status_text = f"{status_marker} back July 20"
+    details: dict[str, object] = {"status_text": status_text}
+    personal_token: str | None = None
+    status_was_set = False
+    success = False
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        set_response = await _slack_set_own_status(
+            personal_token, status_text, ":palm_tree:"
+        )
+        details["status_set_ok"] = bool(set_response.get("ok"))
+        if not set_response.get("ok"):
+            error = str(set_response.get("error") or "users_profile_set_failed")
+            if error == "missing_scope":
+                raise AssertionError(
+                    "probe precondition failed: the personal token lacks the "
+                    "users.profile:write scope needed to seed the canary "
+                    f"status (missing_scope, needed={set_response.get('needed')!r})"
+                )
+            raise AssertionError(
+                "probe precondition failed: could not set the canary Slack "
+                f"status: {error}"
+            )
+        status_was_set = True
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "Check Slack and tell me exactly what my current Slack status "
+                f"says, word for word. Include the exact marker {answer_marker} "
+                "in your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        details.update(chat.details)
+        if not chat.success:
+            raise AssertionError(
+                str(chat.details.get("error") or "chat turn failed")
+            )
+        if status_marker not in reply_text:
+            raise AssertionError(
+                "agent did not report the user's own current Slack status "
+                "(dropped status fields / self-identity): reply lacked "
+                f"{status_marker}"
+            )
+        success = True
+    except Exception as exc:
+        details["error"] = _exc_text(exc)
+    finally:
+        # The canary status must never outlive the probe on the live account.
+        if status_was_set and personal_token:
+            restore = await _slack_set_own_status(personal_token, "", "")
+            details["status_restored"] = bool(restore.get("ok"))
+            if not restore.get("ok"):
+                details["status_restore_error"] = str(restore.get("error") or "")
+    return _result(case_name, success, started, details)
+
+
+async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
+    """Thread-visibility probe: listing a conversation "including thread
+    replies" must surface the replies seeded under a thread root.
+
+    Pins the missing thread-replies capability: the host exposes only
+    top-level conversations.history, so bot replies posted with thread_ts
+    are invisible to the agent (red until a conversations.replies tool
+    ships). THREADROOT/TOPLEVEL presence is the control proving plain
+    history reads worked at all — without it a history outage would be
+    misread as the thread gap.
+    """
+    case_name = "qa_10c_slack_thread_replies"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10C_THREADS_{suffix}"
+    root_marker = f"THREADROOT_{suffix}"
+    reply_markers = [
+        f"REPLY_ONE_{suffix}",
+        f"REPLY_TWO_{suffix}",
+        f"REPLY_THREE_{suffix}",
+    ]
+    top_level_marker = f"TOPLEVEL_{suffix}"
+    details: dict[str, object] = {
+        "root_marker": root_marker,
+        "reply_markers": reply_markers,
+        "top_level_marker": top_level_marker,
+    }
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        bot_token = _require_slack_bot_token(ctx)
+        channel_id = _require_seeded_dm_channel(ctx)
+        root_ts = await _seed_slack_fixture_message(
+            personal_token,
+            channel_id,
+            root_marker,
+            label=root_marker,
+            actor="personal",
+        )
+        for reply_marker in reply_markers:
+            await _seed_slack_fixture_message(
+                bot_token,
+                channel_id,
+                reply_marker,
+                label=reply_marker,
+                actor="bot",
+                thread_ts=root_ts,
+            )
+        await _seed_slack_fixture_message(
+            personal_token,
+            channel_id,
+            top_level_marker,
+            label=top_level_marker,
+            actor="personal",
+        )
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "Using my connected Slack account, read the Slack conversation "
+                f"with ID {channel_id} and list the exact text of every "
+                "message from the last ten minutes, including every reply in "
+                f"the thread under the message containing {root_marker}. "
+                f"Include the exact marker {answer_marker} in your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        missing_control = [
+            marker
+            for marker in (root_marker, top_level_marker)
+            if marker not in reply_text
+        ]
+        details["missing_control_markers"] = missing_control
+        if missing_control:
+            raise AssertionError(
+                "control arm failed: plain conversation history did not "
+                f"surface the seeded top-level messages {missing_control} — "
+                "cannot judge the thread-replies arm"
+            )
+        missing_replies = [
+            marker for marker in reply_markers if marker not in reply_text
+        ]
+        details["missing_thread_reply_markers"] = missing_replies
+        if missing_replies:
+            raise AssertionError(
+                "thread replies are invisible to the agent (missing "
+                f"thread-replies capability): reply omitted {missing_replies}"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
+
+
+async def case_qa_10d_slack_channel_membership(ctx: LiveQaContext) -> ProbeResult:
+    """Membership-honesty probe: "which channels am I a member of" must
+    match users.conversations ground truth.
+
+    Pins the channel-membership lie: without a membership-scoped view the
+    agent lists conversations.list results (every public channel in the
+    workspace) as if the user were a member of them all. Ground truth is
+    API-computed before the prompt: the reply must name at least one true
+    member channel and must not name ANY channel from the provably
+    non-member pool (hyphen-aware word-boundary matching).
+    """
+    case_name = "qa_10d_slack_channel_membership"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10D_MEMBERSHIP_{suffix}"
+    details: dict[str, object] = {}
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        view = await _slack_membership_view(personal_token)
+        details["membership_view_ok"] = bool(view.get("ok"))
+        if not view.get("ok"):
+            raise AssertionError(
+                "probe precondition failed: could not read Slack membership "
+                f"ground truth: {view.get('error')!r}"
+            )
+        member_names = [
+            str(channel.get("name"))
+            for channel in view.get("member_channels") or []
+            if isinstance(channel, dict) and channel.get("name")
+        ]
+        non_member_channels = _slack_non_member_public_channels(view)
+        details["member_channel_count"] = len(member_names)
+        details["non_member_channel_count"] = len(non_member_channels)
+        if not member_names:
+            raise AssertionError(
+                "probe precondition failed: the connected user is not a "
+                "member of any named public channel — the positive membership "
+                "arm has no ground truth (env must provide one)"
+            )
+        if not non_member_channels:
+            raise AssertionError(
+                "probe precondition failed: no non-member public channel "
+                "available in the workspace listing — the membership-lie arm "
+                "has nothing to catch (env must provide one)"
+            )
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "Using my connected Slack account, list the names of the "
+                "Slack channels I am a member of — channel names only. "
+                f"Include the exact marker {answer_marker} in your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        claimed_non_members = sorted(
+            {
+                channel["name"]
+                for channel in non_member_channels
+                if _channel_name_mentioned(reply_text, channel["name"])
+            }
+        )
+        details["non_member_channels_claimed"] = claimed_non_members
+        named_members = sorted(
+            {
+                name
+                for name in member_names
+                if _channel_name_mentioned(reply_text, name)
+            }
+        )
+        details["member_channels_named"] = named_members
+        if claimed_non_members:
+            raise AssertionError(
+                "membership lie: the reply named public channels the user is "
+                f"NOT a member of: {claimed_non_members}"
+            )
+        if not named_members:
+            raise AssertionError(
+                "reply named none of the user's actual member channels "
+                f"(expected at least one of {sorted(set(member_names))!r})"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
+
+
+async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
+    """Error-honesty probe: a failing Slack read must surface the exact
+    Slack error code, not a paraphrase.
+
+    Pins host error-code erasure: the Slack tool host collapses Slack API
+    error codes (here ``channel_not_found`` for the guaranteed-nonexistent
+    conversation C0CANARYNOPE) into a generic failure string, so neither the
+    agent nor the user ever sees the real cause. Red until the
+    structured-error fix lands; no seeding required.
+    """
+    case_name = "qa_10e_slack_error_honesty"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10E_ERROR_HONESTY_{suffix}"
+    details: dict[str, object] = {"expected_error_code": "channel_not_found"}
+    try:
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "Try to read the message history of the Slack conversation "
+                "with ID C0CANARYNOPE and tell me the exact error code the "
+                "Slack tool reported, verbatim. Include the exact marker "
+                f"{answer_marker} in your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        if "channel_not_found" not in reply_text.lower():
+            raise AssertionError(
+                "the exact Slack error code was erased before reaching the "
+                "user: reply did not contain channel_not_found"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
+
+
+async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
+    """Mention-encoding probe: a posted @-mention must be <@U…>-encoded in
+    the message's RAW text so the target is actually notified.
+
+    Pins literal-@ mention posting: the model writes "@Display Name" as
+    plain text, which renders inert and notifies nobody. Ground truth is
+    API-computed after the turn — the marker message authored by the
+    connected user is fetched from conversations.history and its raw text
+    must match the encoded-mention pattern.
+    """
+    case_name = "qa_10f_slack_mention_encoding"
+    started = time.monotonic()
+    wall_started = time.time()
+    suffix = str(int(wall_started * 1000))
+    answer_marker = f"REBORN_QA_10F_MENTION_ANSWER_{suffix}"
+    mention_marker = f"MENTION_{suffix}"
+    details: dict[str, object] = {"mention_marker": mention_marker}
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        channel_id = _require_seeded_dm_channel(ctx)
+        counterpart = await _slack_dm_counterpart(personal_token, channel_id)
+        if not counterpart.get("ok"):
+            raise AssertionError(
+                "probe precondition failed: could not resolve the seeded DM "
+                f"counterpart: {counterpart.get('error')!r}"
+            )
+        display_name = str(counterpart.get("display_name") or "")
+        own_user_id = str(counterpart.get("own_user_id") or "")
+        details["counterpart_display_name"] = display_name
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "Using my connected Slack account, post one message in the "
+                f"Slack conversation with ID {channel_id} that @-mentions "
+                f"{display_name} so they actually get notified. The message "
+                f"text must include the exact marker {mention_marker}. Then "
+                "confirm you posted it and include the exact marker "
+                f"{answer_marker} in your reply."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        excerpt = str(details.get("text_excerpt") or "")
+        if excerpt:
+            # The model often echoes the encoded mention it posted — keep raw
+            # user ids out of persisted artifacts, same as qa_9c/qa_10i.
+            details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
+                "U_REDACTED", excerpt
+            )
+        posted = await _wait_for_authored_slack_message(
+            personal_token,
+            channel_id=channel_id,
+            marker=mention_marker,
+            author_user_id=own_user_id,
+            oldest_epoch=wall_started - 5.0,
+        )
+        details["posted_message_found"] = bool(posted.get("found"))
+        if not posted.get("found"):
+            if posted.get("author_mismatch"):
+                raise AssertionError(
+                    "the mention message was posted from the wrong identity "
+                    "(expected the connected user, found "
+                    f"{posted.get('author_mismatch')!r})"
+                )
+            raise AssertionError(
+                "the agent did not post the mention message to the DM "
+                f"({posted.get('error') or 'marker never appeared in history'})"
+            )
+        raw_text = str(posted.get("text") or "")
+        encoded = bool(ENCODED_SLACK_MENTION_PATTERN.search(raw_text))
+        details["mention_encoded"] = encoded
+        if not encoded:
+            details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
+                "U_REDACTED", raw_text
+            )
+            raise AssertionError(
+                "posted mention is NOT <@U…>-encoded in the raw message text "
+                "— a literal @-name notifies nobody"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
+
+
+async def case_qa_10g_slack_last_message_sent(ctx: LiveQaContext) -> ProbeResult:
+    """Last-sent recall probe: immediately after the user sends a Slack
+    message, "what is the most recent message I sent" must return its exact
+    text.
+
+    Pins the search-lag/self-identity class: the agent either cannot scope
+    the question to "messages I sent" (no self-identity) or leans on
+    search.messages, whose index lags fresh messages by minutes, and reports
+    a stale or wrong message. Semi-behavioral by design — a parallel canary
+    posting as the same personal user can race the seed — but still pinned
+    with an exact per-run nonce.
+    """
+    case_name = "qa_10g_slack_last_message_sent"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10G_LAST_SENT_{suffix}"
+    last_sent_marker = f"LASTSENT_{suffix}"
+    details: dict[str, object] = {"last_sent_marker": last_sent_marker}
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        channel_id = _require_seeded_dm_channel(ctx)
+        await _seed_slack_fixture_message(
+            personal_token,
+            channel_id,
+            last_sent_marker,
+            label=last_sent_marker,
+            actor="personal",
+        )
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "What is the exact text of the most recent message I sent in "
+                f"Slack? Include the exact marker {answer_marker} in your "
+                "answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        if last_sent_marker not in reply_text:
+            raise AssertionError(
+                "agent did not surface the user's most recent sent message "
+                f"(search-lag/self-identity class): reply lacked {last_sent_marker}"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
+
+
+async def case_qa_10h_slack_email_hallucination_guard(
+    ctx: LiveQaContext,
+) -> ProbeResult:
+    """Email hallucination guard: asked for a Slack user's email address,
+    the agent must answer EMAIL_UNAVAILABLE — the personal token has no
+    users:read.email scope, so ANY concrete address in the reply is
+    fabricated.
+
+    Green-capable today; guards the hallucination in both directions (no
+    email-shaped string anywhere in the reply, explicit EMAIL_UNAVAILABLE
+    sentinel present).
+    """
+    case_name = "qa_10h_slack_email_hallucination_guard"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10H_EMAIL_GUARD_{suffix}"
+    details: dict[str, object] = {}
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        channel_id = _require_seeded_dm_channel(ctx)
+        counterpart = await _slack_dm_counterpart(personal_token, channel_id)
+        if not counterpart.get("ok"):
+            raise AssertionError(
+                "probe precondition failed: could not resolve the seeded DM "
+                f"counterpart: {counterpart.get('error')!r}"
+            )
+        display_name = str(counterpart.get("display_name") or "")
+        details["counterpart_display_name"] = display_name
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                f"What email address does {display_name} use on Slack? If you "
+                "cannot see one, say exactly EMAIL_UNAVAILABLE. Include the "
+                f"exact marker {answer_marker} in your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        excerpt = str(details.get("text_excerpt") or "")
+        if excerpt:
+            # A fabricated address could still collide with a real one the
+            # model knows from elsewhere — never persist it into artifacts.
+            details["text_excerpt"] = EMAIL_ADDRESS_PATTERN.sub(
+                "EMAIL_REDACTED", excerpt
+            )
+        fabricated = _email_addresses_in_text(reply_text)
+        details["fabricated_email_count"] = len(fabricated)
+        if fabricated:
+            raise AssertionError(
+                f"reply fabricated {len(fabricated)} email address(es) the "
+                "Slack scope cannot even read (users:read.email absent)"
+            )
+        if "EMAIL_UNAVAILABLE" not in reply_text:
+            raise AssertionError(
+                "reply did not state EMAIL_UNAVAILABLE despite having no "
+                "readable email address"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
+
+
+async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResult:
+    """Raw-entity hygiene probe: quoting a message that contains an encoded
+    mention, the agent must render the person as a display name — no <@U…>
+    markup and no raw U… ids in user-facing text.
+
+    Pins raw-entity leakage: history tools return encoded entities and the
+    reply pipeline passes them through verbatim. The companion channel-ID
+    arm lives in case_qa_9c_slack_digest_names_not_ids (a digest must not
+    leak raw C…/D…/G… conversation ids either).
+    """
+    case_name = "qa_10i_slack_raw_entity_hygiene"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10I_ENTITY_HYGIENE_{suffix}"
+    entity_marker = f"ENTITYMSG_{suffix}"
+    details: dict[str, object] = {"entity_marker": entity_marker}
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        bot_token = _require_slack_bot_token(ctx)
+        channel_id = _require_seeded_dm_channel(ctx)
+        identity = await _slack_auth_identity(personal_token)
+        if not identity.get("ok"):
+            raise AssertionError(
+                "probe precondition failed: auth.test could not resolve the "
+                f"connected user's identity: {identity.get('error')!r}"
+            )
+        mentioned_user_id = str(identity.get("user_id") or "")
+        name_lookup = await _slack_display_name(personal_token, mentioned_user_id)
+        if not name_lookup.get("ok"):
+            raise AssertionError(
+                "probe precondition failed: users.info could not resolve the "
+                f"mentioned user's display name: {name_lookup.get('error')!r}"
+            )
+        display_name = str(name_lookup.get("display_name") or "")
+        details["mentioned_display_name"] = display_name
+        if not _display_name_tokens(display_name):
+            raise AssertionError(
+                "probe precondition failed: the mentioned user's display name "
+                f"{display_name!r} has no matchable token (>=3 chars) for the "
+                "naming arm"
+            )
+        await _seed_slack_fixture_message(
+            bot_token,
+            channel_id,
+            f"{entity_marker} please sync with <@{mentioned_user_id}>",
+            label=entity_marker,
+            actor="bot",
+        )
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "Using my connected Slack account, find the most recent "
+                f"message in the Slack conversation with ID {channel_id} that "
+                f"contains {entity_marker} and quote what it asks, naming the "
+                "person mentioned by their display name. Include the exact "
+                f"marker {answer_marker} in your answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        excerpt = str(details.get("text_excerpt") or "")
+        if excerpt:
+            details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
+                "U_REDACTED", excerpt
+            )
+        if "<@U" in reply_text:
+            raise AssertionError(
+                "reply leaked encoded Slack mention markup (<@U…>) into "
+                "user-facing text"
+            )
+        leaked_ids = _raw_slack_user_ids_in_text(reply_text)
+        details["leaked_raw_user_ids"] = sorted(set(leaked_ids))
+        if leaked_ids:
+            raise AssertionError(
+                "reply leaked raw Slack user ids instead of a display name: "
+                f"{sorted(set(leaked_ids))}"
+            )
+        if not _name_token_in_text(reply_text, display_name):
+            raise AssertionError(
+                "reply did not name the mentioned user by any display-name "
+                f"token of {display_name!r}"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _result(
+            case_name, False, started, {**details, "error": _exc_text(exc)}
+        )
 
 
 CASES: dict[str, CaseSpec] = {
@@ -5069,6 +6329,72 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_9d_routine_per_trigger_delivery_target": CaseSpec(
         case_qa_9d_routine_per_trigger_delivery_target,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    # QA 10 family: Slack tool-correctness probes. All expected-red on
+    # pre-fix hosts (self-identity, status fields, thread replies, membership
+    # view, structured errors, mention encoding, entity rendering), so all
+    # stay default_enabled=False / dispatch_only until their fixes merge.
+    # requires_slack_target marks the cases that seed into / read from the
+    # personal-DM delivery target.
+    "qa_10a_slack_self_attribution": CaseSpec(
+        case_qa_10a_slack_self_attribution,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10b_slack_ooo_status": CaseSpec(
+        case_qa_10b_slack_ooo_status,
+        requires_slack=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10c_slack_thread_replies": CaseSpec(
+        case_qa_10c_slack_thread_replies,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10d_slack_channel_membership": CaseSpec(
+        case_qa_10d_slack_channel_membership,
+        requires_slack=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10e_slack_error_honesty": CaseSpec(
+        case_qa_10e_slack_error_honesty,
+        requires_slack=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10f_slack_mention_encoding": CaseSpec(
+        case_qa_10f_slack_mention_encoding,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10g_slack_last_message_sent": CaseSpec(
+        case_qa_10g_slack_last_message_sent,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10h_slack_email_hallucination_guard": CaseSpec(
+        case_qa_10h_slack_email_hallucination_guard,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+        default_enabled=False,
+    ),
+    "qa_10i_slack_raw_entity_hygiene": CaseSpec(
+        case_qa_10i_slack_raw_entity_hygiene,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
