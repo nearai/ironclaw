@@ -2144,7 +2144,7 @@ where
             |body| Ok::<_, SessionThreadError>(body.to_vec()),
             |body| {
                 Ok::<_, SessionThreadError>(
-                    Entry::bytes(body.clone()).with_content_type(ContentType::json()),
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
                 )
             },
             move |existing| {
@@ -2207,7 +2207,7 @@ where
             |body| Ok::<_, SessionThreadError>(body.to_vec()),
             |body| {
                 Ok::<_, SessionThreadError>(
-                    Entry::bytes(body.clone()).with_content_type(ContentType::json()),
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
                 )
             },
             move |existing| {

@@ -1123,6 +1123,7 @@ fn scripted_capability_outcome(
             terminate_hint,
             byte_len: 0,
             output_digest,
+            model_observation: None,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
             Ok(CapabilityOutcome::ApprovalRequired {

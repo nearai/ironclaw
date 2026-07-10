@@ -105,6 +105,10 @@ pub enum ToolObservationDetail {
         byte_len: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_offset: Option<u64>,
     },
 }
 

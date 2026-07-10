@@ -1,6 +1,27 @@
 //! Tool-calling turn: proves the §3.7 two-tier egress design end-to-end —
 //! scripted `builtin.http` call → real `RuntimeHttpEgress` → recording egress
-//! (Tier-2) → finalized reply. Same scripted `TraceLlm` seam as other harness tests.
+//! (Tier-2) → finalized reply. The existing cases use the scripted `TraceLlm`
+//! seam; the LocalDev result-reference regression below uses the public runtime
+//! builder with a model-boundary gateway so the real capability wiring runs.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use ironclaw_host_api::CapabilityId;
+use ironclaw_loop_support::{
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedToolResultContent,
+};
+use ironclaw_reborn_composition::{
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    local_runtime_build_input,
+};
+use ironclaw_turns::run_profile::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
+use serde_json::json;
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -11,7 +32,123 @@ mod support;
 
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
-use serde_json::json;
+
+const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
+const LARGE_ECHO_TAIL: &str = "UNREPLAYED_RAW_TOOL_RESULT_TAIL";
+
+fn large_echo_message() -> String {
+    format!("{}{}", LARGE_ECHO_MESSAGE.repeat(100), LARGE_ECHO_TAIL)
+}
+
+#[derive(Debug, Default)]
+struct LargeEchoResultReadGateway {
+    requests: Mutex<Vec<HostManagedModelRequest>>,
+    calls: Mutex<usize>,
+}
+
+impl LargeEchoResultReadGateway {
+    fn captured_requests(&self) -> Vec<HostManagedModelRequest> {
+        self.requests.lock().expect("request lock").clone()
+    }
+}
+
+fn model_gateway_error(error: impl std::fmt::Display) -> HostManagedModelError {
+    HostManagedModelError::safe(
+        HostManagedModelErrorKind::InvalidRequest,
+        format!("capability interaction failed: {error}"),
+    )
+}
+
+#[async_trait]
+impl HostManagedModelGateway for LargeEchoResultReadGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.requests.lock().expect("request lock").push(request);
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "expected capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut calls = self.calls.lock().expect("call lock");
+            let index = *calls;
+            *calls += 1;
+            index
+        };
+        self.requests
+            .lock()
+            .expect("request lock")
+            .push(request.clone());
+        if call_index == 1 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                .expect("second model call should include the echo result");
+            let result_ref = match tool_result.tool_result_content.as_ref() {
+                Some(HostManagedToolResultContent::Reference { envelope }) => {
+                    envelope.result_ref.clone()
+                }
+                other => panic!("expected an echo result reference, got {other:?}"),
+            };
+            let result_read_tool = capabilities
+                .tool_definitions()
+                .map_err(model_gateway_error)?
+                .into_iter()
+                .find(|definition| definition.capability_id.as_str() == "builtin.result_read")
+                .expect("builtin.result_read must be visible through LocalDev wiring");
+            let candidate = capabilities.register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(), provider_model_id: "test-model".to_string(),
+                turn_id: Some("provider-turn-2".to_string()), id: "call-2".to_string(), name: result_read_tool.name,
+                arguments: json!({"result_ref": result_ref, "offset": 0, "max_bytes": 2048}),
+                response_reasoning: None, reasoning: None, signature: None,
+            })).await.map_err(model_gateway_error)?;
+            return Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ));
+        }
+        if call_index == 2 {
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "bounded result read",
+            ));
+        }
+        let echo_tool = capabilities
+            .tool_definitions()
+            .map_err(model_gateway_error)?
+            .into_iter()
+            .find(|definition| {
+                definition.capability_id == CapabilityId::new("builtin.echo").expect("echo id")
+            })
+            .expect("builtin.echo must be visible through LocalDev wiring");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("provider-turn-1".to_string()),
+                id: "call-1".to_string(),
+                name: echo_tool.name,
+                arguments: json!({"message": large_echo_message()}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(model_gateway_error)?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
 
 #[tokio::test]
 async fn runs_http_tool_call_through_recorded_egress() {
@@ -37,6 +174,100 @@ async fn runs_http_tool_call_through_recorded_egress() {
 }
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
+
+#[tokio::test]
+async fn local_dev_large_echo_uses_bounded_result_reference_and_result_read() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(LargeEchoResultReadGateway::default());
+    let input = local_runtime_build_input(
+        RebornCompositionProfile::LocalDev,
+        "large-echo-result-owner",
+        root.path().join("local-dev"),
+    )
+    .expect("local-dev input builds");
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: "large-echo-result-tenant".to_string(),
+                agent_id: "large-echo-result-agent".to_string(),
+                source_binding_id: "large-echo-result-source".to_string(),
+                reply_target_binding_id: "large-echo-result-reply".to_string(),
+            })
+            .with_poll_settings(ironclaw_reborn_composition::PollSettings {
+                interval: Duration::from_millis(10),
+                max_total: Duration::from_secs(10),
+            })
+            .with_model_gateway_override(gateway.clone()),
+    )
+    .await
+    .expect("runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .enable_global_auto_approve_for_test(&conversation)
+        .await;
+    let reply = tokio::time::timeout(
+        Duration::from_secs(15),
+        runtime.send_user_message(&conversation, "echo a large result"),
+    )
+    .await
+    .expect("runtime send finishes")
+    .expect("runtime send succeeds");
+    assert!(reply.is_successful_final_reply(), "reply: {reply:?}");
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let requests = gateway.captured_requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "echo, result_read, and final model calls"
+    );
+    let echo_result = requests[1]
+        .messages
+        .iter()
+        .find(|message| {
+            message.role == HostManagedModelMessageRole::ToolResult
+                && message
+                    .tool_result_provider_call
+                    .as_ref()
+                    .is_some_and(|call| call.capability_id.as_str() == "builtin.echo")
+        })
+        .expect("second model request includes the echo result");
+    let echo_envelope = match echo_result.tool_result_content.as_ref() {
+        Some(HostManagedToolResultContent::Reference { envelope }) => envelope,
+        other => panic!("expected bounded echo result reference, got {other:?}"),
+    };
+    assert!(echo_result.content.contains("result_reference"));
+    assert!(echo_result.content.contains(&echo_envelope.result_ref));
+    assert!(!echo_result.content.contains(LARGE_ECHO_TAIL));
+    assert!(echo_result.content.len() <= 4096);
+    let echo_result_ref = echo_envelope.result_ref.clone();
+
+    let result_read_result = requests[2]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == HostManagedModelMessageRole::ToolResult
+                && message
+                    .tool_result_provider_call
+                    .as_ref()
+                    .is_some_and(|call| call.capability_id.as_str() == "builtin.result_read")
+        })
+        .expect("third model request includes result_read output");
+    let result_read_call = result_read_result
+        .tool_result_provider_call
+        .as_ref()
+        .expect("result_read provider call metadata");
+    assert_eq!(result_read_call.arguments["result_ref"], echo_result_ref);
+    assert!(result_read_result.content.contains(LARGE_ECHO_MESSAGE));
+    assert!(!result_read_result.content.contains(LARGE_ECHO_TAIL));
+    let observation: serde_json::Value =
+        serde_json::from_str(&result_read_result.content).expect("result_read envelope");
+    assert_eq!(
+        observation["model_observation"]["detail"]["next_offset"],
+        2048
+    );
+}
 
 /// Guards against vacuous pass: with no scripted tool call, both
 /// `assert_tool_invoked` and `assert_egress_request_matching` must return `Err`.

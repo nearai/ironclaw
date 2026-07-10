@@ -573,7 +573,14 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
         "result_reference" => {
             validate_object_keys(
                 object,
-                &["kind", "result_ref", "byte_len", "preview"],
+                &[
+                    "kind",
+                    "result_ref",
+                    "byte_len",
+                    "preview",
+                    "total_bytes",
+                    "next_offset",
+                ],
                 "model observation detail",
             )?;
             validate_required_observation_text(
@@ -582,6 +589,15 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 MODEL_OBSERVATION_TEXT_MAX_BYTES,
             )?;
             required_u64(object, "byte_len", "model observation detail")?;
+            for field in ["total_bytes", "next_offset"] {
+                if let Some(value) = object.get(field)
+                    && value.as_u64().is_none()
+                {
+                    return Err(format!(
+                        "model observation detail field `{field}` must be a u64"
+                    ));
+                }
+            }
             if let Some(preview) = optional_string(object, "preview", "model observation detail")? {
                 validate_model_observation_text(preview)?;
             }

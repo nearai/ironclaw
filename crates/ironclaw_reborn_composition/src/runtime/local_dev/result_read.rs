@@ -104,7 +104,7 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
             Ok(available) => available,
             Err(SessionThreadError::UnknownThread { .. }) => false,
             Err(error) => {
-                tracing::warn!(error = %error, "result reader history lookup failed");
+                tracing::debug!(error = %error, "result reader history lookup failed");
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Unavailable,
                     "result reader storage is unavailable",
@@ -131,23 +131,28 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
                 return Ok(unavailable_result_reference());
             }
             Err(error) => {
-                tracing::warn!(error = %error, "result reader storage lookup failed");
+                tracing::debug!(error = %error, "result reader storage lookup failed");
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Unavailable,
                     "result reader storage is unavailable",
                 ));
             }
         };
-        let content = match String::from_utf8(chunk.content) {
+        let ironclaw_threads::ToolResultRecordChunk {
+            content: chunk_content,
+            total_bytes,
+            next_offset,
+        } = chunk;
+        let content = match String::from_utf8(chunk_content) {
             Ok(content) => content,
-            Err(_) => return Ok(invalid_result_offset()),
+            Err(_) => return Ok(non_text_result_content()),
         };
         let output = serde_json::json!({
-            "result_ref": input.result_ref,
+            "result_ref": input.result_ref.clone(),
             "offset": input.offset,
             "content": content,
-            "total_bytes": chunk.total_bytes,
-            "next_offset": chunk.next_offset,
+            "total_bytes": total_bytes,
+            "next_offset": next_offset,
         });
         let mut write = invocation
             .result_writer
@@ -161,8 +166,10 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
             })
             .await?;
         write.model_observation = Some(result_read_observation(
-            &write.result_ref,
+            &input.result_ref,
             write.byte_len,
+            total_bytes,
+            next_offset,
             sanitize_model_visible_text(content),
         ));
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
@@ -178,8 +185,10 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
 }
 
 fn result_read_observation(
-    result_ref: &ironclaw_turns::LoopResultRef,
+    result_ref: &str,
     byte_len: u64,
+    total_bytes: u64,
+    next_offset: Option<u64>,
     content: String,
 ) -> ModelVisibleToolObservation {
     ModelVisibleToolObservation {
@@ -187,12 +196,14 @@ fn result_read_observation(
         status: ToolObservationStatus::Success,
         summary: "Requested tool-result chunk returned.".to_string(),
         detail: ToolObservationDetail::ResultReference {
-            result_ref: result_ref.as_str().to_string(),
+            result_ref: result_ref.to_string(),
             byte_len,
             preview: Some(content),
+            total_bytes: Some(total_bytes),
+            next_offset,
         },
         artifacts: vec![ModelVisibleArtifact {
-            artifact_ref: result_ref.as_str().to_string(),
+            artifact_ref: result_ref.to_string(),
             summary: "Stored result-read response".to_string(),
         }],
         recovery: None,
@@ -208,10 +219,10 @@ fn unavailable_result_reference() -> CapabilityOutcome {
     })
 }
 
-fn invalid_result_offset() -> CapabilityOutcome {
+fn non_text_result_content() -> CapabilityOutcome {
     CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: "result_read offset must align with a prior result chunk".to_string(),
+        safe_summary: "stored tool result cannot be returned as text".to_string(),
         detail: None,
     })
 }

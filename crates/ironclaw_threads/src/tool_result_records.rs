@@ -43,7 +43,10 @@ pub(crate) fn tool_result_record_chunk(
         .min(content.len());
     let start = utf8_boundary_at_or_after(content, requested_start);
     let requested_end = start.saturating_add(max_bytes).min(content.len());
-    let end = utf8_boundary_at_or_before(content, requested_end);
+    let mut end = utf8_boundary_at_or_before(content, requested_end);
+    if end <= start && start < content.len() {
+        end = (start + 1).min(content.len());
+    }
     ToolResultRecordChunk {
         content: content[start..end].to_vec(),
         total_bytes,
@@ -63,4 +66,17 @@ fn utf8_boundary_at_or_after(content: &[u8], mut index: usize) -> usize {
         index += 1;
     }
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_result_record_chunk;
+
+    #[test]
+    fn opaque_bytes_always_advance_chunk_offset() {
+        let chunk = tool_result_record_chunk(&[0xC2, 0x80, 0x80, 0x80, 0x80], 0, 4);
+
+        assert_eq!(chunk.content, vec![0xC2]);
+        assert_eq!(chunk.next_offset, Some(1));
+    }
 }

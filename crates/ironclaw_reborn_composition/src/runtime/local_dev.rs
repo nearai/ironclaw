@@ -174,8 +174,6 @@ pub(super) fn capability_wiring(
             capability_leases,
             external_tool_catalog,
         });
-    let model_gateway: Arc<dyn HostManagedModelGateway> = model_gateway;
-
     Some(LocalDevCapabilityWiring {
         capability_factory,
         capability_input_resolver,
@@ -257,7 +255,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
 
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
-const LOCAL_DEV_DURABLE_TOOL_RESULT_MAX_BYTES: usize = LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES;
+const LOCAL_DEV_DURABLE_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 struct LocalDevCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
@@ -338,13 +336,8 @@ impl LocalDevCapabilityIo {
         result_ref: &LoopResultRef,
         content: Vec<u8>,
     ) -> Result<(), AgentLoopHostError> {
-        let Some(durable_previews) = &self.durable_previews else {
+        let Some((durable_previews, scope)) = self.durable_tool_result_scope(run_context)? else {
             return Ok(());
-        };
-        let Some(scope) =
-            local_dev_thread_scope_for_run(run_context, &durable_previews.fallback_user_id)
-        else {
-            return Err(durable_result_scope_error());
         };
         match durable_previews
             .thread_service
@@ -367,13 +360,8 @@ impl LocalDevCapabilityIo {
         result_ref: &LoopResultRef,
         content: Vec<u8>,
     ) -> Result<(), AgentLoopHostError> {
-        let Some(durable_previews) = &self.durable_previews else {
+        let Some((durable_previews, scope)) = self.durable_tool_result_scope(run_context)? else {
             return Ok(());
-        };
-        let Some(scope) =
-            local_dev_thread_scope_for_run(run_context, &durable_previews.fallback_user_id)
-        else {
-            return Err(durable_result_scope_error());
         };
         match durable_previews
             .thread_service
@@ -385,7 +373,15 @@ impl LocalDevCapabilityIo {
             })
             .await
         {
-            Ok(()) | Err(ironclaw_threads::SessionThreadError::UnknownThread { .. }) => Ok(()),
+            Ok(()) => Ok(()),
+            Err(ironclaw_threads::SessionThreadError::UnknownThread { thread_id }) => {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    result_ref = result_ref.as_str(),
+                    "local-dev durable tool result update skipped: thread is unknown"
+                );
+                Ok(())
+            }
             Err(error) => Err(durable_result_store_error(error)),
         }
     }
@@ -395,13 +391,8 @@ impl LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
     ) -> Result<(), AgentLoopHostError> {
-        let Some(durable_previews) = &self.durable_previews else {
+        let Some((durable_previews, scope)) = self.durable_tool_result_scope(run_context)? else {
             return Ok(());
-        };
-        let Some(scope) =
-            local_dev_thread_scope_for_run(run_context, &durable_previews.fallback_user_id)
-        else {
-            return Err(durable_result_scope_error());
         };
         match durable_previews
             .thread_service
@@ -412,9 +403,30 @@ impl LocalDevCapabilityIo {
             })
             .await
         {
-            Ok(()) | Err(ironclaw_threads::SessionThreadError::UnknownThread { .. }) => Ok(()),
+            Ok(()) => Ok(()),
+            Err(ironclaw_threads::SessionThreadError::UnknownThread { thread_id }) => {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    result_ref = result_ref.as_str(),
+                    "local-dev durable tool result delete skipped: thread is unknown"
+                );
+                Ok(())
+            }
             Err(error) => Err(durable_result_store_error(error)),
         }
+    }
+
+    fn durable_tool_result_scope(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Option<(&DurableCapabilityDisplayPreviewSink, ThreadScope)>, AgentLoopHostError>
+    {
+        let Some(durable_previews) = &self.durable_previews else {
+            return Ok(None);
+        };
+        let scope = local_dev_thread_scope_for_run(run_context, &durable_previews.fallback_user_id)
+            .ok_or_else(durable_result_scope_error)?;
+        Ok(Some((durable_previews, scope)))
     }
 
     fn stage_result_best_effort(&self, result_ref: &LoopResultRef, output: serde_json::Value) {
@@ -868,6 +880,8 @@ fn local_dev_result_reference_observation(
             result_ref: result_ref.as_str().to_string(),
             byte_len,
             preview: None,
+            total_bytes: None,
+            next_offset: None,
         },
         artifacts: vec![ModelVisibleArtifact {
             artifact_ref: result_ref.as_str().to_string(),

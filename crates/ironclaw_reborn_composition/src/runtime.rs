@@ -5419,6 +5419,25 @@ output_schema_ref = "schemas/write.output.json"
                     !tool_result.content.contains(LARGE_ECHO_TAIL),
                     "the result_read response must remain bounded"
                 );
+                let observation: serde_json::Value =
+                    serde_json::from_str(&tool_result.content).expect("result_read observation");
+                let detail = &observation["model_observation"]["detail"];
+                assert_ne!(
+                    detail["result_ref"], observation["result_ref"],
+                    "result_read replay must retain the original result reference, not its own output ref"
+                );
+                assert!(
+                    detail["total_bytes"]
+                        .as_u64()
+                        .is_some_and(|total_bytes| total_bytes > 2048),
+                    "result_read replay must expose total bytes for continuation: {}",
+                    tool_result.content
+                );
+                assert_eq!(
+                    detail["next_offset"].as_u64(),
+                    Some(2048),
+                    "result_read replay must expose the next offset for continuation"
+                );
                 return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
             }
             let echo_id = CapabilityId::new("builtin.echo").expect("echo id");

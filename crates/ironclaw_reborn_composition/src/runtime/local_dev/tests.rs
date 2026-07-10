@@ -1923,6 +1923,23 @@ mod tests {
             CapabilityOutcome::Completed(message) => message,
             outcome => panic!("result_read should complete, got {outcome:?}"),
         };
+        let observation = message
+            .model_observation
+            .as_ref()
+            .expect("result_read must expose a model observation");
+        match &observation.detail {
+            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+                result_ref,
+                total_bytes,
+                next_offset,
+                ..
+            } => {
+                assert_eq!(result_ref, &original_result_ref);
+                assert_eq!(*total_bytes, Some(36));
+                assert_eq!(*next_offset, Some(18));
+            }
+            detail => panic!("expected result reference observation, got {detail:?}"),
+        }
         let output = capability_io
             .result_output(message.result_ref.as_str())
             .expect("result output lookup succeeds")
@@ -1931,6 +1948,52 @@ mod tests {
         assert_eq!(output["offset"], 10);
         assert_eq!(output["next_offset"], 18);
         assert_eq!(output["total_bytes"], 36);
+
+        let binary_result_ref = "result:binary-tool-result".to_string();
+        thread_service
+            .put_tool_result_record(PutToolResultRecordRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                result_ref: binary_result_ref.clone(),
+                content: vec![0xC2, 0x80, 0x80, 0x80, 0x80],
+            })
+            .await
+            .expect("opaque raw result exists for this thread");
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                result_ref: binary_result_ref.clone(),
+                safe_summary: ToolResultSafeSummary::new("binary tool completed").expect("summary"),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .expect("canonical binary result reference exists");
+        let binary_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": binary_result_ref,
+                        "offset": 0,
+                        "max_bytes": 4,
+                    }),
+                ),
+            ))
+            .await
+            .expect("binary result_read provider call stages");
+        let binary = port
+            .invoke_capability(invocation_for_candidate(&binary_candidate))
+            .await
+            .expect("binary result_read remains model-recoverable");
+        assert!(matches!(
+            binary,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::InvalidInput
+                    && failure.safe_summary == "stored tool result cannot be returned as text"
+        ));
 
         thread_service
             .redact_message(RedactMessageRequest {
