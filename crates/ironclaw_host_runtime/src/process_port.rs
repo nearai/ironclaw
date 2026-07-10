@@ -563,6 +563,9 @@ fn validate_raw_mount_source_paths(
             break;
         };
         let token = Path::new(&command[token_start..token_end]);
+        if token == Path::new("/") && guards.iter().any(LocalHostMountSourceGuard::is_scoped) {
+            return Err(disallowed_mount_source_path("command path"));
+        }
         if token.is_absolute() {
             validate_mount_source_path(token, guards, "command path")?;
         }
@@ -1323,6 +1326,43 @@ mod tests {
         assert!(
             !other_user_file.exists(),
             "raw host workspace path must not write another user's artifact"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_rejects_raw_root_for_scoped_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let scoped_user_root = workspace_root.join("tenants/tenant-a/users/user-a");
+        std::fs::create_dir_all(&scoped_user_root).expect("scoped user dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root);
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "ls /".to_string(),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect_err("scoped shell must not expose the host root");
+
+        assert!(
+            matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace"))
         );
     }
 
