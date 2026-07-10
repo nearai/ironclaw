@@ -73,7 +73,13 @@ function collectJsFiles(dir, out = []) {
 
 function findViolations(source) {
   const violations = [];
-  const lines = source.split("\n");
+  // Blank out block comments first (issue refs like `/* see #123 */`
+  // are valid hex-ish strings), replacing non-newline chars with
+  // spaces so line numbers in the report stay accurate.
+  const withoutBlockComments = source.replace(/\/\*[\s\S]*?\*\//g, (m) =>
+    m.replace(/[^\n]/g, " ")
+  );
+  const lines = withoutBlockComments.split("\n");
   lines.forEach((rawLine, index) => {
     // Drop line comments (whitespace-preceded `//` so `https://` in
     // string literals survives) — a comment *mentioning* text-white

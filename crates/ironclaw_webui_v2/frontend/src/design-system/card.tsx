@@ -131,7 +131,7 @@ export function CardLabel({ children, className = "" }) {
   return (
     <div
       className={cn(
-        "v2-tag-face text-[0.6875rem] text-[var(--v2-text-faint)]",
+        "v2-tag-face text-[length:var(--v2-font-size-label)] text-[var(--v2-text-faint)]",
         className
       )}
     >

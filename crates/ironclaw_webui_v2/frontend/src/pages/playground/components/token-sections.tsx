@@ -4,10 +4,11 @@
  * custom properties so the swatches always show what the active
  * theme actually resolves, not a stale copy.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   COLOR_TOKENS,
   CONTROL_TOKENS,
+  MOTION_TOKENS,
   RADIUS_TOKENS,
   SHADOW_TOKENS,
   SPACE_TOKENS,
@@ -42,12 +43,20 @@ function TokenValue({ children }) {
 
 function useCopy() {
   const [copied, setCopied] = useState(null);
+  const timeoutRef = useRef(null);
   const copy = useCallback((value) => {
     try {
       navigator.clipboard?.writeText(value);
     } catch (_) { /* clipboard unavailable */ }
     setCopied(value);
-    window.setTimeout(() => setCopied(null), 1200);
+    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+    timeoutRef.current = window.setTimeout(() => {
+      setCopied(null);
+      timeoutRef.current = null;
+    }, 1200);
+  }, []);
+  useEffect(() => () => {
+    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
   }, []);
   return { copied, copy };
 }
@@ -278,22 +287,15 @@ export function MotionSection({ theme }) {
 
       <SectionTitle>Durations &amp; easings</SectionTitle>
       <div className="flex flex-col gap-2">
-        {[
-          "--v2-duration-instant",
-          "--v2-duration-fast",
-          "--v2-duration-base",
-          "--v2-duration-slow",
-          "--v2-ease-standard",
-          "--v2-ease-in-out",
-          "--v2-ease-out-expo",
-          "--v2-ease-spring",
-          "--v2-ease-spring-gentle",
-        ].map((name) => (
-          <div key={name + theme} className="flex items-baseline gap-4">
+        {/* Ambient loop durations (spin/typing/breathe) are demoed below. */}
+        {MOTION_TOKENS.filter(
+          (token) => !/-(spin|typing|breathe)$/.test(token.var)
+        ).map((token) => (
+          <div key={token.var + theme} className="flex items-baseline gap-4">
             <span className="w-56 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
-              {name}
+              {token.var}
             </span>
-            <TokenValue>{readToken(name)}</TokenValue>
+            <TokenValue>{readToken(token.var)}</TokenValue>
           </div>
         ))}
       </div>
@@ -371,7 +373,12 @@ export function ZIndexSection({ theme }) {
 
       <SectionTitle>Scrims (overlay layer)</SectionTitle>
       <div className="flex flex-wrap gap-6">
-        {["--v2-scrim-soft", "--v2-scrim"].map((name) => {
+        {/* Derived from the token catalog so a renamed/added scrim can't
+            drift; the usage notes here are layer-specific, so they live
+            in the ternary below rather than tokens.js. */}
+        {COLOR_TOKENS.flatMap((group) => group.tokens)
+          .filter((token) => token.var.startsWith("--v2-scrim"))
+          .map(({ var: name }) => {
           const value = readToken(name);
           return (
             <div key={name + theme} className="flex w-60 flex-col gap-2">

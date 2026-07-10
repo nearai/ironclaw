@@ -41,15 +41,16 @@ function usePlaygroundTheme() {
     document.documentElement.dataset.theme === "dark" ? "dark" : "light"
   );
   const toggleTheme = useCallback(() => {
-    setTheme((current) => {
-      const next = current === "dark" ? "light" : "dark";
-      document.documentElement.dataset.theme = next;
-      try {
-        window.localStorage.setItem(THEME_STORAGE_KEY, next);
-      } catch (_) { /* private mode */ }
-      return next;
-    });
-  }, []);
+    // Side effects live in the handler (not the state updater, which
+    // must stay pure): the DOM write happens before the re-render so
+    // getComputedStyle reads the new theme in the same pass.
+    const next = theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch (_) { /* private mode */ }
+    setTheme(next);
+  }, [theme]);
   return { theme, toggleTheme };
 }
 

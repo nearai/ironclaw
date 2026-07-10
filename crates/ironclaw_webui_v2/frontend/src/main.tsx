@@ -15,7 +15,7 @@ import "./i18n/en";
 // never serves this shell outside /v2, but a plain static server with
 // SPA fallback can (e.g. local previews hitting /playground) — hop
 // into the namespace instead of showing a blank page.
-if (window.location.pathname.startsWith("/v2")) {
+if (window.location.pathname === "/v2" || window.location.pathname.startsWith("/v2/")) {
   createRoot(document.getElementById("v2-root")).render((
     <I18nProvider>
       <QueryClientProvider client={queryClient}>

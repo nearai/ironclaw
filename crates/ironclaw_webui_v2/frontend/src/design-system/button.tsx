@@ -48,13 +48,13 @@ const BASE =
 const SIZES = {
   sm:
     "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] " +
-    "px-[var(--v2-control-px-sm)] text-xs",
+    "px-[var(--v2-control-px-sm)] text-[length:var(--v2-font-size-caption)]",
   md:
     "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] " +
-    "px-[var(--v2-control-px-md)] text-[13px]",
+    "px-[var(--v2-control-px-md)] text-[length:var(--v2-font-size-body-sm)]",
   lg:
     "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] " +
-    "px-[var(--v2-control-px-lg)] text-sm",
+    "px-[var(--v2-control-px-lg)] text-[length:var(--v2-font-size-body)]",
   icon:
     "h-[var(--v2-control-h-md)] w-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)]",
   "icon-sm":
