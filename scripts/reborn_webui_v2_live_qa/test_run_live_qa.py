@@ -3563,7 +3563,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
 
         shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
-        self.assertEqual(len(shard_case_lines), 7)
+        self.assertEqual(len(shard_case_lines), 10)
         sharded_cases = [
             case_name
             for line in shard_case_lines
@@ -3605,6 +3605,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn('SKIP_BUILD: "1"', match.group("body"))
         self.assertIn("REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE", match.group("body"))
+        self.assertIn("Cache Playwright browsers", match.group("body"))
+        self.assertIn("cache: pip", match.group("body"))
         self.assertNotIn("Build WASM channels", match.group("body"))
         self.assertNotIn("Setup OVH sccache", match.group("body"))
 

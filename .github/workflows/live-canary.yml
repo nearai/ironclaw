@@ -735,9 +735,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard_id: qa-2
-            shard_name: QA 2
-            cases: qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery
+          - shard_id: qa-2-connect
+            shard_name: QA 2A-2C
+            cases: qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect
+          - shard_id: qa-2-workflow
+            shard_name: QA 2D-2F
+            cases: qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery
           - shard_id: qa-3
             shard_name: QA 3
             cases: qa_3a_slack_connect,qa_3b_endpoint_status_live_chat,qa_3c_endpoint_status_slack_routine,qa_3d_endpoint_status_slack_delivery
@@ -747,15 +750,21 @@ jobs:
           - shard_id: qa-5
             shard_name: QA 5
             cases: qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer
-          - shard_id: qa-6
-            shard_name: QA 6
-            cases: qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery
+          - shard_id: qa-6-connect
+            shard_name: QA 6A-6C
+            cases: qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat
+          - shard_id: qa-6-workflow
+            shard_name: QA 6D-6E
+            cases: qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery
           - shard_id: qa-7
             shard_name: QA 7
             cases: qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery
-          - shard_id: qa-8
-            shard_name: QA 8
-            cases: qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+          - shard_id: qa-8-monitor
+            shard_name: QA 8A-8C
+            cases: qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine
+          - shard_id: qa-8-delivery
+            shard_name: QA 8D
+            cases: qa_8d_hn_keyword_slack_delivery
     env:
       REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
       REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
@@ -873,6 +882,16 @@ jobs:
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tests/e2e/pyproject.toml
+
+      - name: Cache Playwright browsers
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('tests/e2e/pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-playwright-
 
       - name: Download prepared Reborn WebUI v2 binary
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
