@@ -1691,13 +1691,6 @@ async fn postgres_delete_if_version_with_client(
         return Err(not_found(path.clone(), FilesystemOperation::Delete));
     };
 
-    // If the row at `path` was replaced while this call was serialized by
-    // the row lock, a large version jump is a reliable signal of a
-    // concurrent delete+recreate race; expose it as `NotFound`.
-    if locked_version_raw > expected_raw && locked_version_raw - expected_raw > 1 {
-        return Err(not_found(path.clone(), FilesystemOperation::Delete));
-    }
-
     Err(FilesystemError::VersionMismatch {
         path: path.clone(),
         expected: Some(expected_version),

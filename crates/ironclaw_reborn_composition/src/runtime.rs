@@ -5531,7 +5531,6 @@ output_schema_ref = "schemas/write.output.json"
         // set/remove helpers lock only the separate override map, so
         // restoration can safely run while this guard is held.
         _async_lock: tokio::sync::MutexGuard<'static, ()>,
-        _env_lock: std::sync::MutexGuard<'static, ()>,
         previous: Vec<(&'static str, Option<String>)>,
     }
 
@@ -5543,20 +5542,21 @@ output_schema_ref = "schemas/write.output.json"
 
         async fn with<const N: usize>(vars: [(&'static str, Option<&str>); N]) -> Self {
             let async_lock = RUNTIME_ENV_TEST_LOCK.lock().await;
-            let env_lock = ironclaw_common::env_helpers::lock_env();
             let previous = vars
                 .iter()
                 .map(|(name, _)| (*name, ironclaw_common::env_helpers::env_or_override(name)))
                 .collect::<Vec<_>>();
-            for (name, value) in vars {
-                match value {
-                    Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
-                    None => ironclaw_common::env_helpers::remove_runtime_env(name),
+            {
+                let _env_lock = ironclaw_common::env_helpers::lock_env();
+                for (name, value) in vars {
+                    match value {
+                        Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
+                        None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                    }
                 }
             }
             Self {
                 _async_lock: async_lock,
-                _env_lock: env_lock,
                 previous,
             }
         }
@@ -5565,6 +5565,7 @@ output_schema_ref = "schemas/write.output.json"
     #[cfg(feature = "root-llm-provider")]
     impl Drop for RuntimeEnvGuard {
         fn drop(&mut self) {
+            let _env_lock = ironclaw_common::env_helpers::lock_env();
             for (name, previous) in self.previous.iter().rev() {
                 match previous {
                     Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),

@@ -59,13 +59,13 @@ jobs:
             flags: "--all-features"
             has_postgres: true
             regression_tests: |
-              local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart
-              postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race
+              tests::local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart
+              postgres_tests::postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race
           - name: default
-            flags: ""
+            flags: "--features postgres"
             has_postgres: true
             regression_tests: |
-              postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race
+              postgres_tests::postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race
           - name: libsql-only
             flags: "--no-default-features --features libsql"
             has_postgres: false
@@ -161,7 +161,11 @@ jobs:
 
           if [[ -n "${{ matrix.regression_tests }}" ]]; then
             while read -r test_name; do
-              if [[ "$test_name" == "local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart" ]]; then
+              if [[ -z "$test_name" ]]; then
+                continue
+              fi
+
+              if [[ "$test_name" == "tests::local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart" ]]; then
                 cargo llvm-cov ${{ matrix.flags }} \
                   --package ironclaw_reborn_composition \
                   --no-report \
@@ -169,7 +173,7 @@ jobs:
                 continue
               fi
 
-              if [[ "$test_name" == "postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race" ]]; then
+              if [[ "$test_name" == "postgres_tests::postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race" ]]; then
                 cargo llvm-cov ${{ matrix.flags }} \
                   --package ironclaw_filesystem \
                   --test db_root_filesystem_contract \
