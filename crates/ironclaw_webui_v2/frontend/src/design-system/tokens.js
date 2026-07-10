@@ -168,8 +168,10 @@ export const SHADOW_TOKENS = [
 /** Motion tokens — the nux restrained-motion system (see DESIGN_SYSTEM.md). */
 export const MOTION_TOKENS = [
   { var: "--v2-duration-instant", note: "Hover fills, color shifts" },
-  { var: "--v2-duration-fast", note: "Borders, small transforms" },
-  { var: "--v2-duration-base", note: "Panel/sheet entrances" },
+  { var: "--v2-duration-exit", note: "Menu/overlay exits — quicker than entry" },
+  { var: "--v2-duration-fast", note: "Borders, small transforms, press" },
+  { var: "--v2-duration-menu", note: "Dropdown/popover entrances" },
+  { var: "--v2-duration-base", note: "Panel/sheet/modal entrances" },
   { var: "--v2-duration-slow", note: "Large surface transitions" },
   { var: "--v2-ease-standard", note: "Default ease for feedback" },
   { var: "--v2-ease-in-out", note: "Symmetric moves" },

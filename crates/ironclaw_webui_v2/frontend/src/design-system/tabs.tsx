@@ -7,6 +7,13 @@
  * --v2-control-h-md tall with a hairline baseline, and the active tab
  * carries a 2px accent underline.
  *
+ * The underline is a shared-layout element (motion/react layoutId): when
+ * the selection moves, it slides between tabs instead of blinking. The
+ * slide is a quick tween (MOTION_DURATION.menu + strong ease-out — no
+ * spring, selection is a pointer/keyboard action, not a playful pop) and
+ * collapses to an instant swap under prefers-reduced-motion. Focus
+ * traversal (Tab/arrow keys) never animates — only selection changes do.
+ *
  * This is the desktop/tablet vocabulary for single-select filters; below
  * `sm` callers should swap to a SelectMenu dropdown instead of shrinking
  * or scrolling the tab row.
@@ -21,7 +28,10 @@
  *             share the same rule
  *   className layout additions for the row
  */
+import React from "react";
+import { motion } from "motion/react";
 import { cn } from "../utils/cn";
+import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
 
 export function Tabs({
   tabs = [],
@@ -31,6 +41,11 @@ export function Tabs({
   bordered = true,
   className = "",
 }) {
+  // Unique per Tabs instance so two tab rows on one page never trade
+  // underlines through the shared-layout system.
+  const underlineId = React.useId();
+  const reducedMotion = useReducedMotion();
+
   return (
     <div
       role="tablist"
@@ -56,13 +71,13 @@ export function Tabs({
               // toolbar is taller, keeping the label vertically centered
               // against adjacent controls while the underline stays on the
               // shared hairline.
-              "-mb-px inline-flex min-h-[calc(var(--v2-control-h-md)+var(--v2-control-px-sm))] shrink-0 items-center gap-1.5",
-              "border-b-2 px-[var(--v2-control-px-sm)] text-[13px] font-medium",
+              "relative -mb-px inline-flex min-h-[calc(var(--v2-control-h-md)+var(--v2-control-px-sm))] shrink-0 items-center gap-1.5",
+              "border-b-2 border-transparent px-[var(--v2-control-px-sm)] text-[13px] font-medium",
               "transition-colors focus-visible:outline-none focus-visible:ring-2",
               "focus-visible:ring-inset focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_40%,transparent)]",
               selected
-                ? "border-[var(--v2-accent)] text-[var(--v2-text-strong)]"
-                : "border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
+                ? "text-[var(--v2-text-strong)]"
+                : "text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
             )}
           >
             {tab.label}
@@ -78,6 +93,21 @@ export function Tabs({
               >
                 {tab.count}
               </span>
+            )}
+            {selected && (
+              <motion.span
+                aria-hidden="true"
+                layoutId={underlineId}
+                // Sits on the same hairline the border-b-2 used to paint:
+                // the button keeps a transparent 2px border for geometry,
+                // and this element draws the accent line.
+                className="absolute inset-x-0 -bottom-[2px] h-[2px] bg-[var(--v2-accent)]"
+                transition={
+                  reducedMotion
+                    ? { duration: 0 }
+                    : { duration: MOTION_DURATION.menu, ease: MOTION_EASE_OUT }
+                }
+              />
             )}
           </button>
         );

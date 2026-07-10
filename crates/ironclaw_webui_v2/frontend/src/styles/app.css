@@ -299,8 +299,10 @@
      raw ms value or ad-hoc cubic-bezier. All motion is suppressed
      under prefers-reduced-motion (see "Motion policy" below). */
   --v2-duration-instant: 100ms;  /* hover fills, color shifts */
-  --v2-duration-fast:    150ms;  /* borders, small transforms */
-  --v2-duration-base:    250ms;  /* panel/sheet entrances */
+  --v2-duration-exit:    120ms;  /* menu/overlay exits — quicker than entry */
+  --v2-duration-fast:    150ms;  /* borders, small transforms, press */
+  --v2-duration-menu:    180ms;  /* dropdown/popover entrances */
+  --v2-duration-base:    250ms;  /* panel/sheet/modal entrances */
   --v2-duration-slow:    400ms;  /* large surface transitions */
   --v2-ease-standard:     ease;
   --v2-ease-in-out:       cubic-bezier(0.4, 0, 0.2, 1);

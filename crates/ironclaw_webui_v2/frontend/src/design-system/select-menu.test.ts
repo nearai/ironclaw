@@ -193,6 +193,14 @@ function createHarness() {
     html,
     cn,
     Icon,
+    // motion/react + ./motion stubs (imports are stripped by the vm
+    // harness; the identifiers must exist). motion.div renders as a
+    // plain tag so the tree walkers see the same shape as before.
+    motion: { div: "motion.div", span: "motion.span" },
+    AnimatePresence: function AnimatePresence() {},
+    useReducedMotion: () => false,
+    MOTION_DURATION: { instant: 0.1, exit: 0.12, fast: 0.15, menu: 0.18, base: 0.25 },
+    MOTION_EASE_OUT: [0.16, 1, 0.3, 1],
   };
   const exports = runVmModuleForTest(
     "./select-menu.tsx",

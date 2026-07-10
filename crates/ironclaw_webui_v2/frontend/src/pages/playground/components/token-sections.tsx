@@ -285,6 +285,18 @@ export function MotionSection({ theme }) {
         <code className="font-mono text-[0.75rem]">prefers-reduced-motion</code>.
       </p>
 
+      <SectionTitle>Interaction vocabulary (motion/react)</SectionTitle>
+      <p className="max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        The interactive components carry a shared vocabulary — animation is
+        felt, not seen: buttons scale to 0.97 on press (CSS, fast + ease);
+        menus and popovers scale in from 0.96 at their trigger&apos;s corner
+        (menu + out-expo) and exit quicker than they enter (exit); modals
+        fade the scrim and settle the panel from 0.96/8px at center (base +
+        out-expo, exit faster); the Tabs underline slides between tabs as a
+        shared-layout element. Keyboard focus traversal never animates. Try
+        them live in the Button / SelectMenu / Tabs / Modal sections.
+      </p>
+
       <SectionTitle>Durations &amp; easings</SectionTitle>
       <div className="flex flex-col gap-2">
         {/* Ambient loop durations (spin/typing/breathe) are demoed below. */}

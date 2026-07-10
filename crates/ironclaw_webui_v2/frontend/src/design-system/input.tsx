@@ -22,6 +22,12 @@ const INPUT_BASE =
   "placeholder:text-[var(--v2-text-faint)] " +
   "border-[var(--v2-panel-border)] " +
   "outline-none " +
+  // Hover feedback: a fast border tint (no movement — inputs never
+  // scale). The focus ring itself is NOT transitioned: focus must land
+  // instantly, especially under keyboard traversal.
+  "transition-[border-color,background-color] " +
+  "duration-[var(--v2-duration-fast)] ease-[var(--v2-ease-standard)] " +
+  "hover:not-focus:border-[color-mix(in_srgb,var(--v2-accent)_25%,var(--v2-panel-border))] " +
   "focus:border-[var(--v2-accent)] " +
   "focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_28%,transparent)] " +
   "disabled:cursor-not-allowed disabled:opacity-50";

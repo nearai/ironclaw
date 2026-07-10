@@ -18,9 +18,11 @@
  *   <ModalFooter>  — action button row with top divider
  */
 import React from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { useT } from "../lib/i18n";
 import { cn } from "../utils/cn";
 import { Icon } from "./icons";
+import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
 
 /* ─── Size ────────────────────────────────────────────────────────── */
 
@@ -43,6 +45,8 @@ export function Modal({
   closeLabel,
   children,
 }) {
+  const reducedMotion = useReducedMotion();
+
   /* Lock body scroll when open */
   React.useEffect(() => {
     if (!open) return;
@@ -63,38 +67,65 @@ export function Modal({
     return () => window.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
-  if (!open) return null;
+  /* Modal vocabulary: the scrim fades while the panel scales from 0.96
+     and settles up from an 8px offset — center-origin on purpose (modals
+     are not anchored to a trigger, unlike menus/popovers). Exit is
+     quicker than entry so dismissal feels immediate. Reduced motion
+     keeps the fades and drops the movement. AnimatePresence keeps the
+     tree mounted through the exit. */
+  const exitTransition = {
+    duration: MOTION_DURATION.exit,
+    ease: MOTION_EASE_OUT,
+  };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
-      aria-modal="true"
-      role="dialog"
-    >
-      {/* Dim layer */}
-      <div
-        className="absolute inset-0 bg-[var(--v2-scrim)] backdrop-blur-sm"
-        onClick={onClose}
-        aria-hidden="true"
-      />
+    <AnimatePresence>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
+          aria-modal="true"
+          role="dialog"
+        >
+          {/* Dim layer */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: exitTransition }}
+            transition={{ duration: MOTION_DURATION.base, ease: "easeOut" }}
+            className="absolute inset-0 bg-[var(--v2-scrim)] backdrop-blur-sm"
+            onClick={onClose}
+            aria-hidden="true"
+          />
 
-      {/* Panel */}
-      <div
-        className={cn(
-          "relative z-10 w-full",
-          "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
-          "shadow-[var(--v2-shadow-modal)]",
-          "rounded-[1.5rem]",
-          "flex flex-col max-h-[90dvh] overflow-hidden",
-          SIZES[size] ?? SIZES.md,
-          className
-        )}
-      >
-        {title
-          ? (<ModalHeader onClose={onClose} closeLabel={closeLabel}>{title}</ModalHeader>) : null}
-        {children}
-      </div>
-    </div>
+          {/* Panel */}
+          <motion.div
+            initial={
+              reducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }
+            }
+            animate={reducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
+            exit={{
+              opacity: 0,
+              ...(reducedMotion ? {} : { scale: 0.98 }),
+              transition: exitTransition,
+            }}
+            transition={{ duration: MOTION_DURATION.base, ease: MOTION_EASE_OUT }}
+            className={cn(
+              "relative z-10 w-full",
+              "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
+              "shadow-[var(--v2-shadow-modal)]",
+              "rounded-[1.5rem]",
+              "flex flex-col max-h-[90dvh] overflow-hidden",
+              SIZES[size] ?? SIZES.md,
+              className
+            )}
+          >
+            {title
+              ? (<ModalHeader onClose={onClose} closeLabel={closeLabel}>{title}</ModalHeader>) : null}
+            {children}
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
   );
 }
 
