@@ -3756,6 +3756,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "the persisted excerpt must be redacted of raw user ids",
         )
         self.assertIn(
+            "RAW_SLACK_CONVERSATION_ID_PATTERN.sub",
+            source,
+            "the persisted excerpt must be redacted of raw C…/D…/G… "
+            "conversation ids too — scanning without redacting would still "
+            "persist them",
+        )
+        self.assertIn(
             "_raw_slack_conversation_ids_in_text",
             source,
             "the digest must also fail on leaked raw C…/D…/G… conversation "
@@ -3763,6 +3770,52 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         wait_source = inspect.getsource(run_live_qa._wait_for_assistant_reply)
         self.assertIn("full_text=", wait_source)
+
+    def test_qa_9c_digest_persists_leak_counts_not_raw_ids(self):
+        # A leak verdict must not itself re-leak: the failed ProbeResult's
+        # persisted details (error message included) carry only counts and
+        # redacted excerpts, never the raw U…/C…/D…/G… identifiers.
+        scenarios = {
+            "user_id": (
+                "your DMs: U0BDC16TML3 said hi REBORN_QA_9C_DIGEST",
+                "U0BDC16TML3",
+                "leaked_raw_user_id_count",
+            ),
+            "conversation_id": (
+                "your DMs: D0BDC16TML3 has one message REBORN_QA_9C_DIGEST",
+                "D0BDC16TML3",
+                "leaked_raw_conversation_id_count",
+            ),
+        }
+        for label, (reply, raw_id, count_key) in scenarios.items():
+            with self.subTest(scenario=label):
+                async def fake_live_chat_case(_ctx, **kwargs):
+                    return run_live_qa.ProbeResult(
+                        provider="test",
+                        mode=f"live:{kwargs['case_name']}",
+                        success=True,
+                        latency_ms=1,
+                        details={
+                            "full_reply_text": reply,
+                            "text_excerpt": reply,
+                        },
+                    )
+
+                with patch.object(
+                    run_live_qa,
+                    "_live_chat_case",
+                    side_effect=fake_live_chat_case,
+                ):
+                    result = asyncio.run(
+                        run_live_qa.case_qa_9c_slack_digest_names_not_ids(
+                            self._dummy_ctx()
+                        )
+                    )
+                self.assertFalse(result.success)
+                self.assertEqual(result.details[count_key], 1)
+                persisted = json.dumps(result.details)
+                self.assertNotIn(raw_id, persisted)
+                self.assertNotIn("full_reply_text", result.details)
 
     def test_dm_counterpart_scan_paginates_to_exhaustion(self):
         import inspect
@@ -3810,6 +3863,36 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNone(
             run_live_qa.ENCODED_SLACK_MENTION_PATTERN.search(
                 "MENTION_123 ping @Benjamin Kurrek (literal, notifies nobody)"
+            )
+        )
+
+    def test_encoded_mention_targets_user_pins_the_exact_target(self):
+        # An encoded mention of the WRONG user (self-mention, unrelated id)
+        # must not satisfy the mention-encoding probe — only the counterpart
+        # the prompt named counts, in bare or labelled form.
+        self.assertTrue(
+            run_live_qa._encoded_mention_targets_user(
+                "MENTION_123 ping <@U0TARGET01>", "U0TARGET01"
+            )
+        )
+        self.assertTrue(
+            run_live_qa._encoded_mention_targets_user(
+                "MENTION_123 ping <@U0TARGET01|ben>", "U0TARGET01"
+            )
+        )
+        self.assertFalse(
+            run_live_qa._encoded_mention_targets_user(
+                "MENTION_123 ping <@U0SOMEONE9>", "U0TARGET01"
+            )
+        )
+        self.assertFalse(
+            run_live_qa._encoded_mention_targets_user(
+                "MENTION_123 ping @Target Name (literal)", "U0TARGET01"
+            )
+        )
+        self.assertFalse(
+            run_live_qa._encoded_mention_targets_user(
+                "MENTION_123 ping <@U0TARGET01>", ""
             )
         )
 
@@ -3911,6 +3994,71 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             {"status_text": "", "status_emoji": "", "status_expiration": 0},
         )
 
+    def test_qa_10b_fails_when_status_restore_fails(self):
+        # A failed users.profile.set restore leaves the canary status live on
+        # the real account: the case must go red even when the readback arm
+        # itself passed — a green must never mask an un-restored status.
+        def drive(restore_ok: bool) -> run_live_qa.ProbeResult:
+            calls: list[tuple[str, str]] = []
+
+            async def fake_set_own_status(_token, text, emoji, expiration=0):
+                calls.append((text, emoji))
+                if text:
+                    return {"ok": True}
+                if restore_ok:
+                    return {"ok": True}
+                return {"ok": False, "error": "ratelimited"}
+
+            async def fake_chat_reply(_ctx, **kwargs):
+                extra_details = kwargs["extra_details"]
+                reply = (
+                    f"Your status says: {extra_details['status_text']} "
+                    f"{kwargs['answer_marker']}"
+                )
+                return (
+                    run_live_qa.ProbeResult(
+                        provider="test",
+                        mode=f"live:{kwargs['case_name']}",
+                        success=True,
+                        latency_ms=1,
+                        details={"text_excerpt": reply},
+                    ),
+                    reply,
+                )
+
+            ctx = self._dummy_ctx()
+            ctx.env = {"AUTH_LIVE_SLACK_ACCESS_TOKEN": "xoxp-unit-test"}
+            with (
+                patch.object(
+                    run_live_qa,
+                    "_slack_set_own_status",
+                    side_effect=fake_set_own_status,
+                ),
+                patch.object(
+                    run_live_qa,
+                    "_slack_correctness_chat_reply",
+                    side_effect=fake_chat_reply,
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa.case_qa_10b_slack_ooo_status(ctx)
+                )
+            # The finally block always attempts the clear form last.
+            self.assertEqual(calls[-1], ("", ""))
+            return result
+
+        green = drive(restore_ok=True)
+        self.assertTrue(green.success)
+        self.assertTrue(green.details["status_restored"])
+
+        red = drive(restore_ok=False)
+        self.assertFalse(red.success)
+        self.assertFalse(red.details["status_restored"])
+        self.assertEqual(red.details["status_restore_error"], "ratelimited")
+        self.assertIn(
+            "canary status restore failed", str(red.details["error"])
+        )
+
     def test_slack_second_user_token_reads_optional_env_and_asserts_loudly(self):
         self.assertEqual(
             run_live_qa._slack_second_user_token(
@@ -3970,7 +4118,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 spec.requires_slack_target,
                 case_name in seeded_dm_cases,
                 f"{case_name}: requires_slack_target must mark exactly the "
-                "cases that use the seeded personal DM",
+                "cases that seed into / read from the personal↔bot DM",
             )
             self.assertIn(case_name, run_live_qa.QA_SHEET_CASES)
         self.assertEqual(
@@ -4017,6 +4165,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             run_live_qa.case_qa_10f_slack_mention_encoding: (
                 "MENTION_",
                 "ENCODED_SLACK_MENTION_PATTERN",
+                "_encoded_mention_targets_user",
+                "mention_targets_counterpart",
                 "_wait_for_authored_slack_message",
                 "author_mismatch",
             ),
@@ -4049,7 +4199,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         # token provisioned they must return a FAILED ProbeResult carrying the
         # distinct precondition message — never a vacuous pass, never an
         # exception escaping into the shard runner, and no network/playwright
-        # side effects before the precondition fires.
+        # side effects before the precondition fires. Every QA 10 entrypoint
+        # that acquires the personal token is driven (qa_10e acquires none —
+        # it is error-honesty over a guaranteed-nonexistent channel).
         blank_env = {}
         for name in (
             "AUTH_LIVE_SLACK_ACCESS_TOKEN",
@@ -4058,21 +4210,33 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             blank_env[name] = ""
             blank_env[f"{name}_PATH"] = ""
+        results: dict[str, run_live_qa.ProbeResult] = {}
         for case_fn in (
             run_live_qa.case_qa_10a_slack_self_attribution,
             run_live_qa.case_qa_10b_slack_ooo_status,
+            run_live_qa.case_qa_10c_slack_thread_replies,
+            run_live_qa.case_qa_10d_slack_channel_membership,
+            run_live_qa.case_qa_10f_slack_mention_encoding,
+            run_live_qa.case_qa_10g_slack_last_message_sent,
+            run_live_qa.case_qa_10h_slack_email_hallucination_guard,
+            run_live_qa.case_qa_10i_slack_raw_entity_hygiene,
         ):
-            with patch.dict(os.environ, blank_env, clear=False):
-                result = asyncio.run(case_fn(self._dummy_ctx()))
-            self.assertFalse(result.success, case_fn.__name__)
-            self.assertIn(
-                "probe precondition failed: Slack personal token not "
-                "provisioned (AUTH_LIVE_SLACK_ACCESS_TOKEN)",
-                str(result.details.get("error")),
-                case_fn.__name__,
-            )
+            with self.subTest(case=case_fn.__name__):
+                with patch.dict(os.environ, blank_env, clear=False):
+                    result = asyncio.run(case_fn(self._dummy_ctx()))
+                self.assertFalse(result.success, case_fn.__name__)
+                self.assertIn(
+                    "probe precondition failed: Slack personal token not "
+                    "provisioned (AUTH_LIVE_SLACK_ACCESS_TOKEN)",
+                    str(result.details.get("error")),
+                    case_fn.__name__,
+                )
+                results[case_fn.__name__] = result
         # The status probe must not report a restore it never attempted.
-        self.assertNotIn("status_restored", result.details)
+        self.assertNotIn(
+            "status_restored",
+            results["case_qa_10b_slack_ooo_status"].details,
+        )
 
     def test_qa_10_seeding_and_api_helpers_are_guarded(self):
         import inspect
@@ -4095,7 +4259,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         for precondition_helper in (
             run_live_qa._require_slack_personal_token,
             run_live_qa._require_slack_bot_token,
-            run_live_qa._require_seeded_dm_channel,
+            run_live_qa._require_slack_personal_bot_dm_channel,
             run_live_qa._require_slack_second_user_token,
             run_live_qa._seed_slack_fixture_message,
         ):
@@ -4113,6 +4277,186 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "truncated member list calls a real membership a lie",
         )
         self.assertIn("exceeded the page cap", membership_source)
+
+    def test_qa_10_seeded_cases_anchor_on_personal_bot_dm(self):
+        # Live run 29062917993: the delivery DM is the bot↔bound-webchat-user
+        # conversation, and the personal (xoxp) token's human is NOT a member
+        # of it, so every personal-token chat.postMessage/read there failed
+        # with channel_not_found. The seeded cases must anchor on the
+        # personal↔bot DM instead — never on the delivery DM.
+        import inspect
+
+        for case_fn in (
+            run_live_qa.case_qa_10a_slack_self_attribution,
+            run_live_qa.case_qa_10c_slack_thread_replies,
+            run_live_qa.case_qa_10f_slack_mention_encoding,
+            run_live_qa.case_qa_10g_slack_last_message_sent,
+            run_live_qa.case_qa_10h_slack_email_hallucination_guard,
+            run_live_qa.case_qa_10i_slack_raw_entity_hygiene,
+        ):
+            source = inspect.getsource(case_fn)
+            self.assertIn(
+                "_slack_personal_bot_dm_channel",
+                source,
+                f"{case_fn.__name__} must seed/read via the personal↔bot DM",
+            )
+            self.assertNotIn(
+                "_slack_delivery_channel_id",
+                source,
+                f"{case_fn.__name__} must not anchor on the delivery DM — "
+                "the personal token's user is not a member of it",
+            )
+
+    def test_find_im_channel_for_user_selects_exact_counterpart(self):
+        channels: list[object] = [
+            "not-a-dict",
+            {"id": "D0OTHER001", "user": "U0HUMAN001"},
+            {"user": "U0BOTUSER1"},  # no id — must be skipped
+            {"id": "D0BOTDM001", "user": "U0BOTUSER1"},
+        ]
+        self.assertEqual(
+            run_live_qa._find_im_channel_for_user(channels, "U0BOTUSER1"),
+            "D0BOTDM001",
+        )
+        self.assertIsNone(
+            run_live_qa._find_im_channel_for_user(channels, "U0NOWHERE1")
+        )
+        self.assertIsNone(run_live_qa._find_im_channel_for_user(channels, ""))
+        self.assertIsNone(run_live_qa._find_im_channel_for_user([], "U0BOTUSER1"))
+
+    def test_slack_personal_bot_dm_channel_resolves_from_im_scan_and_caches(self):
+        env = {
+            "AUTH_LIVE_SLACK_ACCESS_TOKEN": "xoxp-personal",
+            "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot",
+        }
+
+        async def fake_auth_identity(token):
+            self.assertEqual(token, "xoxb-bot", "bot user id comes from the BOT token")
+            return {"ok": True, "user_id": "U0BOTUSER1"}
+
+        pages = [
+            {
+                "ok": True,
+                "channels": [{"id": "D0OTHER001", "user": "U0HUMAN001"}],
+                "response_metadata": {"next_cursor": "cur2"},
+            },
+            {
+                "ok": True,
+                "channels": [{"id": "D0BOTDM001", "user": "U0BOTUSER1"}],
+            },
+        ]
+        get_calls: list[dict[str, str]] = []
+
+        async def fake_api_get(token, method, params=None):
+            self.assertEqual(token, "xoxp-personal", "the im scan runs as the personal user")
+            self.assertEqual(method, "conversations.list")
+            self.assertEqual((params or {}).get("types"), "im")
+            get_calls.append(dict(params or {}))
+            return pages[len(get_calls) - 1]
+
+        async def forbidden_api_post(_token, _method, _payload):
+            raise AssertionError(
+                "conversations.open must not run when the im scan finds the DM"
+            )
+
+        ctx = self._dummy_ctx()
+        ctx.env = env
+        with (
+            patch.object(
+                run_live_qa, "_slack_auth_identity", side_effect=fake_auth_identity
+            ),
+            patch.object(run_live_qa, "_slack_api_get", side_effect=fake_api_get),
+            patch.object(
+                run_live_qa, "_slack_api_post", side_effect=forbidden_api_post
+            ),
+        ):
+            resolved = asyncio.run(run_live_qa._slack_personal_bot_dm_channel(ctx))
+            self.assertEqual(
+                resolved,
+                {
+                    "ok": True,
+                    "channel_id": "D0BOTDM001",
+                    "bot_user_id": "U0BOTUSER1",
+                    "opened": False,
+                },
+            )
+            self.assertEqual(
+                get_calls[1].get("cursor"),
+                "cur2",
+                "the im scan must follow next_cursor — one page can hide the bot DM",
+            )
+            channel_id = asyncio.run(
+                run_live_qa._require_slack_personal_bot_dm_channel(ctx)
+            )
+        self.assertEqual(channel_id, "D0BOTDM001")
+        self.assertEqual(
+            len(get_calls),
+            2,
+            "a successful resolution is cached on ctx — the require call "
+            "must not re-hit the API",
+        )
+
+    def test_slack_personal_bot_dm_channel_open_fallback_and_failure(self):
+        env = {
+            "AUTH_LIVE_SLACK_ACCESS_TOKEN": "xoxp-personal",
+            "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot",
+        }
+
+        async def fake_auth_identity(_token):
+            return {"ok": True, "user_id": "U0BOTUSER1"}
+
+        async def fake_api_get(_token, _method, _params=None):
+            # No im with the bot anywhere in the (single-page) scan.
+            return {
+                "ok": True,
+                "channels": [{"id": "D0OTHER001", "user": "U0HUMAN001"}],
+            }
+
+        open_response: dict[str, object] = {
+            "ok": True,
+            "channel": {"id": "D0OPENED01"},
+        }
+
+        async def fake_api_post(token, method, payload):
+            self.assertEqual(token, "xoxp-personal")
+            self.assertEqual(method, "conversations.open")
+            self.assertEqual(payload, {"users": "U0BOTUSER1"})
+            return dict(open_response)
+
+        patches = (
+            patch.object(
+                run_live_qa, "_slack_auth_identity", side_effect=fake_auth_identity
+            ),
+            patch.object(run_live_qa, "_slack_api_get", side_effect=fake_api_get),
+            patch.object(run_live_qa, "_slack_api_post", side_effect=fake_api_post),
+        )
+        ctx = self._dummy_ctx()
+        ctx.env = env
+        with patches[0], patches[1], patches[2]:
+            resolved = asyncio.run(run_live_qa._slack_personal_bot_dm_channel(ctx))
+            self.assertEqual(resolved["ok"], True)
+            self.assertEqual(resolved["channel_id"], "D0OPENED01")
+            self.assertTrue(resolved["opened"])
+
+            # A rejected open (e.g. personal token without im:write) must come
+            # back as {"ok": False, …} — and the require wrapper must raise
+            # the distinct precondition failure, never a vacuous pass.
+            open_response.clear()
+            open_response.update({"ok": False, "error": "missing_scope"})
+            fresh_ctx = self._dummy_ctx()
+            fresh_ctx.env = env
+            failed = asyncio.run(
+                run_live_qa._slack_personal_bot_dm_channel(fresh_ctx)
+            )
+            self.assertEqual(failed, {"ok": False, "error": "missing_scope"})
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"probe precondition failed: could not resolve the "
+                r"personal↔bot DM: missing_scope",
+            ):
+                asyncio.run(
+                    run_live_qa._require_slack_personal_bot_dm_channel(fresh_ctx)
+                )
 
     def test_routine_confirmation_follow_up_respects_timezone_instruction(self):
         text = "I can create that routine — should I go ahead?"

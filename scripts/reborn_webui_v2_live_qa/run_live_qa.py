@@ -4721,6 +4721,21 @@ def _raw_slack_conversation_ids_in_text(text: str) -> list[str]:
 ENCODED_SLACK_MENTION_PATTERN = re.compile(r"<@U[A-Z0-9]+(?:\|[^>]*)?>")
 
 
+def _encoded_mention_targets_user(text: str, user_id: str) -> bool:
+    """True when ``text`` carries an encoded mention of exactly ``user_id``
+    (label suffix allowed).
+
+    Any-mention matching would let a self-mention or an unrelated <@U…> pass
+    the mention-encoding probe while the person the prompt named is never
+    notified — the target must be pinned, not just the markup shape.
+    """
+    if not user_id:
+        return False
+    return bool(
+        re.search(rf"<@{re.escape(user_id)}(?:\|[^>]*)?>", text or "")
+    )
+
+
 EMAIL_ADDRESS_PATTERN = re.compile(
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 )
@@ -4851,7 +4866,11 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
             "C_REDACTED",
             RAW_SLACK_USER_ID_PATTERN.sub("U_REDACTED", excerpt),
         )
+    # Persist leak COUNTS only: echoing the leaked identifiers into the
+    # artifact JSON would re-leak the very values this probe exists to keep
+    # out of persisted artifacts (the redacted excerpt would be moot).
     leaked_ids = _raw_slack_user_ids_in_text(reply_text)
+    result.details["leaked_raw_user_id_count"] = len(set(leaked_ids))
     if leaked_ids:
         return _result(
             case_name,
@@ -4860,17 +4879,18 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
             {
                 **result.details,
                 "error": (
-                    "digest leaked raw Slack user ids instead of display names: "
-                    f"{sorted(set(leaked_ids))}"
+                    f"digest leaked {len(set(leaked_ids))} raw Slack user "
+                    "id(s) instead of display names"
                 ),
-                "leaked_raw_user_ids": sorted(set(leaked_ids)),
             },
         )
-    result.details["leaked_raw_user_ids"] = []
     # Channel-ID arm (companion to qa_10i): a digest that surfaces raw C…/D…/G…
     # conversation ids instead of conversation names has the same raw-entity
     # hygiene failure as raw user ids.
     leaked_conversation_ids = _raw_slack_conversation_ids_in_text(reply_text)
+    result.details["leaked_raw_conversation_id_count"] = len(
+        set(leaked_conversation_ids)
+    )
     if leaked_conversation_ids:
         return _result(
             case_name,
@@ -4879,13 +4899,11 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
             {
                 **result.details,
                 "error": (
-                    "digest leaked raw Slack conversation ids instead of names: "
-                    f"{sorted(set(leaked_conversation_ids))}"
+                    f"digest leaked {len(set(leaked_conversation_ids))} raw "
+                    "Slack conversation id(s) instead of names"
                 ),
-                "leaked_raw_conversation_ids": sorted(set(leaked_conversation_ids)),
             },
         )
-    result.details["leaked_raw_conversation_ids"] = []
     # Positive arm: the digest must actually NAME someone. Ground truth comes
     # from the Slack API with the personal token, so a cop-out answer ("you
     # have no DMs") cannot pass vacuously when human DM history exists.
@@ -4973,6 +4991,13 @@ async def case_qa_9d_routine_per_trigger_delivery_target(ctx: LiveQaContext) -> 
 # seeded message), asserts its preconditions INSIDE the case try with distinct
 # "probe precondition failed: …" messages, and judges the FULL reply text —
 # no fuzzy heuristics, no vacuous passes, no shard crashes.
+#
+# Seeded cases anchor on the PERSONAL↔BOT DM
+# (_slack_personal_bot_dm_channel), never on the delivery DM
+# (_slack_delivery_channel_id): the delivery DM pairs the bot with the bound
+# webchat user, a DIFFERENT human than the personal (xoxp) token's owner, so
+# personal-token seeding/reading there fails channel_not_found (live run
+# 29062917993).
 
 
 async def _slack_api_get(
@@ -5222,7 +5247,8 @@ async def _slack_dm_counterpart(token: str, channel_id: str) -> dict[str, object
     Uses auth.test + conversations.members rather than the im object's
     perspective-dependent ``user`` field, and rather than
     ``_slack_personal_dm_counterpart_names`` (which deliberately filters out
-    bot users — the seeded delivery DM's counterpart IS the app's bot user).
+    bot users — the seeded personal↔bot DM's counterpart IS the app's bot
+    user).
     """
     identity = await _slack_auth_identity(token)
     if not identity.get("ok"):
@@ -5280,14 +5306,144 @@ def _require_slack_bot_token(ctx: LiveQaContext) -> str:
     return token
 
 
-def _require_seeded_dm_channel(ctx: LiveQaContext) -> str:
-    channel_id = _slack_delivery_channel_id(ctx)
-    if not channel_id:
-        raise AssertionError(
-            "probe precondition failed: seeded Slack DM channel could not be "
-            "resolved from preflight/preferences"
+def _find_im_channel_for_user(channels: list[object], user_id: str) -> str | None:
+    """The im channel whose counterpart is exactly ``user_id`` from a
+    conversations.list types=im page (pure selection logic)."""
+    if not user_id:
+        return None
+    for channel in channels:
+        if not isinstance(channel, dict):
+            continue
+        if str(channel.get("user") or "") != user_id:
+            continue
+        channel_id = str(channel.get("id") or "")
+        if channel_id:
+            return channel_id
+    return None
+
+
+async def _slack_personal_bot_dm_channel(ctx: LiveQaContext) -> dict[str, object]:
+    """Resolve the DM between the PERSONAL token's user and the app bot —
+    the seeding/read anchor for every seeded QA 10 case.
+
+    ``_slack_delivery_channel_id`` is the bot↔bound-webchat-user DM; the
+    personal (xoxp) token's human is a DIFFERENT user who is not a member of
+    that conversation, so personal-token chat.postMessage/history there fails
+    channel_not_found (live run 29062917993). Resolution: (1) bot user id via
+    bot-token auth.test, (2) personal-token conversations.list types=im scan
+    (guarded pagination, same shape as
+    ``_slack_personal_dm_counterpart_names``), (3) personal-token
+    conversations.open fallback. Guarded like every probe API arm: failures
+    come back as ``{"ok": False, "error": …}``, never raised. A successful
+    resolution is cached on ``ctx`` — every case in a run anchors on the same
+    DM.
+    """
+    cached = getattr(ctx, "_personal_bot_dm_cache", None)
+    if isinstance(cached, dict) and cached.get("ok"):
+        return cached
+    resolved = await _resolve_slack_personal_bot_dm_channel(ctx)
+    if resolved.get("ok"):
+        ctx._personal_bot_dm_cache = resolved
+    return resolved
+
+
+async def _resolve_slack_personal_bot_dm_channel(
+    ctx: LiveQaContext,
+) -> dict[str, object]:
+    personal_token = _slack_personal_token(ctx.env)
+    if not personal_token:
+        return {
+            "ok": False,
+            "error": (
+                "Slack personal token not provisioned "
+                f"({SLACK_PERSONAL_ACCESS_TOKEN_ENV})"
+            ),
+        }
+    bot_token = _slack_bot_token(ctx.env)
+    if not bot_token:
+        return {
+            "ok": False,
+            "error": f"Slack bot token not provisioned ({SLACK_BOT_TOKEN_ENV})",
+        }
+    bot_identity = await _slack_auth_identity(bot_token)
+    if not bot_identity.get("ok"):
+        return {
+            "ok": False,
+            "error": f"bot auth.test failed: {bot_identity.get('error')}",
+        }
+    bot_user_id = str(bot_identity.get("user_id") or "")
+    if not bot_user_id:
+        return {"ok": False, "error": "bot auth.test returned no user_id"}
+    cursor = ""
+    for _ in range(10):
+        params: dict[str, str] = {"types": "im", "limit": "200"}
+        if cursor:
+            params["cursor"] = cursor
+        payload = await _slack_api_get(
+            personal_token, "conversations.list", params
         )
-    return channel_id
+        if not payload.get("ok"):
+            return {
+                "ok": False,
+                "error": str(
+                    payload.get("error") or "slack_conversations_list_failed"
+                ),
+            }
+        channels = payload.get("channels")
+        channel_id = _find_im_channel_for_user(
+            channels if isinstance(channels, list) else [], bot_user_id
+        )
+        if channel_id:
+            return {
+                "ok": True,
+                "channel_id": channel_id,
+                "bot_user_id": bot_user_id,
+                "opened": False,
+            }
+        cursor = str(
+            (payload.get("response_metadata") or {}).get("next_cursor") or ""
+        ).strip()
+        if not cursor:
+            break
+    else:
+        return {
+            "ok": False,
+            "error": "conversations.list pagination exceeded the page cap",
+        }
+    # No existing im with the bot: open one. Fails cleanly (e.g. a token
+    # without im:write) instead of raising.
+    opened = await _slack_api_post(
+        personal_token, "conversations.open", {"users": bot_user_id}
+    )
+    if not opened.get("ok"):
+        return {
+            "ok": False,
+            "error": str(opened.get("error") or "slack_conversations_open_failed"),
+        }
+    channel = opened.get("channel")
+    opened_channel_id = (
+        str(channel.get("id") or "") if isinstance(channel, dict) else ""
+    )
+    if not opened_channel_id:
+        return {"ok": False, "error": "conversations.open returned no channel id"}
+    return {
+        "ok": True,
+        "channel_id": opened_channel_id,
+        "bot_user_id": bot_user_id,
+        "opened": True,
+    }
+
+
+async def _require_slack_personal_bot_dm_channel(ctx: LiveQaContext) -> str:
+    """The personal↔bot DM channel id, or the distinct precondition failure
+    every seeded QA 10 case must fail red with."""
+    resolved = await _slack_personal_bot_dm_channel(ctx)
+    if not resolved.get("ok"):
+        raise AssertionError(
+            "probe precondition failed: could not resolve the personal↔bot "
+            f"DM: {resolved.get('error')}"
+        )
+    return str(resolved.get("channel_id") or "")
 
 
 def _require_slack_second_user_token(ctx: LiveQaContext) -> str:
@@ -5455,7 +5611,7 @@ async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
     try:
         personal_token = _require_slack_personal_token(ctx)
         bot_token = _require_slack_bot_token(ctx)
-        channel_id = _require_seeded_dm_channel(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
         for marker_text in self_markers:
             await _seed_slack_fixture_message(
                 personal_token,
@@ -5582,7 +5738,15 @@ async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
             restore = await _slack_set_own_status(personal_token, "", "")
             details["status_restored"] = bool(restore.get("ok"))
             if not restore.get("ok"):
-                details["status_restore_error"] = str(restore.get("error") or "")
+                restore_error = str(restore.get("error") or "")
+                details["status_restore_error"] = restore_error
+                # A failed restore leaves the canary status live on the real
+                # account — a green verdict must never mask that.
+                success = False
+                details.setdefault(
+                    "error",
+                    f"canary status restore failed: {restore_error}",
+                )
     return _result(case_name, success, started, details)
 
 
@@ -5616,7 +5780,7 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
     try:
         personal_token = _require_slack_personal_token(ctx)
         bot_token = _require_slack_bot_token(ctx)
-        channel_id = _require_seeded_dm_channel(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
         root_ts = await _seed_slack_fixture_message(
             personal_token,
             channel_id,
@@ -5841,7 +6005,7 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
     details: dict[str, object] = {"mention_marker": mention_marker}
     try:
         personal_token = _require_slack_personal_token(ctx)
-        channel_id = _require_seeded_dm_channel(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
         counterpart = await _slack_dm_counterpart(personal_token, channel_id)
         if not counterpart.get("ok"):
             raise AssertionError(
@@ -5850,6 +6014,7 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             )
         display_name = str(counterpart.get("display_name") or "")
         own_user_id = str(counterpart.get("own_user_id") or "")
+        target_user_id = str(counterpart.get("user_id") or "")
         details["counterpart_display_name"] = display_name
         chat, reply_text = await _slack_correctness_chat_reply(
             ctx,
@@ -5906,6 +6071,21 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
                 "posted mention is NOT <@U…>-encoded in the raw message text "
                 "— a literal @-name notifies nobody"
             )
+        # Encoded is not enough: the mention must target the counterpart the
+        # prompt named — a self-mention or an unrelated <@U…> notifies the
+        # wrong person and must fail.
+        targets_counterpart = _encoded_mention_targets_user(
+            raw_text, target_user_id
+        )
+        details["mention_targets_counterpart"] = targets_counterpart
+        if not targets_counterpart:
+            details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
+                "U_REDACTED", raw_text
+            )
+            raise AssertionError(
+                "posted mention is encoded but does not target the requested "
+                "counterpart — the person the prompt named is never notified"
+            )
         return _result(case_name, True, started, details)
     except Exception as exc:
         return _result(
@@ -5933,7 +6113,7 @@ async def case_qa_10g_slack_last_message_sent(ctx: LiveQaContext) -> ProbeResult
     details: dict[str, object] = {"last_sent_marker": last_sent_marker}
     try:
         personal_token = _require_slack_personal_token(ctx)
-        channel_id = _require_seeded_dm_channel(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
         await _seed_slack_fixture_message(
             personal_token,
             channel_id,
@@ -5987,7 +6167,7 @@ async def case_qa_10h_slack_email_hallucination_guard(
     details: dict[str, object] = {}
     try:
         personal_token = _require_slack_personal_token(ctx)
-        channel_id = _require_seeded_dm_channel(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
         counterpart = await _slack_dm_counterpart(personal_token, channel_id)
         if not counterpart.get("ok"):
             raise AssertionError(
@@ -6056,7 +6236,7 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
     try:
         personal_token = _require_slack_personal_token(ctx)
         bot_token = _require_slack_bot_token(ctx)
-        channel_id = _require_seeded_dm_channel(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
         identity = await _slack_auth_identity(personal_token)
         if not identity.get("ok"):
             raise AssertionError(
@@ -6113,11 +6293,13 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
                 "user-facing text"
             )
         leaked_ids = _raw_slack_user_ids_in_text(reply_text)
-        details["leaked_raw_user_ids"] = sorted(set(leaked_ids))
+        # Count only: persisting the leaked ids would re-leak them into the
+        # artifact JSON (same rule as the qa_9c digest arms).
+        details["leaked_raw_user_id_count"] = len(set(leaked_ids))
         if leaked_ids:
             raise AssertionError(
-                "reply leaked raw Slack user ids instead of a display name: "
-                f"{sorted(set(leaked_ids))}"
+                f"reply leaked {len(set(leaked_ids))} raw Slack user id(s) "
+                "instead of a display name"
             )
         if not _name_token_in_text(reply_text, display_name):
             raise AssertionError(
@@ -6338,8 +6520,10 @@ CASES: dict[str, CaseSpec] = {
     # pre-fix hosts (self-identity, status fields, thread replies, membership
     # view, structured errors, mention encoding, entity rendering), so all
     # stay default_enabled=False / dispatch_only until their fixes merge.
-    # requires_slack_target marks the cases that seed into / read from the
-    # personal-DM delivery target.
+    # requires_slack_target marks the cases that seed into / read from a
+    # Slack DM (it keeps the prepared home's DM route provisioning on); their
+    # seeding/read anchor is the personal↔bot DM
+    # (_slack_personal_bot_dm_channel), NOT the delivery DM.
     "qa_10a_slack_self_attribution": CaseSpec(
         case_qa_10a_slack_self_attribution,
         requires_slack=True,
