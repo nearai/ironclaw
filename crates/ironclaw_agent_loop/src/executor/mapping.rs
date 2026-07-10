@@ -261,14 +261,6 @@ fn sanitized_failure_category(
     })
 }
 
-pub(super) fn sanitized_strategy_summary(
-    summary: String,
-) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
-    SanitizedStrategySummary::new(summary).map_err(|_| AgentLoopExecutorError::PlannerContract {
-        detail: "host returned unsafe strategy summary",
-    })
-}
-
 /// Sanitize a strategy summary, failing soft: a summary that fails strict
 /// validation degrades to a fixed fallback instead of aborting the run, and the
 /// secret-value-scrubbed raw cause is returned alongside so the caller can carry

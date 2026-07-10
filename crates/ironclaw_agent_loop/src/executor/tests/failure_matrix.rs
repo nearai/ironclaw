@@ -36,6 +36,7 @@ enum FailureSetup {
     NoProgressDetected,
     PolicyDenied,
     CapabilityPolicyDeniedRecoverable,
+    CapabilityAuthorizationRecoverable,
     CompactionUnavailable,
     TranscriptWriteFailed,
     CheckpointRejected,
@@ -177,6 +178,19 @@ const ROWS: &[MatrixRow] = &[
         expects_explanation: false,
     },
     MatrixRow {
+        label: "PolicyDenied <- capability Failed(Authorization)",
+        setup: FailureSetup::CapabilityAuthorizationRecoverable,
+        // Regression: the auto-built card-summary prefix ("capability failed
+        // with authorization: ") used to trip the summary validator's own
+        // "authorization:" marker ban and terminally bork the run before
+        // handle_capability_error could fire. A 401/expired-scope tool failure
+        // is model-recoverable and must stay that way.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::PolicyDenied,
+        },
+        expects_explanation: false,
+    },
+    MatrixRow {
         label: "CompactionUnavailable <- compaction port returns Err",
         setup: FailureSetup::CompactionUnavailable,
         expected_kind: ExpectedTerminal::Failed {
@@ -249,9 +263,10 @@ matrix_row_test!(matrix_driver_bug_approval_skip_diverges, 6);
 matrix_row_test!(matrix_no_progress_detected, 7);
 matrix_row_test!(matrix_policy_denied_outcome_diverges, 8);
 matrix_row_test!(matrix_capability_policy_denied_recovers, 9);
-matrix_row_test!(matrix_compaction_unavailable, 10);
-matrix_row_test!(matrix_transcript_write_failed, 11);
-matrix_row_test!(matrix_checkpoint_rejected, 12);
+matrix_row_test!(matrix_capability_authorization_recovers, 10);
+matrix_row_test!(matrix_compaction_unavailable, 11);
+matrix_row_test!(matrix_transcript_write_failed, 12);
+matrix_row_test!(matrix_checkpoint_rejected, 13);
 
 async fn run_matrix_row(row: &MatrixRow) {
     let observed = run_setup(row.setup).await;
@@ -381,6 +396,17 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .with_batch_outcomes(vec![batch_outcome(failed_capability(
                 CapabilityFailureKind::PolicyDenied,
                 "capability policy denied",
+            ))]);
+            run_local(crate::families::default(), host, None).await
+        }
+        FailureSetup::CapabilityAuthorizationRecoverable => {
+            let host = MockHost::new(vec![
+                calls_response(),
+                reply_response_with_text("completed after authorization failure"),
+            ])
+            .with_batch_outcomes(vec![batch_outcome(failed_capability(
+                CapabilityFailureKind::Authorization,
+                "the provider token has expired",
             ))]);
             run_local(crate::families::default(), host, None).await
         }

@@ -3352,9 +3352,14 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
 }
 
 #[tokio::test]
-async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result() {
+async fn spawned_child_run_degrades_unsafe_safe_summary_without_borking() {
+    // Regression: a spawned-child summary is a raw host string; one carrying a
+    // path used to end the whole run with a terminal PlannerContract error
+    // before the result was appended. It must instead degrade the label to the
+    // fixed fallback, append the result, and let the run complete — with the
+    // raw path never reaching the transcript label.
     let result_ref = LoopResultRef::new("result:spawned-child").expect("valid");
-    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+    let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::SpawnedChildRun {
                 child_run_id: TurnRunId::new(),
@@ -3368,18 +3373,16 @@ async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result(
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let error = executor
+    let exit = executor
         .execute_family(&crate::families::default(), &host, state)
         .await
-        .unwrap_err();
+        .expect("unsafe spawned-child summary must degrade, not end the run");
 
-    assert_eq!(
-        error,
-        AgentLoopExecutorError::PlannerContract {
-            detail: "host returned unsafe strategy summary"
-        }
-    );
-    assert!(host.appended_result_refs().is_empty());
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].safe_summary, "spawned a child run");
+    assert!(!appended[0].safe_summary.contains("id_rsa"));
 }
 
 #[tokio::test]
