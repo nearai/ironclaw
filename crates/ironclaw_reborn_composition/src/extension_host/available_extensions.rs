@@ -152,7 +152,7 @@ impl HostManagedCredentialExtension {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
     pub(crate) path: String,
     pub(crate) content: AvailableExtensionAssetContent,
@@ -162,12 +162,17 @@ pub(crate) struct AvailableExtensionAsset {
 /// remove -> reinstall re-materializes from the entry alone (a `Filesystem`
 /// path-pointer variant existed before that invariant and dangled after
 /// `remove` deleted the extension dir).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug)]
+/// Cloneable so an owner-registered package resolved from
+/// [`crate::extension_host::registered_extension_store`] (freshly loaded from
+/// disk, never borrowed from the shared first-party catalog) and a
+/// first-party catalog hit can flow through the same owned
+/// `AvailableExtensionPackage` return type in `resolve_with_owner_overlay_for_scope`.
+#[derive(Debug, Clone)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
@@ -456,7 +461,7 @@ impl AvailableExtensionCatalog {
         F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root).await?,
+            load_filesystem_packages(fs, root, ManifestSource::InstalledLocal).await?,
         ))
     }
 
@@ -487,7 +492,10 @@ impl AvailableExtensionCatalog {
     }
 }
 
-fn package_matches_search(package: &AvailableExtensionPackage, normalized_query: &str) -> bool {
+pub(crate) fn package_matches_search(
+    package: &AvailableExtensionPackage,
+    normalized_query: &str,
+) -> bool {
     normalized_query.is_empty()
         || package_search_terms(package)
             .iter()
@@ -1607,9 +1615,22 @@ pub(crate) fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     }
 }
 
-async fn load_filesystem_packages<F>(
+/// Load extension packages from every immediate child directory of `root`
+/// that has a `manifest.toml`, tagging each with `source`. Reused for both
+/// the shared first-party catalog root (`/system/extensions`, `source =
+/// InstalledLocal`) and an owner's registered-extension subtree
+/// (`/system/extensions/registered/<tenant>/<owner>`, `source =
+/// UserRegistered`) — see
+/// [`crate::extension_host::registered_extension_store`]. The resulting
+/// package's `root` is always the canonical `/system/extensions/<id>` path
+/// (see [`canonical_extension_root`]), never `root` itself, so a package
+/// loaded from a nested owner subtree still satisfies `ExtensionPackage`'s
+/// own root/id matching invariant. Asset bytes are still read from the real
+/// `entry.path` location.
+pub(crate) async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
+    source: ManifestSource,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -1649,7 +1670,16 @@ where
         if reserved_host_bundled_extension_id(&extension_id) {
             continue;
         }
-        match load_filesystem_package(fs, entry, &host_ports, &contracts).await {
+        match load_filesystem_package(
+            fs,
+            entry,
+            extension_id.clone(),
+            source.clone(),
+            &host_ports,
+            &contracts,
+        )
+        .await
+        {
             Ok(Some(package)) => packages.push(package),
             Ok(None) => {}
             // Per-entry validation failure is fail-open: a stale materialized
@@ -1675,6 +1705,8 @@ where
 async fn load_filesystem_package<F>(
     fs: &F,
     entry: DirEntry,
+    extension_id: ExtensionId,
+    source: ManifestSource,
     host_ports: &HostPortCatalog,
     contracts: &HostApiContractRegistry,
 ) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>
@@ -1704,7 +1736,7 @@ where
     })?;
     let record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
-        ManifestSource::InstalledLocal,
+        source.clone(),
         host_ports,
         None,
         contracts,
@@ -1716,8 +1748,6 @@ where
         .clone()
         .try_into()
         .map_err(map_binding_error)?;
-    let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
-        .map_err(map_binding_error)?;
     // Catalog EVERY file in the extension dir as inline bytes, exactly
     // like a fresh import. Assets stored as `Filesystem(path)` pointers
     // into the extension's own materialized dir dangle after `remove`
@@ -1725,28 +1755,47 @@ where
     // remove -> available -> reinstall flow with
     // "failed to read available extension asset"; and cataloging only
     // manifest + wasm module would lose schemas/prompt docs on reinstall.
-    let assets = inline_extension_dir_assets(fs, &package.root).await?;
+    let assets = inline_extension_dir_assets(fs, &entry.path).await?;
+    let package_root = canonical_extension_root(&extension_id)?;
+    let package = ExtensionPackage::from_manifest_toml(manifest, package_root, record.raw_toml())
+        .map_err(map_binding_error)?;
     Ok(Some(AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
-        // Everything discovered on the filesystem is `InstalledLocal`, per
-        // the `ManifestSource` contract ("Locally installed extension under
-        // `/system/extensions/`"). `HostBundled` — the only tier eligible
-        // for first-party/system trust — is reserved for extensions
-        // compiled into the host binary (`from_first_party_assets`), whose
-        // reserved ids the scan skips above. Uploaded tool bundles
-        // materialize under this root, so stamping discovery `HostBundled`
+        // Carries the `source` this loader call was asked to tag: the
+        // shared first-party catalog root stamps `InstalledLocal` (see
+        // the `ManifestSource` contract — "Locally installed extension
+        // under `/system/extensions/`"; `HostBundled` is reserved for
+        // extensions compiled into the host binary and never reaches
+        // this loader), and an owner's registered-extension subtree
+        // stamps `UserRegistered`. Uploaded tool bundles materialize
+        // under the shared root, so stamping discovery `HostBundled`
         // would let a process restart launder an untrusted upload into
         // first-party trust (#5459 review: import → restart → install).
-        source: ManifestSource::InstalledLocal,
+        source,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
         assets,
     }))
+}
+
+/// The canonical `/system/extensions/<id>` root every `ExtensionPackage` must
+/// carry (`ensure_extension_root_matches` in `ironclaw_extensions` requires
+/// it). Used both for the shared first-party catalog (where it is also the
+/// package's real on-disk location) and, via [`load_filesystem_packages`],
+/// for packages loaded from a nested owner-scoped subtree — those are never
+/// materialized under this synthetic root (the registered store never writes
+/// into `/system/extensions/<id>/` directly), so the mismatch between this
+/// synthetic root and the real read location is inert.
+pub(crate) fn canonical_extension_root(
+    extension_id: &ExtensionId,
+) -> Result<VirtualPath, ProductWorkflowError> {
+    VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
+        .map_err(map_binding_error)
 }
 
 pub(crate) fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
