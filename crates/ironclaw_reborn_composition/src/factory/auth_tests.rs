@@ -750,7 +750,7 @@ fn in_memory_product_auth_ports() -> RebornProductAuthServicePorts {
     RebornProductAuthServicePorts::from_shared(Arc::new(InMemoryAuthProductServices::new()))
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(all(test, feature = "libsql"))]
 async fn submit_and_block_provider_auth_run(
     turn_coordinator: &dyn TurnCoordinator,
     transition: &dyn TurnRunTransitionPort,
