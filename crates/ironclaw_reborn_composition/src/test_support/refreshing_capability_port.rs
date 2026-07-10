@@ -31,8 +31,15 @@ pub struct RefreshingLocalDevCapabilityPortTestParts {
     pub input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
     pub result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
     pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
+    /// Opaque handle built by
+    /// `test_support::build_local_dev_skill_context_source_for_test`. Wraps
+    /// the crate-private `LocalDevSelectableSkillContextSource` so it never
+    /// appears in this (public, `test-support`-gated) struct's field types;
+    /// the private type is recovered internally via
+    /// `SkillActivationTestSource::activation_source` when forwarding to the
+    /// production factory.
     pub skill_activation_source:
-        Option<std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource>>,
+        Option<std::sync::Arc<crate::test_support::SkillActivationTestSource>>,
     pub project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
     pub outbound_preferences_facade:

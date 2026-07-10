@@ -157,7 +157,6 @@ impl RefreshingLocalDevCapabilityPort {
                 system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
                 policy: &self.policy,
                 extension_surface: &extension_surface,
-                additional_provider_trust: &self.additional_provider_trust,
             },
         )?;
         // Test-support-only narrowing (empty in production, see the config
@@ -169,6 +168,15 @@ impl RefreshingLocalDevCapabilityPort {
                 .grants
                 .grants
                 .retain(|grant| self.capability_id_filter.contains(&grant.capability));
+        }
+        // Test-support-only extra provider-trust entries (empty in production,
+        // see the config field doc-comment): merge after the canonical helper
+        // has built the base provider-trust map, so the production helper
+        // stays byte-identical to the pre-seam version.
+        if !self.additional_provider_trust.is_empty() {
+            visible_request
+                .provider_trust
+                .extend(self.additional_provider_trust.clone());
         }
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
@@ -410,6 +418,10 @@ pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
             persistent_approval_policies,
         ),
     );
+    // Recover the crate-private `LocalDevSelectableSkillContextSource` from
+    // the opaque `SkillActivationTestSource` handle the harness passed in
+    // (see the field's doc-comment on `RefreshingLocalDevCapabilityPortTestParts`).
+    let skill_activation_source = skill_activation_source.map(|handle| handle.activation_source());
 
     create_refreshing_local_dev_capability_port(RefreshingLocalDevCapabilityPortConfig {
         runtime,

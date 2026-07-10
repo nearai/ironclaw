@@ -21,8 +21,9 @@ use ironclaw_approvals::{
 };
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode,
-    ProjectId, ProviderToolName, ResourceEstimate, RuntimeKind, TenantId, ThreadId, UserId,
+    AgentId, CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant,
+    MountPermissions, MountView, PermissionMode, ProjectId, ProviderToolName, ResourceEstimate,
+    RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_host_runtime::{
@@ -44,7 +45,8 @@ use ironclaw_product_workflow::{
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 use ironclaw_reborn_composition::test_support::{
-    RefreshingLocalDevCapabilityPortTestParts, create_refreshing_local_dev_capability_port_for_test,
+    PROJECT_CREATE_CAPABILITY_ID, RefreshingLocalDevCapabilityPortTestParts,
+    create_refreshing_local_dev_capability_port_for_test,
 };
 use ironclaw_run_state::InMemoryApprovalRequestStore;
 use ironclaw_turns::run_profile::{
@@ -57,17 +59,57 @@ use ironclaw_turns::{RunProfileResolver, TurnId, TurnRunId, TurnScope};
 /// Echoes a runtime-visible capability for every grant in the request's
 /// context, so `capability_id_filter` narrowing (applied upstream of this
 /// stub, in `build_inner`) is directly observable in `tool_definitions()`.
-struct StubHostRuntime;
+/// Also records the `ExecutionContext` of every `invoke_capability` call and
+/// the `provider_trust` map of every `visible_capabilities` call, so tests
+/// can observe what `build_inner` actually resolved and handed to the host
+/// runtime (mount overrides, extra provider trust) rather than just that the
+/// port assembled.
+struct StubHostRuntime {
+    invocation_contexts: StdMutex<Vec<ironclaw_host_api::ExecutionContext>>,
+    visible_provider_trust: StdMutex<Vec<BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>>>,
+}
+
+impl StubHostRuntime {
+    fn new() -> Self {
+        Self {
+            invocation_contexts: StdMutex::new(Vec::new()),
+            visible_provider_trust: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn invocation_contexts(&self) -> Vec<ironclaw_host_api::ExecutionContext> {
+        self.invocation_contexts
+            .lock()
+            .expect("invocation contexts lock")
+            .clone()
+    }
+
+    fn visible_provider_trust(&self) -> Vec<BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>> {
+        self.visible_provider_trust
+            .lock()
+            .expect("visible provider trust lock")
+            .clone()
+    }
+}
 
 #[async_trait]
 impl HostRuntime for StubHostRuntime {
     async fn invoke_capability(
         &self,
-        _request: RuntimeCapabilityRequest,
+        request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        Err(HostRuntimeError::unavailable(
-            "stub host runtime does not execute capabilities",
-        ))
+        self.invocation_contexts
+            .lock()
+            .expect("invocation contexts lock")
+            .push(request.context.clone());
+        Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+            ironclaw_host_runtime::RuntimeCapabilityCompleted {
+                capability_id: request.capability_id,
+                output: serde_json::json!({"ok": true}),
+                display_preview: None,
+                usage: ironclaw_host_api::ResourceUsage::default(),
+            },
+        )))
     }
 
     async fn resume_capability(
@@ -83,6 +125,10 @@ impl HostRuntime for StubHostRuntime {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+        self.visible_provider_trust
+            .lock()
+            .expect("visible provider trust lock")
+            .push(request.provider_trust.clone());
         let capabilities = request
             .context
             .grants
@@ -330,11 +376,14 @@ async fn run_context(label: &str) -> LoopRunContext {
 
 fn test_parts(
     run_context: LoopRunContext,
+    runtime: Arc<StubHostRuntime>,
     shared_io: Arc<SharedStubCapabilityIo>,
     capability_id_filter: HashSet<CapabilityId>,
+    capability_execution_mount_overrides: HashMap<CapabilityId, ironclaw_host_api::MountView>,
+    additional_provider_trust: BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>,
 ) -> RefreshingLocalDevCapabilityPortTestParts {
     RefreshingLocalDevCapabilityPortTestParts {
-        runtime: Arc::new(StubHostRuntime),
+        runtime,
         run_context,
         fallback_user_id: UserId::new("user-stub").expect("user id"),
         workspace_mounts: ironclaw_host_api::MountView::default(),
@@ -354,8 +403,8 @@ fn test_parts(
         persistent_approval_policies: Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
         approval_requests: Arc::new(InMemoryApprovalRequestStore::new()),
         capability_leases: Arc::new(InMemoryCapabilityLeaseStore::new()),
-        capability_execution_mount_overrides: HashMap::new(),
-        additional_provider_trust: BTreeMap::new(),
+        capability_execution_mount_overrides,
+        additional_provider_trust,
         capability_id_filter,
     }
 }
@@ -366,7 +415,14 @@ fn test_parts(
 #[tokio::test]
 async fn port_builds_and_includes_synthetic_capabilities() {
     let shared_io = Arc::new(SharedStubCapabilityIo::new());
-    let parts = test_parts(run_context("builds").await, shared_io, HashSet::new());
+    let parts = test_parts(
+        run_context("builds").await,
+        Arc::new(StubHostRuntime::new()),
+        shared_io,
+        HashSet::new(),
+        HashMap::new(),
+        BTreeMap::new(),
+    );
     let port = create_refreshing_local_dev_capability_port_for_test(parts)
         .await
         .expect("port assembles through the real production factory");
@@ -375,7 +431,7 @@ async fn port_builds_and_includes_synthetic_capabilities() {
     assert!(
         definitions
             .iter()
-            .any(|definition| definition.capability_id.as_str() == "builtin.project_create"),
+            .any(|definition| definition.capability_id.as_str() == PROJECT_CREATE_CAPABILITY_ID),
         "synthetic project_create capability must be present: {definitions:?}"
     );
     assert!(
@@ -394,7 +450,14 @@ async fn capability_id_filter_narrows_visible_surface() {
     let shared_io = Arc::new(SharedStubCapabilityIo::new());
     let mut filter = HashSet::new();
     filter.insert(CapabilityId::new("builtin.echo").expect("capability id"));
-    let parts = test_parts(run_context("filter").await, shared_io, filter);
+    let parts = test_parts(
+        run_context("filter").await,
+        Arc::new(StubHostRuntime::new()),
+        shared_io,
+        filter,
+        HashMap::new(),
+        BTreeMap::new(),
+    );
     let port = create_refreshing_local_dev_capability_port_for_test(parts)
         .await
         .expect("port assembles");
@@ -403,7 +466,7 @@ async fn capability_id_filter_narrows_visible_surface() {
     let builtin_ids: Vec<&str> = definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
-        .filter(|id| id.starts_with("builtin.") && *id != "builtin.project_create")
+        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
         .collect();
     assert_eq!(
         builtin_ids,
@@ -420,7 +483,14 @@ async fn capability_id_filter_narrows_visible_surface() {
 #[tokio::test]
 async fn input_and_result_refs_correlate_through_one_shared_io() {
     let shared_io = Arc::new(SharedStubCapabilityIo::new());
-    let parts = test_parts(run_context("io").await, shared_io.clone(), HashSet::new());
+    let parts = test_parts(
+        run_context("io").await,
+        Arc::new(StubHostRuntime::new()),
+        shared_io.clone(),
+        HashSet::new(),
+        HashMap::new(),
+        BTreeMap::new(),
+    );
     let port = create_refreshing_local_dev_capability_port_for_test(parts)
         .await
         .expect("port assembles");
@@ -478,4 +548,137 @@ async fn input_and_result_refs_correlate_through_one_shared_io() {
         staged_result.is_some(),
         "result_ref must resolve through the SAME shared io the input was staged in"
     );
+}
+
+fn mount_view(alias: &str, target: &str) -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new(alias).expect("valid mount alias"),
+        VirtualPath::new(target).expect("valid virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("valid mount view")
+}
+
+/// (v) `capability_execution_mount_overrides` (the review-flagged FIX C
+/// coverage gap): a non-empty override for `builtin.echo` must be the mount
+/// view the STUB host runtime actually sees on `ExecutionContext.mounts` when
+/// that capability is invoked -- not just baked into port construction.
+#[tokio::test]
+async fn capability_execution_mount_overrides_reach_invocation_context() {
+    let shared_io = Arc::new(SharedStubCapabilityIo::new());
+    let runtime = Arc::new(StubHostRuntime::new());
+    let echo_id = CapabilityId::new("builtin.echo").expect("capability id");
+    let override_mounts = mount_view("/override-alias", "/projects/override-target");
+    let mut overrides = HashMap::new();
+    overrides.insert(echo_id.clone(), override_mounts.clone());
+    let parts = test_parts(
+        run_context("mount-override").await,
+        runtime.clone(),
+        shared_io,
+        HashSet::new(),
+        overrides,
+        BTreeMap::new(),
+    );
+    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+        .await
+        .expect("port assembles");
+
+    let tool_call = ProviderToolCall {
+        provider_id: "stub-provider".to_string(),
+        provider_model_id: "stub-model".to_string(),
+        turn_id: Some("turn-1".to_string()),
+        id: "call-1".to_string(),
+        name: ProviderToolName::new("builtin__echo").expect("tool name"),
+        arguments: serde_json::json!({}),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    };
+    let candidate = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest {
+            tool_call,
+            activity_id: None,
+        })
+        .await
+        .expect("registers the builtin.echo provider tool call");
+
+    port.invoke_capability(CapabilityInvocation {
+        activity_id: candidate.activity_id,
+        surface_version: candidate.surface_version,
+        capability_id: candidate.capability_id,
+        input_ref: candidate.input_ref,
+        approval_resume: None,
+        auth_resume: None,
+    })
+    .await
+    .expect("invokes builtin.echo");
+
+    let invocations = runtime.invocation_contexts();
+    assert_eq!(invocations.len(), 1, "expected exactly one invocation");
+    assert_eq!(
+        invocations[0].mounts, override_mounts,
+        "the override mount, not the default, must reach the invocation ExecutionContext"
+    );
+}
+
+fn distinguishing_trust_decision() -> ironclaw_trust::TrustDecision {
+    ironclaw_trust::TrustDecision {
+        effective_trust: ironclaw_trust::EffectiveTrustClass::user_trusted(),
+        authority_ceiling: ironclaw_trust::AuthorityCeiling {
+            allowed_effects: vec![EffectKind::ReadFilesystem],
+            max_resource_ceiling: None,
+        },
+        // `Bundled` is never produced by `local_dev_visible_capability_request`
+        // itself (which only ever inserts `AdminConfig`), so seeing it back
+        // out proves the test's entry -- not the canonical helper's -- won.
+        provenance: ironclaw_trust::TrustProvenance::Bundled,
+        evaluated_at: chrono::Utc::now(),
+    }
+}
+
+/// (vi) `additional_provider_trust` (the review-flagged FIX D coverage gap):
+/// a non-empty entry must be observable in the `VisibleCapabilityRequest`
+/// the STUB host runtime receives, and -- since `build_inner` merges it in
+/// AFTER the canonical helper's base map -- an entry keyed by the same
+/// provider the canonical helper already populates (`builtin`) must
+/// overwrite the base value.
+#[tokio::test]
+async fn additional_provider_trust_is_forwarded_to_visible_request() {
+    let shared_io = Arc::new(SharedStubCapabilityIo::new());
+    let runtime = Arc::new(StubHostRuntime::new());
+    let builtin_provider = ExtensionId::new("builtin").expect("provider id");
+    let override_trust = distinguishing_trust_decision();
+    let mut additional_provider_trust = BTreeMap::new();
+    additional_provider_trust.insert(builtin_provider.clone(), override_trust.clone());
+    let parts = test_parts(
+        run_context("provider-trust").await,
+        runtime.clone(),
+        shared_io,
+        HashSet::new(),
+        HashMap::new(),
+        additional_provider_trust,
+    );
+    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+        .await
+        .expect("port assembles");
+    // Construction already triggers one `visible_capabilities` refresh; drive
+    // a second one explicitly through the public port API so the assertion
+    // exercises the same seam a real loop run would.
+    port.visible_capabilities(ironclaw_turns::run_profile::VisibleCapabilityRequest)
+        .await
+        .expect("visible capabilities refresh");
+
+    let observed = runtime.visible_provider_trust();
+    assert!(
+        !observed.is_empty(),
+        "host runtime must have observed at least one visible-capabilities request"
+    );
+    for provider_trust in &observed {
+        assert_eq!(
+            provider_trust.get(&builtin_provider),
+            Some(&override_trust),
+            "additional_provider_trust must overwrite the canonical helper's base \
+             `builtin` provider-trust entry, not merge alongside it"
+        );
+    }
 }
