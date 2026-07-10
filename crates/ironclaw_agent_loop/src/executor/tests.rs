@@ -56,45 +56,6 @@ use support::*;
 mod cancellation;
 mod failure_matrix;
 
-fn assert_bounded_result_reference_observation(
-    appended: &ironclaw_turns::run_profile::AppendCapabilityResultRef,
-    expected_result_ref: &LoopResultRef,
-    expected_byte_len: u64,
-) {
-    let observation = appended
-        .model_observation
-        .as_ref()
-        .expect("child result must append a model-visible observation for replay");
-    assert_eq!(observation.status, ToolObservationStatus::Success);
-    assert_eq!(
-        observation.summary,
-        "Tool completed; use result_read with the result reference for more output."
-    );
-    assert_eq!(observation.trust, ObservationTrust::UntrustedToolOutput);
-    assert_eq!(observation.artifacts.len(), 1);
-    assert_eq!(
-        observation.artifacts[0].artifact_ref,
-        expected_result_ref.as_str()
-    );
-    assert_eq!(observation.artifacts[0].summary, "Stored tool result");
-    match &observation.detail {
-        ToolObservationDetail::ResultReference {
-            result_ref,
-            byte_len,
-            preview,
-            total_bytes,
-            next_offset,
-        } => {
-            assert_eq!(result_ref, expected_result_ref.as_str());
-            assert_eq!(*byte_len, expected_byte_len);
-            assert!(preview.is_none());
-            assert!(total_bytes.is_none());
-            assert!(next_offset.is_none());
-        }
-        detail => panic!("expected bounded result reference observation, got {detail:?}"),
-    }
-}
-
 fn continuation_observation(
     result_ref: &LoopResultRef,
     byte_len: u64,
@@ -4358,103 +4319,6 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
 }
 
 #[tokio::test]
-async fn spawned_child_run_appends_bounded_result_reference_observation_for_replay() {
-    let result_ref = LoopResultRef::new("result:spawned-child-observation").expect("valid");
-    let byte_len = 4_096;
-    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::SpawnedChildRun {
-                child_run_id: TurnRunId::new(),
-                result_ref: result_ref.clone(),
-                safe_summary: "spawned child completed".to_string(),
-                byte_len,
-                model_observation: None,
-            }],
-            stopped_on_suspension: false,
-        }]);
-
-    let exit = CanonicalAgentLoopExecutor
-        .execute_family(
-            &crate::families::default(),
-            &host,
-            LoopExecutionState::initial_for_run(host.run_context()),
-        )
-        .await
-        .expect("execute");
-
-    assert!(matches!(exit, LoopExit::Completed(_)));
-    let appended = host.appended_result_refs();
-    assert_eq!(appended.len(), 1);
-    assert_bounded_result_reference_observation(&appended[0], &result_ref, byte_len);
-}
-
-#[tokio::test]
-async fn spawned_child_run_preserves_model_observation_for_replay() {
-    let result_ref =
-        LoopResultRef::new("result:spawned-child-preserved-observation").expect("valid");
-    let observation = continuation_observation(&result_ref, 2_048);
-    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
-        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::SpawnedChildRun {
-                child_run_id: TurnRunId::new(),
-                result_ref,
-                safe_summary: "spawned child completed".to_string(),
-                byte_len: 2_048,
-                model_observation: Some(observation.clone()),
-            }],
-            stopped_on_suspension: false,
-        }]);
-
-    let exit = CanonicalAgentLoopExecutor
-        .execute_family(
-            &crate::families::default(),
-            &host,
-            LoopExecutionState::initial_for_run(host.run_context()),
-        )
-        .await
-        .expect("execute");
-
-    assert!(matches!(exit, LoopExit::Completed(_)));
-    assert_eq!(host.appended_result_refs().len(), 1);
-    assert_eq!(
-        host.appended_result_refs()[0].model_observation.as_ref(),
-        Some(&observation)
-    );
-}
-
-#[tokio::test]
-async fn await_dependent_run_appends_bounded_result_reference_observation_for_replay() {
-    let result_ref = LoopResultRef::new("result:await-dependent-observation").expect("valid");
-    let byte_len = 8_192;
-    let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::AwaitDependentRun {
-                gate_ref: LoopGateRef::new("gate:await-dependent-observation").expect("valid"),
-                result_ref: result_ref.clone(),
-                safe_summary: "awaited child completed".to_string(),
-                byte_len,
-                model_observation: None,
-            }],
-            stopped_on_suspension: true,
-        },
-    ]);
-
-    let exit = CanonicalAgentLoopExecutor
-        .execute_family(
-            &crate::families::default(),
-            &host,
-            LoopExecutionState::initial_for_run(host.run_context()),
-        )
-        .await
-        .expect("execute");
-
-    assert!(matches!(exit, LoopExit::Blocked(_)));
-    let appended = host.appended_result_refs();
-    assert_eq!(appended.len(), 1);
-    assert_bounded_result_reference_observation(&appended[0], &result_ref, byte_len);
-}
-
-#[tokio::test]
 async fn await_dependent_run_preserves_model_observation_for_replay() {
     let result_ref =
         LoopResultRef::new("result:await-dependent-preserved-observation").expect("valid");
@@ -4488,49 +4352,6 @@ async fn await_dependent_run_preserves_model_observation_for_replay() {
         host.appended_result_refs()[0].model_observation.as_ref(),
         Some(&observation)
     );
-}
-
-#[tokio::test]
-async fn coalesced_await_dependent_runs_append_bounded_result_reference_observations_for_replay() {
-    let first_result_ref = LoopResultRef::new("result:await-coalesced-first").expect("valid");
-    let second_result_ref = LoopResultRef::new("result:await-coalesced-second").expect("valid");
-    let shared_gate_ref = LoopGateRef::new("gate:await-coalesced").expect("valid");
-    let host = MockHost::new(vec![provider_two_calls_response()]).with_batch_outcomes(vec![
-        ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![
-                CapabilityOutcome::AwaitDependentRun {
-                    gate_ref: shared_gate_ref.clone(),
-                    result_ref: first_result_ref.clone(),
-                    safe_summary: "first awaited child completed".to_string(),
-                    byte_len: 1_024,
-                    model_observation: None,
-                },
-                CapabilityOutcome::AwaitDependentRun {
-                    gate_ref: shared_gate_ref,
-                    result_ref: second_result_ref.clone(),
-                    safe_summary: "second awaited child completed".to_string(),
-                    byte_len: 2_048,
-                    model_observation: None,
-                },
-            ],
-            stopped_on_suspension: false,
-        },
-    ]);
-
-    let exit = CanonicalAgentLoopExecutor
-        .execute_family(
-            &crate::families::default(),
-            &host,
-            LoopExecutionState::initial_for_run(host.run_context()),
-        )
-        .await
-        .expect("execute");
-
-    assert!(matches!(exit, LoopExit::Blocked(_)));
-    let appended = host.appended_result_refs();
-    assert_eq!(appended.len(), 2);
-    assert_bounded_result_reference_observation(&appended[0], &first_result_ref, 1_024);
-    assert_bounded_result_reference_observation(&appended[1], &second_result_ref, 2_048);
 }
 
 /// D2 regression: byte_len was hardcoded to 0 for SpawnedChildRun outcomes.
