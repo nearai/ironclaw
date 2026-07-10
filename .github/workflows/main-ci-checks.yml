@@ -120,6 +120,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
       HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      # Dedicated branch used by staging deployment.
       STAGING_BRANCH: staging-release
     steps:
       - name: Check main CI run set
