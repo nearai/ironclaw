@@ -662,11 +662,19 @@ async fn drop_with_saturated_queue_still_cancels_token() {
         status: TurnStatus::Queued,
         event_cursor: EventCursor::default(),
     };
-    use ironclaw_turns::TurnRunWakeNotifier;
-    for _ in 0..4 {
-        #[allow(clippy::let_underscore_must_use)]
-        // queue-full DeliveryUnavailable is expected and intended here
-        let _ = notifier.notify_queued_run(fake_wake.clone());
+    use ironclaw_turns::{TurnRunWakeNotifier, TurnRunWakeNotifyError};
+    // The first send must succeed, establishing the saturated-queue
+    // precondition the rest of the test relies on. Only the subsequent sends
+    // are expected to bounce with DeliveryUnavailable.
+    notifier
+        .notify_queued_run(fake_wake.clone())
+        .expect("first enqueue must succeed to saturate the capacity-1 queue");
+    for _ in 0..3 {
+        match notifier.notify_queued_run(fake_wake.clone()) {
+            Err(TurnRunWakeNotifyError::DeliveryUnavailable) => {}
+            Ok(()) => panic!("saturated queue must reject further enqueues"),
+            Err(other) => panic!("unexpected wake notify error: {other}"),
+        }
     }
 
     let scheduler =
