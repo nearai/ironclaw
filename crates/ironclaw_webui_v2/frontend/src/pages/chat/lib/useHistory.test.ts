@@ -41,7 +41,7 @@ function useHistorySourceForTest() {
   }
   return `${helperLines.join("\n")}\n${lines.join(
     "\n",
-  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh };`;
+  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh, nextCursorAfterFullRefresh };`;
 }
 
 function createReactStub({ setCalls = [] } = {}) {
@@ -104,6 +104,16 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 test("useHistory records a load error when timeline fetch fails", async () => {
   const setCalls = [];
   const consoleErrors = [];
@@ -132,6 +142,52 @@ test("useHistory records a load error when timeline fetch fails", async () => {
     "chat.history.loadFailed",
   );
   assert.equal(consoleErrors.length, 1);
+});
+
+test("useHistory starts an older-page load while latest refresh is in flight", async () => {
+  const latestPage = deferred();
+  const olderPage = deferred();
+  const fetchCalls = [];
+  const context = {
+    console,
+    fetchTimeline: ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      return cursor ? olderPage.promise : latestPage.promise;
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records.map((record) => ({
+        id: record.id,
+        role: "user",
+        sequence: record.sequence,
+      })),
+    React: createReactStub(),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory("thread-page", {});
+
+  assert.deepEqual(fetchCalls, [null]);
+
+  const loadOlder = history.loadHistory("cursor-older");
+  assert.deepEqual(
+    fetchCalls,
+    [null, "cursor-older"],
+    "a background latest-page refresh must not drop an explicit cursor load",
+  );
+
+  latestPage.resolve({
+    messages: [{ id: "newer", sequence: 20 }],
+    next_cursor: "cursor-older",
+  });
+  olderPage.resolve({
+    messages: [{ id: "older", sequence: 10 }],
+    next_cursor: null,
+  });
+  await loadOlder;
+  await flushMicrotasks();
 });
 
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {
@@ -564,6 +620,59 @@ test("mergeFullRefresh anchors preserved runtime bubbles at their original posit
   assert.equal(
     merged.map((m) => m.id).join(","),
     "msg-user-1,thinking-live,msg-assistant-1,msg-user-2,err-run-1",
+  );
+});
+
+test("mergeFullRefresh preserves paginated older timeline messages", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+      { id: "tool-newer", role: "tool_activity", sequence: 51 },
+      { id: "msg-newer-assistant", role: "assistant", sequence: 52 },
+    ],
+    [
+      { id: "msg-older-user", role: "user", sequence: 10 },
+      { id: "tool-older", role: "tool_activity", sequence: 11 },
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-older-user,tool-older,msg-newer-user,tool-newer,msg-newer-assistant",
+  );
+});
+
+test("nextCursorAfterFullRefresh does not rewind past loaded older pages", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { nextCursorAfterFullRefresh } = context.globalThis.__testExports;
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [{ id: "msg-newer", sequence: 50 }],
+      [
+        { id: "msg-older", sequence: 10 },
+        { id: "msg-newer", sequence: 50 },
+      ],
+      "cursor-for-page-two",
+      "cursor-for-page-three",
+    ),
+    "cursor-for-page-three",
+  );
+
+  assert.equal(
+    nextCursorAfterFullRefresh(
+      [{ id: "msg-newer", sequence: 50 }],
+      [{ id: "msg-newer", sequence: 50 }],
+      "cursor-for-page-two",
+      null,
+    ),
+    "cursor-for-page-two",
   );
 });
 

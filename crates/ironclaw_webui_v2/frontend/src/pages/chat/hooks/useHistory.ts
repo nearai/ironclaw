@@ -80,12 +80,12 @@ export function useHistory(threadId, options = {}) {
       loadError: null,
     });
   }
-  // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
-  // async so it can't gate overlapping calls (scroll-to-load + onRunSettled
-  // refetch can fire in the same tick). It must be per-thread, not a single
-  // boolean: a boolean held by an in-flight load of thread A would block a
-  // switch to an uncached thread B, leaving B stuck loading. Each entry is
-  // added before the first await and removed in `finally`.
+  // Synchronous reentrancy guard, tracked PER THREAD AND PAGE — `isLoading` in
+  // state is async so it can't gate overlapping calls (scroll-to-load +
+  // onRunSettled refetch can fire in the same tick). It must be per-page, not
+  // just per-thread: a background latest-page refresh must not cause an
+  // explicit "load older" cursor request for the same thread to be dropped.
+  // Each entry is added before the first await and removed in `finally`.
   const loadingRef = React.useRef(new Set());
   // Tracks the currently-active thread so a fetch that resolves after
   // the user has switched threads doesn't clobber the live view (its
@@ -114,8 +114,9 @@ export function useHistory(threadId, options = {}) {
         });
         return;
       }
-      if (loadingRef.current.has(threadId)) return;
-      loadingRef.current.add(threadId);
+      const loadKey = historyLoadKey(threadId, cursor);
+      if (loadingRef.current.has(loadKey)) return;
+      loadingRef.current.add(loadKey);
       // Capture the issuing identity + cache key BEFORE the await. If the
       // user signs out / in (or swaps tokens) while this request is in
       // flight, the response belongs to the previous user: we must neither
@@ -148,12 +149,21 @@ export function useHistory(threadId, options = {}) {
         // The active thread cache is refreshed again below after merging
         // client-only messages from the live state.
         if (!cursor) {
-          const cachedMessages = historyCache.get(key)?.messages || [];
+          const cachedEntry = historyCache.get(key);
+          const cachedMessages = cachedEntry?.messages || [];
           const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
             preserveClientOnly,
             finalReplyTimestampByRun,
           });
-          putCache(key, { messages: cacheMerged, nextCursor });
+          putCache(key, {
+            messages: cacheMerged,
+            nextCursor: nextCursorAfterFullRefresh(
+              renderable,
+              cachedMessages,
+              nextCursor,
+              cachedEntry?.nextCursor || null,
+            ),
+          });
         }
 
         setState((prev) => {
@@ -169,12 +179,24 @@ export function useHistory(threadId, options = {}) {
               finalReplyTimestampByRun,
             });
           }
-          putCache(key, { messages: merged, nextCursor });
+          const mergedNextCursor = cursor
+            ? nextCursor
+            : nextCursorAfterFullRefresh(
+                renderable,
+                prev.messages,
+                nextCursor,
+                prev.nextCursor || null,
+              );
+          putCache(key, { messages: merged, nextCursor: mergedNextCursor });
           return {
             messages: merged,
             messagesThreadId: threadId,
-            nextCursor,
-            isLoading: false,
+            nextCursor: mergedNextCursor,
+            isLoading: hasOtherActiveLoadsForThread(
+              loadingRef.current,
+              threadId,
+              loadKey,
+            ),
             loadError: null,
           };
         });
@@ -189,13 +211,17 @@ export function useHistory(threadId, options = {}) {
           threadIdRef.current === threadId
             ? {
                 ...s,
-                isLoading: false,
+                isLoading: hasOtherActiveLoadsForThread(
+                  loadingRef.current,
+                  threadId,
+                  loadKey,
+                ),
                 loadError: "chat.history.loadFailed",
               }
             : s,
         );
       } finally {
-        loadingRef.current.delete(threadId);
+        loadingRef.current.delete(loadKey);
       }
     },
     [threadId, getPendingMessages, setPendingMessages],
@@ -268,6 +294,32 @@ function mergePage(older, current) {
   return [...older.filter((m) => !ids.has(m?.id)), ...current];
 }
 
+function historyLoadKey(threadId, cursor) {
+  return `${threadId}\u0000${cursor || ""}`;
+}
+
+function hasOtherActiveLoadsForThread(activeLoadKeys, threadId, currentLoadKey) {
+  const prefix = `${threadId}\u0000`;
+  for (const key of activeLoadKeys) {
+    if (key !== currentLoadKey && key.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+function nextCursorAfterFullRefresh(
+  fresh,
+  current,
+  freshNextCursor,
+  currentNextCursor,
+) {
+  if (!freshNextCursor) return null;
+  const oldestFreshSequence = oldestTimelineSequence(fresh);
+  if (oldestFreshSequence === null) return freshNextCursor;
+  return hasLoadedOlderTimelineMessage(current, oldestFreshSequence)
+    ? currentNextCursor || null
+    : freshNextCursor;
+}
+
 function mergeFullRefresh(fresh, current, options = {}) {
   const { preserveClientOnly = false, finalReplyTimestampByRun = null } = options;
   const hydratedFresh = carryFinalAssistantOrderFlags(
@@ -277,6 +329,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
     current,
   );
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
+  const oldestFreshSequence = oldestTimelineSequence(hydratedFresh);
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
@@ -289,6 +342,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
       return false;
     }
     if (isSeededOptimisticMessage(message)) return true;
+    if (isLoadedOlderTimelineMessage(message, oldestFreshSequence)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
   return preserved.length > 0
@@ -303,6 +357,33 @@ function isSeededOptimisticMessage(message) {
     message.id.startsWith("pending-") &&
     (message.role === "user" || message.role === "assistant")
   );
+}
+
+function isLoadedOlderTimelineMessage(message, oldestFreshSequence) {
+  if (oldestFreshSequence === null) return false;
+  const sequence = timelineSequence(message);
+  return sequence !== null && sequence < oldestFreshSequence;
+}
+
+function hasLoadedOlderTimelineMessage(messages, oldestFreshSequence) {
+  return (messages || []).some((message) =>
+    isLoadedOlderTimelineMessage(message, oldestFreshSequence),
+  );
+}
+
+function oldestTimelineSequence(messages) {
+  let oldest = null;
+  for (const message of messages || []) {
+    const sequence = timelineSequence(message);
+    if (sequence === null) continue;
+    oldest = oldest === null ? sequence : Math.min(oldest, sequence);
+  }
+  return oldest;
+}
+
+function timelineSequence(message) {
+  const sequence = Number(message?.sequence);
+  return Number.isFinite(sequence) ? sequence : null;
 }
 
 function hydrateFreshMessages(fresh, current, options = {}) {
@@ -351,8 +432,15 @@ function hydrateFreshMessages(fresh, current, options = {}) {
 }
 
 function insertPreservedAtOriginalPositions(fresh, preserved, current) {
+  const base = mergeTimelineMessagesBySequence(
+    fresh,
+    preserved.filter((message) => timelineSequence(message) !== null),
+  );
+  const anchoredPreserved = preserved.filter(
+    (message) => timelineSequence(message) === null,
+  );
   const freshIndexById = new Map();
-  for (const [index, message] of fresh.entries()) {
+  for (const [index, message] of base.entries()) {
     if (typeof message?.id === "string") freshIndexById.set(message.id, index);
   }
   const currentAnchors = current.map((message) =>
@@ -361,7 +449,7 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   const after = new Map();
   const append = [];
 
-  for (const message of preserved) {
+  for (const message of anchoredPreserved) {
     if (!isRunActivityMessage(message)) {
       append.push(message);
       continue;
@@ -384,13 +472,23 @@ function insertPreservedAtOriginalPositions(fresh, preserved, current) {
   }
 
   const merged = [];
-  for (const [index, message] of fresh.entries()) {
+  for (const [index, message] of base.entries()) {
     merged.push(message);
     const group = after.get(index);
     if (group) merged.push(...group);
   }
   merged.push(...append);
   return merged;
+}
+
+function mergeTimelineMessagesBySequence(fresh, preserved) {
+  if (preserved.length === 0) return fresh;
+  return [...fresh, ...preserved].sort((left, right) => {
+    const leftSequence = timelineSequence(left);
+    const rightSequence = timelineSequence(right);
+    if (leftSequence === null || rightSequence === null) return 0;
+    return leftSequence - rightSequence;
+  });
 }
 
 function freshIndexForCurrentMessage(message, freshIndexById) {
