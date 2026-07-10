@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "cleanup execution is wired by the follow-up lifecycle task"
-)]
-
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
@@ -127,6 +122,12 @@ impl std::fmt::Debug for ExtensionRemovalCleanupRegistry {
 }
 
 impl ExtensionRemovalCleanupRegistry {
+    pub(crate) fn empty() -> Self {
+        Self {
+            adapters: BTreeMap::new(),
+        }
+    }
+
     pub(crate) fn try_from_adapters(
         adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>>,
     ) -> Result<Self, ProductWorkflowError> {

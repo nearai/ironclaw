@@ -173,6 +173,10 @@ use crate::extension_host::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
+    extension_removal_cleanup::{
+        ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry,
+        SlackPersonalConnectionCleanupAdapter,
+    },
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
@@ -1822,6 +1826,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
+    let removal_cleanup_adapter: Arc<dyn ExtensionRemovalCleanupAdapter> =
+        Arc::new(SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
+            &store_graph.local_runtime.channel_connection_facade_slot,
+        )));
+    let removal_cleanup = Arc::new(
+        ExtensionRemovalCleanupRegistry::try_from_adapters(vec![removal_cleanup_adapter]).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("extension removal cleanup registry could not be built: {error}"),
+            },
+        )?,
+    );
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
             extension_filesystem,
@@ -1831,9 +1846,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             active_extensions,
             Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
         )
-        .with_channel_connection_facade_slot(Arc::clone(
-            &store_graph.local_runtime.channel_connection_facade_slot,
-        )),
+        .with_removal_cleanup_registry(removal_cleanup),
     );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
