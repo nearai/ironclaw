@@ -361,6 +361,25 @@ async fn initial_runtime_items_order_live_text_before_terminal_status() {
     );
 }
 
+#[test]
+fn terminal_run_status_detection_includes_killed_runtime_status() {
+    let payload = ProductOutboundPayload::ProjectionUpdate {
+        state: ProductProjectionState::new(
+            "webui-killed-terminal-thread",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: run_status_wire(RunProjectionStatus::Killed).to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: None,
+            }],
+        )
+        .unwrap(),
+    };
+
+    assert!(outbound_payload_has_terminal_run_status(&payload));
+}
+
 #[tokio::test]
 async fn terminal_turn_events_wait_for_next_live_text_projection() {
     let tenant_id = TenantId::new("webui-turn-terminal-live-tenant").unwrap();

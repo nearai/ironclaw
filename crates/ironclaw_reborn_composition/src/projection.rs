@@ -35,7 +35,7 @@ use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
-    TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
+    TurnRunId, TurnScope, TurnStatus, run_profile::LoopHostMilestoneSink,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -66,7 +66,7 @@ use runtime_replay::{
 pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
-    TurnEventPayload,
+    TurnEventPayload, turn_status_wire,
 };
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
@@ -777,12 +777,29 @@ fn outbound_payload_has_terminal_run_status(payload: &ProductOutboundPayload) ->
         matches!(
             item,
             ProductProjectionItem::RunStatus { status, .. }
-                if matches!(
-                    status.as_str(),
-                    "completed" | "succeeded" | "cancelled" | "failed"
-                )
+                if product_run_status_is_terminal(status)
         )
     })
+}
+
+fn product_run_status_is_terminal(status: &str) -> bool {
+    const TERMINAL_RUNTIME_STATUSES: &[RunProjectionStatus] = &[
+        RunProjectionStatus::Completed,
+        RunProjectionStatus::Cancelled,
+        RunProjectionStatus::Failed,
+        RunProjectionStatus::Killed,
+    ];
+    const TERMINAL_TURN_STATUSES: &[TurnStatus] = &[
+        TurnStatus::Completed,
+        TurnStatus::Cancelled,
+        TurnStatus::Failed,
+    ];
+    TERMINAL_RUNTIME_STATUSES
+        .iter()
+        .any(|terminal| status == run_status_wire(*terminal))
+        || TERMINAL_TURN_STATUSES
+            .iter()
+            .any(|terminal| status == turn_status_wire(*terminal))
 }
 
 fn projection_item_is_live_update(item: &ProjectionStreamItem) -> bool {
