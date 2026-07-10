@@ -32,6 +32,7 @@ import {
   STREAM_FAILURE_ID_PREFIX,
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
+import { groupMessages } from "./message-groups";
 
 function useChatEventsSourceForTest() {
   const source = readFileSync(
@@ -353,6 +354,87 @@ test("useChatEvents: replayed final_reply replaces existing same-run assistant i
   assert.equal(harness.messages[2].timestamp, "2026-07-08T12:59:00Z");
   assert.equal(harness.messages[2].keepFollowingActivityAfter, true);
   assert.equal(harness.isProcessing, false);
+});
+
+test("useChatEvents: unscoped live activity inherits the active run for reply ordering", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "accepted",
+    frame: {
+      ack: {
+        run_id: "run-google",
+        thread_id: "thread-1",
+        status: "queued",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-google",
+        text: "Gmail, Calendar, Drive, and Sheets are connected.",
+        generated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-extension-search",
+        capability_id: "builtin.extension_search",
+        status: "completed",
+      },
+    },
+  });
+
+  assert.equal(harness.messages[1].turnRunId, "run-google");
+  const grouped = groupMessages(harness.messages);
+  assert.deepEqual(
+    grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
+    ["activity-run-tool-invocation-extension-search", "reply-run-google"],
+  );
+});
+
+test("useChatEvents: unscoped projection activity inherits the batch run for reply ordering", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "reply-run-google",
+      role: "assistant",
+      content: "Gmail, Calendar, Drive, and Sheets are connected.",
+      timestamp: "2026-07-08T13:00:00Z",
+      turnRunId: "run-google",
+      isFinalReply: true,
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-google", status: "completed" } },
+          {
+            capability_activity: {
+              invocation_id: "invocation-extension-install",
+              capability_id: "builtin.extension_install",
+              status: "completed",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages[1].turnRunId, "run-google");
+  const grouped = groupMessages(harness.messages);
+  assert.deepEqual(
+    grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
+    ["activity-run-tool-invocation-extension-install", "reply-run-google"],
+  );
 });
 
 test("useChatEvents: stale projection text does not duplicate finalized same-run reply", () => {

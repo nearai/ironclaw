@@ -127,9 +127,17 @@ export function useChatEvents({
           // upgrade the same bubble in place.
           const activity = frame.activity;
           if (!activity || !activity.invocation_id) return;
+          const scopedActivity = withFallbackTurnRunId(
+            activity,
+            fallbackTurnRunIdForActivity({
+              explicitRunId: activity.turn_run_id,
+              activeRunRef,
+              latestRunIdRef,
+            }),
+          );
           upsertToolActivityMessage(
             setMessages,
-            toolCardFromActivity(activity),
+            toolCardFromActivity(scopedActivity),
             toolActivityStateRef,
           );
           return;
@@ -142,7 +150,15 @@ export function useChatEvents({
           // card for the same invocation_id.
           const preview = frame.preview;
           if (!preview || !preview.invocation_id) return;
-          const card = toolCardFromPreview(preview);
+          const scopedPreview = withFallbackTurnRunId(
+            preview,
+            fallbackTurnRunIdForActivity({
+              explicitRunId: preview.turn_run_id,
+              activeRunRef,
+              latestRunIdRef,
+            }),
+          );
+          const card = toolCardFromPreview(scopedPreview);
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
           return;
         }
@@ -603,9 +619,19 @@ function applyProjectionItems({
     if (item.capability_activity) {
       const activity = item.capability_activity;
       if (activity.invocation_id) {
+        const scopedActivity = withFallbackTurnRunId(
+          activity,
+          fallbackTurnRunIdForActivity({
+            explicitRunId: activity.turn_run_id,
+            activeRunId,
+            activeRunRef,
+            latestRunIdRef,
+            batchRunStatusByRunId,
+          }),
+        );
         upsertToolActivityMessage(
           setMessages,
-          toolCardFromActivity(activity),
+          toolCardFromActivity(scopedActivity),
           toolActivityStateRef,
         );
       }
@@ -645,6 +671,38 @@ function applyProjectionItems({
   }
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
+  }
+}
+
+function withFallbackTurnRunId(value, fallbackRunId) {
+  if (!value || value.turn_run_id || !fallbackRunId) return value;
+  return { ...value, turn_run_id: fallbackRunId };
+}
+
+// Some capability lifecycle frames are allowed to omit turn_run_id. Only infer
+// it when every available signal points at the same run; ambiguous frames stay
+// unscoped so they cannot be attached to the wrong turn.
+function fallbackTurnRunIdForActivity({
+  explicitRunId,
+  activeRunId = null,
+  activeRunRef = null,
+  latestRunIdRef = null,
+  batchRunStatusByRunId = null,
+}) {
+  if (explicitRunId) return explicitRunId;
+  const candidates = new Set();
+  addRunIdCandidate(candidates, activeRunId);
+  addRunIdCandidate(candidates, activeRunRef?.current?.runId);
+  addRunIdCandidate(candidates, latestRunIdRef?.current);
+  if (batchRunStatusByRunId?.size === 1) {
+    addRunIdCandidate(candidates, batchRunStatusByRunId.keys().next().value);
+  }
+  return candidates.size === 1 ? candidates.values().next().value : null;
+}
+
+function addRunIdCandidate(candidates, runId) {
+  if (typeof runId === "string" && runId.length > 0) {
+    candidates.add(runId);
   }
 }
 
