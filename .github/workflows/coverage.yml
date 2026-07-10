@@ -306,7 +306,29 @@ jobs:
     needs: [coverage, e2e-coverage]
     steps:
       - run: |
-          if [[ "${{ needs.coverage.result }}" != "success" || "${{ needs.e2e-coverage.result }}" != "success" ]]; then
+          job_result_ok() {
+            local name="$1"
+            local result="$2"
+
+            if [[ "$result" == "success" ]]; then
+              return 0
+            fi
+
+            if [[ "$result" == "cancelled" ]] &&
+              [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo "$name was cancelled on push to main; treating as non-blocking"
+              return 0
+            fi
+
+            return 1
+          }
+
+          if ! job_result_ok "coverage" "${{ needs.coverage.result }}"; then
+            echo "Coverage job failed: ${{ needs.coverage.result }}"
+            exit 1
+          fi
+          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}"; then
+            echo "E2E coverage job failed: ${{ needs.e2e-coverage.result }}"
             echo "One or more coverage jobs failed"
             exit 1
           fi

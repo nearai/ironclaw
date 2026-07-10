@@ -140,13 +140,7 @@ jobs:
     needs: [test]
     steps:
       - run: |
-          if [[ "${{ needs.test.result }}" == "success" ]]; then
-            exit 0
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "One or more E2E jobs failed"
+            exit 1
           fi
-          if [[ "${{ needs.test.result }}" == "cancelled" ]] &&
-             [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "E2E jobs were cancelled on push to main; treating as non-blocking"
-            exit 0
-          fi
-          echo "One or more E2E jobs failed"
-          exit 1

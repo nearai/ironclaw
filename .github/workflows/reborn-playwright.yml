@@ -181,13 +181,7 @@ jobs:
     steps:
       - name: Check Reborn Playwright shards
         run: |
-          if [[ "${{ needs.test.result }}" == "success" ]]; then
-            exit 0
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "One or more Reborn Playwright shards failed"
+            exit 1
           fi
-          if [[ "${{ needs.test.result }}" == "cancelled" ]] &&
-             [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "One or more Reborn Playwright shards were cancelled on push to main; treating as non-blocking"
-            exit 0
-          fi
-          echo "One or more Reborn Playwright shards failed"
-          exit 1
