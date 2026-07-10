@@ -1,5 +1,4 @@
 import React from "react";
-import { useNavigate } from "react-router";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { Input } from "../../../design-system/input";
@@ -44,7 +43,6 @@ export function AutomationDetailPanel({
   onDeleteAutomation,
 }) {
   const t = useT();
-  const navigate = useNavigate();
   const [isEditingName, setIsEditingName] = React.useState(false);
   const [draftName, setDraftName] = React.useState("");
   const [nameError, setNameError] = React.useState("");
@@ -269,8 +267,6 @@ export function AutomationDetailPanel({
                     <RecentRunRow
                       key={recentRunKey(run)}
                       run={run}
-                      onOpenRun={navigate}
-                      onOpenLogs={navigate}
                     />
                   ))}
                 </div>

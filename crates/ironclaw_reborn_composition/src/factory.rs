@@ -53,8 +53,18 @@ use ironclaw_filesystem::{
     MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+#[cfg(feature = "test-support")]
+use ironclaw_first_party_extensions::{
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
+    WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
+};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
+};
+#[cfg(feature = "test-support")]
+use ironclaw_host_api::{
+    CapabilityGrant, CapabilityGrantId, GrantConstraints, NetworkPolicy, NetworkTargetPattern,
+    Principal,
 };
 use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId,
@@ -117,11 +127,14 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+#[cfg(feature = "test-support")]
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 #[cfg(all(
     feature = "inmemory-turn-state",
     any(feature = "libsql", feature = "postgres")
 ))]
 use ironclaw_turns::FilesystemTurnStateBlockPersistence;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStoreKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
@@ -452,7 +465,7 @@ pub struct RebornServices {
     /// via `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the scheduler
     /// loop driven by that function shares the exact same channel.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub(crate) production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
+    pub(crate) production_scheduler_wake: Option<ironclaw_runner::runtime::SchedulerWakeWiring>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
@@ -753,6 +766,146 @@ impl RebornServices {
                 .active_extensions_for_test()
                 .publish(package),
         )
+    }
+
+    /// Test-support authority snapshot for active local-dev extensions.
+    ///
+    /// Binary-E2E harnesses build capability ports at the host-runtime boundary
+    /// instead of going through `LocalDevLoopCapabilityPortFactory`, so they need
+    /// the same active-extension grants and provider trust that production
+    /// local-dev recomputes whenever the model-visible surface is refreshed.
+    #[cfg(feature = "test-support")]
+    pub async fn local_dev_active_extension_authority_for_test(
+        &self,
+        grantee: &ExtensionId,
+    ) -> Option<
+        Result<
+            LocalDevActiveExtensionAuthorityForTest,
+            ironclaw_product_workflow::ProductWorkflowError,
+        >,
+    > {
+        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
+        Some(active_extension_authority_for_test(extension_management, grantee).await)
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub struct LocalDevActiveExtensionAuthorityForTest {
+    pub grants: Vec<CapabilityGrant>,
+    pub provider_trust: Vec<(ExtensionId, TrustDecision)>,
+}
+
+#[cfg(feature = "test-support")]
+async fn active_extension_authority_for_test(
+    extension_management: &RebornLocalExtensionManagementPort,
+    grantee: &ExtensionId,
+) -> Result<LocalDevActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError>
+{
+    let active_capabilities = extension_management
+        .active_model_visible_capabilities()
+        .await?;
+    let grants = active_capabilities
+        .iter()
+        .map(|capability| CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: capability.id.clone(),
+            grantee: Principal::Extension(grantee.clone()),
+            issued_by: Principal::HostRuntime,
+            constraints: active_extension_grant_constraints_for_test(capability),
+        })
+        .collect();
+    let mut effects_by_provider: std::collections::BTreeMap<ExtensionId, Vec<EffectKind>> =
+        std::collections::BTreeMap::new();
+    for capability in &active_capabilities {
+        let effects = effects_by_provider
+            .entry(capability.provider.clone())
+            .or_default();
+        for effect in &capability.effects {
+            if !effects.contains(effect) {
+                effects.push(*effect);
+            }
+        }
+    }
+    let provider_trust = effects_by_provider
+        .into_iter()
+        .map(|(provider, allowed_effects)| {
+            (
+                provider,
+                TrustDecision {
+                    effective_trust: EffectiveTrustClass::user_trusted(),
+                    authority_ceiling: AuthorityCeiling {
+                        allowed_effects,
+                        max_resource_ceiling: None,
+                    },
+                    provenance: TrustProvenance::AdminConfig,
+                    evaluated_at: chrono::Utc::now(),
+                },
+            )
+        })
+        .collect();
+    Ok(LocalDevActiveExtensionAuthorityForTest {
+        grants,
+        provider_trust,
+    })
+}
+
+#[cfg(feature = "test-support")]
+fn active_extension_grant_constraints_for_test(
+    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+) -> GrantConstraints {
+    GrantConstraints {
+        allowed_effects: capability.effects.clone(),
+        mounts: MountView::default(),
+        network: active_extension_network_policy_for_test(capability),
+        secrets: {
+            let mut handles = Vec::new();
+            for credential in &capability.runtime_credentials {
+                if !handles.contains(&credential.handle) {
+                    handles.push(credential.handle.clone());
+                }
+            }
+            handles
+        },
+        resource_ceiling: None,
+        expires_at: None,
+        max_invocations: None,
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn active_extension_network_policy_for_test(
+    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+) -> NetworkPolicy {
+    if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
+        return policy;
+    }
+
+    let mut targets = Vec::new();
+    for credential in &capability.runtime_credentials {
+        if !targets.contains(&credential.audience) {
+            targets.push(credential.audience.clone());
+        }
+    }
+    let is_web_access_exa_mcp = capability.provider.as_str() == WEB_ACCESS_EXTENSION_ID
+        && matches!(
+            capability.id.as_str(),
+            WEB_SEARCH_CAPABILITY_ID | WEB_GET_CONTENT_CAPABILITY_ID
+        );
+    if is_web_access_exa_mcp
+        && !targets
+            .iter()
+            .any(|target| target.host_pattern == EXA_MCP_HOST)
+    {
+        targets.push(NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+            host_pattern: EXA_MCP_HOST.to_string(),
+            port: None,
+        });
+    }
+    NetworkPolicy {
+        allowed_targets: targets,
+        deny_private_ip_ranges: true,
+        max_egress_bytes: is_web_access_exa_mcp.then_some(NETWORK_EGRESS_LIMIT),
     }
 }
 
@@ -2158,6 +2311,7 @@ async fn build_local_dev_store_graph(
     }
     let resource_governor = FilesystemResourceGovernor::new(Arc::clone(&scoped_filesystem))
         .with_event_sink(Arc::clone(&budget_event_sink));
+    resource_governor.warm_authority()?;
     let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(resource_governor);
     let skill_mounts =
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
@@ -3882,7 +4036,7 @@ async fn build_production_shaped(
             //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
             //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
-            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
+            let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
@@ -3929,7 +4083,7 @@ async fn build_production_shaped(
             //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
             //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
-            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
+            let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
@@ -3998,14 +4152,14 @@ struct RebornProductionBuildContext {
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
-    scheduler_wake_wiring: ironclaw_reborn::runtime::SchedulerWakeWiring,
+    scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
-    turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
+    turn_run_wake_notifier: Arc<ironclaw_runner::turn_scheduler::SchedulerTurnRunWakeNotifier>,
     runtime_process_binding: RebornRuntimeProcessBinding,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
@@ -4039,7 +4193,7 @@ fn validate_production_process_binding(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, RebornBuildError> {
     Ok(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver().map_err(
+        ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver().map_err(
             |error| RebornBuildError::PlannedRunProfileResolver {
                 reason: error.to_string(),
             },
@@ -4246,6 +4400,7 @@ where
         secret_master_key,
     )
     .await?;
+    resource_governor.warm_authority()?;
     let governor = Arc::new(resource_governor);
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
@@ -4274,7 +4429,7 @@ where
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_turn_state_and_transition_port(turn_state)
     .with_run_profile_resolver(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
+        ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
     let services = match event_store {
         #[cfg(feature = "libsql")]
@@ -4416,6 +4571,7 @@ where
             Arc::clone(&scoped_filesystem),
             secret_master_key,
         )?;
+        resource_governor.warm_authority()?;
 
         Ok(Self {
             filesystem,
@@ -4956,23 +5112,11 @@ mod tests {
 
         let reservation = local_runtime
             .resource_governor
-            .reserve(
-                scope,
-                ResourceEstimate {
-                    usd: Some(dec!(0.10)),
-                    ..ResourceEstimate::default()
-                },
-            )
+            .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
             .expect("reservation");
         local_runtime
             .resource_governor
-            .reconcile(
-                reservation.id,
-                ResourceUsage {
-                    usd: dec!(0.10),
-                    ..ResourceUsage::default()
-                },
-            )
+            .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
             .expect("reconcile");
 
         assert_eq!(

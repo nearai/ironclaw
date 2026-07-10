@@ -19,11 +19,11 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
+use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
 use ironclaw_wasm::{
     PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
-use ironclaw_wasm_sandbox_core::SandboxLimits;
 use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
@@ -836,12 +836,10 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_process_count: Some(10),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_process_count(10)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
@@ -851,12 +849,10 @@ fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest
     CapabilityDispatchRequest {
         capability_id: CapabilityId::new(capability).unwrap(),
         scope: sample_scope(),
-        estimate: ResourceEstimate {
-            concurrency_slots: Some(1),
-            process_count: Some(1),
-            output_bytes: Some(10_000),
-            ..ResourceEstimate::default()
-        },
+        estimate: ResourceEstimate::default()
+            .set_concurrency_slots(1)
+            .set_process_count(1)
+            .set_output_bytes(10_000),
         mounts: None,
         resource_reservation: None,
         input,

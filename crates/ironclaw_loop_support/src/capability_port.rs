@@ -8260,10 +8260,7 @@ mod tests {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
-                    usage: ResourceUsage {
-                        output_bytes: RECORDING_OUTPUT_BYTES,
-                        ..ResourceUsage::default()
-                    },
+                    usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
             )))
         }
@@ -8363,10 +8360,7 @@ mod tests {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"resumed": true}),
                     display_preview: None,
-                    usage: ResourceUsage {
-                        output_bytes: RECORDING_OUTPUT_BYTES,
-                        ..ResourceUsage::default()
-                    },
+                    usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
             )))
         }

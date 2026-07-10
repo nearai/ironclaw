@@ -91,10 +91,10 @@ fn make_store() -> InMemoryTurnStateStore {
 }
 
 fn make_capped_store(cap: u32) -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(InMemoryTurnStateStoreLimits {
-        max_concurrent_runs_per_user: std::num::NonZeroU32::new(cap),
-        ..InMemoryTurnStateStoreLimits::default()
-    })
+    InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default()
+            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(cap).expect("nonzero cap")),
+    )
 }
 
 fn resolver() -> InMemoryRunProfileResolver {
@@ -845,10 +845,8 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
     // already be 1 without claiming again.
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         snapshot,
-        InMemoryTurnStateStoreLimits {
-            max_concurrent_runs_per_user: std::num::NonZeroU32::new(10),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default()
+            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     )
     .unwrap();
     assert_eq!(

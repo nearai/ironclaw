@@ -41,11 +41,9 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
     let invocation_id = context.invocation_id;
     let mounts = context.mounts.clone();
     let grants = context.grants.clone();
-    let estimate = ResourceEstimate {
-        output_bytes: Some(2_048),
-        process_count: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_output_bytes(2_048)
+        .set_process_count(1);
     let input = json!({"message":"background"});
 
     let spawned = host

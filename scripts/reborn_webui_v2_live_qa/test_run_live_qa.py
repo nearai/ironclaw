@@ -44,7 +44,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env={},
         )
 
-    def _fake_assistant_reply_page(self, response_text: str):
+    def _fake_assistant_reply_page(
+        self,
+        response_text: str,
+        *,
+        final_reply_state: str | None = "true",
+    ):
         class FakeApprove:
             @property
             def last(self):
@@ -63,6 +68,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             async def inner_text(self, **_kwargs):
                 return response_text
+
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-final-reply":
+                    return final_reply_state
+                return None
 
             async def all_inner_texts(self):
                 return [response_text]
@@ -762,7 +772,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "_live_chat_case",
                 side_effect=fake_live_chat_case,
             ),
-            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 0]),
+            patch.object(run_live_qa, "_trigger_record_count", return_value=0),
+            patch.object(
+                run_live_qa,
+                "_wait_for_trigger_record_after_count",
+                return_value=(0, 25),
+            ),
         ):
             result = asyncio.run(
                 run_live_qa._routine_creation_case(
@@ -779,7 +794,41 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured_prompts, ["original sheet prompt"])
         self.assertEqual(captured_follow_up_flags, [True])
         self.assertEqual(result.details["trigger_records_after"], 0)
+        self.assertEqual(result.details["trigger_record_wait_ms"], 25)
         self.assertIn("did not add a trigger_record", result.details["error"])
+
+    def test_wait_for_trigger_record_after_count_polls_until_record_added(self):
+        counts = iter([0, 0, 1])
+        observed_sleeps: list[float] = []
+
+        def fake_trigger_record_count(_home: Path, routine_name: str | None) -> int:
+            self.assertIsNone(routine_name)
+            return next(counts)
+
+        async def fake_sleep(seconds: float) -> None:
+            observed_sleeps.append(seconds)
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_trigger_record_count",
+                side_effect=fake_trigger_record_count,
+            ),
+            patch.object(run_live_qa.asyncio, "sleep", new=fake_sleep),
+        ):
+            after_count, waited_ms = asyncio.run(
+                run_live_qa._wait_for_trigger_record_after_count(
+                    Path("/tmp/reborn-home"),
+                    None,
+                    before_count=0,
+                    timeout=10.0,
+                    poll_interval=0.01,
+                )
+            )
+
+        self.assertEqual(after_count, 1)
+        self.assertGreaterEqual(len(observed_sleeps), 1)
+        self.assertGreaterEqual(waited_ms, 0)
 
     def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
         text = (
@@ -970,6 +1019,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             async def inner_text(self, **_kwargs):
                 return "latest news on that company\nEmails a concise briefing"
 
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-final-reply":
+                    return "true"
+                return None
+
             async def all_inner_texts(self):
                 return [
                     'The routine has been created successfully. Routine: "30-min meeting briefing"',
@@ -999,6 +1053,133 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("emails", text.lower())
         self.assertFalse(reply.semantic_judge_used)
         self.assertEqual(reply.semantic_judge_reason, "literal_required_text_matched")
+        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+
+    def test_wait_for_assistant_reply_waits_for_final_marked_message(self):
+        state = {"index": 0, "sleep_calls": 0}
+        responses = [
+            ("I'll connect Google Calendar and get it connected.", "false"),
+            ("Google Calendar connected.", "true"),
+        ]
+
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def inner_text(self, **_kwargs):
+                return responses[state["index"]][0]
+
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-final-reply":
+                    return responses[state["index"]][1]
+                return None
+
+            async def all_inner_texts(self):
+                return [responses[state["index"]][0]]
+
+        class FakePage:
+            def locator(self, selector):
+                if selector != "[data-testid='msg-assistant']":
+                    raise AssertionError(f"unexpected selector: {selector}")
+                return FakeAssistantBlocks()
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        async def fake_sleep(_seconds):
+            state["sleep_calls"] += 1
+            state["index"] = min(1, state["index"] + 1)
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    FakePage(),
+                    marker=None,
+                    required_text=["Google Calendar", "connected"],
+                    timeout=1.0,
+                )
+            )
+
+        self.assertGreaterEqual(state["sleep_calls"], 1)
+        self.assertEqual(reply.text_excerpt, "Google Calendar connected.")
+        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+
+    def test_wait_for_assistant_reply_preserves_non_final_state_on_attribute_error(self):
+        state = {"index": 0, "sleep_calls": 0}
+        responses = [
+            ("Google Calendar connected.", "false"),
+            ("Google Calendar connected.", RuntimeError("transient attr failure")),
+            ("Google Calendar connected.", "true"),
+        ]
+
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def inner_text(self, **_kwargs):
+                return responses[state["index"]][0]
+
+            async def get_attribute(self, name, **_kwargs):
+                if name != "data-final-reply":
+                    return None
+                value = responses[state["index"]][1]
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+            async def all_inner_texts(self):
+                return [responses[state["index"]][0]]
+
+        class FakePage:
+            def locator(self, selector):
+                if selector != "[data-testid='msg-assistant']":
+                    raise AssertionError(f"unexpected selector: {selector}")
+                return FakeAssistantBlocks()
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        async def fake_sleep(_seconds):
+            state["sleep_calls"] += 1
+            state["index"] = min(len(responses) - 1, state["index"] + 1)
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    FakePage(),
+                    marker=None,
+                    required_text=["Google Calendar", "connected"],
+                    timeout=1.0,
+                )
+            )
+
+        self.assertGreaterEqual(state["sleep_calls"], 2)
+        self.assertEqual(reply.text_excerpt, "Google Calendar connected.")
+        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
 
     def test_wait_for_assistant_reply_uses_semantic_judge_for_text_mismatch(self):
         response_text = (
@@ -3382,7 +3563,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
 
         shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
-        self.assertEqual(len(shard_case_lines), 7)
+        self.assertEqual(len(shard_case_lines), 10)
         sharded_cases = [
             case_name
             for line in shard_case_lines
@@ -3411,10 +3592,61 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "Unknown Reborn WebUI v2 live QA case",
             match.group("body"),
         )
-        self.assertIn("target_pr is required when target_ref is supplied", match.group("body"))
-        self.assertIn("Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR", match.group("body"))
-        self.assertIn("target_ref does not match PR #${TARGET_PR} head SHA", match.group("body"))
-        self.assertIn("ref: ${{ steps.validate_reborn_webui_v2_target.outputs.checkout_ref", match.group("body"))
+        self.assertIn("target_pr is required when target_ref is supplied", workflow)
+        self.assertIn(
+            "Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR",
+            workflow,
+        )
+        self.assertIn("target_ref does not match PR #${TARGET_PR} head SHA", workflow)
+        self.assertIn("approve-reborn-webui-v2-pr-live-qa:", workflow)
+        self.assertIn("environment: reborn-live-canary-pr", workflow)
+        self.assertIn(
+            "requires an approving review from a collaborator with write access",
+            workflow,
+        )
+        self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn(
+            "ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}",
+            match.group("body"),
+        )
+        self.assertIn('SKIP_BUILD: "1"', match.group("body"))
+        self.assertIn("REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE", match.group("body"))
+        self.assertIn("Cache Playwright browsers", match.group("body"))
+        self.assertIn("cache: pip", match.group("body"))
+        self.assertNotIn("Build WASM channels", match.group("body"))
+        self.assertNotIn("Setup OVH sccache", match.group("body"))
+
+        prepare_match = re.search(
+            r"(?ms)^  prepare-reborn-webui-v2-live-qa:\n(?P<body>.*?)^  reborn-webui-v2-live-qa:",
+            workflow,
+        )
+        self.assertIsNotNone(prepare_match, "shared live QA binary preparation job missing")
+        prepare_body = prepare_match.group("body")
+        self.assertIn("needs: approve-reborn-webui-v2-pr-live-qa", prepare_body)
+        self.assertIn("reborn-webui-v2-binary-${TARGET_REF}", prepare_body)
+        self.assertIn("Build fallback Reborn WebUI v2 binary once", prepare_body)
+        self.assertIn("if ! (", prepare_body)
+        self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
+        self.assertIn("using the canary fallback build", prepare_body)
+        self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
+        self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
+
+        reborn_e2e_path = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/reborn-e2e.yml"
+        )
+        reborn_e2e = reborn_e2e_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "github.event.pull_request.head.sha",
+            reborn_e2e,
+        )
+        self.assertIn(
+            "--features webui-v2-beta,slack-v2-host-beta",
+            reborn_e2e,
+        )
+        self.assertIn(
+            "name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}",
+            reborn_e2e,
+        )
 
         command_workflow_path = (
             Path(__file__).resolve().parents[2] / ".github/workflows/live-canary-command.yml"

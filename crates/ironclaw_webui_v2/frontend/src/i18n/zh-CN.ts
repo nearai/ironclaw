@@ -1075,6 +1075,13 @@ registerPack("zh-CN", {
   "admin.dashboard.jobs": "任务",
   "admin.dashboard.lastActive": "最后活跃",
 
+  // Admin — relative time
+  "admin.relative.never": "从未",
+  "admin.relative.justNow": "刚刚",
+  "admin.relative.minutesAgo": "{count} 分钟前",
+  "admin.relative.hoursAgo": "{count} 小时前",
+  "admin.relative.daysAgo": "{count} 天前",
+
   // Admin — users list
   "admin.users.user": "用户",
   "admin.users.userFallback": "用户",
@@ -1085,6 +1092,8 @@ registerPack("zh-CN", {
   "admin.users.filter.active": "活跃",
   "admin.users.filter.suspended": "已停用",
   "admin.users.filter.admins": "管理员",
+  "admin.users.status.active": "活跃",
+  "admin.users.status.suspended": "已停用",
   "admin.users.newUser": "新建用户",
   "admin.users.createUser": "创建用户",
   "admin.users.creating": "创建中…",

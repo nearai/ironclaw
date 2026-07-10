@@ -598,17 +598,15 @@ mod tests {
     }
 
     fn enabled_policy() -> trace::StandingTraceContributionPolicy {
-        trace::StandingTraceContributionPolicy {
-            enabled: true,
-            // Loopback endpoint on a closed port: the immediate flush attempt
-            // fails fast and locally (no external traffic), leaving the
-            // envelope queued for assertion.
-            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
-            min_submission_score: 0.0,
-            require_manual_approval_when_pii_detected: false,
-            auto_submit_high_value_traces: true,
-            ..trace::StandingTraceContributionPolicy::default()
-        }
+        // Loopback endpoint on a closed port: the immediate flush attempt fails
+        // fast and locally (no external traffic), leaving the envelope queued
+        // for assertion.
+        trace::StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://127.0.0.1:1/v1/traces")
+            .set_min_submission_score(0.0)
+            .set_require_manual_approval_when_pii_detected(false)
+            .set_auto_submit_high_value_traces(true)
     }
 
     fn unique_scope(label: &str) -> String {

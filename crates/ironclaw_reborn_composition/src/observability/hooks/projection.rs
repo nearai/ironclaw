@@ -12,6 +12,7 @@
 use ironclaw_extensions::ExtensionRegistry;
 
 use crate::error::RebornBuildError;
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 use super::HooksActivationConfig;
 use super::audit::emit_hook_quarantined;
@@ -265,13 +266,19 @@ where
         // (Critical-2 fail-open fix). The ONLY error that triggers the
         // builtin-only fallback is failure to LIST THE ROOT itself (the
         // extensions tree is unreadable) — surfaced as the outer `Err` below.
-        let discovered = match ironclaw_host_runtime::discover_extensions_tolerant_bounded(
+        let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("could not build extension host API contract registry: {error}"),
+            }
+        })?;
+        let discovery = ironclaw_host_runtime::discover_extensions_tolerant_bounded_with_contracts(
             input.filesystem,
             &root,
+            &contracts,
             MAX_INSTALLED_EXTENSIONS_CONSIDERED,
         )
-        .await
-        {
+        .await;
+        let discovered = match discovery {
             Ok(discovered) => discovered,
             Err(error) => {
                 // Root unreadable: cannot make per-package decisions. Fail-safe

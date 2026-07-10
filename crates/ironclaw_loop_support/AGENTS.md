@@ -8,7 +8,7 @@
   - `crates/ironclaw_turns/AGENTS.md`
   - `crates/ironclaw_capabilities/AGENTS.md`
   - `crates/ironclaw_skills/AGENTS.md`
-  - `crates/ironclaw_reborn/CLAUDE.md`
+  - `crates/ironclaw_runner/CLAUDE.md`
 
 ## What This Crate Owns
 
@@ -30,7 +30,7 @@
 
 - Fast local check: `cargo test -p ironclaw_loop_support`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
-- Run `cargo test -p ironclaw_turns` and `cargo test -p ironclaw_reborn` when host-port contracts change.
+- Run `cargo test -p ironclaw_turns` and `cargo test -p ironclaw_runner` when host-port contracts change.
 
 ## Agent Notes
 

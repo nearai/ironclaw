@@ -16,7 +16,7 @@ pub(crate) use options::HostRuntimeHarnessOptions;
 pub(crate) use recorder::{HarnessCapabilityRecorder, RecordedCapabilityResult};
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -39,8 +39,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, HostRuntime, SurfaceKind};
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
@@ -54,8 +55,11 @@ use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     GateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation, LoopCapabilityPort,
-        LoopHostMilestoneSink, LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome,
+        LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -123,9 +127,7 @@ impl HarnessCapabilityMode {
             }
             Self::HostRuntime(harness) => Ok((
                 harness.capability_factory(milestone_sink),
-                Arc::new(StaticCapabilitySurfaceProfileResolver {
-                    allow_set: CapabilityAllowSet::allowlist(harness.capability_ids.clone()),
-                }),
+                Arc::new(HostRuntimeHarnessSurfaceResolver),
                 harness.io.clone(),
                 harness.capability_result_writer(),
                 HarnessCapabilityRecorder::HostRuntime(harness),
@@ -1313,6 +1315,23 @@ impl HostRuntimeCapabilityHarness {
     /// for the thin `LoopCapabilityPortFactory` delegating wrapper that calls
     /// this method.
     pub(crate) async fn create_recording_capability_port(
+        self: &Arc<Self>,
+        run_context: &LoopRunContext,
+        milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let initial = self
+            .build_recording_capability_port_snapshot(run_context, milestone_sink)
+            .await?;
+        Ok(Arc::new(RefreshingHostRuntimeHarnessCapabilityPort {
+            harness: Arc::clone(self),
+            run_context: run_context.clone(),
+            milestone_sink: Arc::clone(milestone_sink),
+            current: Mutex::new(Some(initial)),
+            refresh_lock: tokio::sync::Mutex::new(()),
+        }))
+    }
+
+    async fn build_recording_capability_port_snapshot(
         &self,
         run_context: &LoopRunContext,
         milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
@@ -1322,6 +1341,36 @@ impl HostRuntimeCapabilityHarness {
         // and the grant grantee MUST use the SAME user so the lease is
         // self-consistent (grantee == execution user) — matching production.
         let dispatch_user = self.dispatch_user_for_run(run_context);
+        let mut grants = capability_grants(
+            Principal::User(dispatch_user.clone()),
+            &self.capability_ids,
+            self.effect_kinds.clone(),
+            self.mounts.clone(),
+            &self.capability_mount_overrides,
+            self.network_policy.clone(),
+            self.secrets.clone(),
+        );
+        let mut active_extension_provider_trust = Vec::new();
+        if let Some(services) = self.reborn_services.as_ref() {
+            let execution_extension = loop_driver_execution_extension_id(run_context)
+                .map_err(host_runtime_harness_error)?;
+            if let Some(active_authority) = services
+                .local_dev_active_extension_authority_for_test(&execution_extension)
+                .await
+            {
+                let active_authority = active_authority.map_err(host_runtime_harness_error)?;
+                let active_capability_ids = active_authority
+                    .grants
+                    .iter()
+                    .map(|grant| grant.capability.clone())
+                    .collect::<HashSet<_>>();
+                grants
+                    .grants
+                    .retain(|grant| !active_capability_ids.contains(&grant.capability));
+                grants.grants.extend(active_authority.grants);
+                active_extension_provider_trust = active_authority.provider_trust;
+            }
+        }
         let mut authority = ProductLiveVisibleCapabilityRequestConfig::new(
             dispatch_user.clone(),
             self.runtime_kind,
@@ -1330,15 +1379,7 @@ impl HostRuntimeCapabilityHarness {
             CapabilitySurfacePolicy::allow_all(),
         )
         .with_mounts(self.mounts.clone())
-        .with_grants(capability_grants(
-            Principal::User(dispatch_user.clone()),
-            &self.capability_ids,
-            self.effect_kinds.clone(),
-            self.mounts.clone(),
-            &self.capability_mount_overrides,
-            self.network_policy.clone(),
-            self.secrets.clone(),
-        ))
+        .with_grants(grants)
         .with_provider_trust_for_effects(
             self.provider_id.clone(),
             EffectiveTrustClass::user_trusted(),
@@ -1350,6 +1391,9 @@ impl HostRuntimeCapabilityHarness {
                 EffectiveTrustClass::user_trusted(),
                 effects.clone(),
             );
+        }
+        for (provider, trust_decision) in active_extension_provider_trust {
+            authority = authority.with_provider_trust_decision(provider, trust_decision);
         }
         let execution_mounts = self.mounts.clone();
         let visible_request = visible_capability_request_for_run(run_context, authority)
@@ -1447,6 +1491,133 @@ impl HostRuntimeCapabilityHarness {
                 max_invocations: Some(1),
             },
         }
+    }
+}
+
+struct HostRuntimeHarnessSurfaceResolver;
+
+#[async_trait::async_trait]
+impl CapabilitySurfaceProfileResolver for HostRuntimeHarnessSurfaceResolver {
+    async fn resolve(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        Ok(CapabilityAllowSet::All)
+    }
+}
+
+struct RefreshingHostRuntimeHarnessCapabilityPort {
+    harness: Arc<HostRuntimeCapabilityHarness>,
+    run_context: LoopRunContext,
+    milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    current: Mutex<Option<Arc<dyn LoopCapabilityPort>>>,
+    refresh_lock: tokio::sync::Mutex<()>,
+}
+
+impl RefreshingHostRuntimeHarnessCapabilityPort {
+    fn current_port(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        self.current
+            .lock()
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "capability port cache is unavailable",
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::StaleSurface,
+                    "capability surface is unavailable",
+                )
+            })
+    }
+
+    async fn refresh_current(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let _guard = self.refresh_lock.lock().await;
+        let port = self
+            .harness
+            .build_recording_capability_port_snapshot(&self.run_context, &self.milestone_sink)
+            .await?;
+        *self.current.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "capability port cache is unavailable",
+            )
+        })? = Some(Arc::clone(&port));
+        Ok(port)
+    }
+
+    async fn current_or_refresh(&self) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        match self.current_port() {
+            Ok(port) => Ok(port),
+            Err(error) if error.kind == AgentLoopHostErrorKind::StaleSurface => {
+                self.refresh_current().await
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopCapabilityPort for RefreshingHostRuntimeHarnessCapabilityPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.current_port()?.tool_definitions()
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.current_port()?.validate_provider_tool_call(tool_call)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        self.current_port()?
+            .provider_tool_call_capability_ids(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        request: RegisterProviderToolCallRequest,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        self.current_or_refresh()
+            .await?
+            .register_provider_tool_call(request)
+            .await
+    }
+
+    async fn visible_capabilities(
+        &self,
+        request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        self.refresh_current()
+            .await?
+            .visible_capabilities(request)
+            .await
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        self.current_or_refresh()
+            .await?
+            .invoke_capability(request)
+            .await
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        self.current_or_refresh()
+            .await?
+            .invoke_capability_batch(request)
+            .await
     }
 }
 
