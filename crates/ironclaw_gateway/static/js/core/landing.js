@@ -215,8 +215,10 @@ renderLandingUseCases();
 renderPendingIntentBanner();
 
 // Called from initApp() after authentication: carries the prompt of the
-// use case picked on the landing page into the chat input (pre-filled, not
-// auto-sent — the user stays in control of the first message).
+// use case picked on the landing page into the chat input and sends it
+// automatically, so the handoff flows straight into a working first
+// conversation without an extra click. The seed is consumed here, so a
+// refresh never re-sends it.
 function applyPendingUseCasePrompt() {
   const prompt = sessionStorage.getItem(NUX_PENDING_PROMPT_KEY);
   if (!prompt) return;
@@ -227,4 +229,25 @@ function applyPendingUseCasePrompt() {
   // Reuse the existing input pipeline so autosize + send-button state update.
   input.dispatchEvent(new Event('input'));
   input.focus();
+  autoSendPendingPrompt(input, prompt);
+}
+
+// Auto-send the handoff prompt once the chat is actually ready to accept it.
+// Thread selection happens asynchronously (loadThreads → switchThread), so we
+// poll briefly for a selected, writable thread. Bails out if the user edits
+// or clears the composer in the meantime — their keystrokes win — or if the
+// chat never becomes ready (the prompt then stays pre-filled as before).
+function autoSendPendingPrompt(input, prompt) {
+  const deadline = Date.now() + 10000;
+  (function attempt() {
+    if (input.value !== prompt) return;
+    const ready = typeof currentThreadId !== 'undefined' && currentThreadId
+      && !input.disabled
+      && !(typeof authFlowPending !== 'undefined' && authFlowPending);
+    if (ready && typeof sendMessage === 'function') {
+      sendMessage();
+      return;
+    }
+    if (Date.now() < deadline) setTimeout(attempt, 150);
+  })();
 }
