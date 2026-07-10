@@ -618,6 +618,7 @@ async fn postgres_pool_or_skip() -> Option<(
     String,
 )> {
     let (container, database_url) = start_postgres_container().await?;
+    assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
         .expect("testcontainer database URL must parse");
@@ -626,11 +627,25 @@ async fn postgres_pool_or_skip() -> Option<(
         .max_size(4)
         .build()
         .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
+    Some((container, pool, database_url))
+}
+
+#[cfg(feature = "postgres")]
+async fn assert_postgres_accepts_connections(database_url: &str) {
+    let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls)
         .await
         .expect("Postgres testcontainer must accept connections");
-    Some((container, pool, database_url))
+    let connection_task = tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("Postgres readiness probe connection ended with error: {error}");
+        }
+    });
+    client
+        .simple_query("SELECT 1")
+        .await
+        .expect("Postgres testcontainer must answer readiness query");
+    drop(client);
+    connection_task.abort();
 }
 
 #[cfg(feature = "postgres")]
