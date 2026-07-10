@@ -1,7 +1,5 @@
-// arch-exempt: large_file, channel-connect requirement + extension lifecycle and
-// its test module; includes restore-time compatibility cleanup for the retired
-// slack_user companion from the model-B remodel
-// (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
+// arch-exempt: large_file, lifecycle orchestration plus legacy regression tests remain co-located after ZIP/import extraction; follow-up split, plan #5499
+// Retired slack_user restore cleanup is still here, plan #5604.
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
@@ -32,6 +30,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::RebornProductAuthServices;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
+use crate::extension_host::unzip_extension_bundle;
 
 /// Narrow lifecycle-cleanup port over product-auth so extension removal can
 /// revoke the removed extension's exclusively-owned reusable credential without
@@ -114,7 +113,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     // nothing to revoke on removal.
     credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
     /// Bounds concurrent zip decode/validation in `import_bundle`. Each decode
-    /// may expand up to [`MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] into
+    /// may expand up to [`crate::extension_host::extension_bundle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] into
     /// memory, so without a bound N concurrent operator uploads turn the
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
@@ -130,7 +129,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
-/// 2 x [`MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] caps worst-case decode
+/// 2 x [`crate::extension_host::extension_bundle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] caps worst-case decode
 /// memory at 128 MiB; imports are a rare admin-only operation, so waiting is
 /// the right trade against unbounded memory.
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
@@ -186,84 +185,6 @@ impl ExtensionActivationMode {
             None => Self::Static,
         }
     }
-}
-
-/// Zip-bomb guards for [`unzip_extension_bundle`]: the HTTP route caps only the
-/// COMPRESSED body (8 MiB), so these bound what an uploaded bundle may expand
-/// to in memory. Generous for real tool bundles (wasm + schemas + prompts),
-/// tight enough that a hostile upload cannot OOM the host.
-pub(crate) const MAX_EXTENSION_BUNDLE_FILES: usize = 512;
-pub(crate) const MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
-
-/// Extract an uploaded tool bundle (a zip) into `(path, bytes)` pairs, guarding
-/// against zip-slip: absolute paths, `..` traversal, and backslash separators
-/// are rejected rather than trusted.
-fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, ProductWorkflowError> {
-    use std::io::Read;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bundle)).map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("uploaded tool bundle is not a valid zip: {error}"),
-        }
-    })?;
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut seen_names = std::collections::HashSet::new();
-    let mut total_bytes = 0usize;
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("uploaded tool bundle has a corrupt entry: {error}"),
-            }
-        })?;
-        if !entry.is_file() {
-            continue;
-        }
-        if files.len() >= MAX_EXTENSION_BUNDLE_FILES {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "uploaded tool bundle contains too many files (limit {MAX_EXTENSION_BUNDLE_FILES})"
-                ),
-            });
-        }
-        let name = entry.name().to_string();
-        if name.is_empty()
-            || name.starts_with('/')
-            || name.contains('\\')
-            || name.split('/').any(|component| component == "..")
-        {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("uploaded tool bundle contains an unsafe path: {name}"),
-            });
-        }
-        // Zip archives may legally repeat an entry name. Validation reads the
-        // first occurrence while materialization writes every entry in order,
-        // so a later duplicate could swap the validated bytes on disk.
-        if !seen_names.insert(name.clone()) {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("uploaded tool bundle contains a duplicate entry: {name}"),
-            });
-        }
-        // `take(allowance + 1)` bounds what a hostile entry can buffer: the
-        // declared zip sizes are attacker-controlled lies, so the guard must sit
-        // on the actual decompressed stream, never on entry metadata.
-        let allowance = MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES - total_bytes;
-        let mut bytes = Vec::new();
-        entry
-            .take(allowance as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("failed to read `{name}` from the uploaded bundle: {error}"),
-            })?;
-        if bytes.len() > allowance {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "uploaded tool bundle expands past the {MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES}-byte decompressed limit"
-                ),
-            });
-        }
-        total_bytes += bytes.len();
-        files.push((name, bytes));
-    }
-    Ok(files)
 }
 
 pub(crate) async fn restore_extension_lifecycle_state(
@@ -707,7 +628,7 @@ impl RebornLocalExtensionManagementPort {
     /// CPU/blocking-IO work that must not stall the async runtime) behind a
     /// [`MAX_CONCURRENT_IMPORT_DECODES`]-permit semaphore acquired BEFORE any
     /// lifecycle lock, bounding decode memory instead of letting N concurrent
-    /// uploads each expand [`MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`].
+    /// uploads each expand [`crate::extension_host::extension_bundle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`].
     pub(crate) async fn import_bundle(
         &self,
         bundle: Vec<u8>,
@@ -2229,6 +2150,18 @@ mod tests {
 
     mod private_install_tests;
 
+    fn zip_bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("start zip entry");
+            writer.write_all(bytes).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
     #[test]
     fn installed_external_channel_search_result_gets_activation_guidance() {
         let payload = LifecycleProductPayload::ExtensionSearch {
@@ -2295,136 +2228,6 @@ mod tests {
         assert!(
             !message.contains("callable by exact name"),
             "no tools published ⇒ no direct-invocation guidance, got: {message}"
-        );
-    }
-
-    /// Build an in-memory zip from `(entry_name, bytes)` pairs for
-    /// [`unzip_extension_bundle`] boundary tests.
-    fn zip_bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        use std::io::Write;
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default();
-        for (name, bytes) in entries {
-            writer.start_file(*name, options).expect("start zip entry");
-            writer.write_all(bytes).expect("write zip entry");
-        }
-        writer.finish().expect("finish zip").into_inner()
-    }
-
-    /// The doc contract promises backslash separators are REJECTED; normalizing
-    /// them instead silently accepts a path shape the guard claims to refuse.
-    #[test]
-    fn unzip_extension_bundle_rejects_backslash_entry_names() {
-        let bundle = zip_bundle(&[("wasm\\module.wasm", b"x".as_slice())]);
-        let error = unzip_extension_bundle(&bundle)
-            .expect_err("backslash separators must be rejected, not normalized");
-        assert!(
-            format!("{error}").contains("unsafe path"),
-            "unexpected error: {error}"
-        );
-    }
-
-    /// A small compressed upload must not be allowed to expand past the
-    /// decompressed-bytes cap (zip bomb): the route body limit bounds only the
-    /// COMPRESSED size, so the cap here is the actual memory guard.
-    #[test]
-    fn unzip_extension_bundle_caps_total_decompressed_bytes() {
-        let oversized = vec![0u8; MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES + 1];
-        let bundle = zip_bundle(&[("payload.bin", oversized.as_slice())]);
-        assert!(
-            bundle.len() < MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
-            "test premise: the bomb must be small compressed"
-        );
-        let error = unzip_extension_bundle(&bundle)
-            .expect_err("expansion past the decompressed cap must be rejected");
-        assert!(
-            format!("{error}").contains("expands past"),
-            "unexpected error: {error}"
-        );
-    }
-
-    /// Zip archives may legally contain two entries with the same name (the
-    /// spec does not forbid it and hostile archives are handcrafted, not
-    /// written by well-behaved writers). If both entries surfaced,
-    /// `imported_extension_package` would validate the FIRST
-    /// `manifest.toml`/asset while `materialize_available_extension` writes
-    /// every entry in order — the bytes on disk would differ from the bytes
-    /// that were validated.
-    ///
-    /// The invariant this test pins: `unzip_extension_bundle` NEVER returns two
-    /// entries with the same name. zip 8.x's reader indexes entries by
-    /// filename (`IndexMap`), so duplicates collapse at parse time and exactly
-    /// one entry survives; the explicit `seen_names` guard in
-    /// `unzip_extension_bundle` is the backstop that turns any future reader
-    /// behavior change (surfacing both entries) into a hard error instead of a
-    /// silent validated-vs-materialized divergence. Both outcomes satisfy the
-    /// invariant; returning two same-name entries fails the test.
-    ///
-    /// `zip::ZipWriter` itself refuses duplicate names, so the fixture is
-    /// authored with a same-length placeholder name and byte-patched into a
-    /// duplicate — entry names are stored verbatim in the local file header and
-    /// central directory and are not covered by the entry CRC, so the patched
-    /// archive stays structurally valid.
-    #[test]
-    fn unzip_extension_bundle_never_returns_duplicate_entry_names() {
-        let placeholder = zip_bundle(&[
-            ("manifest.toml", b"validated".as_slice()),
-            ("manifest.tomX", b"materialized".as_slice()),
-        ]);
-        let needle = b"manifest.tomX";
-        let replacement = b"manifest.toml";
-        let mut bundle = placeholder;
-        let mut patched = 0;
-        let mut index = 0;
-        while index + needle.len() <= bundle.len() {
-            if &bundle[index..index + needle.len()] == needle {
-                bundle[index..index + needle.len()].copy_from_slice(replacement);
-                patched += 1;
-            }
-            index += 1;
-        }
-        assert!(
-            patched >= 2,
-            "test premise: the placeholder name must appear in the local file \
-             header and the central directory; patched {patched} occurrence(s)"
-        );
-        match unzip_extension_bundle(&bundle) {
-            // Reader surfaced both entries → the seen_names guard must fire.
-            Err(error) => {
-                assert!(
-                    format!("{error}").contains("duplicate"),
-                    "unexpected error: {error}"
-                );
-            }
-            // Reader collapsed the duplicate → exactly one consistent entry;
-            // what gets validated IS what gets materialized.
-            Ok(files) => {
-                let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-                assert_eq!(
-                    names,
-                    vec!["manifest.toml"],
-                    "duplicate names must never coexist in the unzipped file list"
-                );
-            }
-        }
-    }
-
-    /// Entry-count flooding is the other zip-bomb axis: many tiny entries.
-    #[test]
-    fn unzip_extension_bundle_caps_entry_count() {
-        let names: Vec<String> = (0..=MAX_EXTENSION_BUNDLE_FILES)
-            .map(|index| format!("assets/file-{index}.txt"))
-            .collect();
-        let entries: Vec<(&str, &[u8])> = names
-            .iter()
-            .map(|name| (name.as_str(), b"x".as_slice()))
-            .collect();
-        let bundle = zip_bundle(&entries);
-        let error =
-            unzip_extension_bundle(&bundle).expect_err("entry-count flooding must be rejected");
-        assert!(
-            format!("{error}").contains("too many files"),
-            "unexpected error: {error}"
         );
     }
 

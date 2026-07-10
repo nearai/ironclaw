@@ -1,3 +1,4 @@
+// arch-exempt: large_file, canonical obligation orchestration remains co-located; resolved-source optimization only, plan #5499
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -1095,6 +1096,11 @@ pub struct BuiltinObligationHandler {
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
+struct ResolvedSecretInjection {
+    handle: SecretHandle,
+    source_scope: ResourceScope,
+}
+
 impl BuiltinObligationHandler {
     pub fn new() -> Self {
         Self::default()
@@ -1208,9 +1214,9 @@ impl BuiltinObligationHandler {
         &self,
         request: &CapabilityObligationRequest<'_>,
         handles: &[SecretHandle],
-    ) -> Result<(), CapabilityObligationError> {
+    ) -> Result<Vec<ResolvedSecretInjection>, CapabilityObligationError> {
         if handles.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let Some(secret_store) = &self.secret_store else {
             return Err(secret_obligation_failed());
@@ -1218,6 +1224,7 @@ impl BuiltinObligationHandler {
         if self.secret_injections.is_none() {
             return Err(secret_obligation_failed());
         }
+        let mut resolved = Vec::with_capacity(handles.len());
         for handle in handles {
             // Fail closed on a store error: the dispatch-time backstop must never
             // let an uncredentialed call through on a transient failure. Preserve the
@@ -1241,21 +1248,25 @@ impl BuiltinObligationHandler {
                     return Err(secret_obligation_failed());
                 }
             };
-            if owner.is_none() {
+            let Some(source_scope) = owner else {
                 return Err(CapabilityObligationError::AuthRequired {
                     credential_requirements: Vec::new(),
                 });
-            }
+            };
+            resolved.push(ResolvedSecretInjection {
+                handle: handle.clone(),
+                source_scope,
+            });
         }
-        Ok(())
+        Ok(resolved)
     }
 
     async fn inject_secrets(
         &self,
         request: &CapabilityObligationRequest<'_>,
-        handles: &[SecretHandle],
+        resolved: &[ResolvedSecretInjection],
     ) -> Result<(), CapabilityObligationError> {
-        if handles.is_empty() {
+        if resolved.is_empty() {
             return Ok(());
         }
         let Some(secret_store) = &self.secret_store else {
@@ -1265,55 +1276,41 @@ impl BuiltinObligationHandler {
             return Err(secret_obligation_failed());
         };
 
-        let mut material = Vec::with_capacity(handles.len());
-        for handle in handles {
-            // Read from the same scope the presence probe accepted: the caller's
+        let mut material = Vec::with_capacity(resolved.len());
+        for resolved in resolved {
+            // Use the same source scope the presence probe accepted: the caller's
             // own secret if present, else the tenant-shared admin-managed secret
             // (#5459). The injection target below stays the caller's invocation
-            // slot regardless of where the source material came from. Fail closed
-            // if the secret vanished between preflight and here.
+            // slot regardless of where the source material came from. The
+            // lease/consume operations remain authoritative if the secret
+            // vanishes between preflight and here.
             // Every arm below fails closed; the bound error is logged first so a
             // shared-secret lease/consume fault (e.g. an AAD/scope regression on
             // the cross-scope read) leaves a server-side trail. `SecretStoreError`
             // Display carries no raw secret material — handles/reasons only.
-            let source_scope = secret_owner_scope(
-                secret_store.as_ref(),
-                &request.context.resource_scope,
-                handle,
-            )
-            .await
-            .map_err(|error| {
-                tracing::debug!(
-                    secret_handle = handle.as_str(),
-                    error = %error,
-                    "secret injection: owner-scope probe failed; failing closed"
-                );
-                secret_obligation_failed()
-            })?
-            .ok_or_else(secret_obligation_failed)?;
             let lease = secret_store
-                .lease_once(&source_scope, handle)
+                .lease_once(&resolved.source_scope, &resolved.handle)
                 .await
                 .map_err(|error| {
                     tracing::debug!(
-                        secret_handle = handle.as_str(),
+                        secret_handle = resolved.handle.as_str(),
                         error = %error,
                         "secret injection: lease failed; failing closed"
                     );
                     secret_obligation_failed()
                 })?;
             let secret = secret_store
-                .consume(&source_scope, lease.id)
+                .consume(&resolved.source_scope, lease.id)
                 .await
                 .map_err(|error| {
                     tracing::debug!(
-                        secret_handle = handle.as_str(),
+                        secret_handle = resolved.handle.as_str(),
                         error = %error,
                         "secret injection: lease consume failed; failing closed"
                     );
                     secret_obligation_failed()
                 })?;
-            material.push((handle.clone(), secret));
+            material.push((resolved.handle.clone(), secret));
         }
 
         for (handle, secret) in material {
@@ -1431,7 +1428,7 @@ impl BuiltinObligationHandler {
     async fn finish_prepare(
         &self,
         request: &CapabilityObligationRequest<'_>,
-        secret_handles: &[SecretHandle],
+        resolved_secret_injections: &[ResolvedSecretInjection],
         network_policy: Option<NetworkPolicy>,
     ) -> Result<(), CapabilityObligationError> {
         if request
@@ -1442,7 +1439,8 @@ impl BuiltinObligationHandler {
             self.emit_audit_before(request).await?;
         }
 
-        self.inject_secrets(request, secret_handles).await?;
+        self.inject_secrets(request, resolved_secret_injections)
+            .await?;
         self.inject_credential_accounts(request).await?;
 
         if let Some(policy) = network_policy {
@@ -1538,7 +1536,8 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         }
         let scoped_mounts = scoped_mount_obligation(request.context, request.obligations)?;
         let secret_handles = secret_injection_handles(request.obligations);
-        self.preflight_secret_injection(&request, &secret_handles)
+        let resolved_secret_injections = self
+            .preflight_secret_injection(&request, &secret_handles)
             .await?;
         self.preflight_resource_ceiling(&request)?;
         let resource_reservation = self.reserve_resource_obligation(&request)?;
@@ -1548,7 +1547,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         };
 
         if let Err(error) = self
-            .finish_prepare(&request, &secret_handles, network_policy)
+            .finish_prepare(&request, &resolved_secret_injections, network_policy)
             .await
         {
             self.abort(CapabilityObligationAbortRequest {
@@ -2119,11 +2118,11 @@ pub(crate) async fn secret_present(
 ///
 /// Single source of truth for BOTH "is this required secret present" (callers map
 /// to `.is_some()`) and "where does the lease read from" — the pre-flight ordering
-/// probe (`credential_preflight_check`), the dispatch-time backstop
-/// (`preflight_secret_injection`), and the injection lease (`inject_secrets`) all
-/// consult this one rule, so presence and ownership can never drift. Each caller
-/// decides how to treat a store `Err` (the pre-flight fails open and skips; the
-/// obligation backstop and lease fail closed).
+/// probe (`credential_preflight_check`) and the dispatch-time backstop
+/// (`preflight_secret_injection`) consult this rule, then the injection lease
+/// (`inject_secrets`) consumes the resolved source scope. Each caller decides how
+/// to treat a store `Err` (the pre-flight fails open and skips; the obligation
+/// backstop and lease fail closed).
 pub(crate) async fn secret_owner_scope(
     store: &dyn SecretStore,
     caller_scope: &ResourceScope,

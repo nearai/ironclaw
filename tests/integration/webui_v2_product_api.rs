@@ -11,24 +11,41 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use std::io::Write;
 use std::sync::Arc;
 
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::http::StatusCode;
+use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
 use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
-use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, PermissionMode};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, TenantId, UserId,
+};
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornServicesApi,
     RebornStreamEventsRequest,
 };
+use ironclaw_reborn_composition::test_support::BudgetTestGateway;
+use ironclaw_reborn_composition::{
+    RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    build_webui_services, local_dev_runtime_policy,
+};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
+use ironclaw_webui_v2::{
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
+};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::session_thread::RebornThreadHarness;
 use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json, webui_caller_for};
+use serde_json::Value;
+use tempfile::tempdir;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn thread_history_cold_get_and_libsql_reopen() {
@@ -256,6 +273,193 @@ async fn settings_tool_permission_post_then_cold_read() {
         entry["value"]["state"], "disabled",
         "POSTed permission state must survive the cold read: {entry}"
     );
+}
+
+/// Production-composed WebUI import path: the local-dev composition owns the
+/// real lifecycle facade and extension-management port, while this test uses
+/// only an inert model/network boundary because no turn or outbound request is
+/// needed. The default router mount proves the operator route is forbidden;
+/// the operator-capability mount then submits the same valid ZIP through the
+/// real route and checks both catalog and filesystem effects.
+#[tokio::test]
+async fn operator_can_import_extension_bundle_through_production_webui_facade() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let storage_root = root.path().join("local-dev");
+    let tenant_id = TenantId::new("webui-import-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-import-agent").expect("agent id");
+    let user_id = UserId::new("webui-import-operator").expect("user id");
+    let input = RebornBuildInput::local_dev(user_id.as_str(), storage_root.clone())
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-import-source".to_string(),
+                reply_target_binding_id: "webui-import-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id,
+        user_id,
+        Some(agent_id),
+        None,
+    );
+    let bundle = importable_extension_zip("webui-uploaded");
+
+    let (status, body) = post_raw(
+        mount_webui_v2_router(Arc::clone(&webui.api), caller.clone()),
+        "/api/webchat/v2/extensions/import",
+        bundle.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "non-operator response: {body}"
+    );
+    assert!(
+        !storage_root
+            .join("system/extensions/webui-uploaded")
+            .exists(),
+        "forbidden upload must not reach lifecycle storage"
+    );
+
+    let operator_router = webui_v2_router(WebUiV2State::new(
+        Arc::clone(&webui.api),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(
+        caller.clone().with_operator_webui_config(true),
+    ))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+    let (status, body) =
+        post_raw(operator_router, "/api/webchat/v2/extensions/import", bundle).await;
+    assert_eq!(status, StatusCode::OK, "operator response: {body}");
+    assert_eq!(body["success"], true);
+
+    let (status, body) = get_json(
+        mount_webui_v2_router(
+            Arc::clone(&webui.api),
+            ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+                caller.tenant_id.clone(),
+                caller.user_id.clone(),
+                caller.agent_id.clone(),
+                caller.project_id.clone(),
+            ),
+        ),
+        "/api/webchat/v2/extensions/registry",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "registry response: {body}");
+    assert!(
+        body["entries"].as_array().is_some_and(|entries| entries
+            .iter()
+            .any(|entry| entry["package_ref"]["id"] == "webui-uploaded")),
+        "imported package must be visible in the real extension catalog: {body}"
+    );
+    for path in [
+        "manifest.toml",
+        "wasm/tool.wasm",
+        "schemas/run.input.json",
+        "schemas/run.output.json",
+    ] {
+        assert!(
+            storage_root
+                .join("system/extensions/webui-uploaded")
+                .join(path)
+                .is_file(),
+            "import lifecycle must materialize {path}"
+        );
+    }
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
+async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header("content-type", "application/zip")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "response body is not valid JSON ({error}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    };
+    (status, body)
+}
+
+fn importable_extension_zip(id: &str) -> Vec<u8> {
+    let manifest = format!(
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "WebUI Imported Tool"
+version = "0.1.0"
+description = "Production WebUI import integration fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run the imported tool"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+"#
+    );
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    for (path, bytes) in [
+        ("manifest.toml", manifest.as_bytes()),
+        ("wasm/tool.wasm", b"\0asm\x0d\0\x01\0".as_slice()),
+        ("schemas/run.input.json", b"{}".as_slice()),
+        ("schemas/run.output.json", b"{}".as_slice()),
+    ] {
+        writer.start_file(path, options).expect("start zip entry");
+        writer.write_all(bytes).expect("write zip entry");
+    }
+    writer.finish().expect("finish zip").into_inner()
 }
 
 /// W5-WEBUI-API-1 scenario 2: drives `RebornServicesApi::stream_events`
