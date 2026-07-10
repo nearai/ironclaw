@@ -694,3 +694,133 @@ async fn additional_provider_trust_is_forwarded_to_visible_request() {
         );
     }
 }
+
+/// Review follow-up: pins the "many" edge of all three collection-valued
+/// config knobs together in one port build, since the five tests above each
+/// exercise a single entry. `capability_id_filter` must keep BOTH listed ids
+/// (dropping the rest); `capability_execution_mount_overrides` must resolve
+/// EACH capability's invocation against its OWN mount, not the other's or the
+/// default; `additional_provider_trust` must land BOTH entries in the
+/// observed provider-trust map. See PR #5950 review.
+#[tokio::test]
+async fn multi_entry_collection_knobs_round_trip() {
+    let shared_io = Arc::new(SharedStubCapabilityIo::new());
+    let runtime = Arc::new(StubHostRuntime::new());
+
+    let echo_id = CapabilityId::new("builtin.echo").expect("capability id");
+    let time_id = CapabilityId::new("builtin.time").expect("capability id");
+    let mut filter = HashSet::new();
+    filter.insert(echo_id.clone());
+    filter.insert(time_id.clone());
+
+    let echo_mounts = mount_view("/echo-alias", "/projects/echo-target");
+    let time_mounts = mount_view("/time-alias", "/projects/time-target");
+    let mut overrides = HashMap::new();
+    overrides.insert(echo_id.clone(), echo_mounts.clone());
+    overrides.insert(time_id.clone(), time_mounts.clone());
+
+    let builtin_provider = ExtensionId::new("builtin").expect("provider id");
+    let other_provider = ExtensionId::new("other-provider").expect("provider id");
+    // `builtin_trust` overrides the "builtin" provider used to invoke both
+    // capabilities below, so its ceiling must cover both grants' effects
+    // (`dispatch_capability`/`read_filesystem`/`write_filesystem` per
+    // local_dev_capability_policy.toml) or invocation is denied as untrusted.
+    let mut builtin_trust = distinguishing_trust_decision();
+    builtin_trust.authority_ceiling.allowed_effects = vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+    ];
+    let other_trust = distinguishing_trust_decision();
+    let mut additional_provider_trust = BTreeMap::new();
+    additional_provider_trust.insert(builtin_provider.clone(), builtin_trust.clone());
+    additional_provider_trust.insert(other_provider.clone(), other_trust.clone());
+
+    let parts = test_parts(
+        run_context("multi-entry").await,
+        runtime.clone(),
+        shared_io,
+        filter,
+        overrides,
+        additional_provider_trust,
+    );
+    let port = create_refreshing_local_dev_capability_port_for_test(parts)
+        .await
+        .expect("port assembles");
+
+    // capability_id_filter: both listed builtin ids survive, everything else
+    // (e.g. builtin.shell, builtin.read_file, ...) is dropped.
+    let definitions = port.tool_definitions().expect("tool definitions");
+    let mut builtin_ids: Vec<&str> = definitions
+        .iter()
+        .map(|definition| definition.capability_id.as_str())
+        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
+        .collect();
+    builtin_ids.sort_unstable();
+    assert_eq!(
+        builtin_ids,
+        vec!["builtin.echo", "builtin.time"],
+        "both filtered-in builtin capabilities should remain, and no others: {definitions:?}"
+    );
+
+    // capability_execution_mount_overrides: invoke both and check each one's
+    // ExecutionContext carries ITS OWN override mount, not the other's.
+    async fn invoke(
+        port: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+        provider_tool_name: &str,
+    ) {
+        let tool_call = ProviderToolCall {
+            provider_id: "stub-provider".to_string(),
+            provider_model_id: "stub-model".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            id: format!("call-{provider_tool_name}"),
+            name: ProviderToolName::new(provider_tool_name).expect("tool name"),
+            arguments: serde_json::json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest {
+                tool_call,
+                activity_id: None,
+            })
+            .await
+            .expect("registers the provider tool call");
+        port.invoke_capability(CapabilityInvocation {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("invokes capability");
+    }
+    invoke(port.as_ref(), "builtin__echo").await;
+    invoke(port.as_ref(), "builtin__time").await;
+
+    let invocations = runtime.invocation_contexts();
+    assert_eq!(invocations.len(), 2, "expected exactly two invocations");
+    assert_eq!(
+        invocations[0].mounts, echo_mounts,
+        "builtin.echo must resolve against its own override mount"
+    );
+    assert_eq!(
+        invocations[1].mounts, time_mounts,
+        "builtin.time must resolve against its own override mount, not builtin.echo's"
+    );
+
+    // additional_provider_trust: both entries land in the observed
+    // visible_capabilities provider-trust map.
+    port.visible_capabilities(ironclaw_turns::run_profile::VisibleCapabilityRequest)
+        .await
+        .expect("visible capabilities refresh");
+    let observed = runtime.visible_provider_trust();
+    let last = observed
+        .last()
+        .expect("host runtime must have observed at least one visible-capabilities request");
+    assert_eq!(last.get(&builtin_provider), Some(&builtin_trust));
+    assert_eq!(last.get(&other_provider), Some(&other_trust));
+}
