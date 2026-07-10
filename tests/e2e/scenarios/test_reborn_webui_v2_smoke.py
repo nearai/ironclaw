@@ -76,26 +76,36 @@ async def _install_fake_v2_event_source(page) -> None:
     await page.add_init_script(
         """
         (() => {
-          const streams = [];
+          let activeStream = null;
+          const currentStream = () => {
+            if (!activeStream || activeStream.readyState === 2) {
+              throw new Error("no EventSource stream is open");
+            }
+            return activeStream;
+          };
           class FakeEventSource extends EventTarget {
             constructor(url) {
               super();
               this.url = url;
               this.readyState = 0;
-              streams.push(this);
+              if (activeStream && activeStream.readyState !== 2) {
+                activeStream.close();
+              }
+              activeStream = this;
               setTimeout(() => {
+                if (activeStream !== this || this.readyState === 2) return;
                 this.readyState = 1;
                 if (typeof this.onopen === "function") this.onopen(new Event("open"));
               }, 0);
             }
             close() {
               this.readyState = 2;
+              if (activeStream === this) activeStream = null;
             }
           }
           window.EventSource = FakeEventSource;
           window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
+            const stream = currentStream();
             const event = new MessageEvent(type, {
               data: JSON.stringify({ type, ...frame }),
               lastEventId: id,
@@ -103,9 +113,9 @@ async def _install_fake_v2_event_source(page) -> None:
             stream.dispatchEvent(event);
           };
           window.__failLatestV2Sse = () => {
-            const stream = streams[streams.length - 1];
-            if (!stream) throw new Error("no EventSource stream is open");
+            const stream = currentStream();
             stream.readyState = 2;
+            if (activeStream === stream) activeStream = null;
             if (typeof stream.onerror !== "function") {
               throw new Error("EventSource has no error handler");
             }
@@ -633,10 +643,16 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
 async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     reborn_v2_server, reborn_v2_browser
 ):
-    """Delayed activity without turn_run_id still renders before its reply."""
+    """POST-seeded run ids keep delayed unscoped activity before its reply.
+
+    This remains a browser E2E because the regression crosses the React-only
+    seam from useChat's submit response into useChatEvents and MessageList DOM
+    grouping; the Rust integration harness cannot observe that client boundary.
+    """
     thread_id = "thread-unscoped-activity-order"
     run_id = "run-unscoped-activity-order"
     send_requests: list[dict] = []
+    timeline_messages: list[dict] = []
     release_second_send = asyncio.Event()
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -683,7 +699,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
         )
 
     async def handle_timeline(route) -> None:
-        await fulfill_json(route, {"messages": [], "next_cursor": None})
+        await fulfill_json(route, {"messages": timeline_messages, "next_cursor": None})
 
     async def handle_send(route) -> None:
         send_requests.append(json.loads(route.request.post_data or "{}"))
@@ -692,6 +708,8 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
                 route,
                 {
                     "thread_id": thread_id,
+                    "accepted_message_ref": "msg:first-user",
+                    "run_id": run_id,
                     "status": "running",
                 },
                 status=202,
@@ -725,12 +743,37 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
             "connect my Google tools", timeout=15000
         )
 
+        timeline_messages[:] = [
+            {
+                "message_id": "first-user",
+                "kind": "user",
+                "content": "connect my Google tools",
+                "sequence": 1,
+                "status": "accepted",
+                "created_at": "2026-07-08T13:00:00Z",
+                "turn_run_id": run_id,
+            },
+            {
+                "message_id": "first-assistant",
+                "kind": "assistant",
+                "content": "Gmail, Calendar, Drive, and Sheets are connected.",
+                "sequence": 2,
+                "status": "finalized",
+                "created_at": "2026-07-08T13:00:10Z",
+                "updated_at": "2026-07-08T13:00:10Z",
+                "turn_run_id": run_id,
+            },
+        ]
         await page.evaluate(
             """
-            ({ runId, threadId }) => {
-              window.__emitV2Sse("accepted", {
-                ack: { run_id: runId, thread_id: threadId, status: "running" }
-              }, "cursor-accepted");
+            (runId) => {
+              window.__emitV2Sse("projection_update", {
+                state: {
+                  items: [
+                    { run_status: { run_id: runId, status: "completed" } }
+                  ]
+                }
+              }, "cursor-terminal");
               window.__emitV2Sse("final_reply", {
                 reply: {
                   turn_run_id: runId,
@@ -740,7 +783,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
               }, "cursor-final");
             }
             """,
-            {"runId": run_id, "threadId": thread_id},
+            run_id,
         )
         await expect(page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
             "Gmail, Calendar, Drive, and Sheets are connected.",
