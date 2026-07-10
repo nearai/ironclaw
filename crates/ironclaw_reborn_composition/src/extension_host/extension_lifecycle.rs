@@ -1748,9 +1748,7 @@ fn extension_search_has_inactive_installed_result(
     extensions.iter().any(|extension| {
         matches!(
             extension.installation_phase,
-            Some(
-                LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Disabled
-            )
+            Some(LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Disabled)
         ) && !extension
             .summary
             .surface_kinds
