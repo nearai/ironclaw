@@ -215,7 +215,8 @@ crates/ironclaw_loop_support/src/compaction_task.rs                        NEW
        CompactionError::InputTooLarge as soon as the running total
        exceeds the cap (no full-buffer allocation before check).
        InputTooLarge is a HARD ERROR per §10 — does NOT increment
-       circuit breaker; returns CompactionUnavailable to executor.
+       circuit breaker; surfaces to the executor as a non-terminal
+       CompactionFailed + deferred continuation (#5838/#5895).
     6. Build SystemInferenceRequest carrying input_text + identity + cap.
     7. Call SystemInferencePort.call (timeout enforced inside port).
     8. Run LeakDetector on response.output_text BEFORE persistence; on
@@ -422,13 +423,10 @@ crates/ironclaw_agent_loop/src/executor/prompt.rs
        boundary only while the prompt snapshot fingerprint is unchanged; if a
        later prompt refresh changes the snapshot, the same boundary can be
        retried without requiring a newer user message.
-    7. On Err(error):
-       - InvalidCutPoint | InputTooLarge | InjectionDetected | LeakDetected:
-         emit CompactionFailed event with sanitized reason;
-         return LoopFailureKind::CompactionUnavailable.
-       - InferenceFailed | PersistenceFailed:
-         emit CompactionFailed event with sanitized reason;
-         return LoopFailureKind::CompactionUnavailable.
+    7. On Err(error) other than Cancelled (#5838/#5895):
+       emit CompactionFailed event with sanitized reason;
+       record deferred watermark and continue the candidate prompt in
+       the same iteration (see §10) — no terminal exit.
 
 crates/ironclaw_agent_loop/src/executor/goal_refresh.rs                    NEW (Phase 2)
   pub(super) struct GoalRefreshStage;
@@ -972,7 +970,7 @@ It does NOT issue SessionThreadService calls. The snapshot is populated
 from LoopPromptBundle.compaction_message_index and is not checkpointed.
 ```
 
-`CompactionTask` validates the requested `drop_through_seq` on entry. A non-boundary cut returns `CompactionError::InvalidCutPoint` — a HARD error that returns `LoopFailureKind::CompactionUnavailable` to the executor (it indicates a strategy bug, not a transient inference failure). The task also rejects ranges containing hidden/non-model-visible messages so it cannot persist a replacement summary that the thread layer will later ignore.
+`CompactionTask` validates the requested `drop_through_seq` on entry. A non-boundary cut returns `CompactionError::InvalidCutPoint` — a HARD error (it indicates a strategy bug, not a transient inference failure); the executor surfaces it as a non-terminal `CompactionFailed` + deferred continuation (#5838/#5895). The task also rejects ranges containing hidden/non-model-visible messages so it cannot persist a replacement summary that the thread layer will later ignore.
 
 ## 10. Failure handling — explicit state machine
 
@@ -984,27 +982,19 @@ on Ok(summary_id):
   state.compaction_fired_this_iteration = true
   emit CompactionCompleted
 
-// Phase 1 errors abort the run immediately:
-on Err(InvalidCutPoint):
-  emit CompactionFailed { reason: "invalid cut point" }
-  return LoopFailureKind::CompactionUnavailable
+// Non-cancellation errors are non-terminal (#5838, amended by #5895 —
+// originally these aborted with LoopFailureKind::CompactionUnavailable):
+on Err(InvalidCutPoint | UnsupportedMode | InputTooLarge
+       | SecurityRejected | InferenceFailed | PersistenceFailed):
+  emit CompactionFailed { reason: <stage-specific safe reason kind> }
+  record DeferredCompactionWatermark { through_seq, prompt_fingerprint }
+  clear force_compact_on_next_iteration
+  continue candidate prompt in the SAME iteration, uncompacted
+  (LeakDetected/InjectionDetected reasons never forward raw model output;
+   the deferred watermark blocks retrying the identical boundary+fingerprint)
 
-on Err(InputTooLarge { cap, observed_bytes }):
-  emit CompactionFailed { reason: "input exceeds byte cap" }
-  return LoopFailureKind::CompactionUnavailable
-
-on Err(InjectionDetected):
-  emit CompactionFailed { reason: "injection pattern detected" }
-  return LoopFailureKind::CompactionUnavailable
-
-on Err(LeakDetected):
-  emit CompactionFailed { reason: "leak detected" }
-  return LoopFailureKind::CompactionUnavailable
-  (does NOT forward raw model output into reason field)
-
-on Err(InferenceFailed { safe_summary }) | Err(PersistenceFailed { safe_summary }):
-  emit CompactionFailed { reason: safe_summary }
-  return LoopFailureKind::CompactionUnavailable
+on Err(Cancelled):
+  return terminal exit — cancellation remains the only run-ending path
 ```
 
 Phase 1 intentionally has no compaction circuit breaker or naive tail-trim
