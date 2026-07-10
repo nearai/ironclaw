@@ -151,15 +151,13 @@ async fn build_runtime_with_pause_inducing_setup(
     governor
         .set_limit(
             user_account,
-            ResourceLimits {
-                max_usd: Some(dec!(10.00)),
-                period: BudgetPeriod::Rolling24h,
-                thresholds: BudgetThresholds {
+            ResourceLimits::default()
+                .set_max_usd(dec!(10.00))
+                .set_period(BudgetPeriod::Rolling24h)
+                .set_thresholds(BudgetThresholds {
                     warn_at: 0.2,
                     pause_at: 0.5,
-                },
-                ..ResourceLimits::default()
-            },
+                }),
         )
         .unwrap();
     (runtime, gateway)
@@ -218,12 +216,10 @@ async fn f3_approval_with_increased_limit_unblocks_retry() {
     // succeeds.
     let store = runtime.budget_gate_store().expect("gate store");
     let approver = ironclaw_host_api::UserId::new("f3-approver").unwrap();
-    let increased = ResourceLimits {
-        max_usd: Some(dec!(1_000.00)),
-        period: BudgetPeriod::Rolling24h,
-        thresholds: BudgetThresholds::DISABLED,
-        ..ResourceLimits::default()
-    };
+    let increased = ResourceLimits::default()
+        .set_max_usd(dec!(1_000.00))
+        .set_period(BudgetPeriod::Rolling24h)
+        .set_thresholds(BudgetThresholds::DISABLED);
     let resolved = store
         .resolve(
             &gate_scope,

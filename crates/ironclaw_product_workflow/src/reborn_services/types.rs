@@ -93,6 +93,68 @@ pub struct RebornLogQueryRequest {
     pub follow: bool,
 }
 
+impl RebornLogQueryRequest {
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    pub fn set_level(mut self, level: RebornLogLevel) -> Self {
+        self.level = Some(level);
+        self
+    }
+
+    pub fn set_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    pub fn set_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
+        self
+    }
+
+    pub fn set_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = Some(turn_id.into());
+        self
+    }
+
+    pub fn set_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.tool_call_id = Some(tool_call_id.into());
+        self
+    }
+
+    pub fn set_tool_name(mut self, tool_name: impl Into<String>) -> Self {
+        self.tool_name = Some(tool_name.into());
+        self
+    }
+
+    pub fn set_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    pub fn set_tail(mut self, tail: bool) -> Self {
+        self.tail = tail;
+        self
+    }
+
+    pub fn set_follow(mut self, follow: bool) -> Self {
+        self.follow = follow;
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornLogEntry {
     pub id: String,
@@ -268,6 +330,30 @@ pub struct RebornTimelineRequest {
     /// include here and round-trips it on each follow-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+
+impl RebornTimelineRequest {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn set_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = thread_id.into();
+        self
+    }
+
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1344,6 +1430,43 @@ pub struct RebornOperatorSetupRequest {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub webui_access_token: Option<SecretString>,
+}
+
+impl RebornOperatorSetupRequest {
+    pub fn set_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    pub fn set_adapter(mut self, adapter: impl Into<String>) -> Self {
+        self.adapter = Some(adapter.into());
+        self
+    }
+
+    pub fn set_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    pub fn set_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn set_api_key(mut self, api_key: SecretString) -> Self {
+        self.api_key = Some(api_key);
+        self
+    }
+
+    pub fn set_profile_id(mut self, profile_id: impl Into<String>) -> Self {
+        self.profile_id = Some(profile_id.into());
+        self
+    }
+
+    pub fn set_webui_access_token(mut self, webui_access_token: SecretString) -> Self {
+        self.webui_access_token = Some(webui_access_token);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

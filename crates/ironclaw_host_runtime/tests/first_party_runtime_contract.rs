@@ -63,10 +63,7 @@ async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     });
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
-    let estimate = ResourceEstimate {
-        output_bytes: Some(1024),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(1024);
     let input = json!({"message":"status"});
 
     let outcome = runtime
@@ -151,11 +148,9 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             capability_id(),
-            ResourceEstimate {
-                network_egress_bytes: Some(100),
-                output_bytes: Some(1024),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_network_egress_bytes(100)
+                .set_output_bytes(1024),
             json!({"url":"https://api.example.test/v1/native"}),
             trust_decision(),
         ))
@@ -412,10 +407,9 @@ async fn host_runtime_health_reports_missing_first_party_backend_for_empty_regis
 
 #[tokio::test]
 async fn first_party_handler_error_reconciles_reported_usage_after_side_effect() {
-    let handler = Arc::new(FailingFirstPartyHandler::new(ResourceUsage {
-        network_egress_bytes: 77,
-        ..ResourceUsage::default()
-    }));
+    let handler = Arc::new(FailingFirstPartyHandler::new(
+        ResourceUsage::default().set_network_egress_bytes(77),
+    ));
     let first_party =
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
     let governor = Arc::new(InMemoryResourceGovernor::new());
@@ -439,10 +433,7 @@ async fn first_party_handler_error_reconciles_reported_usage_after_side_effect()
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             capability_id(),
-            ResourceEstimate {
-                network_egress_bytes: Some(100),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default().set_network_egress_bytes(100),
             json!({"message":"status"}),
             trust_decision(),
         ))
@@ -488,10 +479,7 @@ async fn first_party_handler_panic_fails_closed_and_releases_reservation() {
     let outcome = AssertUnwindSafe(runtime.invoke_capability(RuntimeCapabilityRequest::new(
         context,
         capability_id(),
-        ResourceEstimate {
-            network_egress_bytes: Some(100),
-            ..ResourceEstimate::default()
-        },
+        ResourceEstimate::default().set_network_egress_bytes(100),
         json!({"message":"status"}),
         trust_decision(),
     )))
@@ -771,11 +759,9 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
             })?;
         Ok(FirstPartyCapabilityResult::new(
             json!({"status": response.status}),
-            ResourceUsage {
-                network_egress_bytes: response.request_bytes,
-                output_bytes: 14,
-                ..ResourceUsage::default()
-            },
+            ResourceUsage::default()
+                .set_network_egress_bytes(response.request_bytes)
+                .set_output_bytes(14),
         ))
     }
 }
@@ -828,11 +814,9 @@ async fn invoke_http_fixture(
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             capability_id(),
-            ResourceEstimate {
-                network_egress_bytes: Some(100),
-                output_bytes: Some(1024),
-                ..ResourceEstimate::default()
-            },
+            ResourceEstimate::default()
+                .set_network_egress_bytes(100)
+                .set_output_bytes(1024),
             input,
             trust_decision(),
         ))

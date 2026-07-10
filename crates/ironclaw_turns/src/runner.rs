@@ -17,6 +17,13 @@ pub struct ClaimRunRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRunsRequest {
+    pub runner_id: TurnRunnerId,
+    pub scope_filter: Option<TurnScope>,
+    pub max_runs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedTurnRun {
     pub state: TurnRunState,
     pub resolved_run_profile: ResolvedRunProfile,
@@ -127,6 +134,27 @@ pub trait TurnRunTransitionPort: Send + Sync {
         &self,
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError>;
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let mut claimed = Vec::new();
+        for _ in 0..request.max_runs {
+            let next = self
+                .claim_next_run(ClaimRunRequest {
+                    runner_id: request.runner_id,
+                    lease_token: TurnLeaseToken::new(),
+                    scope_filter: request.scope_filter.clone(),
+                })
+                .await?;
+            let Some(next) = next else {
+                break;
+            };
+            claimed.push(next);
+        }
+        Ok(claimed)
+    }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError>;
 

@@ -24,6 +24,19 @@ test("conversation message bubbles use readable typography", () => {
   );
 });
 
+test("assistant bubbles expose final reply state for live QA", () => {
+  assert.match(
+    messageBubbleSource,
+    /const finalReplyState =[\s\S]*message\.isFinalReply/,
+    "assistant messages should derive a DOM-readable final reply state",
+  );
+  assert.match(
+    messageBubbleSource,
+    /data-final-reply=\{finalReplyState\}/,
+    "live QA should be able to distinguish streaming text from the final answer",
+  );
+});
+
 test("markdown body and code blocks inherit readable message sizing", () => {
   assert.match(
     appCssSource,

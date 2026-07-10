@@ -41,11 +41,9 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -62,11 +60,9 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: Some(mounts.clone()),
             resource_reservation: None,
             input: json!({"message": "hello through public seam"}),
@@ -158,11 +154,9 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -255,14 +249,12 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
         });
 
         let output_bytes = serde_json::to_vec(&self.output).unwrap().len() as u64;
-        let usage = ResourceUsage {
-            output_bytes,
-            process_count: u32::from(matches!(
+        let usage = ResourceUsage::default()
+            .set_output_bytes(output_bytes)
+            .set_process_count(u32::from(matches!(
                 self.runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
+            )));
         let reservation = request
             .governor
             .reserve(request.scope, request.estimate)
