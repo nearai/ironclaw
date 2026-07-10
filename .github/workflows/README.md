@@ -97,9 +97,9 @@ trail: the former in-run alert jobs and `nightly-alert-issue.sh` were removed
 in favor of this single external check, because an in-run alert dies with its
 own run on a startup_failure and can never see a cron that didn't fire.
 
-### Main branch alerting
+### Main CI checks
 
-`main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
+`main-ci-checks.yml` watches completed `workflow_run` events for the
 current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
 Platform & Compat, Replay Snapshot Gate, Code Coverage,
 nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
@@ -111,8 +111,19 @@ Alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be a single
 webhook URL or multiple URLs separated by newlines or commas. This is
 intentionally separate from the canary/nightly `SLACK_WEBHOOK_URL` so main CI
 alerts can target dedicated channels.
+
+The same workflow fast-forwards `staging-release` to the main commit after all
+required push-to-main CI workflows for that SHA have succeeded. Required
+workflows are Code Style, Tests (Reborn), Platform & Compat, Replay Snapshot
+Gate, Code Coverage, and Release-plz. Path-filtered workflows — Reborn E2E and
+nearai-bench dispatcher tests — block staging-release promotion when they ran
+for the SHA, but are ignored when their path filters skip them. The
+staging-release update is a normal `git push` to
+`refs/heads/staging-release`, so it fails instead of forcing when
+`staging-release` is not a fast-forward from `main`.
+
 When adding a new workflow that runs on `push` to `main`, add its workflow
-`name:` to the watched list in `main-ci-slack-alerts.yml`.
+`name:` to the watched list in `main-ci-checks.yml`.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 
