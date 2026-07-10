@@ -81,6 +81,10 @@ function renderChat({
   threadStateUpdates = [],
   globalAutoApproveEnabled = false,
   showChatLogsShortcut = true,
+  selectedThreads = [],
+  toasts = [],
+  chatHookOptions = [],
+  translations = {},
 }) {
   const components = {
     ApprovalCard() {},
@@ -123,28 +127,73 @@ function renderChat({
     channelConnectionDisplayName,
     setThreadState: (threadId, state) =>
       threadStateUpdates.push({ threadId, state }),
+    toast: (message, options) => toasts.push({ message, options }),
     setTimeout: () => 1,
     clearTimeout: () => {},
     window: {
       addEventListener: () => {},
       removeEventListener: () => {},
     },
-    useChat: () => hookState,
+    useChat: (_threadId, options) => {
+      chatHookOptions.push(options);
+      return hookState;
+    },
     useInterfacePreferences: () => ({ showChatLogsShortcut }),
-    useT: () => (key) => key,
+    useT: () => (key) => translations[key] || key,
   };
 
   vm.runInNewContext(chatSourceForTest(), context);
   const tree = context.globalThis.__testExports.Chat({
     threads: activeThreadId ? [{ id: activeThreadId }] : [],
     activeThreadId,
-    onSelectThread: () => {},
+    onSelectThread: (...args) => selectedThreads.push(args),
     isCreatingThread: false,
     gatewayStatus: {},
     globalAutoApproveEnabled,
   });
-  return { tree, components };
+  return { tree, components, chatHookOptions, selectedThreads, toasts };
 }
+
+test("Chat leaves a missing thread and shows the dedicated notice", () => {
+  const threadStateUpdates = [];
+  const { chatHookOptions, selectedThreads, toasts } = renderChat({
+    threadStateUpdates,
+    translations: {
+      "chat.threadNoLongerExists": "This thread no longer exists",
+    },
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "idle",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  chatHookOptions[0].onThreadNotFound("thread-1");
+
+  assert.deepEqual(threadStateUpdates, [{ threadId: "thread-1", state: null }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(selectedThreads)), [[null, { replace: true }]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(toasts)), [
+    {
+      message: "This thread no longer exists",
+      options: { tone: "error", duration: 5000 },
+    },
+  ]);
+});
 
 test("Chat cancel button routes through active thread run cancellation", async () => {
   const cancelReasons = [];

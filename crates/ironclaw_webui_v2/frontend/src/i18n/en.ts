@@ -1400,6 +1400,7 @@ registerPack("en", {
   "chat.copyMessage": "Copy message",
   "chat.retryMessage": "Retry message",
   "chat.history.loadFailed": "Failed to load conversation history.",
+  "chat.threadNoLongerExists": "This thread no longer exists",
   "chat.finishPairingBeforeSend": "Finish connecting the channel before sending another message.",
   "chat.resolveApprovalBeforeSend": "Resolve the approval request before sending another message.",
   "chat.retryIn": "Retry in {seconds}s",

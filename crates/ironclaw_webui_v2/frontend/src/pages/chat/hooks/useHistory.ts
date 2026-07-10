@@ -2,6 +2,7 @@
 import React from "react";
 import { fetchTimeline } from "../../../lib/api";
 import { authScope } from "../../../lib/auth-scope";
+import { isThreadNotFoundError } from "../../../lib/thread-errors";
 import { messagesFromTimeline } from "../lib/history-messages";
 import {
   carryFinalAssistantOrderFlags,
@@ -50,8 +51,12 @@ export function clearHistoryCache() {
   historyCache.clear();
 }
 
+export function evictThreadHistory(threadId) {
+  if (threadId) historyCache.delete(cacheKey(threadId));
+}
+
 export function useHistory(threadId, options = {}) {
-  const { getPendingMessages, setPendingMessages } = options;
+  const { getPendingMessages, onThreadNotFound, setPendingMessages } = options;
   const cached = threadId ? historyCache.get(cacheKey(threadId)) : null;
   const [state, setState] = React.useState({
     messages: cached?.messages || [],
@@ -179,9 +184,23 @@ export function useHistory(threadId, options = {}) {
           };
         });
       } catch (err) {
-        console.error("Failed to load timeline:", err);
         // Identity changed mid-flight — the error isn't the new user's.
         if (authScope() !== issuingScope) return;
+        if (isThreadNotFoundError(err)) {
+          evictThreadHistory(threadId);
+          if (threadIdRef.current === threadId) {
+            setState((state) => ({
+              ...state,
+              messages: [],
+              nextCursor: null,
+              isLoading: false,
+              loadError: null,
+            }));
+            onThreadNotFound?.(threadId);
+          }
+          return;
+        }
+        console.error("Failed to load timeline:", err);
         // Stay loud — surface a user-visible error rather than silently
         // masking timeline outages. Ignore a stale resolve for a thread the
         // user already navigated away from (its data is already cached).
@@ -198,7 +217,7 @@ export function useHistory(threadId, options = {}) {
         loadingRef.current.delete(threadId);
       }
     },
-    [threadId, getPendingMessages, setPendingMessages],
+    [threadId, getPendingMessages, onThreadNotFound, setPendingMessages],
   );
 
   React.useEffect(() => {

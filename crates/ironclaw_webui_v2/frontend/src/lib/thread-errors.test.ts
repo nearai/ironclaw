@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { deleteThreadErrorMessage, isThreadBusyError } from "./thread-errors";
+import {
+  deleteThreadErrorMessage,
+  isThreadBusyError,
+  isThreadNotFoundError,
+} from "./thread-errors";
 
 const t = (key) => key;
 
@@ -13,6 +17,13 @@ test("isThreadBusyError matches the busy kind, not any 409", () => {
   assert.equal(isThreadBusyError({ status: 409 }), false);
   assert.equal(isThreadBusyError({ status: 500 }), false);
   assert.equal(isThreadBusyError(undefined), false);
+});
+
+test("isThreadNotFoundError matches thread request 404s", () => {
+  assert.equal(isThreadNotFoundError({ status: 404 }), true);
+  assert.equal(isThreadNotFoundError({ status: 404, payload: { kind: "not_found" } }), true);
+  assert.equal(isThreadNotFoundError({ status: 500, payload: { kind: "not_found" } }), false);
+  assert.equal(isThreadNotFoundError(undefined), false);
 });
 
 test("deleteThreadErrorMessage surfaces a clear line for a running thread (#4823)", () => {

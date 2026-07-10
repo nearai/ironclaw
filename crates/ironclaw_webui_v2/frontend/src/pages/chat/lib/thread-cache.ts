@@ -106,6 +106,18 @@ export function touchThreadList(data, { threadId, messageContent, updatedAt }) {
   };
 }
 
+export function removeThreadFromList(data, threadId) {
+  if (!threadId) return data;
+
+  const current = threadListData(data);
+  const threads = Array.isArray(current.threads) ? current.threads : [];
+  return {
+    ...current,
+    threads: threads.filter((thread) => threadIdFor(thread) !== threadId),
+    next_cursor: current.next_cursor ?? null,
+  };
+}
+
 export function upsertThreadInCache(thread) {
   queryClient.setQueryData?.(THREADS_QUERY_KEY, (data) =>
     upsertThreadList(data, thread),
@@ -115,5 +127,11 @@ export function upsertThreadInCache(thread) {
 export function touchThreadInCache(update) {
   queryClient.setQueryData?.(THREADS_QUERY_KEY, (data) =>
     touchThreadList(data, update),
+  );
+}
+
+export function removeThreadFromCache(threadId) {
+  queryClient.setQueryData?.(THREADS_QUERY_KEY, (data) =>
+    removeThreadFromList(data, threadId),
   );
 }

@@ -236,7 +236,10 @@ mod tests {
         // unit harness injects stubs for unknown identifiers, so only a
         // source-level pin (and the Playwright smoke) catches a re-drop.
         let use_chat = source_text("pages/chat/hooks/useChat.ts");
-        assert!(use_chat.contains("import { touchThreadInCache } from \"../lib/thread-cache\""));
+        assert!(use_chat.contains(
+            "import { removeThreadFromCache, touchThreadInCache } from \"../lib/thread-cache\""
+        ));
+        assert!(use_chat.contains("removeThreadFromCache("));
         assert!(use_chat.contains("touchThreadInCache({"));
     }
 

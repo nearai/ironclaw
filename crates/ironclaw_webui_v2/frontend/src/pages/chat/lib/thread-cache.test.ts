@@ -23,6 +23,7 @@ globalThis.__testExports = {
   deriveSidebarTitle,
   displaySidebarTitle,
   normalizeSidebarTitle,
+  removeThreadFromList,
   touchThreadList,
   upsertThreadList,
 };`;
@@ -189,4 +190,20 @@ test("touchThreadList creates a minimal missing thread record", () => {
       next_cursor: null,
     },
   );
+});
+
+test("removeThreadFromList evicts only the stale thread and preserves pagination", () => {
+  const { removeThreadFromList } = loadThreadCache();
+  const data = {
+    threads: [
+      { thread_id: "thread-1", title: "Missing" },
+      { id: "thread-2", title: "Still here" },
+    ],
+    next_cursor: "cursor-1",
+  };
+
+  assert.deepEqual(normalize(removeThreadFromList(data, "thread-1")), {
+    threads: [{ id: "thread-2", title: "Still here" }],
+    next_cursor: "cursor-1",
+  });
 });

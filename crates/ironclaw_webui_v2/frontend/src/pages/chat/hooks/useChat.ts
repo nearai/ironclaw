@@ -12,13 +12,14 @@ import {
   subscribeProductAuthOAuthCompletion,
 } from "../../../lib/product-auth-oauth-events";
 import { queryClient } from "../../../lib/query-client";
+import { isThreadNotFoundError } from "../../../lib/thread-errors";
 import React from "react";
 import {
   onboardingBelongsToThread,
   useChannelOnboarding,
 } from "./useChannelOnboarding";
 import { useChatEvents } from "../lib/useChatEvents";
-import { touchThreadInCache } from "../lib/thread-cache";
+import { removeThreadFromCache, touchThreadInCache } from "../lib/thread-cache";
 import {
   addPending,
   recordAcceptedMessageRef,
@@ -47,7 +48,7 @@ import {
 } from "../lib/connection-status";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments";
 import { failureMessageForRequestError } from "../lib/failureMessages";
-import { useHistory } from "./useHistory";
+import { evictThreadHistory, useHistory } from "./useHistory";
 import { useSSE } from "./useSSE";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
@@ -118,8 +119,10 @@ function isPendingOAuthGate(gate) {
 // - resolveGate uses `runId` + `gateRef` from the live event stream, not
 //   a v1-style `requestId`.
 // - cancelRun is a first-class action and posts to the v2 cancel route.
-export function useChat(threadId) {
+export function useChat(threadId, options = {}) {
+  const { onThreadNotFound } = options;
   const threadIdRef = React.useRef(threadId);
+  const missingThreadIdsRef = React.useRef(new Set());
   const pendingMessagesRef = React.useRef(new Map());
   const pendingSeqRef = React.useRef(1);
   const [cooldownUntil, setCooldownUntil] = React.useState(0);
@@ -159,6 +162,17 @@ export function useChat(threadId) {
     [threadId],
   );
 
+  const handleThreadNotFound = React.useCallback(
+    (missingThreadId) => {
+      if (!missingThreadId || missingThreadIdsRef.current.has(missingThreadId)) return;
+      missingThreadIdsRef.current.add(missingThreadId);
+      removeThreadFromCache(missingThreadId);
+      evictThreadHistory(missingThreadId);
+      onThreadNotFound?.(missingThreadId);
+    },
+    [onThreadNotFound],
+  );
+
   const {
     messages,
     messagesThreadId,
@@ -169,7 +183,11 @@ export function useChat(threadId) {
     loadHistory,
     seedThreadMessages,
     setMessages,
-  } = useHistory(threadId, { getPendingMessages, setPendingMessages });
+  } = useHistory(threadId, {
+    getPendingMessages,
+    onThreadNotFound: handleThreadNotFound,
+    setPendingMessages,
+  });
 
   const [isProcessing, setIsProcessingState] = React.useState(false);
   const isProcessingRef = React.useRef(isProcessing);
@@ -776,6 +794,17 @@ export function useChat(threadId) {
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
+        if (isThreadNotFoundError(err) && sendThreadId) {
+          if (!threadIdRef.current || threadIdRef.current === sendThreadId) {
+            handleThreadNotFound(sendThreadId);
+          } else {
+            removeThreadFromCache(sendThreadId);
+            evictThreadHistory(sendThreadId);
+          }
+          updateCurrentRunState(() => setIsProcessing(false));
+          submitBusyRef.current = false;
+          throw err;
+        }
         const failureContent = failureMessageForRequestError(err);
         // Mark the optimistic user bubble as retryable and append a separate
         // assistant-side error bubble. Apply each updater to both stores because
@@ -826,6 +855,7 @@ export function useChat(threadId) {
     },
     [
       threadId,
+      handleThreadNotFound,
       pendingGate,
       pendingOnboarding,
       setMessages,

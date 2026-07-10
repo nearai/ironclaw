@@ -131,6 +131,11 @@ function runUseChatSource(context) {
   }
   if (!("touchThreadInCache" in context)) context.touchThreadInCache = () => {};
   if (!("upsertThreadInCache" in context)) context.upsertThreadInCache = () => {};
+  if (!("removeThreadFromCache" in context)) context.removeThreadFromCache = () => {};
+  if (!("evictThreadHistory" in context)) context.evictThreadHistory = () => {};
+  if (!("isThreadNotFoundError" in context)) {
+    context.isThreadNotFoundError = (error) => error?.status === 404;
+  }
   vm.runInNewContext(useChatSourceForTest(), context);
 }
 
@@ -1084,6 +1089,74 @@ test("useChat.send: request failure appends inline error in the active thread", 
     renderedMessages[1].content,
     "inline:AI provider account is out of credits",
   );
+});
+
+test("useChat.send: a thread 404 evicts stale caches and skips the generic error bubble", async () => {
+  const threadId = "thread-missing";
+  const removedThreads = [];
+  const evictedHistories = [];
+  const missingThreads = [];
+  let renderedMessages = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    evictThreadHistory: (id) => evictedHistories.push(id),
+    globalThis: {},
+    listConnectableChannels: async () => [],
+    queryClient: { fetchQuery: async () => [], invalidateQueries: () => {} },
+    recordAcceptedMessageRef,
+    removePending,
+    removeThreadFromCache: (id) => removedThreads.push(id),
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw Object.assign(new Error("Not found"), {
+        status: 404,
+        payload: { kind: "not_found" },
+      });
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId, {
+    onThreadNotFound: (id) => missingThreads.push(id),
+  });
+
+  await assert.rejects(chat.send("please answer"), /Not found/);
+
+  assert.deepEqual(removedThreads, [threadId]);
+  assert.deepEqual(evictedHistories, [threadId]);
+  assert.deepEqual(missingThreads, [threadId]);
+  assert.equal(renderedMessages.some((message) => message.role === "error"), false);
 });
 
 test("useChat.send: create-thread failure appends inline error on new chat", async () => {

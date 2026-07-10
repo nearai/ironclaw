@@ -39,9 +39,9 @@ function useHistorySourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${helperLines.join("\n")}\n${lines.join(
+  return `function isThreadNotFoundError(error) { return error?.status === 404; }\n${helperLines.join("\n")}\n${lines.join(
     "\n",
-  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh };`;
+  )}\nglobalThis.__testExports = { clearHistoryCache, evictThreadHistory, useHistory, mergeFullRefresh };`;
 }
 
 function createReactStub({ setCalls = [] } = {}) {
@@ -132,6 +132,30 @@ test("useHistory records a load error when timeline fetch fails", async () => {
     "chat.history.loadFailed",
   );
   assert.equal(consoleErrors.length, 1);
+});
+
+test("useHistory reports a missing active thread without a generic load error", async () => {
+  const setCalls = [];
+  const missingThreads = [];
+  const context = {
+    console: { error: () => {} },
+    fetchTimeline: async () => {
+      throw Object.assign(new Error("Not found"), { status: 404 });
+    },
+    authScope: () => "test-user",
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub({ setCalls }),
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.useHistory("thread-missing", {
+    onThreadNotFound: (threadId) => missingThreads.push(threadId),
+  });
+  await flushMicrotasks();
+
+  assert.deepEqual(missingThreads, ["thread-missing"]);
+  assert.equal(setCalls.some((state) => state?.loadError), false);
 });
 
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {

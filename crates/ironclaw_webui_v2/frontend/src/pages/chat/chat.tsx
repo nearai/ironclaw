@@ -25,6 +25,7 @@ import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
+import { toast } from "../../lib/toast";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -67,6 +68,14 @@ export function Chat({
 }) {
   const t = useT();
   const { showChatLogsShortcut } = useInterfacePreferences();
+  const handleThreadNotFound = React.useCallback(
+    (missingThreadId) => {
+      clearThreadState(missingThreadId);
+      toast(t("chat.threadNoLongerExists"), { tone: "error", duration: 5000 });
+      onSelectThread?.(null, { replace: true });
+    },
+    [onSelectThread, t],
+  );
   const {
     messages,
     isProcessing,
@@ -93,7 +102,7 @@ export function Chat({
     submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
-  } = useChat(activeThreadId);
+  } = useChat(activeThreadId, { onThreadNotFound: handleThreadNotFound });
 
   const activeThread = React.useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) || null,
