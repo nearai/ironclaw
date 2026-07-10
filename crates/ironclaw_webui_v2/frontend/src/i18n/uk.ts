@@ -815,7 +815,7 @@ registerPack("uk", {
   "automations.summary.filterAction": "Показати {label}",
   "automations.summary.nextRun": "Наступний запуск",
   "automations.summary.none": "Жодного",
-  "automations.summary.nextRunDue": "Невдовзі",
+  "automations.summary.nextRunDue": "Вже зараз",
   "automations.summary.nextRunDetail": "Найближчий запланований запуск у цьому списку.",
   "automations.empty.matchingTitle": "Немає відповідних автоматизацій",
   "automations.empty.matchingDescription": "Спробуйте інший фільтр статусу.",
