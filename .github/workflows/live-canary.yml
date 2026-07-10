@@ -741,21 +741,12 @@ jobs:
           - shard_id: qa-2-workflow
             shard_name: QA 2D-2F
             cases: qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery
-          - shard_id: qa-3-chat
-            shard_name: QA 3A-3B
-            cases: qa_3a_slack_connect,qa_3b_endpoint_status_live_chat
-          - shard_id: qa-3-routine
-            shard_name: QA 3C
-            cases: qa_3c_endpoint_status_slack_routine
-          - shard_id: qa-3-delivery
-            shard_name: QA 3D
-            cases: qa_3d_endpoint_status_slack_delivery
-          - shard_id: qa-4-summary
-            shard_name: QA 4A-4C
-            cases: qa_4a_gmail_connect,qa_4b_github_connect,qa_4c_github_release_live_chat
-          - shard_id: qa-4-automation
-            shard_name: QA 4D-4E
-            cases: qa_4d_github_release_slack_routine,qa_4e_github_release_email_delivery
+          - shard_id: qa-3
+            shard_name: QA 3
+            cases: qa_3a_slack_connect,qa_3b_endpoint_status_live_chat,qa_3c_endpoint_status_slack_routine,qa_3d_endpoint_status_slack_delivery
+          - shard_id: qa-4
+            shard_name: QA 4
+            cases: qa_4a_gmail_connect,qa_4b_github_connect,qa_4c_github_release_live_chat,qa_4d_github_release_slack_routine,qa_4e_github_release_email_delivery
           - shard_id: qa-5
             shard_name: QA 5
             cases: qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer

@@ -3563,7 +3563,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
 
         shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
-        self.assertEqual(len(shard_case_lines), 13)
+        self.assertEqual(len(shard_case_lines), 10)
         sharded_cases = [
             case_name
             for line in shard_case_lines
