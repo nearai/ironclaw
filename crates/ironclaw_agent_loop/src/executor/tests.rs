@@ -840,6 +840,22 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
         1,
         "compaction cancellation should not request a failure explanation prompt"
     );
+
+    // The Final checkpoint must persist the deferred watermark set by the
+    // failure-fallback path, not just the in-memory Cancelled exit.
+    let final_state = final_staged_state(&host);
+    assert!(
+        !final_state.compaction_state.force_compact_on_next_iteration,
+        "force_compact_on_next_iteration must be cleared before the Final checkpoint"
+    );
+    assert_eq!(
+        final_state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: final_state.compaction_prompt.fingerprint(),
+        }),
+        "deferred watermark must persist through the cancellation checkpoint"
+    );
 }
 
 #[tokio::test]
