@@ -246,6 +246,93 @@ impl SessionSummarizer {
     }
 }
 
+/// Coordinator: distills a conversation and writes the per-session file +
+/// `recent.md` digest. Fail-soft — every error is logged, never propagated
+/// into a conversation turn.
+pub struct SessionMemory {
+    summarizer: SessionSummarizer,
+    workspace: std::sync::Arc<crate::workspace::Workspace>,
+}
+
+impl SessionMemory {
+    pub fn new(
+        llm: std::sync::Arc<dyn ironclaw_llm::LlmProvider>,
+        workspace: std::sync::Arc<crate::workspace::Workspace>,
+    ) -> Self {
+        Self {
+            summarizer: SessionSummarizer::new(llm),
+            workspace,
+        }
+    }
+
+    /// Summarize a conversation and durably store it. Skips trivial
+    /// conversations (no substantive user turns) and is idempotent on
+    /// `conversation_id` (a pre-existing per-session file means "already
+    /// summarized"). All failures are logged; none propagate.
+    pub async fn summarize_and_store(
+        &self,
+        conversation_id: &str,
+        channel: &str,
+        timestamp: DateTime<Utc>,
+        turns: &[(String, Option<String>)],
+    ) {
+        // Skip trivial: nothing worth remembering if every user turn is empty.
+        if turns.iter().all(|(u, _)| u.trim().is_empty()) {
+            return;
+        }
+        let stem = format!("{}-{}", timestamp.format("%Y-%m-%d"), conversation_id);
+        let path = sessions_path(&stem);
+        // Idempotency: a file already existing for this conversation means we
+        // already summarized it — skip (guards session-end vs backstop races).
+        if self.file_exists(&path).await {
+            return;
+        }
+        let summary = match self
+            .summarizer
+            .summarize(conversation_id, channel, timestamp, turns)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("session summary failed for {conversation_id}: {e}");
+                return;
+            }
+        };
+        if let Err(e) = self.workspace.write(&path, &summary.to_markdown()).await {
+            tracing::warn!("write session file failed for {conversation_id}: {e}");
+            return;
+        }
+        let existing = self.read_or_empty(RECENT_PATH).await;
+        let recent = build_recent(&summary.digest_entry(), &existing, 5, 6000);
+        if let Err(e) = self.workspace.write(RECENT_PATH, &recent).await {
+            tracing::warn!("update recent.md failed for {conversation_id}: {e}");
+        }
+    }
+
+    /// True if a document already exists at `path` (any read error other than
+    /// "found" is treated as absent — the backstop sweep will retry).
+    async fn file_exists(&self, path: &str) -> bool {
+        self.workspace.read(path).await.is_ok()
+    }
+
+    /// Read a document's content, or the empty string if it is absent.
+    async fn read_or_empty(&self, path: &str) -> String {
+        self.workspace
+            .read(path)
+            .await
+            .map(|d| d.content)
+            .unwrap_or_default() // silent-ok: recent.md may not exist yet; empty = fresh digest
+    }
+}
+
+#[cfg(test)]
+impl SessionMemory {
+    /// Test-only: read a workspace document's content, or empty on absence.
+    async fn workspace_read(&self, path: &str) -> String {
+        self.read_or_empty(path).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +438,69 @@ mod tests {
         let out = parse_summary_json("not json at all", "c2", "cli", ts);
         assert_eq!(out.title, "Conversation");
         assert!(out.gist.contains("not json"));
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn test_workspace() -> (std::sync::Arc<crate::workspace::Workspace>, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("session_memory_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: std::sync::Arc<dyn crate::db::Database> = std::sync::Arc::new(backend);
+        let ws = crate::workspace::Workspace::new_with_db("test_session_memory", db);
+        (std::sync::Arc::new(ws), temp_dir)
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn store_writes_session_file_and_updates_recent() {
+        let (ws, _dir) = test_workspace().await;
+        let llm = std::sync::Arc::new(crate::testing::StubLlm::new(
+            r#"{"title":"T","gist":"g","open_threads":["x"]}"#,
+        ));
+        let mem = SessionMemory::new(llm, ws);
+        let ts = chrono::Utc::now();
+        mem.summarize_and_store("conv9", "cli", ts, &[("hi".into(), Some("hello".into()))])
+            .await;
+
+        let stem = format!("{}-conv9", ts.format("%Y-%m-%d"));
+        let file = mem.workspace_read(&sessions_path(&stem)).await;
+        assert!(file.contains("title: T"), "session file has frontmatter title");
+        let recent = mem.workspace_read(RECENT_PATH).await;
+        assert!(recent.contains("— T"), "recent.md has the digest entry");
+
+        // idempotent: a second call does not double-append to recent.md
+        mem.summarize_and_store("conv9", "cli", ts, &[("hi".into(), Some("hello".into()))])
+            .await;
+        let recent2 = mem.workspace_read(RECENT_PATH).await;
+        assert_eq!(
+            recent2.matches("— T").count(),
+            1,
+            "idempotent: no double-append"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn store_skips_trivial_conversation() {
+        let (ws, _dir) = test_workspace().await;
+        let llm = std::sync::Arc::new(crate::testing::StubLlm::new(
+            r#"{"title":"T","gist":"g"}"#,
+        ));
+        let mem = SessionMemory::new(llm, ws);
+        let ts = chrono::Utc::now();
+        // Only empty user turns -> skip; no file written.
+        mem.summarize_and_store("trivial", "cli", ts, &[("   ".into(), Some("hi".into()))])
+            .await;
+        let stem = format!("{}-trivial", ts.format("%Y-%m-%d"));
+        assert!(
+            !mem.file_exists(&sessions_path(&stem)).await,
+            "trivial conversation must not write a session file"
+        );
     }
 }
