@@ -27,6 +27,7 @@ pub(crate) mod scheduler;
 mod self_repair;
 pub mod session;
 mod session_manager;
+pub mod session_memory;
 pub mod submission;
 pub mod task;
 mod thread_ops;
