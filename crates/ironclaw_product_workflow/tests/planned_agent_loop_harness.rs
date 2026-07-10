@@ -5,7 +5,7 @@ use ironclaw_runner::planned_driver_factory::PLANNED_DEFAULT_PROFILE_ID;
 use ironclaw_threads::MessageStatus;
 use ironclaw_turns::TurnStatus;
 
-use ironclaw_loop_support::HostManagedModelResponse;
+use ironclaw_loop_host::HostManagedModelResponse;
 
 use support::planned_agent_loop::{
     HarnessCapabilityConfig, HostRuntimeCapabilityConfig, ProductLiveAgentLoopHarness,

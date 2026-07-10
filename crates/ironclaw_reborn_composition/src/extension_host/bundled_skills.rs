@@ -9,7 +9,7 @@ use ironclaw_filesystem::{
     CasExpectation, Entry, FileType, FilesystemError, LocalFilesystem, RootFilesystem,
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
-use ironclaw_loop_support::SkillFilePath;
+use ironclaw_loop_host::SkillFilePath;
 use ironclaw_skills::{ManagedSkillSource, SkillSummary};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;

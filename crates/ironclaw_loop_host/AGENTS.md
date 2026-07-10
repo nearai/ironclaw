@@ -1,4 +1,4 @@
-# Agent Map — ironclaw_loop_support
+# Agent Map — ironclaw_loop_host
 
 ## Start Here
 
@@ -28,7 +28,7 @@
 
 ## Validation
 
-- Fast local check: `cargo test -p ironclaw_loop_support`
+- Fast local check: `cargo test -p ironclaw_loop_host`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
 - Run `cargo test -p ironclaw_turns` and `cargo test -p ironclaw_runner` when host-port contracts change.
 

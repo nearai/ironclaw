@@ -158,7 +158,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         // NOTE: this schema is published by the host_runtime first-party
         // capability registry (consumed by `surface.rs::resolve_builtin_input_schema_ref`).
-        // The decorator path (`ironclaw_loop_support::build_spawn_subagent_parameters_schema`)
+        // The decorator path (`ironclaw_loop_host::build_spawn_subagent_parameters_schema`)
         // builds an equivalent schema dynamically from the registered flavor
         // catalog and overrides the model-facing tool definition at runtime.
         // The two shapes MUST stay in sync. Long-term, route this entry

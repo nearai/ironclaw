@@ -8,7 +8,7 @@ mod support;
 
 use std::time::Duration;
 
-use ironclaw_loop_support::HostManagedModelResponse;
+use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_product_adapters::ProductInboundAck;
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};

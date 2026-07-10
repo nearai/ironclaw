@@ -14,7 +14,7 @@
 //! (`crates/ironclaw_runner/src/runtime.rs:260-326`), so this file only reads
 //! it from test-tree code.
 
-use ironclaw_loop_support::HostManagedModelGateway;
+use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_runner::runtime::DefaultPlannedRuntimeParts;
 
 /// Some/None shape of `DefaultPlannedRuntimeParts`'s 13 `Option`-typed

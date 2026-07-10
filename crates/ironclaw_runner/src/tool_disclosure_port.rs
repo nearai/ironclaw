@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
@@ -44,7 +44,7 @@ const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 
 /// Provider tool name of the loop's `capability_info` inspector (mirrors
-/// `ironclaw_loop_support::capability_info::TOOL_NAME`). Inspecting a deferred
+/// `ironclaw_loop_host::capability_info::TOOL_NAME`). Inspecting a deferred
 /// tool via `capability_info` is treated as intent to use it: the target is
 /// disclosed + promoted so it becomes directly callable — the `tool_search` →
 /// `capability_info` → direct-call discovery path.
@@ -1334,7 +1334,7 @@ mod tests {
     }
 
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_loop_support::CapabilityWriteResult;
+    use ironclaw_loop_host::CapabilityWriteResult;
     use ironclaw_turns::{
         InMemoryRunProfileResolver, LoopResultRef, RunProfileResolver, TurnRunId, TurnScope,
         run_profile::{

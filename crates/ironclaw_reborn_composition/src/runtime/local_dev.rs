@@ -15,7 +15,7 @@ use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelStreamSink, HostManagedToolResultContent,
@@ -505,7 +505,7 @@ fn staged_value_bytes(value: &serde_json::Value) -> Result<usize, AgentLoopHostE
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
         .map_err(|error| {
-            ironclaw_loop_support::raw_agent_loop_host_error(
+            ironclaw_loop_host::raw_agent_loop_host_error(
                 "local_dev_capability_io",
                 "measure_payload",
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -1080,7 +1080,7 @@ fn host_api_agent_loop_error(
     error: impl std::fmt::Debug + std::fmt::Display,
 ) -> AgentLoopHostError {
     let safe_summary = error.to_string();
-    ironclaw_loop_support::raw_agent_loop_host_error(
+    ironclaw_loop_host::raw_agent_loop_host_error(
         "local_dev_host_api",
         "validate_local_dev_runtime_input",
         AgentLoopHostErrorKind::InvalidInvocation,

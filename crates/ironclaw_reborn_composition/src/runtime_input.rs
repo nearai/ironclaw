@@ -5,7 +5,7 @@
 //!
 //! - **LLM configuration** (optional, behind the `root-llm-provider` feature).
 //!   Used by the composition root to construct an `LlmProviderModelGateway`
-//!   that satisfies the loop-support `HostManagedModelGateway` contract.
+//!   that satisfies the loop-host `HostManagedModelGateway` contract.
 //! - **Turn-runner configuration** — poll/heartbeat intervals for the worker
 //!   loop.
 //! - **Completion polling configuration** — interval/timeout policy for
@@ -26,8 +26,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_loop_support::HostManagedModelGateway;
-use ironclaw_loop_support::HostSkillContextSource;
+use ironclaw_loop_host::HostManagedModelGateway;
+use ironclaw_loop_host::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
@@ -460,7 +460,7 @@ pub struct RebornRuntimeInput {
     /// `LlmModelProfilePolicy::build_cost_table()` which the test
     /// override skips).
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
+    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_host::ModelCostTable>>,
 }
 
 impl RebornRuntimeInput {
@@ -698,7 +698,7 @@ impl RebornRuntimeInput {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_model_cost_table_override(
         mut self,
-        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
+        cost_table: Arc<dyn ironclaw_loop_host::ModelCostTable>,
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self

@@ -33,7 +33,7 @@ pub mod store;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{CapabilityId, ThreadId};
-use ironclaw_loop_support::{SpawnSubagentMode, SubagentKindId};
+use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use ironclaw_turns::{
     GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,
 };
@@ -111,7 +111,7 @@ impl EdgeTerminalKind {
 ///   ≤4-spawns/turn, ≤16-descendants caps this ever sees.
 /// - `source_binding_ref`/`reply_target_binding_ref`: these are pure
 ///   deterministic functions of `(parent_run_id, child_run_id)` at spawn time
-///   (`ironclaw_loop_support::subagent_spawn_port`'s private `source_binding_ref`/
+///   (`ironclaw_loop_host::subagent_spawn_port`'s private `source_binding_ref`/
 ///   `reply_target_binding_ref` helpers) — stored here rather than
 ///   recomputed, to avoid duplicating that private format-string logic
 ///   across the crate boundary and the drift risk of two copies going stale

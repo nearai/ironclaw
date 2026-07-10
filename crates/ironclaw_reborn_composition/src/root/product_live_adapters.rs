@@ -20,7 +20,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextSource,
     HostInputQueue, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
@@ -852,7 +852,7 @@ impl LoopCapabilityPortFactory for ProductLiveLoopCapabilityPortFactory {
 
 fn adapter_error(error: ProductLivePlannedRuntimeAdapterError) -> AgentLoopHostError {
     let safe_summary = error.to_string();
-    ironclaw_loop_support::raw_agent_loop_host_error(
+    ironclaw_loop_host::raw_agent_loop_host_error(
         "product_live_planned_runtime_adapter",
         "build_capability_port",
         AgentLoopHostErrorKind::InvalidInvocation,

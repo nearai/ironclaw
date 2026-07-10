@@ -13,7 +13,7 @@ pub const SKILL_ACTIVATE_CAPABILITY_ID: &str = crate::runtime::SKILL_ACTIVATE_CA
 /// inside for [`wrap_skill_activation_capability_for_test`]. Tests only.
 #[cfg(feature = "test-support")]
 pub struct SkillActivationTestSource {
-    source: std::sync::Arc<dyn ironclaw_loop_support::HostSkillContextSource>,
+    source: std::sync::Arc<dyn ironclaw_loop_host::HostSkillContextSource>,
     activation_source: std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource>,
 }
 
@@ -22,9 +22,7 @@ impl SkillActivationTestSource {
     /// The `HostSkillContextSource` to wire as the runtime's
     /// `skill_context_source` (`into_group`, E-SKILL) so activated-skill
     /// instructions inject into the model request.
-    pub fn context_source(
-        &self,
-    ) -> std::sync::Arc<dyn ironclaw_loop_support::HostSkillContextSource> {
+    pub fn context_source(&self) -> std::sync::Arc<dyn ironclaw_loop_host::HostSkillContextSource> {
         self.source.clone()
     }
 }
@@ -71,8 +69,8 @@ pub fn wrap_skill_activation_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     source: &SkillActivationTestSource,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,

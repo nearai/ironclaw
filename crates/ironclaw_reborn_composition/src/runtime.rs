@@ -44,7 +44,7 @@ use ironclaw_host_api::{
     AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
     InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
     CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
     HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
@@ -159,12 +159,12 @@ use production::{
 const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
 
 // Adapter: wraps `MemoryBackedUserProfileSource` (in `ironclaw_host_runtime`) and
-// implements `HostUserProfileSource` (in `ironclaw_loop_support`). A direct
+// implements `HostUserProfileSource` (in `ironclaw_loop_host`). A direct
 // `impl HostUserProfileSource for MemoryBackedUserProfileSource` is forbidden by
 // the orphan rule — neither the trait nor the type is defined in this crate. The
 // newtype wrapper is defined here, so the impl is allowed. This mirrors how
 // `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
-// `HostIdentityContextSource` (defined in `ironclaw_loop_support`) — the impl
+// `HostIdentityContextSource` (defined in `ironclaw_loop_host`) — the impl
 // lives in the crate that owns the *concrete type* and can see the trait.
 //
 // `pub(crate)` so the `test_support::build_user_profile_source_for_test`
@@ -230,11 +230,9 @@ impl AwaitEdgeSettler for NonDurableAwaitEdgeSettler {
     async fn on_child_terminal(
         &self,
         _event: &ironclaw_turns::TurnLifecycleEvent,
-    ) -> Result<
-        ironclaw_loop_support::ResolveOutcome,
-        ironclaw_turns::run_profile::AgentLoopHostError,
-    > {
-        Ok(ironclaw_loop_support::ResolveOutcome::NotApplicable)
+    ) -> Result<ironclaw_loop_host::ResolveOutcome, ironclaw_turns::run_profile::AgentLoopHostError>
+    {
+        Ok(ironclaw_loop_host::ResolveOutcome::NotApplicable)
     }
 
     fn bind_coordinator(
@@ -318,8 +316,7 @@ fn local_runtime_parts(
         )));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
-            Arc::clone(&subagent_goal_store)
-                as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             Arc::clone(&local_runtime.turn_state)
                 as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             Arc::clone(&local_runtime.thread_service),
@@ -336,7 +333,7 @@ fn local_runtime_parts(
     };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = (
-        Arc::new(ironclaw_loop_support::InMemoryAwaitEdgeWriter::default())
+        Arc::new(ironclaw_loop_host::InMemoryAwaitEdgeWriter::default())
             as Arc<dyn AwaitEdgeWriter>,
         Arc::new(NonDurableAwaitEdgeSettler) as Arc<dyn AwaitEdgeSettler>,
         Arc::new(NonDurableAwaitDependentRunEvidence) as Arc<dyn AwaitDependentRunEvidenceStore>,
@@ -377,7 +374,7 @@ where
     )));
     let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
         Arc::clone(&await_edge_store),
-        Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         Arc::clone(&graph.turn_state) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
         Arc::clone(&graph.thread_service),
     ));
@@ -1068,8 +1065,8 @@ pub(crate) fn wrap_project_create_capability_for_test(
     project_service: std::sync::Arc<dyn ironclaw_product_workflow::ProjectService>,
     fallback_user_id: ironclaw_host_api::UserId,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,
@@ -1121,8 +1118,8 @@ pub(crate) fn wrap_skill_activation_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     skill_activation_source: std::sync::Arc<LocalDevSelectableSkillContextSource>,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     ironclaw_turns::run_profile::AgentLoopHostError,
@@ -3298,8 +3295,8 @@ pub async fn build_reborn_runtime(
     // accountant doesn't get built (no spend, no cascade). The test
     // override (when set) wins over the LLM-derived table — the test is
     // being explicit about the prices it wants.
-    let llm_cost_table_arc: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>> = llm_cost_table
-        .map(|table| Arc::new(table) as Arc<dyn ironclaw_loop_support::ModelCostTable>);
+    let llm_cost_table_arc: Option<Arc<dyn ironclaw_loop_host::ModelCostTable>> =
+        llm_cost_table.map(|table| Arc::new(table) as Arc<dyn ironclaw_loop_host::ModelCostTable>);
     #[cfg(any(test, feature = "test-support"))]
     let resolved_cost_table = model_cost_table_override.or(llm_cost_table_arc);
     #[cfg(not(any(test, feature = "test-support")))]
@@ -3697,7 +3694,7 @@ pub async fn build_reborn_runtime(
         attachment_read_port: local_runtime.map(|rt| {
             Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
                 Arc::clone(&rt.workspace_filesystem),
-            )) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
+            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
         }),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
@@ -3716,7 +3713,7 @@ pub async fn build_reborn_runtime(
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,
         )),
-        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
@@ -4371,8 +4368,8 @@ async fn build_production_model_gateway(
     llm: Option<crate::runtime_input::ResolvedRebornLlm>,
 ) -> Result<
     (
-        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
-        Option<ironclaw_loop_support::StaticModelCostTable>,
+        Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
+        Option<ironclaw_loop_host::StaticModelCostTable>,
         Option<RebornLlmReloadParts>,
     ),
     RebornRuntimeError,
@@ -4445,8 +4442,8 @@ async fn build_skill_learning_provider(
 #[cfg(not(feature = "root-llm-provider"))]
 fn build_production_model_gateway() -> Result<
     (
-        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
-        Option<ironclaw_loop_support::StaticModelCostTable>,
+        Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
+        Option<ironclaw_loop_host::StaticModelCostTable>,
     ),
     RebornRuntimeError,
 > {
@@ -4455,7 +4452,7 @@ fn build_production_model_gateway() -> Result<
 
 #[cfg(feature = "root-llm-provider")]
 struct LlmGatewayBundle {
-    gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+    gateway: Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
     /// Policy used to derive the budget accountant's cost table — kept
     /// alongside the gateway so the composer doesn't re-derive the
     /// `ModelProfileId → provider-model` mapping in two places.
@@ -4600,9 +4597,9 @@ fn placeholder_unconfigured_error() -> ironclaw_llm::LlmError {
 // stub gateway. With the LLM provider compiled in, a cold boot uses a
 // placeholder-backed swappable gateway instead (see `build_placeholder_llm_gateway`).
 #[cfg(not(feature = "root-llm-provider"))]
-fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
+fn build_stub_gateway() -> Arc<dyn ironclaw_loop_host::HostManagedModelGateway> {
     use async_trait::async_trait;
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelRequest, HostManagedModelResponse,
     };
@@ -5032,7 +5029,7 @@ output_schema_ref = "schemas/write.output.json"
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
         },
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource, ModelCost,
@@ -5654,7 +5651,7 @@ output_schema_ref = "schemas/write.output.json"
         HostManagedModelRequest {
             model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
                 .expect("model profile id"),
-            messages: vec![ironclaw_loop_support::HostManagedModelMessage {
+            messages: vec![ironclaw_loop_host::HostManagedModelMessage {
                 role: HostManagedModelMessageRole::User,
                 content: "hello model".to_string(),
                 content_ref: ironclaw_turns::LoopMessageRef::new(
@@ -7122,7 +7119,7 @@ output_schema_ref = "schemas/write.output.json"
             reply: "yolo budget bypass reply".to_string(),
             requests: Arc::clone(&requests),
         });
-        let cost_table = ironclaw_loop_support::StaticModelCostTable::new().with_entry(
+        let cost_table = ironclaw_loop_host::StaticModelCostTable::new().with_entry(
             ModelProfileId::new("interactive_model").expect("model profile id"),
             ModelCost {
                 input_per_token: dec!(1.00),
@@ -9162,7 +9159,7 @@ output_schema_ref = "schemas/write.output.json"
             .as_deref()
             .expect("landed attachment carries a storage_key");
 
-        let read_back = ironclaw_loop_support::LoopAttachmentReadPort::read_attachment_bytes(
+        let read_back = ironclaw_loop_host::LoopAttachmentReadPort::read_attachment_bytes(
             &read_port,
             &thread_scope.to_resource_scope(),
             storage_key,

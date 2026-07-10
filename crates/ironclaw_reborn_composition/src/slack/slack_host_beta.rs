@@ -1209,7 +1209,7 @@ mod tests {
     use ironclaw_host_runtime::{
         CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };

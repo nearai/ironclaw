@@ -59,7 +59,7 @@ use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
     ZeroCostTable,
@@ -703,7 +703,7 @@ impl RebornIntegrationGroupBuilder {
         let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             capability_result_writer.clone(),
             group_thread_harness.service.clone(),
@@ -823,9 +823,9 @@ impl RebornIntegrationGroupBuilder {
             capability_result_writer,
             subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
                 as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),

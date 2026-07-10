@@ -1,6 +1,6 @@
 //! Dependency-inversion seam for subagent await-edge delivery.
 //!
-//! `ironclaw_loop_support` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
+//! `ironclaw_loop_host` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
 //! but cannot depend on `ironclaw_runner`, which owns the concrete CAS'd
 //! filesystem await-edge store and resolver
 //! (`crates/ironclaw_runner/src/subagent/await_edge/`). This module defines

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityResultWriter,
 };
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
@@ -48,7 +48,7 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
             .await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id: CapabilityId::new(
-                ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+                ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
             )
             .map_err(|error| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, error.to_string())

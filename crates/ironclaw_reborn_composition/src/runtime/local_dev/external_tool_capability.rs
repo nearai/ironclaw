@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::run_profile::{
@@ -494,7 +494,7 @@ mod tests {
     use super::*;
 
     use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_loop_support::CapabilityWriteResult;
+    use ironclaw_loop_host::CapabilityWriteResult;
     use ironclaw_turns::{
         ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog,
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnScope,

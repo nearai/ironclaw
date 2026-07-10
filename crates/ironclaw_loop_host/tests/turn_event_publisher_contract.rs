@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_loop_support::EventPublishingTurnRunTransitionPort;
+use ironclaw_loop_host::EventPublishingTurnRunTransitionPort;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, GateRef, IdempotencyKey,
     InMemoryTurnEventSink, InMemoryTurnStateStore, LoopCheckpointStateRef, ReplyTargetBindingRef,

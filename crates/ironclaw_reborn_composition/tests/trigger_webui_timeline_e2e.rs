@@ -55,7 +55,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };

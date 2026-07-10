@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, UserId};
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_loop_host::CapabilityResultWrite;
 use ironclaw_product_workflow::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest,
 };
@@ -30,8 +30,8 @@ pub(crate) fn wrap_project_create_capability_for_test(
     project_service: Arc<dyn ProjectService>,
     fallback_user_id: UserId,
     run_context: LoopRunContext,
-    input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+    input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
     super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
         inner,
