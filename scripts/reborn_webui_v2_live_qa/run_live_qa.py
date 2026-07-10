@@ -6603,27 +6603,22 @@ CASES: dict[str, CaseSpec] = {
         # The workspace sweep runs on the personal token; without this gate a
         # wrong-workspace token would make the sweep structurally blind.
         requires_slack_personal_auth=True,
-        # Expected-red on pre-fix servers; keep out of bare local runs until
-        # promoted off dispatch_only.
-        default_enabled=False,
     ),
     "qa_9c_slack_digest_names_not_ids": CaseSpec(
         case_qa_9c_slack_digest_names_not_ids,
         requires_slack=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_9d_routine_per_trigger_delivery_target": CaseSpec(
         case_qa_9d_routine_per_trigger_delivery_target,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
-    # QA 10 family: Slack tool-correctness probes. All expected-red on
-    # pre-fix hosts (self-identity, status fields, thread replies, membership
-    # view, structured errors, mention encoding, entity rendering), so all
-    # stay default_enabled=False / dispatch_only until their fixes merge.
+    # QA 10 family: Slack tool-correctness probes (self-identity, status
+    # fields, thread replies, membership view, structured errors, mention
+    # encoding, entity rendering). Promoted into default runs and the cron
+    # rotation: the fixes merged and were live-verified green (9/9).
     # requires_slack_target marks the cases that seed into / read from a
     # Slack DM (it keeps the prepared home's DM route provisioning on); their
     # seeding/read anchor is the personal↔bot DM
@@ -6633,60 +6628,51 @@ CASES: dict[str, CaseSpec] = {
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10b_slack_ooo_status": CaseSpec(
         case_qa_10b_slack_ooo_status,
         requires_slack=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10c_slack_thread_replies": CaseSpec(
         case_qa_10c_slack_thread_replies,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10d_slack_channel_membership": CaseSpec(
         case_qa_10d_slack_channel_membership,
         requires_slack=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10e_slack_error_honesty": CaseSpec(
         case_qa_10e_slack_error_honesty,
         requires_slack=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10f_slack_mention_encoding": CaseSpec(
         case_qa_10f_slack_mention_encoding,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10g_slack_last_message_sent": CaseSpec(
         case_qa_10g_slack_last_message_sent,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10h_slack_email_hallucination_guard": CaseSpec(
         case_qa_10h_slack_email_hallucination_guard,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
     "qa_10i_slack_raw_entity_hygiene": CaseSpec(
         case_qa_10i_slack_raw_entity_hygiene,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
-        default_enabled=False,
     ),
 }
 

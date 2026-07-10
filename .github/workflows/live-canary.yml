@@ -836,24 +836,22 @@ jobs:
           - shard_id: qa-8-delivery
             shard_name: QA 8D
             cases: qa_8d_hn_keyword_slack_delivery
-          # Automation delivery probes (wrong-channel / duplicate-delivery /
-          # raw-user-id / per-trigger routing). dispatch_only until the
-          # per-trigger delivery-target fixes (#5898) merge: on pre-fix servers
-          # these are expected-red, so they must not page the 3-hourly cron.
+          # Automation delivery probes, in the 3-hourly cron rotation (the
+          # delivery-routing fixes from #5898 are merged and live-verified
+          # green). Guards regressions in: wrong-channel routine delivery,
+          # duplicate DM delivery, raw Slack user ids leaking into digests,
+          # and per-trigger delivery-target routing.
           - shard_id: qa-9
             shard_name: QA 9
             cases: qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target
-            dispatch_only: true
-          # Slack tool-correctness probes (self-attribution / status readback
-          # / thread replies / membership honesty / error honesty / mention
-          # encoding / last-sent recall / email hallucination guard /
-          # raw-entity hygiene). dispatch_only: expected-red on pre-fix hosts
-          # (self-identity, status fields, thread replies, structured errors),
-          # so they must not page the 3-hourly cron until the fixes merge.
+          # Slack tool-correctness probes, in the 3-hourly cron rotation (the
+          # tool-surface fixes from #5898 are merged and live-verified green).
+          # Guards regressions in: self-attribution, status readback, thread
+          # replies, membership honesty, error honesty, mention encoding,
+          # last-sent recall, email hallucination, and raw-entity hygiene.
           - shard_id: qa-10
             shard_name: QA 10
             cases: qa_10a_slack_self_attribution,qa_10b_slack_ooo_status,qa_10c_slack_thread_replies,qa_10d_slack_channel_membership,qa_10e_slack_error_honesty,qa_10f_slack_mention_encoding,qa_10g_slack_last_message_sent,qa_10h_slack_email_hallucination_guard,qa_10i_slack_raw_entity_hygiene
-            dispatch_only: true
     env:
       REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
       REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
