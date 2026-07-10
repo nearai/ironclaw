@@ -14,9 +14,9 @@ use ironclaw_threads::{
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -334,6 +334,109 @@ async fn tool_result_records_are_scope_bound_idempotent_and_bounded() {
             .expect("missing result remains non-enumerating")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn tool_result_record_validation_enforces_write_and_read_boundaries() {
+    const TOOL_RESULT_RECORD_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("durable-tool-result-boundaries");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-durable-tool-result-boundaries").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let invalid_put = service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: "result:contains/slash".into(),
+            content: b"valid content".to_vec(),
+        })
+        .await
+        .expect_err("invalid result refs must not become storage keys");
+    assert!(matches!(invalid_put, SessionThreadError::Serialization(_)));
+
+    let result_ref = "result:durable-tool-result-boundaries".to_string();
+    service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: result_ref.clone(),
+            content: vec![b'x'; TOOL_RESULT_RECORD_MAX_BYTES],
+        })
+        .await
+        .expect("the exact durable-result cap is accepted");
+
+    let over_cap = service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: "result:durable-tool-result-over-cap".into(),
+            content: vec![b'x'; TOOL_RESULT_RECORD_MAX_BYTES + 1],
+        })
+        .await
+        .expect_err("records over the durable-result cap are rejected");
+    assert!(matches!(over_cap, SessionThreadError::Backend(_)));
+
+    let min_read = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: result_ref.clone(),
+            offset: 0,
+            max_bytes: 4,
+        })
+        .await
+        .expect("minimum read size is accepted")
+        .expect("stored record exists");
+    assert_eq!(min_read.content, vec![b'x'; 4]);
+
+    let max_read = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: result_ref.clone(),
+            offset: 0,
+            max_bytes: TOOL_RESULT_RECORD_READ_MAX_BYTES,
+        })
+        .await
+        .expect("maximum read size is accepted")
+        .expect("stored record exists");
+    assert_eq!(max_read.content.len(), TOOL_RESULT_RECORD_READ_MAX_BYTES);
+
+    for max_bytes in [3, TOOL_RESULT_RECORD_READ_MAX_BYTES + 1] {
+        let error = service
+            .read_tool_result_record(ReadToolResultRecordRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                result_ref: result_ref.clone(),
+                offset: 0,
+                max_bytes,
+            })
+            .await
+            .expect_err("out-of-range read sizes are rejected");
+        assert!(matches!(error, SessionThreadError::Serialization(_)));
+    }
+
+    let invalid_read = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope,
+            thread_id: thread.thread_id,
+            result_ref: "not-a-result-ref".into(),
+            offset: 0,
+            max_bytes: 4,
+        })
+        .await
+        .expect_err("invalid result refs are rejected before reads");
+    assert!(matches!(invalid_read, SessionThreadError::Serialization(_)));
 }
 
 #[tokio::test]

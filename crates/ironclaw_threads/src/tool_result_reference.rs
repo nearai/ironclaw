@@ -188,7 +188,9 @@ impl ToolResultReferenceEnvelope {
             return Ok(envelope);
         };
 
-        if let Some(model_observation) = normalized_model_observation(model_observation) {
+        if let Some(model_observation) =
+            normalized_model_observation(&envelope.result_ref, model_observation)
+        {
             let model_observation_content =
                 serde_json::to_string(&model_observation).unwrap_or_default();
             log_model_observation_constructed(&envelope.result_ref, &model_observation_content);
@@ -307,6 +309,7 @@ impl ToolResultReferenceEnvelope {
 }
 
 fn normalized_model_observation(
+    result_ref: &str,
     mut model_observation: serde_json::Value,
 ) -> Option<serde_json::Value> {
     match validate_model_observation(&model_observation) {
@@ -325,6 +328,7 @@ fn normalized_model_observation(
             if removed_result_preview && validate_model_observation(&model_observation).is_ok() {
                 tracing::warn!(
                     reason = %error,
+                    result_ref = %result_ref,
                     "dropping an unsafe tool-result preview while preserving its result reference"
                 );
                 Some(model_observation)
@@ -335,6 +339,7 @@ fn normalized_model_observation(
                 );
                 tracing::warn!(
                     reason = %error,
+                    result_ref = %result_ref,
                     "dropping invalid model-visible tool observation and preserving safe summary"
                 );
                 None

@@ -189,6 +189,79 @@ async fn filesystem_tool_result_records_survive_restart_and_enforce_scope() {
 }
 
 #[tokio::test]
+async fn filesystem_concurrent_duplicate_tool_result_writes_converge() {
+    let backend = Arc::new(ConcurrentToolResultWriteBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-tool-result-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-tool-result-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-tool-result-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let result_ref = "result:fs-concurrent-tool-result".to_string();
+    let content = b"concurrent durable tool output".to_vec();
+
+    let left = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        let result_ref = result_ref.clone();
+        let content = content.clone();
+        async move {
+            service
+                .put_tool_result_record(PutToolResultRecordRequest {
+                    scope,
+                    thread_id,
+                    result_ref,
+                    content,
+                })
+                .await
+        }
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        let result_ref = result_ref.clone();
+        let content = content.clone();
+        async move {
+            service
+                .put_tool_result_record(PutToolResultRecordRequest {
+                    scope,
+                    thread_id,
+                    result_ref,
+                    content,
+                })
+                .await
+        }
+    };
+
+    let (left, right) = tokio::join!(left, right);
+    left.expect("first concurrent duplicate write converges");
+    right.expect("second concurrent duplicate write converges after CAS retry");
+
+    let stored = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope,
+            thread_id: thread.thread_id,
+            result_ref,
+            offset: 0,
+            max_bytes: 128,
+        })
+        .await
+        .expect("converged record is readable")
+        .expect("converged record exists");
+    assert_eq!(stored.content, content);
+    assert!(stored.next_offset.is_none());
+}
+
+#[tokio::test]
 async fn filesystem_redaction_retains_durable_tool_result_record() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-tool-redaction", "alice");
@@ -3023,6 +3096,26 @@ struct TransactionalRaceBackend {
     idempotency_get_count: AtomicUsize,
 }
 
+struct ConcurrentToolResultWriteBackend {
+    inner: InMemoryBackend,
+    tool_result_get_barrier: Barrier,
+    tool_result_get_count: AtomicUsize,
+}
+
+impl ConcurrentToolResultWriteBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            tool_result_get_barrier: Barrier::new(2),
+            tool_result_get_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn is_tool_result_record_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/tool_results/")
+    }
+}
+
 impl TransactionalRaceBackend {
     fn new() -> Self {
         Self {
@@ -3298,6 +3391,54 @@ impl RootFilesystem for TransactionalRaceBackend {
             _guard: guard,
             staged_puts: HashMap::new(),
         }))
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for ConcurrentToolResultWriteBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if Self::is_tool_result_record_path(path)
+            && self.tool_result_get_count.fetch_add(1, Ordering::SeqCst) < 2
+        {
+            let result = self.inner.get(path).await?;
+            self.tool_result_get_barrier.wait().await;
+            return Ok(result);
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
     }
 }
 
