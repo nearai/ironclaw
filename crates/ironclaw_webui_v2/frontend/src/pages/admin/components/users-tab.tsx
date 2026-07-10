@@ -15,6 +15,7 @@ import {
   formatUserRole,
   formatUserStatus,
   filterUsers,
+  buildRoleOptions,
 } from "../lib/admin-presenters";
 
 function buildFilters(t) {
@@ -23,13 +24,6 @@ function buildFilters(t) {
     { value: "active", label: t("admin.users.filter.active") },
     { value: "suspended", label: t("admin.users.filter.suspended") },
     { value: "admin", label: t("admin.users.filter.admins") },
-  ];
-}
-
-function buildRoleOptions(t) {
-  return [
-    { value: "member", label: t("admin.users.member") },
-    { value: "admin", label: t("admin.users.admin") },
   ];
 }
 

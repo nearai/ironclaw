@@ -324,7 +324,7 @@ def _provider_card(page, provider_id: str):
     )
 
 
-async def _choose_select_menu_option(root, label: str, option: str):
+async def _choose_select_menu_option(root, label: str, option: str) -> None:
     trigger = root.get_by_role("button", name=label)
     await trigger.click()
     listbox = root.get_by_role("listbox")

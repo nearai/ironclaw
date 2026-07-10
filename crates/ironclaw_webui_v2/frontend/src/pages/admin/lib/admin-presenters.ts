@@ -35,6 +35,19 @@ const USER_STATUS_KEYS = {
   [USER_STATUS.SUSPENDED]: "admin.users.status.suspended",
 };
 
+export function buildRoleOptions(t) {
+  return [
+    {
+      value: USER_ROLE.MEMBER,
+      label: tx(t, USER_ROLE_KEYS[USER_ROLE.MEMBER], {}, USER_ROLE_LABELS[USER_ROLE.MEMBER]),
+    },
+    {
+      value: USER_ROLE.ADMIN,
+      label: tx(t, USER_ROLE_KEYS[USER_ROLE.ADMIN], {}, USER_ROLE_LABELS[USER_ROLE.ADMIN]),
+    },
+  ];
+}
+
 export function formatTokenCount(n) {
   if (n == null || n === 0) return "0";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";

@@ -16,6 +16,7 @@ import {
   roleTone,
   formatUserRole,
   formatUserStatus,
+  buildRoleOptions,
 } from "../lib/admin-presenters";
 
 function DetailRow({ label, children }) {
@@ -25,13 +26,6 @@ function DetailRow({ label, children }) {
       <span className="text-right text-sm text-iron-100">{children}</span>
     </div>
   );
-}
-
-function buildRoleOptions(t) {
-  return [
-    { value: "member", label: t("admin.users.member") },
-    { value: "admin", label: t("admin.users.admin") },
-  ];
 }
 
 export function UserDetail({ userId, onBack }) {
