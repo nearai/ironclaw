@@ -22,16 +22,17 @@ Rules — kept short on purpose:
 - [ ] MAN-3 A v2 manifest and its v3 rewrite resolve to identical surfaces,
   capability ids, scopes, and credentials (projection-equality test over all
   11 first-party packages; the two hosted-MCP packages instead assert their
-  `[mcp_tools]` ceiling plus the discovered set, since their placeholder
-  static tools intentionally become discovery).
+  `[mcp]` ceiling plus the discovered set, since their placeholder static
+  tools intentionally become discovery).
 - [ ] MAN-4 Unknown manifest fields fail closed with a path-qualified error.
 - [ ] MAN-5 Recipe validation rejects: non-https endpoints, reserved authorize
   params in `extra_authorize_params`, invalid/deep/wildcard JSON pointers,
   wildcard egress hosts, multi-segment `route_suffix`.
-- [ ] MAN-6 `[mcp_tools]` requires `runtime.kind = "mcp"` and is mutually
-  exclusive with `[[tools]]`; discovered tools outside the
-  namespace/count/schema-size/effects ceiling are rejected and cannot add
-  credentials or egress hosts.
+- [ ] MAN-6 Exactly one of `[runtime]` or `[mcp]` declares the implementation;
+  `[mcp]` is mutually exclusive with `[[tools]]` and `[channel]`; discovered
+  tools outside the namespace/count/schema-size/effects ceiling are rejected;
+  only the `[mcp]` connection credential and server host carry authority —
+  discovered tools cannot add credentials or egress.
 - [ ] MAN-7 Two extensions with the same vendor id and identical-except-scopes
   recipes activate and share one vendor record; differing recipes fail
   activation with a conflict error.
@@ -60,7 +61,7 @@ Rules — kept short on purpose:
 
 ## 3. Binding, loaders, lifecycle (LIFE)
 
-- [ ] LIFE-1 Declared `[[tools]]`/`[mcp_tools]` without a bound tool
+- [ ] LIFE-1 Declared `[[tools]]`/`[mcp]` without a bound tool
   adapter fails activation; same for `[channel]`; undeclared bindings fail;
   auth never binds.
 - [ ] LIFE-2 `bind` is side-effect-free and receives no network/secret/store

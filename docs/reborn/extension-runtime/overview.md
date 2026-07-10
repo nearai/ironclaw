@@ -190,7 +190,8 @@ Notes on the sections:
   entries reuse the existing v2 injection model (`audience` + `injection`;
   v2's `provider` field is `vendor` in v3); the host injects secrets during
   restricted egress, adapters never see bytes.
-- **MCP extensions** declare `[mcp_tools]` instead of `[[tools]]` — see §3.1.
+- **MCP extensions** declare one `[mcp]` section (the proxied server) instead
+  of `[runtime]` + `[[tools]]` — see §3.1.
 - **`[channel.ingress.verification]`** is a declarative recipe the *host*
   executes: `hmac_sha256` (segment list: literals, named headers, body),
   `shared_secret_header` (constant-time compare), or `none`. Signing secrets
@@ -212,36 +213,58 @@ Notes on the sections:
   validation of the config happens in the adapter's `activate()` hook.
 - **`[auth.*]`** is one recipe per vendor the extension needs. See section 4.3.
 
-### 3.1 MCP extensions and discovered tools
+### 3.1 MCP extensions
 
 Hosted MCP servers (`notion-mcp`, `nearai-mcp`) are the one case where the tool
 list is not known at authoring time: the server's `tools/list` is the source of
-truth. That is MCP-specific, so the manifest names it that way — there is no
-generic "dynamic tools" abstraction with a single implementation.
+truth. An MCP extension *is* a proxied server, so the manifest says exactly
+that — one `[mcp]` section instead of `[runtime]` + `[[tools]]`, and no
+generic "dynamic tools" abstraction:
 
 ```toml
-[runtime]
-kind = "mcp"                      # server endpoint/config as today
+schema_version = "reborn.extension_manifest.v3"
+id = "notion"
+name = "Notion"
+version = "0.2.0"
+description = "Notion workspace tools via the hosted Notion MCP server"
+trust = "first_party_requested"
 
-[mcp_tools]
+[mcp]
+server = "https://mcp.notion.com/mcp"
 namespace = "notion"              # discovered tools publish as `notion.<tool>`
 max_tools = 256
 default_permission = "ask"
 effects = ["network", "use_secret"]   # ceiling for every discovered tool
+
+[[mcp.credentials]]               # the server connection's credential —
+handle = "notion_account"         # discovered tools cannot declare their own
+vendor = "notion"
+scopes = ["read_content"]
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.notion]
+method = "oauth2_code"
+# … recipe …
 ```
 
 Rules that keep the boundary easy to reason about:
 
-- `[mcp_tools]` requires `runtime.kind = "mcp"` and is mutually exclusive with
-  `[[tools]]` — an extension's tools are either fully declared or fully
-  discovered, never mixed.
+- An extension declares its implementation as **exactly one of** `[runtime]`
+  (a native service or WASM module implementing declared `[[tools]]` and/or
+  `[channel]`) **or** `[mcp]` (a proxied server whose tools are discovered).
+  The presence of `[mcp]` selects the MCP loader; internally it resolves to
+  the same runtime-kind descriptor, so "runtime is a loading detail, never
+  taxonomy" holds unchanged.
 - Discovery is **host-owned**: the MCP loader calls `tools/list` at activation
-  (and on explicit refresh), validates every result against the manifest
+  (and on explicit refresh), validates every result against the declared
   ceiling — namespace, count, bounded schema size, effects — and publishes the
-  set atomically. A refresh replaces the whole set or changes nothing.
-- Discovered tools inherit exactly the credentials and egress the manifest
-  declares. They cannot add credential handles, hosts, effects, or ports.
-- **Past activation there is no "dynamic" anywhere in the system.** A
+  set atomically as ordinary tool surfaces. A refresh replaces the whole set
+  or changes nothing.
+- Discovered tools cannot carry credentials or egress of their own: the
+  `[mcp]` connection credential is injected on every server call, and egress
+  is restricted to the server's host. Nothing a server returns can widen
+  authority.
+- **Past activation there is no "MCP" anywhere in the dispatch path.** A
   discovered tool is an ordinary tool surface: same dispatcher pipeline, same
   policy and approvals, same UI. The distinction exists only in the manifest
   and the MCP loader.
@@ -296,7 +319,7 @@ pub struct ExtensionBindings {
 the installation context and the resolved contract. The binding rule is a
 direct check, not a framework:
 
-- manifest declares `[[tools]]` or `[mcp_tools]` → `tools` must be `Some`;
+- manifest declares `[[tools]]` or `[mcp]` → `tools` must be `Some`;
 - manifest declares `[channel]` → `channel` must be `Some`;
 - nothing undeclared may be bound; auth never binds (host-managed);
 - violations fail activation with a typed error. No partial extension activates.
@@ -309,9 +332,10 @@ Loaders by runtime kind:
 - **`wasm`** — wraps the existing WASM tool execution lane in a generic
   `WasmToolAdapter`; the entrypoint is synthesized from the manifest. (WASM
   channel adapters are out of scope until a WASM channel exists.)
-- **`mcp`** — the loader runs `tools/list` discovery against `[mcp_tools]`
-  (§3.1) and synthesizes a `ToolAdapter` that proxies invocations. The
-  extension ships no code.
+- **`mcp`** — selected by the presence of `[mcp]`; the loader connects to the
+  declared server, runs ceiling-validated discovery (§3.1), and synthesizes a
+  `ToolAdapter` that proxies invocations with the connection credential
+  injected. The extension ships no code.
 
 Adapters implement behavior only. They never report ids, schemas, effects,
 scopes, routes, credentials, or display metadata — the resolved manifest is the
@@ -327,13 +351,49 @@ pub trait ToolAdapter: Send + Sync {
 }
 ```
 
+One method is not an impoverished interface — it is everything that remains
+once the historical adapter responsibilities are hoisted to where they belong:
+
+- *what tools exist, their ids, schemas, descriptions, prompt docs, effects,
+  permissions, credentials* — **manifest data**, read from the resolved
+  contract; the adapter is never asked, so it cannot lie or drift;
+- *listing tools to the model, input validation, authorization, approvals,
+  obligations, resource reservation, credential injection, events, audit* —
+  the **dispatcher pipeline**, implemented once;
+- *how the implementation is obtained* — the **loaders**, implemented once per
+  runtime kind.
+
+What remains extension-specific is exactly "given validated input for
+capability X, do the work" — `invoke`.
+
+There is **one adapter instance per extension, not per tool**. `ToolCall`
+carries the `capability_id` and the adapter routes internally: the Slack
+adapter is a `match` over its five capability ids calling five functions.
+(Concrete dispatch inside the concrete crate is fine — the ban is on concrete
+names in *generic* code.) This is also why binding is a single `Option` field
+rather than a per-capability binding map.
+
+Who implements `invoke`, by runtime kind:
+
+| Runtime | `invoke` implementation | Extension author ships |
+| --- | --- | --- |
+| `first_party` | the extension crate: match id → build request → `ports.egress` → parse | Rust in the extension crate |
+| `wasm` | the loader's generic `WasmToolAdapter`: call the module export | a WASM module, zero host Rust |
+| `[mcp]` | the loader's generic `McpToolAdapter`: `tools/call` on the connected server | nothing — manifest only |
+
 `ToolCall` carries the capability id, schema-validated input, invocation id,
 actor/turn scope, and deadline. `ToolPorts` exposes restricted egress (with
 host-side credential injection), scoped key-value state, and logging — derived
-from the resolved contract, nothing wider. **Discovery is never the adapter's
-job:** the model's tool list comes from the resolved manifest (static) or from
-the MCP loader's validated discovery (§3.1). The adapter's entire contract is
-`invoke`.
+from the resolved contract, nothing wider. A mid-flight authorization failure
+(a revoked token, say) returns as a typed `ToolError` category that the host
+maps to the generic re-auth gate. **Discovery is never the adapter's job:**
+
+| | Static `[[tools]]` | `[mcp]` |
+| --- | --- | --- |
+| Source of truth | the manifest | the server's `tools/list` |
+| When discovered | manifest compile/resolve | activation + explicit refresh (loader-run, ceiling-validated, atomic) |
+| Published as | tool surfaces in the active snapshot | tool surfaces in the active snapshot |
+| Downstream difference | none | none |
 
 ### 4.2 `ChannelAdapter` — one per extension
 
@@ -454,12 +514,28 @@ If a future vendor genuinely defeats the descriptor, add a narrow quirk hook
 
 ### 5.2 Tool call
 
-Dispatcher keeps its existing policy pipeline (authorization, approvals,
-obligations, resources, events, audit) and replaces per-invocation
-package/runtime-kind selection with one lookup: `resolve_tool(capability_id)` →
-prebound `ToolAdapter` + its resolved declaration. Missing credentials raise
-the generic auth gate (engine), then resume. `slack.send_message` stays an
-explicit delegated side-effect tool; final replies never go through it.
+The dispatcher keeps its existing policy pipeline and swaps only the lookup.
+End to end:
+
+1. **List** — the agent loop reads tool surfaces (id, description, schema,
+   prompt doc) from the active snapshot: resolved manifest data; the adapter
+   is not consulted.
+2. **Resolve** — the model calls `slack.search_messages`;
+   `ToolResolver::resolve(capability_id)` returns the prebound adapter, its
+   resolved declaration, and the generation. An unknown id fails here, before
+   any work.
+3. **Policy** — authorization, permission mode, approvals, obligations,
+   resource reservation: host, driven by the declaration's effects.
+4. **Validate** — input checked against the manifest's input schema.
+5. **Credentials** — the declaration names its vendor credential; a missing
+   grant raises the generic auth gate (§4.3), then resumes. Present grants are
+   injected by restricted egress at request time; the adapter never holds
+   bytes.
+6. **Invoke** — `adapter.invoke(call, ports)` does the work.
+7. **Record** — result, events, audit: host; back to the model.
+
+`slack.send_message` stays an explicit delegated side-effect tool; final
+replies never go through it.
 
 ### 5.3 Inbound message
 
@@ -612,7 +688,7 @@ reintroduced without one.
 | Serving-leader lease / fencing tokens | single serving process documented | multi-replica deployment is real (new ADR) |
 | Digest-pinned shared vendor implementation packages | shared vendor = identical-recipe rule (§3.2); native code shares via crate deps | third-party binary vendor-implementation sharing exists |
 | Per-vendor auth adapters, manual-validator trait | recipes cover all five current vendors; no code in auth flows | a vendor defeats the descriptor (add a narrow hook) |
-| Generic "dynamic tools" abstraction | MCP is the only dynamic source; named `[mcp_tools]`, owned by the MCP loader | a second, non-MCP discovery source is real |
+| Generic "dynamic tools" abstraction | MCP is the only dynamic source; one `[mcp]` section, owned by the MCP loader | a second, non-MCP discovery source is real |
 | Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[channel.config]` | a real action that config + hooks cannot express |
 | Multiple channel surfaces per extension | no extension has two | one does (wire already carries surface keys) |
 | Trigger/file runtime | reserved kinds, no implementation exists | a production trigger/file use case (fourth adapter, additive) |

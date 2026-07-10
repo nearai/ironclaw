@@ -66,7 +66,7 @@ Not generic yet — the work:
 | Crate | Change |
 | --- | --- |
 | `ironclaw_host_api` | Add `ToolAdapter`, `ToolCall`/`ToolResult`/`ToolPorts`, `RestrictedEgress` trait, auth recipe types, ingress verification recipe types. Base vocabulary — no implementations |
-| `ironclaw_extensions` | Manifest v3 (inline `[channel]`, `[auth.*]`, `[mcp_tools]`), v2 normalization, `ResolvedExtensionManifest` + persisted resolved record + `manifest_digest`, widening diff |
+| `ironclaw_extensions` | Manifest v3 (inline `[channel]`, `[auth.*]`, `[mcp]`), v2 normalization, `ResolvedExtensionManifest` + persisted resolved record + `manifest_digest`, widening diff |
 | `ironclaw_product_adapters` | `ChannelAdapter` (replaces `ProductAdapter`; metadata getters deleted), normalized inbound/outbound DTOs, exported conformance suite |
 | `ironclaw_auth` | `AuthEngine` (oauth2_code + api_key), auth account state machine, recipe execution, flow/grant stores kept |
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
@@ -91,7 +91,7 @@ engine, or the router.
 
 **Changes** (`crates/ironclaw_extensions`, `crates/ironclaw_host_api`):
 
-- Add v3 schema: top-level `[[tools]]`, `[mcp_tools]`, `[channel]`
+- Add v3 schema: top-level `[[tools]]`, `[mcp]`, `[channel]`
   (ingress + verification + config + egress + presentation +
   `conversation_model`), `[auth.<vendor>]` recipes. Exact shapes:
   `overview.md` §3.
@@ -110,9 +110,12 @@ engine, or the router.
   (`state`, `redirect_uri`, `code_challenge*`, `client_id`, `response_type`,
   the scope param); `[channel].route_suffix` one URL-safe segment;
   `[channel].conversation_model` required (`continuous` | `isolated`); egress
-  hosts non-wildcard; `[mcp_tools]` requires `runtime.kind = "mcp"`, is
-  mutually exclusive with `[[tools]]`, and requires `namespace` + `max_tools`;
-  unknown fields fail closed (`deny_unknown_fields`).
+  hosts non-wildcard; **exactly one of `[runtime]` or `[mcp]`** declares the
+  implementation; `[mcp]` requires `server` + `namespace` + `max_tools`, is
+  mutually exclusive with `[[tools]]` and `[channel]`, and carries the
+  server-connection credential (discovered tools cannot declare credentials or
+  egress; the server host is the egress allowlist); unknown fields fail closed
+  (`deny_unknown_fields`).
 - Resolved record: persist `{ manifest_source, manifest_digest, resolved }` in
   the installation store; all production projection reads the record. Keep the
   raw source only for diagnostics and recompilation. Startup backfills legacy
@@ -125,8 +128,10 @@ engine, or the router.
 v3 Slack-shaped fixture resolves to the same surfaces as its v2 equivalent
 (including `provider` → `vendor` mapping); recipe validation failures
 (reserved param, bad pointer, http endpoint, wildcard egress); missing
-`conversation_model` fails; `[mcp_tools]` with static tools or a non-mcp
-runtime fails; v2 normalization parity; record round-trip and
+`conversation_model` fails; `[mcp]` alongside `[runtime]`, `[[tools]]`, or
+`[channel]` fails, as does `[mcp]` missing `server`/`namespace`/`max_tools`;
+v2 normalization parity (v2 mcp-runtime manifests resolve to the same model
+as `[mcp]`); record round-trip and
 restart-without-source on both DBs; widening diff cases (equal / narrow /
 widen). Extend `manifest_v2_contract.rs` rather than duplicating where a case
 already exists.
@@ -148,12 +153,13 @@ already exists.
   - `loaders/{native,wasm,mcp}.rs` — native resolves `runtime.service` in the
     injected factory registry; wasm wraps the existing WASM execution lane
     (`ironclaw_host_runtime`) as a `WasmToolAdapter`; the **mcp loader owns
-    discovery**: it runs `tools/list` through the existing hosted-MCP client,
-    validates results against the `[mcp_tools]` ceiling
-    (namespace/count/schema-size/effects), publishes the discovered tool
-    surfaces atomically, and synthesizes a `ToolAdapter` that proxies
-    invocations. `ToolAdapter` itself has one method (`invoke`); discovery is
-    never part of the extension ABI.
+    discovery**: selected by the presence of `[mcp]`, it connects to the
+    declared server, runs `tools/list` through the existing hosted-MCP client
+    with the connection credential injected, validates results against the
+    declared ceiling (namespace/count/schema-size/effects), publishes the
+    discovered tool surfaces atomically, and synthesizes a `ToolAdapter` that
+    proxies invocations. `ToolAdapter` itself has one method (`invoke`);
+    discovery is never part of the extension ABI.
   - `active.rs` — immutable `ActiveSnapshot` (`Arc` swap), resolver views.
     Resolver ports are defined in consumer crates and implemented here:
     `ToolResolver` (dispatcher), `ChannelResolver` (workflow/router),
@@ -424,7 +430,7 @@ possible.
    credentials identical before/after) — plus the new explicit `[auth.*]` and
    `[channel]` sections. Exception: the two hosted-MCP packages
    (`notion-mcp`, `nearai-mcp`) intentionally change shape — their placeholder
-   static capabilities become `[mcp_tools]` discovery; their parity assertion
+   static capabilities become one `[mcp]` declaration; their parity assertion
    is the declared ceiling plus the post-discovery tool set instead of static
    equality. The v2 reader remains for third-party/local packages.
 
