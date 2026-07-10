@@ -48,7 +48,8 @@ use ironclaw_turns::{
         ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
     },
 };
-use tracing::{debug, info};
+use rust_decimal::Decimal;
+use tracing::debug;
 
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
@@ -70,40 +71,88 @@ const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
 const MODEL_USAGE_TARGET: &str = "ironclaw_runner::model_usage";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
-fn trace_model_usage<P: LlmProvider + ?Sized>(
+#[derive(Debug, Clone)]
+struct ModelUsageContext {
+    model: String,
+    input_usd_per_token: Decimal,
+    output_usd_per_token: Decimal,
+}
+
+fn normalized_request_model_override(model: Option<&str>) -> Option<&str> {
+    let trimmed = model?.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn fallback_usage_rates_for_model(model: &str) -> (Decimal, Decimal) {
+    let rates = model_cost(model).unwrap_or_else(default_cost);
+    if rates == (Decimal::ZERO, Decimal::ZERO) && !is_explicit_free_model(model) {
+        return default_cost();
+    }
+    rates
+}
+
+fn is_explicit_free_model(model: &str) -> bool {
+    model.ends_with(":free") || model == "openrouter/free" || model == "free"
+}
+
+fn model_usage_context<P: LlmProvider + ?Sized>(
     provider: &P,
+    model_override: Option<&str>,
+) -> ModelUsageContext {
+    let active_model = provider.active_model_name();
+    let effective_model = normalized_request_model_override(model_override)
+        .map(str::to_string)
+        .unwrap_or_else(|| active_model.clone());
+    let (input_usd_per_token, output_usd_per_token) = if effective_model == active_model {
+        provider.cost_per_token()
+    } else {
+        fallback_usage_rates_for_model(&effective_model)
+    };
+    ModelUsageContext {
+        model: effective_model,
+        input_usd_per_token,
+        output_usd_per_token,
+    }
+}
+
+fn trace_model_usage(
+    usage: &ModelUsageContext,
     operation: &'static str,
     input_tokens: u32,
     output_tokens: u32,
     cache_read_input_tokens: u32,
     cache_creation_input_tokens: u32,
 ) {
-    if !tracing::enabled!(target: MODEL_USAGE_TARGET, tracing::Level::INFO) {
+    if !tracing::enabled!(target: MODEL_USAGE_TARGET, tracing::Level::DEBUG) {
         return;
     }
-    let (input_rate, output_rate) = provider.cost_per_token();
-    let estimated_usd = provider.calculate_cost(input_tokens, output_tokens);
-    info!(
+    let estimated_usd = usage.input_usd_per_token * Decimal::from(input_tokens)
+        + usage.output_usd_per_token * Decimal::from(output_tokens);
+    debug!(
         target: MODEL_USAGE_TARGET,
         "REBORN_INFERENCE_USAGE operation={} model={} usage_available=true input_tokens={} output_tokens={} cache_read_input_tokens={} cache_creation_input_tokens={} input_usd_per_token={} output_usd_per_token={} estimated_usd={}",
         operation,
-        provider.active_model_name(),
+        usage.model,
         input_tokens,
         output_tokens,
         cache_read_input_tokens,
         cache_creation_input_tokens,
-        input_rate,
-        output_rate,
+        usage.input_usd_per_token,
+        usage.output_usd_per_token,
         estimated_usd,
     );
 }
 
-fn trace_unpriced_model_call<P: LlmProvider + ?Sized>(provider: &P, operation: &'static str) {
-    info!(
+fn trace_unpriced_model_call(usage: &ModelUsageContext, operation: &'static str) {
+    debug!(
         target: MODEL_USAGE_TARGET,
         "REBORN_INFERENCE_USAGE operation={} model={} usage_available=false",
         operation,
-        provider.active_model_name(),
+        usage.model,
     );
 }
 
@@ -1175,6 +1224,7 @@ where
                 .collect::<Vec<_>>();
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
+            let tool_model_usage = model_usage_context(provider, tool_request.model.as_deref());
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {
@@ -1197,7 +1247,7 @@ where
                     response
                 }
                 Err(error) => {
-                    trace_unpriced_model_call(provider, "provider_complete_with_tools");
+                    trace_unpriced_model_call(&tool_model_usage, "provider_complete_with_tools");
                     trace_model_latency_error(
                         "provider_complete_with_tools",
                         &replay_identity,
@@ -1209,7 +1259,7 @@ where
                 }
             };
             trace_model_usage(
-                provider,
+                &tool_model_usage,
                 "provider_complete_with_tools",
                 response.input_tokens,
                 response.output_tokens,
@@ -1272,7 +1322,7 @@ where
                         }
                         Err(error) => {
                             trace_unpriced_model_call(
-                                provider,
+                                &tool_model_usage,
                                 "provider_complete_with_tools_repair",
                             );
                             trace_model_latency_error(
@@ -1286,7 +1336,7 @@ where
                         }
                     };
                     trace_model_usage(
-                        provider,
+                        &tool_model_usage,
                         "provider_complete_with_tools_repair",
                         response.input_tokens,
                         response.output_tokens,
@@ -1348,6 +1398,7 @@ where
     }
 
     let provider_started_at = live_latency_started_at();
+    let text_model_usage = model_usage_context(provider, completion.model.as_deref());
     let response = match if let Some(stream_sink) = stream_sink.as_ref() {
         provider
             .complete_streaming(
@@ -1368,7 +1419,7 @@ where
             response
         }
         Err(error) => {
-            trace_unpriced_model_call(provider, "provider_complete");
+            trace_unpriced_model_call(&text_model_usage, "provider_complete");
             trace_model_latency_error(
                 "provider_complete",
                 &replay_identity,
@@ -1380,12 +1431,12 @@ where
         }
     };
     trace_model_usage(
-        provider,
+        &text_model_usage,
         "provider_complete",
         response.input_tokens,
         response.output_tokens,
-        0,
-        0,
+        response.cache_read_input_tokens,
+        response.cache_creation_input_tokens,
     );
     debug!(
         finish_reason = ?response.finish_reason,

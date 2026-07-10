@@ -195,9 +195,15 @@ def _completion_usage(body: object) -> dict[str, object] | None:
     if not isinstance(usage, dict):
         return None
 
-    def token_count(name: str) -> int:
-        value = usage.get(name)
-        return value if isinstance(value, int) and value >= 0 else 0
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    if (
+        not isinstance(prompt_tokens, int)
+        or prompt_tokens < 0
+        or not isinstance(completion_tokens, int)
+        or completion_tokens < 0
+    ):
+        return None
 
     prompt_details = usage.get("prompt_tokens_details")
     cached_tokens = 0
@@ -208,8 +214,8 @@ def _completion_usage(body: object) -> dict[str, object] | None:
     return {
         "source": "semantic_judge",
         "model": str(body.get("model") or _judge_model()),
-        "input_tokens": token_count("prompt_tokens"),
-        "output_tokens": token_count("completion_tokens"),
+        "input_tokens": prompt_tokens,
+        "output_tokens": completion_tokens,
         "cache_read_input_tokens": cached_tokens,
         "cache_creation_input_tokens": 0,
         "pricing_source": "pending_product_rate_match",

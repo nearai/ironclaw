@@ -741,13 +741,13 @@ def server_env(
     if extra_env:
         env.update(extra_env)
     rust_log = _log_filter_with_model_usage(
-        os.environ.get(
+        env.get(
             "RUST_LOG",
             "ironclaw=warn,ironclaw_reborn=warn,ironclaw_reborn_webui_ingress=info",
         )
     )
     reborn_log = _log_filter_with_model_usage(
-        os.environ.get(
+        env.get(
             "IRONCLAW_REBORN_LOG",
             "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
         )
@@ -774,7 +774,7 @@ def server_env(
 def _log_filter_with_model_usage(value: str) -> str:
     if "ironclaw_runner::model_usage" in value:
         return value
-    return f"{value},ironclaw_runner::model_usage=info"
+    return f"{value},ironclaw_runner::model_usage=debug"
 
 
 async def start_reborn_server(
@@ -1208,7 +1208,55 @@ def _record_assistant_reply_wait_result(
     observed["assistant_reply_wait_ms"] = reply.final_reply_wait_ms
     observed["assistant_reply_wait_reason"] = reply.final_reply_reason
     if reply.semantic_judge is not None:
-        observed["semantic_judge"] = reply.semantic_judge
+        _append_semantic_judge(observed, reply.semantic_judge)
+
+
+def _safe_semantic_judge_usage(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    safe: dict[str, object] = {}
+    for key in (
+        "source",
+        "model",
+        "pricing_source",
+        "estimated_usd",
+        "input_usd_per_token",
+        "output_usd_per_token",
+    ):
+        if key in value:
+            safe[key] = str(value[key])
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ):
+        safe[key] = _non_negative_int(value.get(key))
+    return safe
+
+
+def _safe_semantic_judge_payload(value: dict[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    if isinstance(value.get("completed"), bool):
+        safe["completed"] = value["completed"]
+    if isinstance(value.get("confidence"), (int, float)):
+        safe["confidence"] = value["confidence"]
+    reason = value.get("reason")
+    if isinstance(reason, str):
+        safe["reason"] = reason[:300]
+    usage = _safe_semantic_judge_usage(value.get("inference_usage"))
+    if usage is not None:
+        safe["inference_usage"] = usage
+    return safe
+
+
+def _append_semantic_judge(
+    details: dict[str, object],
+    semantic_judge: dict[str, object],
+) -> None:
+    judges = details.setdefault("semantic_judges", [])
+    if isinstance(judges, list):
+        judges.append(_safe_semantic_judge_payload(semantic_judge))
 
 
 def _routine_confirmation_follow_up_for_text(
@@ -1366,7 +1414,7 @@ async def _live_chat_case(
         }
         semantic_judge = getattr(exc, "semantic_judge", None)
         if isinstance(semantic_judge, dict):
-            failure_details["semantic_judge"] = semantic_judge
+            _append_semantic_judge(failure_details, semantic_judge)
         return _result(
             case_name,
             False,
@@ -1589,15 +1637,18 @@ async def _wait_for_assistant_reply(
                 ),
                 semantic_judge=semantic_judge,
             )
+    safe_semantic_judge = (
+        _safe_semantic_judge_payload(semantic_judge) if semantic_judge else None
+    )
     error = AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
         f"latest_final_reply_state={last_final_reply_state!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
-        f"semantic_judge={_compact_json(semantic_judge)}"
+        f"semantic_judge={_compact_json(safe_semantic_judge)}"
     )
     if semantic_judge is not None:
-        setattr(error, "semantic_judge", semantic_judge)
+        setattr(error, "semantic_judge", safe_semantic_judge)
     raise error
 
 
@@ -6890,6 +6941,8 @@ def _decimal(value: object) -> Decimal | None:
     try:
         parsed = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not parsed.is_finite():
         return None
     return parsed if parsed >= 0 else None
 

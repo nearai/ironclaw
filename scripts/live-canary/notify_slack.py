@@ -256,7 +256,9 @@ def _non_negative_decimal(value: object) -> Decimal:
         parsed = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return Decimal(0)
-    return parsed if parsed >= 0 else Decimal(0)
+    if not parsed.is_finite() or parsed < 0:
+        return Decimal(0)
+    return parsed
 
 
 def _trim_slack_block_text(value: object, limit: int = 2900) -> str:

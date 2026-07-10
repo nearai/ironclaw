@@ -186,6 +186,15 @@ class ParseSummaryStatusTests(unittest.TestCase):
 
 
 class RebornQaSlackReportTests(unittest.TestCase):
+    def test_non_negative_decimal_rejects_non_finite_values(self):
+        self.assertEqual(notify._non_negative_decimal("NaN"), notify.Decimal(0))
+        self.assertEqual(notify._non_negative_decimal("Infinity"), notify.Decimal(0))
+        self.assertEqual(notify._non_negative_decimal("-Infinity"), notify.Decimal(0))
+        self.assertEqual(
+            notify._non_negative_decimal("0.000210"),
+            notify.Decimal("0.000210"),
+        )
+
     def test_collect_lane_populates_per_case_reports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             lane_dir = Path(tmpdir) / "reborn-webui-v2-live-qa" / "reborn-webui-v2" / "20260628T000000Z"
@@ -320,6 +329,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
             inference_input_tokens=150,
             inference_output_tokens=30,
             inference_estimated_usd=notify.Decimal("0.000210"),
+            inference_unpriced_call_count=1,
             reborn_qa_cases=[
                 notify.RebornQaCaseReport(
                     rows=("2A",),
@@ -331,6 +341,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     inference_input_tokens=150,
                     inference_output_tokens=30,
                     inference_estimated_usd=notify.Decimal("0.000210"),
+                    inference_unpriced_call_count=1,
                     tool_calls=[
                         notify.RebornQaToolCall(
                             name="gmail.list_messages",
@@ -389,6 +400,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(len(qa_sections), 1)
         self.assertIn("*Inference:* 2 calls", qa_sections[0])
         self.assertIn("estimated `$0.000210`", qa_sections[0])
+        self.assertIn("1 unpriced", qa_sections[0])
         context_texts = [
             element["text"]
             for block in payload["blocks"]
@@ -398,6 +410,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertTrue(
             any("*Reborn inference estimate:* `$0.000210`" in text for text in context_texts)
         )
+        self.assertTrue(any("1 calls unpriced" in text for text in context_texts))
         self.assertTrue(
             any(
                 "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/3 passed"
