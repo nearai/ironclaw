@@ -316,8 +316,10 @@ pub struct ExtensionBindings {
 ```
 
 `bind` is side-effect-free and receives no network/secret/store ports — only
-the installation context and the resolved contract. The binding rule is a
-direct check, not a framework:
+the installation context, the resolved contract, and the extension's
+**non-secret** config values (adapters are parameterized at bind time; secrets
+exist only behind host injection). The binding rule is a direct check, not a
+framework:
 
 - manifest declares `[[tools]]` or `[mcp]` → `tools` must be `Some`;
 - manifest declares `[channel]` → `channel` must be `Some`;
@@ -444,6 +446,13 @@ pub enum InboundOutcome {
 }
 ```
 
+Attachments are **references, not bytes**: an `AttachmentRef` carries the
+vendor URL/id and a mime hint, which keeps `inbound` pure. When something
+actually needs the bytes, the *host* fetches them through restricted egress
+with the channel credential — secrets stay host-side. Outbound attachments are
+envelope parts; `deliver` owns the upload. (The ref type is defined now; the
+fetch path is built only when a consumer needs it.)
+
 ### 4.3 Auth — one host engine, recipes, no adapter
 
 There is deliberately **no auth trait in the extension ABI.** The host's
@@ -544,6 +553,11 @@ End to end:
    bytes.
 6. **Invoke** — `adapter.invoke(call, ports)` does the work.
 7. **Record** — result, events, audit: host; back to the model.
+
+Host **built-in capabilities** (memory, workspace, …) are not extensions:
+they live in the host's built-in registry, resolve through the same lookup,
+and run the identical pipeline. An extension capability id that collides with
+a built-in fails activation.
 
 `slack.send_message` stays an explicit delegated side-effect tool; final
 replies never go through it.
@@ -736,6 +750,9 @@ no third state machine, no per-extension logic.
   valid ones.
 - Upgrade stages the new generation, applies the widening rule (§3.3), swaps
   atomically; the old generation drains via its `Arc`.
+- Editing `[channel.config]` while `Active` runs an automatic deactivate →
+  reactivate cycle: adapters are rebuilt with the new values and `activate()`
+  revalidates them. There is no separate `Reconfiguring` state.
 - Deployment assumption, documented not engineered: **one serving process per
   deployment** owns the active set. Multi-replica serving needs its own ADR.
 
@@ -755,6 +772,8 @@ reintroduced without one.
 | Generic "dynamic tools" abstraction | MCP is the only dynamic source; one `[mcp]` section, owned by the MCP loader | a second, non-MCP discovery source is real |
 | Channel sub-adapter set (connection/target/action traits) | folded into `ChannelAdapter` methods + `[channel.config]` | a real action that config + hooks cannot express |
 | Multiple channel surfaces per extension | no extension has two | one does (wire already carries surface keys) |
+| Installation-scoped OAuth grants (bot-install flows) | manual `[channel.config]` fields cover today's operator setup | a vendor requires OAuth-based operator install (recipes gain an `owner` field) |
+| Multiple accounts per vendor per user | one account per vendor per user matches current behavior | a real work + personal account use case |
 | Trigger/file runtime | reserved kinds, no implementation exists | a production trigger/file use case (fourth adapter, additive) |
 | Multi-digest canonicalization, golden canonical JSON | one source digest + resolved-contract diff suffices | never, absent a concrete need |
 | Machine-readable evidence ledger, sign-off roles, checker scripts | checklist + CI + architecture gates are the evidence | never |

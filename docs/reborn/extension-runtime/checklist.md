@@ -65,7 +65,7 @@ Rules — kept short on purpose:
   adapter fails activation; same for `[channel]`; undeclared bindings fail;
   auth never binds.
 - [ ] LIFE-2 `bind` is side-effect-free and receives no network/secret/store
-  ports.
+  ports; adapters are parameterized with non-secret config values only.
 - [ ] LIFE-3 Native loader resolves `runtime.service` from the registry the
   binary assembles; unknown service fails with a typed error.
 - [ ] LIFE-4 WASM and MCP runtime extensions load through synthesized
@@ -99,6 +99,9 @@ Rules — kept short on purpose:
   publishes the valid rest.
 - [ ] LIFE-17 Full lifecycle (install → configure → activate → remove) passes
   on both DBs through the integration harness with the acme fixture.
+- [ ] LIFE-18 Editing channel config while `Active` triggers an automatic
+  deactivate → reactivate; adapters observe the new values; no bespoke
+  reconfigure state exists.
 
 ## 4. Tool dispatch (TOOL)
 
@@ -121,6 +124,9 @@ Rules — kept short on purpose:
   method); validated tool surfaces publish atomically; a refresh replaces the
   set completely or not at all; discovered tools run the same dispatcher
   pipeline as static ones.
+- [ ] TOOL-10 Host built-in capabilities resolve through the same dispatcher
+  pipeline; an extension capability id colliding with a built-in fails
+  activation.
 
 ## 5. Auth engine (AUTH)
 
@@ -136,9 +142,9 @@ Rules — kept short on purpose:
   rejected before the vendor call.
 - [ ] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
   extract via bounded JSON pointers, including `fallback_to_requested` scope.
-- [ ] AUTH-6 Refresh honors `rotates_refresh_token` both ways; revoke is
-  idempotent; vendor response bodies are size-capped and redacted from
-  errors and logs.
+- [ ] AUTH-6 Refresh runs on-demand at injection with single-flight and honors
+  `rotates_refresh_token` both ways; revoke is idempotent; vendor response
+  bodies are size-capped and redacted from errors and logs.
 - [ ] AUTH-7 Identity extracts from the token response or the declared
   identity endpoint and is validated against the flow before storage.
 - [ ] AUTH-8 Grants/secrets are encrypted at rest; stored secrets are never
@@ -194,6 +200,9 @@ Rules — kept short on purpose:
   extension's adapter at delivery time.
 - [ ] ING-12 Slack and Telegram inbound both pass through the same router and
   workflow caller with zero host branches (one integration proof each).
+- [ ] ING-13 Inbound attachments are references; any byte fetch happens
+  host-side through restricted egress with the channel credential — adapters
+  never fetch.
 
 ## 7. Channel outbound (OUT)
 

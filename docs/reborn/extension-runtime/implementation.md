@@ -99,7 +99,9 @@ engine, or the router.
   in `ironclaw_host_api` (temporary deprecation alias until callers migrate,
   deleted by P7). The v3 manifest field is `vendor`; v2's `provider` maps to it
   in normalization. Stored identifier strings (`google`, `slack`, …) are
-  unchanged — no data migration.
+  unchanged — no data migration. Related identifiers
+  (`ProviderIdentityActorResolver`, …) pick up the rename whenever their files
+  are touched.
 - Recipe types live in `ironclaw_host_api` (both the manifest parser and the
   auth engine/ingress verifier consume them without a dependency cycle).
 - v2 manifests keep parsing through the existing reader and normalize into the
@@ -171,6 +173,10 @@ already exists.
     startup, fixed removal order, `RemovalPending` retry. This is the **only**
     writer of installation state and the active snapshot; a single async mutex
     serializes lifecycle operations (single serving process assumption).
+    `BindContext`/`ChannelContext` carry installation identity, the resolved
+    declaration, and non-secret config values (secrets only behind injection);
+    adapter hooks run under bounded deadlines; editing `[channel.config]`
+    while `Active` performs an automatic deactivate → reactivate cycle.
   - `egress.rs` — `RestrictedEgress` implementation: scheme/host/method
     allowlist from the resolved contract, credential injection by handle
     (adapter-supplied `Authorization` rejected where injection is declared),
@@ -201,6 +207,9 @@ acme fixture install → activate → resolve → remove on both DBs.
 - Dispatcher resolves `ToolResolver::resolve(capability_id)` → prebound adapter
   + resolved declaration. Authorization, approvals, obligations, resource
   reservation, events, and audit behavior are unchanged and proven unchanged.
+- Host built-in capabilities stay in the host's built-in registry and resolve
+  through the same lookup, running the identical pipeline; an extension
+  capability id colliding with a built-in is an activation conflict (tested).
 - Existing WASM/MCP/script execution code becomes adapter implementations or
   helpers behind the loaders; credential injection and host-port enforcement
   stay host-side (ports built from the resolved declaration per call).
@@ -235,6 +244,8 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   vendor-registered redirect URLs keep working; the `{provider}` path
   parameter carries the vendor id and is resolved via `AuthRecipeResolver` —
   never a match arm.
+- Refresh is on-demand at credential-injection time with single-flight per
+  account; there is no background refresher job.
 - Shared vendors: unify recipes at activation (identical except
   `scopes`/`display_name`, else conflict); scope union and incremental
   re-consent keep NEA-25 behavior; grants are vendor-scoped and survive
@@ -284,13 +295,17 @@ oauth-connect integration test rather than adding a parallel one).
   `shared_secret_header` constant-time; candidate installations tried within a
   small fixed bound) → `adapter.inbound(VerifiedInbound)` (pure, panic-isolated,
   bounded input; signing secrets never in scope) → outcome:
-  - `Messages` → durable dedupe + admission commit in one transaction, **then**
-    2xx; persistence failure → retryable 5xx. Then existing workflow: identity
-    and conversation binding, turn submission.
+  - `Messages` → durable dedupe + admission commit in one transaction (dedupe
+    key: `(installation, event_id)`), **then** 2xx; persistence failure →
+    retryable 5xx. Then existing workflow: identity and conversation binding,
+    turn submission.
   - `Respond` → bounded immediate response (post-verification), no enqueue.
   - `Ignore` → 2xx after the same durable no-op commit.
 - `reply_context` from the message is stored host-side with the conversation
   source binding and handed back in `OutboundEnvelope`.
+- Inbound attachments are `AttachmentRef`s (vendor URL/id + mime hint) so
+  `inbound` stays pure; the host-side fetch through restricted channel egress
+  is specified but implemented only when a consumer needs bytes.
 - Conversation binding consumes the channel's declared `conversation_model`:
   `continuous` channels bind one IronClaw conversation per external
   conversation ref (today's Slack/Telegram behavior, now declared instead of
