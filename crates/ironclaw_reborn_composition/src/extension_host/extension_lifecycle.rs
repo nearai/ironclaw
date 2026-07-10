@@ -1,7 +1,4 @@
-// arch-exempt: large_file, channel-connect requirement + extension lifecycle and
-// its test module; includes restore-time compatibility cleanup for the retired
-// slack_user companion from the model-B remodel
-// (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
+// arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #5905
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -9,8 +6,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
@@ -74,8 +71,8 @@ mod active_publication;
 mod hosted_mcp_test_support;
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
-    materialize_available_extension, visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, SLACK_EXTENSION_ID,
+    is_internal_extension_package_ref, materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -92,8 +89,6 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 use active_publication::extension_trust_policy_input;
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
-const SLACK_EXTENSION_ID: &str = "slack";
-const SLACK_CHANNEL_ID: &str = "slack";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RemovableChannelCleanup {
@@ -113,23 +108,27 @@ impl RemovableChannelCleanup {
 fn removable_channel_cleanup_for_summary(
     summary: &LifecycleExtensionSummary,
 ) -> Option<RemovableChannelCleanup> {
-    if summary
-        .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+    // The bundled Slack tools package owns the personal Slack channel even
+    // though its manifest surface is tool-only.
+    if summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
+        || summary
+            .surface_kinds
+            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
     {
         return Some(RemovableChannelCleanup::Required(
             summary.package_ref.id.as_str().to_string(),
         ));
     }
+    // Tool-only companion extensions can still own a personal connection
+    // whose channel id matches the extension id. Probe the generic connection
+    // facade when such an extension declares credentials; a missing channel is
+    // intentionally a no-op. This keeps provider-specific OAuth knowledge out
+    // of the lifecycle core.
     if summary.package_ref.kind == LifecyclePackageKind::Extension
-        && summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
-        && summary
-            .credential_requirements
-            .iter()
-            .any(|requirement| requirement.provider == SLACK_PERSONAL_PROVIDER_ID)
+        && !summary.credential_requirements.is_empty()
     {
         return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            SLACK_CHANNEL_ID.to_string(),
+            summary.package_ref.id.as_str().to_string(),
         ));
     }
     None
@@ -2425,7 +2424,7 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_tools_extension_removes_cleanly() {
+    async fn slack_tools_extension_removal_fails_closed_without_channel_cleanup() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
@@ -2444,9 +2443,11 @@ mod tests {
         .await
         .expect("activate Slack and internal user tools");
         let removal_scope = hosted_mcp_scope("extension-remove-test");
-        port.remove(slack_ref, &removal_scope, Some(&removal_scope.user_id))
+        let error = port
+            .remove(slack_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
-            .expect("remove public Slack");
+            .expect_err("Slack removal without its cleanup facade must fail closed");
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
 
         let installed_ids = installation_store
             .list_installations()
@@ -2456,8 +2457,8 @@ mod tests {
             .map(|installation| installation.extension_id().as_str().to_string())
             .collect::<BTreeSet<_>>();
         assert!(
-            installed_ids.is_empty(),
-            "removing the public Slack extension must not leave hidden Slack user-tool installations behind"
+            installed_ids.contains("slack"),
+            "failed cleanup must preserve the public Slack extension for a retry"
         );
         let active_capability_ids = port
             .active_model_visible_capabilities()
@@ -2469,8 +2470,8 @@ mod tests {
         assert!(
             active_capability_ids
                 .iter()
-                .all(|capability_id| !capability_id.starts_with("slack.")),
-            "Slack user tools must not remain active after public Slack removal"
+                .any(|capability_id| capability_id.starts_with("slack.")),
+            "failed cleanup must not partially remove active Slack tools"
         );
     }
 

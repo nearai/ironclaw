@@ -17,12 +17,12 @@ use crate::{
     CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSelectionInput, CredentialSetupService, ManualTokenCompletionInput,
     ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, ProviderCallbackOutcome, SecretCleanupAction,
-    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
-    TurnGateAuthFlowQuery, binding_scope_owns_account,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthExchangeCleanupRequest,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
+    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, binding_scope_owns_account,
     cleanup::SecretCleanupAction::Deactivate,
     domain::{
         PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
@@ -507,10 +507,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if !matches!(
-            record.status,
-            AuthFlowStatus::Completed | AuthFlowStatus::Canceled
-        ) {
+        if !crate::is_terminal_status(record.status) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if already marked by a concurrent caller, return existing record.
@@ -1007,6 +1004,46 @@ impl AuthProviderClient for InMemoryAuthProductServices {
 
 #[async_trait]
 impl SecretCleanupService for InMemoryAuthProductServices {
+    async fn retain_oauth_exchange_for_cleanup(
+        &self,
+        request: OAuthExchangeCleanupRequest,
+    ) -> Result<CredentialAccountId, AuthProductError> {
+        let account_id = CredentialAccountId::from_uuid(request.flow_id.as_uuid());
+        let mut state = self.lock_state();
+        if let Some(existing) = state.accounts.get(&account_id) {
+            if existing.status == CredentialAccountStatus::Revoked
+                && existing.provider == request.exchange.provider
+                && CredentialAccountOwnerScope::from_scope(&request.scope).matches(existing)
+                && existing.access_secret.as_ref() == Some(&request.exchange.access_secret)
+                && existing.refresh_secret == request.exchange.refresh_secret
+            {
+                return Ok(account_id);
+            }
+            return Err(AuthProductError::BackendConflict);
+        }
+        let now = Utc::now();
+        state.accounts.insert(
+            account_id,
+            CredentialAccount {
+                id: account_id,
+                scope: request.scope,
+                provider: request.exchange.provider,
+                label: request.exchange.account_label,
+                status: CredentialAccountStatus::Revoked,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(request.exchange.access_secret),
+                refresh_secret: request.exchange.refresh_secret,
+                scopes: Vec::new(),
+                provider_identity: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        Ok(account_id)
+    }
+
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
@@ -1057,11 +1094,11 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                     SecretCleanupAction::Uninstall => {
                         if account.status != CredentialAccountStatus::Revoked {
                             account.status = CredentialAccountStatus::Revoked;
-                            account.access_secret = None;
-                            account.refresh_secret = None;
                             account.updated_at = Utc::now();
                             report.revoked_accounts.push(account.id);
                         }
+                        account.access_secret = None;
+                        account.refresh_secret = None;
                     }
                 }
             } else if had_grant {
@@ -1085,8 +1122,7 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                     flow.error = Some(crate::AuthErrorCode::Canceled);
                     flow.updated_at = Utc::now();
                 }
-                if flow.status == AuthFlowStatus::Canceled
-                    && flow.continuation_emitted_at.is_none()
+                if flow.continuation_emitted_at.is_none()
                     && matches!(
                         flow.continuation,
                         AuthContinuationRef::TurnGateResume { .. }

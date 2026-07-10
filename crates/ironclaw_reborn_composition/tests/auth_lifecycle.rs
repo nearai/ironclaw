@@ -4,14 +4,15 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthGateRef, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
-    CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, CredentialRefreshRequest, InMemoryAuthProductServices, NewAuthFlow,
-    NewCredentialAccount, OAuthAuthorizationUrl, OAuthProviderCallbackRequest,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowKind,
+    AuthFlowManager, AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope,
+    AuthProviderId, AuthSessionId, AuthSurface, CredentialAccountLookupRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    CredentialRefreshRequest, InMemoryAuthProductServices, NewAuthFlow, NewCredentialAccount,
+    OAuthAuthorizationUrl, OAuthCallbackFailureInput, OAuthProviderCallbackRequest,
     OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
     OAuthProviderRefreshRequest, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
-    SecretCleanupRequest, TurnRunRef,
+    SecretCleanupRequest, TurnRunRef, opaque_state_hash,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, ThreadId, UserId};
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
@@ -212,6 +213,15 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
 
 #[tokio::test]
 async fn lifecycle_uninstall_cancels_turn_flow_and_denies_blocked_auth_gate() {
+    assert_lifecycle_uninstall_denies_blocked_auth_gate(false).await;
+}
+
+#[tokio::test]
+async fn lifecycle_uninstall_denies_failed_turn_flow_and_is_idempotent() {
+    assert_lifecycle_uninstall_denies_blocked_auth_gate(true).await;
+}
+
+async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_uninstall: bool) {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let run_id = TurnRunId::new();
@@ -226,6 +236,7 @@ async fn lifecycle_uninstall_cancels_turn_flow_and_denies_blocked_auth_gate() {
         thread_id,
         Some(actor.user_id.clone()),
     );
+    let state_hash = opaque_state_hash("lifecycle-state").unwrap();
     let flow = auth
         .create_flow(NewAuthFlow {
             id: None,
@@ -244,12 +255,24 @@ async fn lifecycle_uninstall_cancels_turn_flow_and_denies_blocked_auth_gate() {
                 gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
             },
             update_binding: None,
-            opaque_state_hash: None,
+            opaque_state_hash: Some(state_hash.clone()),
             pkce_verifier_hash: None,
             expires_at: Utc::now() + Duration::minutes(10),
         })
         .await
         .unwrap();
+    if fail_flow_before_uninstall {
+        auth.fail_oauth_callback(
+            &flow_scope,
+            OAuthCallbackFailureInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash,
+                error: AuthErrorCode::TokenExchangeFailed,
+            },
+        )
+        .await
+        .expect("mark callback failed");
+    }
     let coordinator = Arc::new(LifecycleTurnCoordinator::blocked_auth(
         actor.clone(),
         turn_scope,
@@ -272,7 +295,14 @@ async fn lifecycle_uninstall_cancels_turn_flow_and_denies_blocked_auth_gate() {
         .unwrap();
 
     let canceled = auth.get_flow(&flow_scope, flow.id).await.unwrap().unwrap();
-    assert_eq!(canceled.status, ironclaw_auth::AuthFlowStatus::Canceled);
+    assert_eq!(
+        canceled.status,
+        if fail_flow_before_uninstall {
+            AuthFlowStatus::Failed
+        } else {
+            AuthFlowStatus::Canceled
+        }
+    );
     assert!(canceled.continuation_emitted_at.is_some());
     assert!(
         !serde_json::to_string(&report)
@@ -290,6 +320,21 @@ async fn lifecycle_uninstall_cancels_turn_flow_and_denies_blocked_auth_gate() {
     assert_eq!(
         resumes[0].resume_disposition,
         Some(GateResumeDisposition::Denied)
+    );
+
+    services
+        .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
+            scope: flow_scope,
+            extension_id: ExtensionId::new("github").unwrap(),
+            provider: Some(provider()),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("lifecycle cleanup retry");
+    assert_eq!(
+        coordinator.resumes().len(),
+        1,
+        "continuation marking must make lifecycle cleanup idempotent"
     );
 }
 

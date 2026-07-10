@@ -1,3 +1,4 @@
+// arch-exempt: large_file, model-visible extension removal adapter and caller tests, plan #5905
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
@@ -760,7 +761,7 @@ mod tests {
         .expect("local-dev runtime build");
         let slack_package_path = storage_root.join("system/extensions/slack");
         let channel_connection = Arc::new(
-            RecordingChannelConnectionFacade::with_connection("slack", true)
+            RecordingChannelConnectionFacade::with_connection("slack", false)
                 .watching_package(slack_package_path.clone()),
         );
         let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
@@ -820,7 +821,7 @@ mod tests {
                 (expected_caller.clone(), "slack".to_string()),
                 (expected_caller, "slack".to_string())
             ],
-            "WebUI and tool removal must pass the same tenant, authenticated user, and package to cleanup"
+            "WebUI and tool removal must run the same actor-scoped Slack cleanup even when status projection is stale"
         );
         assert_eq!(
             channel_connection.package_present_during_disconnect(),

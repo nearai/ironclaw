@@ -3,6 +3,8 @@
 //! Core outbound preferences only see opaque target ids and validated reply
 //! target bindings. Slack-specific channel and DM authority stays here.
 
+// arch-exempt: large_file, Slack outbound and personal DM authority tests, plan #5905
+
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -143,6 +145,16 @@ pub(crate) trait SlackPersonalDmTargetStore: Send + Sync + std::fmt::Debug {
         epoch: SlackConnectionEpoch,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
 
+    /// Finds installations retained only in legacy DM state so disconnect can
+    /// fence and clean them even after setup and identity projections drift.
+    async fn personal_dm_target_installations_for_owner(
+        &self,
+        _tenant_id: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdapterInstallationId>, SlackPersonalDmTargetError> {
+        Err(SlackPersonalDmTargetError::StoreUnavailable)
+    }
+
     async fn delete_personal_dm_targets_for_owner(
         &self,
         tenant_id: &TenantId,
@@ -203,6 +215,26 @@ impl SlackPersonalDmTargetStore for InMemorySlackPersonalDmTargetStore {
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
             .insert(target.key.clone(), target.clone());
         Ok(target)
+    }
+
+    async fn personal_dm_target_installations_for_owner(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Vec<AdapterInstallationId>, SlackPersonalDmTargetError> {
+        let targets = self
+            .targets
+            .read()
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
+        let mut installations = targets
+            .keys()
+            .filter(|key| &key.tenant_id == tenant_id && &key.user_id == user_id)
+            .map(|key| key.installation_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        installations.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(installations)
     }
 
     async fn delete_personal_dm_targets_for_owner(

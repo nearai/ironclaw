@@ -22,8 +22,8 @@ mod provider;
 mod scope;
 
 pub use cleanup::{
-    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupQuarantine,
+    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,

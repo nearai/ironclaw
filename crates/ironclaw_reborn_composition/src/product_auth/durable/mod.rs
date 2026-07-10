@@ -20,8 +20,8 @@ use ironclaw_secrets::SecretStore;
 use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
-    AuthContinuationRef, AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthFlowStatus,
-    AuthProductError, AuthSessionId, AuthSurface, CredentialAccount, CredentialAccountId,
+    AuthContinuationRef, AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError,
+    AuthSessionId, AuthSurface, CredentialAccount, CredentialAccountId,
     CredentialAccountOwnerScope, CredentialAccountSelectionRequest, CredentialAccountStatus,
     NewCredentialAccount,
 };
@@ -47,8 +47,7 @@ const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 
 fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
     !ironclaw_auth::is_terminal_status(flow.status)
-        || (flow.status == AuthFlowStatus::Canceled
-            && flow.continuation_emitted_at.is_none()
+        || (flow.continuation_emitted_at.is_none()
             && matches!(
                 flow.continuation,
                 AuthContinuationRef::TurnGateResume { .. }

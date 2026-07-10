@@ -4,9 +4,10 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthFlowStatus, AuthProductError,
-    CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthProductError,
+    CredentialAccountId, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
+    OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
+    SecretCleanupService,
 };
 
 #[async_trait]
@@ -14,6 +15,23 @@ impl<F> SecretCleanupService for FilesystemAuthProductServices<F>
 where
     F: RootFilesystem + 'static,
 {
+    async fn retain_oauth_exchange_for_cleanup(
+        &self,
+        request: OAuthExchangeCleanupRequest,
+    ) -> Result<CredentialAccountId, AuthProductError> {
+        let account_id = CredentialAccountId::from_uuid(request.flow_id.as_uuid());
+        self.stage_callback_secret_cleanup(
+            account_id,
+            request.scope,
+            request.exchange.provider,
+            request.exchange.account_label,
+            Some(request.exchange.access_secret),
+            request.exchange.refresh_secret,
+        )
+        .await?;
+        Ok(account_id)
+    }
+
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
@@ -31,11 +49,11 @@ where
                 .await?
             {
                 let canceled = match flow.status {
-                    AuthFlowStatus::Canceled => flow,
+                    status if ironclaw_auth::is_terminal_status(status) => flow,
                     _ => match self.cancel_flow(&flow.scope, flow.id).await {
                         Ok(canceled) => canceled,
                         Err(AuthProductError::Canceled) => flow,
-                        Err(AuthProductError::FlowAlreadyTerminal) => continue,
+                        Err(AuthProductError::FlowAlreadyTerminal) => flow,
                         Err(error) => return Err(error),
                     },
                 };

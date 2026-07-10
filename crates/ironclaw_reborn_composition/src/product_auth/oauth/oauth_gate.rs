@@ -8,7 +8,7 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager,
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, AuthProductError,
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, NewAuthFlow,
-    OAuthCallbackState, OAuthCallbackStateKind, PkceVerifierSecret, ProviderScope,
+    OAuthCallbackState, OAuthCallbackStateKind, PkceVerifierSecret, ProviderScope, Timestamp,
     TurnGateAuthFlowQuery, TurnRunRef, build_google_authorization_url, opaque_state_hash,
     pkce_s256_challenge, pkce_verifier_hash,
 };
@@ -51,7 +51,12 @@ pub(crate) trait OAuthGateProvider: Send + Sync + fmt::Debug {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
         scopes: Vec<ProviderScope>,
+        expires_at: Timestamp,
     ) -> Result<PreparedOAuthGateFlow, AuthProductError>;
+
+    /// Undo provider-owned state acquired by [`Self::prepare_flow`] when the
+    /// shared gate driver cannot publish or later retires the auth flow.
+    async fn abandon_flow(&self, _scope: &AuthProductScope, _flow_id: AuthFlowId) {}
 }
 
 /// One generic registry over every OAuth gate provider (Google, Slack personal).
@@ -207,17 +212,22 @@ impl OAuthGateFlowDriver {
 
         let flow_id = AuthFlowId::new();
         let scopes = provider_scopes(&requirement.provider_scopes)?;
+        let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
         let prepared = self
             .provider
-            .prepare_flow(&auth_scope, flow_id, scopes)
+            .prepare_flow(&auth_scope, flow_id, scopes, expires_at)
             .await?;
-        let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
-        self.store_pkce_verifier(
-            &auth_scope.resource,
-            flow_id,
-            prepared.pkce_verifier.clone(),
-        )
-        .await?;
+        if let Err(error) = self
+            .store_pkce_verifier(
+                &auth_scope.resource,
+                flow_id,
+                prepared.pkce_verifier.clone(),
+            )
+            .await
+        {
+            self.provider.abandon_flow(&auth_scope, flow_id).await;
+            return Err(error);
+        }
         let flow = match request
             .flow_manager
             .create_flow(NewAuthFlow {
@@ -244,6 +254,7 @@ impl OAuthGateFlowDriver {
             Err(AuthProductError::BackendConflict) => {
                 self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
                     .await;
+                self.provider.abandon_flow(&auth_scope, flow_id).await;
                 self.reusable_flow_for_query(request.flow_manager, request.flow_source, query)
                     .await?
                     .ok_or(AuthProductError::BackendConflict)?
@@ -251,11 +262,21 @@ impl OAuthGateFlowDriver {
             Err(error) => {
                 self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
                     .await;
+                self.provider.abandon_flow(&auth_scope, flow_id).await;
                 return Err(error);
             }
         };
 
-        challenge_view_from_flow(&flow)
+        match challenge_view_from_flow(&flow) {
+            Ok(challenge) => Ok(challenge),
+            Err(error) => {
+                self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
+                    .await;
+                self.provider.abandon_flow(&auth_scope, flow_id).await;
+                let _ = request.flow_manager.cancel_flow(&auth_scope, flow_id).await;
+                Err(error)
+            }
+        }
     }
 
     async fn reusable_flow_for_query(
@@ -274,10 +295,13 @@ impl OAuthGateFlowDriver {
         // now-defunct PKCE verifier so it does not linger in the secret store.
         self.cleanup_pkce_verifier(&existing.scope.resource, existing.id)
             .await;
-        flow_manager
+        let canceled = flow_manager
             .cancel_flow(&existing.scope, existing.id)
-            .await
-            .map(|_| None)
+            .await?;
+        self.provider
+            .abandon_flow(&canceled.scope, canceled.id)
+            .await;
+        Ok(None)
     }
 
     async fn store_pkce_verifier(
@@ -393,6 +417,7 @@ impl OAuthGateProvider for GoogleOAuthGateProvider {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
         scopes: Vec<ProviderScope>,
+        _expires_at: Timestamp,
     ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
         let account_label = CredentialAccountLabel::new("google")?;
         let state = OAuthCallbackState::new(

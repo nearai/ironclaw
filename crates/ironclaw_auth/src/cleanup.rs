@@ -3,8 +3,8 @@ use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthContinuationEvent, AuthProductError, AuthProviderId, CredentialAccountId,
-    scope::AuthProductScope,
+    AuthContinuationEvent, AuthFlowId, AuthProductError, AuthProviderId, CredentialAccountId,
+    OAuthProviderExchange, scope::AuthProductScope,
 };
 
 /// Lifecycle event that drives credential/session cleanup.
@@ -34,6 +34,15 @@ pub struct SecretCleanupRequest {
     /// personal token.
     pub provider: Option<AuthProviderId>,
     pub action: SecretCleanupAction,
+}
+
+/// Provider-neutral OAuth exchange material that could not be deleted and
+/// must remain reachable by the normal lifecycle cleanup path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthExchangeCleanupRequest {
+    pub scope: AuthProductScope,
+    pub flow_id: AuthFlowId,
+    pub exchange: OAuthProviderExchange,
 }
 
 /// Redacted cleanup report. It carries account ids only, never secret handles or
@@ -76,6 +85,13 @@ pub struct SecretCleanupQuarantine {
 
 #[async_trait]
 pub trait SecretCleanupService: Send + Sync {
+    /// Retain exchanged secret handles in a revoked, flow-keyed account so a
+    /// later lifecycle cleanup can retry deletion without a separate journal.
+    async fn retain_oauth_exchange_for_cleanup(
+        &self,
+        request: OAuthExchangeCleanupRequest,
+    ) -> Result<CredentialAccountId, AuthProductError>;
+
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,

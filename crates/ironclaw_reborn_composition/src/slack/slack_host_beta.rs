@@ -4,6 +4,8 @@
 //! the CLI supplies explicit host config, and this module reuses the already
 //! assembled Reborn runtime services instead of creating a second agent loop.
 
+// arch-exempt: large_file, Slack host composition and lifecycle wiring tests, plan #5905
+
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -438,6 +440,12 @@ impl SlackHostBetaMounts {
     ) {
         if let Some(service) = &self.setup_service {
             slot.fill(Arc::clone(service));
+            slot.fill_gate_lifecycle(
+                crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle::new(
+                    Arc::clone(&self.personal_connection_scope_resolver),
+                    Arc::clone(&self.user_binding_lifecycle_store),
+                ),
+            );
         }
     }
 }

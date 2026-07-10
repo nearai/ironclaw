@@ -31,6 +31,8 @@ enum CallbackAccountRollback {
     Restore {
         previous_account: Box<CredentialAccount>,
         cleanup_account_id: CredentialAccountId,
+        staged_cleanup: Option<Box<(CredentialAccount, RecordVersion)>>,
+        rollback_cleanup_account_id: CredentialAccountId,
     },
 }
 
@@ -424,10 +426,7 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if !matches!(
-            record.status,
-            AuthFlowStatus::Completed | AuthFlowStatus::Canceled
-        ) {
+        if !ironclaw_auth::is_terminal_status(record.status) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if the continuation was already marked by a concurrent
@@ -592,13 +591,15 @@ where
 
         if let CallbackAccountRollback::Restore {
             previous_account,
-            cleanup_account_id,
+            staged_cleanup,
+            rollback_cleanup_account_id,
+            ..
         } = rollback
         {
             let previous_account = *previous_account;
             let cleanup_account = self
                 .stage_replaced_callback_secrets(
-                    cleanup_account_id,
+                    rollback_cleanup_account_id,
                     &callback_account,
                     &previous_account,
                 )
@@ -617,6 +618,10 @@ where
             };
             match restore_result {
                 Ok(_) => {
+                    if let Some(staged_cleanup) = staged_cleanup {
+                        let (account, version) = *staged_cleanup;
+                        self.clear_callback_secret_cleanup(account, version).await?;
+                    }
                     return match cleanup_account? {
                         Some((account, version)) => {
                             self.purge_revoked_callback_account(account, version).await
@@ -626,7 +631,7 @@ where
                 }
                 Err(AuthProductError::BackendConflict) => {
                     // A later account mutation owns the record. Preserve any
-                    // staged cleanup pointer for lifecycle retry; if staging
+                    // staged cleanup pointers for lifecycle retry; if staging
                     // itself failed, surface that failure to the caller.
                     cleanup_account?;
                     return Ok(());
@@ -666,16 +671,57 @@ where
         if access_secret.is_none() && refresh_secret.is_none() {
             return Ok(None);
         }
+        self.stage_callback_secret_cleanup(
+            cleanup_account_id,
+            replaced.scope.clone(),
+            replaced.provider.clone(),
+            replaced.label.clone(),
+            access_secret,
+            refresh_secret,
+        )
+        .await
+        .map(Some)
+    }
+
+    async fn clear_callback_secret_cleanup(
+        &self,
+        mut account: CredentialAccount,
+        version: RecordVersion,
+    ) -> Result<(), AuthProductError> {
+        if account.status != CredentialAccountStatus::Revoked {
+            return Err(AuthProductError::BackendConflict);
+        }
+        account.access_secret = None;
+        account.refresh_secret = None;
+        account.updated_at = Utc::now();
+        match self
+            .write_account(&account, CasExpectation::Version(version))
+            .await
+        {
+            Ok(_) | Err(AuthProductError::BackendConflict) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn stage_callback_secret_cleanup(
+        &self,
+        cleanup_account_id: CredentialAccountId,
+        scope: ironclaw_auth::AuthProductScope,
+        provider: ironclaw_auth::AuthProviderId,
+        label: ironclaw_auth::CredentialAccountLabel,
+        access_secret: Option<ironclaw_host_api::SecretHandle>,
+        refresh_secret: Option<ironclaw_host_api::SecretHandle>,
+    ) -> Result<(CredentialAccount, RecordVersion), AuthProductError> {
         let request = NewCredentialAccount {
-            scope: replaced.scope.clone(),
-            provider: replaced.provider.clone(),
-            label: replaced.label.clone(),
+            scope: scope.clone(),
+            provider: provider.clone(),
+            label,
             status: CredentialAccountStatus::Revoked,
             ownership: CredentialOwnership::UserReusable,
             owner_extension: None,
             granted_extensions: Vec::new(),
-            access_secret,
-            refresh_secret,
+            access_secret: access_secret.clone(),
+            refresh_secret: refresh_secret.clone(),
             scopes: Vec::new(),
         };
         match self
@@ -687,18 +733,33 @@ where
             )
             .await
         {
-            Ok(account) => Ok(Some(account)),
+            Ok(account) => Ok(account),
             Err(AuthProductError::BackendConflict) => {
-                let existing = self
-                    .read_account(&replaced.scope, cleanup_account_id)
+                let (mut existing, version) = self
+                    .read_account(&scope, cleanup_account_id)
                     .await?
                     .ok_or(AuthProductError::BackendConflict)?;
-                if existing.0.provider != replaced.provider
-                    || existing.0.status != CredentialAccountStatus::Revoked
+                if existing.provider != provider
+                    || existing.status != CredentialAccountStatus::Revoked
+                    || !binding_scope_owns_account(&scope, &existing)
                 {
                     return Err(AuthProductError::BackendConflict);
                 }
-                Ok(Some(existing))
+                if existing.access_secret == access_secret
+                    && existing.refresh_secret == refresh_secret
+                {
+                    return Ok((existing, version));
+                }
+                if existing.access_secret.is_some() || existing.refresh_secret.is_some() {
+                    return Err(AuthProductError::BackendConflict);
+                }
+                existing.access_secret = access_secret;
+                existing.refresh_secret = refresh_secret;
+                existing.updated_at = Utc::now();
+                let version = self
+                    .write_account(&existing, CasExpectation::Version(version))
+                    .await?;
+                Ok((existing, version))
             }
             Err(error) => Err(error),
         }
@@ -747,48 +808,41 @@ where
         Ok(())
     }
 
-    async fn delete_replaced_account_secrets(
-        &self,
-        replaced: &CredentialAccount,
-        retained: &CredentialAccount,
-    ) -> Result<(), AuthProductError> {
-        let mut delete_failed = false;
-        if let Some(handle) = replaced.access_secret.as_ref()
-            && replaced.access_secret.as_ref() != retained.access_secret.as_ref()
-            && self
-                .secret_store
-                .delete(&replaced.scope.resource, handle)
-                .await
-                .is_err()
-        {
-            delete_failed = true;
-        }
-        if let Some(handle) = replaced.refresh_secret.as_ref()
-            && replaced.refresh_secret.as_ref() != retained.refresh_secret.as_ref()
-            && self
-                .secret_store
-                .delete(&replaced.scope.resource, handle)
-                .await
-                .is_err()
-        {
-            delete_failed = true;
-        }
-        if delete_failed {
-            return Err(AuthProductError::BackendUnavailable);
-        }
-        Ok(())
-    }
-
     async fn finalize_callback_account_write(&self, callback_write: &CallbackAccountWrite) {
         let CallbackAccountRollback::Restore {
-            previous_account, ..
+            previous_account,
+            cleanup_account_id,
+            ..
         } = &callback_write.rollback
         else {
             return;
         };
-        let _ = self
-            .delete_replaced_account_secrets(previous_account, &callback_write.account)
-            .await;
+        match self
+            .stage_replaced_callback_secrets(
+                *cleanup_account_id,
+                previous_account,
+                &callback_write.account,
+            )
+            .await
+        {
+            Ok(Some((account, version))) => {
+                if let Err(error) = self.purge_revoked_callback_account(account, version).await {
+                    tracing::warn!(
+                        cleanup_account_id = %cleanup_account_id,
+                        error_code = ?error.code(),
+                        "retaining replaced OAuth secrets for lifecycle cleanup retry"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    cleanup_account_id = %cleanup_account_id,
+                    error_code = ?error.code(),
+                    "failed to stage replaced OAuth secrets for lifecycle cleanup"
+                );
+            }
+        }
     }
 
     async fn update_bound_oauth_account(
@@ -823,15 +877,41 @@ where
         // if this flow wins, finalization purges the replaced handles.
         let previous_account = account.clone();
         update_account_from_exchange(&mut account, exchange, Utc::now());
-        let version = self
+        let cleanup_account_id = CredentialAccountId::from_uuid(flow_id.as_uuid());
+        let staged_cleanup = self
+            .stage_replaced_callback_secrets(cleanup_account_id, &previous_account, &account)
+            .await?
+            .map(Box::new);
+        let version = match self
             .write_account(&account, CasExpectation::Version(version))
-            .await?;
+            .await
+        {
+            Ok(version) => version,
+            Err(error) => {
+                if let Some(staged_cleanup) = staged_cleanup {
+                    let (cleanup_account, cleanup_version) = *staged_cleanup;
+                    if let Err(clear_error) = self
+                        .clear_callback_secret_cleanup(cleanup_account, cleanup_version)
+                        .await
+                    {
+                        tracing::warn!(
+                            cleanup_account_id = %cleanup_account_id,
+                            error_code = ?clear_error.code(),
+                            "failed to clear unused OAuth cleanup pointer after account update failure"
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
         Ok(CallbackAccountWrite {
             account,
             version,
             rollback: CallbackAccountRollback::Restore {
                 previous_account: Box::new(previous_account),
-                cleanup_account_id: CredentialAccountId::from_uuid(flow_id.as_uuid()),
+                cleanup_account_id,
+                staged_cleanup,
+                rollback_cleanup_account_id: CredentialAccountId::new(),
             },
         })
     }
