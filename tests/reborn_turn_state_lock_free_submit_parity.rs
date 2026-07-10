@@ -18,6 +18,9 @@ use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 #[tokio::test]
 async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked() {
     const ROOM: &str = "room-turn-state-lock-free-submit";
+    // The live submit is still awaited before releasing the blocked writer, so
+    // a real lock regression times out here; the wider window only absorbs CI
+    // scheduler/build-host jitter around the binary-E2E harness.
     const LOCK_FREE_SUBMIT_TIMEOUT: Duration = Duration::from_secs(5);
     const BLOCKED_SUBMIT_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
