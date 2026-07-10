@@ -2,7 +2,7 @@
 //!
 //! This module does not cut app or gateway traffic over to Reborn. It provides
 //! the explicit adapter bundle the eventual app/gateway entrypoint can pass
-//! into `ironclaw_reborn::runtime::build_product_live_planned_runtime` once
+//! into `ironclaw_runner::runtime::build_product_live_planned_runtime` once
 //! durable thread/checkpoint stores are selected by that caller.
 
 use std::collections::{BTreeMap, HashMap};
@@ -27,7 +27,7 @@ use ironclaw_loop_support::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
     loop_driver_execution_extension_id,
 };
-use ironclaw_reborn::model_routes::{
+use ironclaw_runner::model_routes::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
     ModelSlot, StaticModelRouteResolver,
 };
@@ -892,7 +892,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, CapabilityDisplayOutputPreview, InvocationId, ProviderToolName, TenantId, ThreadId,
     };
-    use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
+    use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     };

@@ -31,11 +31,6 @@ use ironclaw_turns::{
     runner::TurnRunTransitionPort,
 };
 
-use ironclaw_host_runtime::{
-    SchedulerTurnRunWakeNotifier, TurnRunScheduler, TurnRunSchedulerConfig, TurnRunSchedulerHandle,
-    TurnRunWakeChannel,
-};
-
 use crate::{
     app_loop_family::build_loop_family_registry_with_default_iteration_limit,
     driver_registry::{DriverRegistry, DriverRegistryError},
@@ -58,6 +53,10 @@ use crate::{
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     tool_disclosure_port::ToolDisclosureCapabilityDecorator,
     turn_run_executor::RebornTurnRunExecutor,
+    turn_scheduler::{
+        SchedulerTurnRunWakeNotifier, TurnRunScheduler, TurnRunSchedulerConfig,
+        TurnRunSchedulerHandle, TurnRunWakeChannel,
+    },
 };
 
 /// Default number of turn-runner worker tasks spawned per runtime instance.
