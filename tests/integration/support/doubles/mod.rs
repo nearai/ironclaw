@@ -14,6 +14,7 @@ mod recording_host_runtime;
 mod recording_network_http_egress;
 mod recording_network_http_transport;
 mod recording_runtime_http_egress;
+mod recording_security_audit_sink;
 mod recording_test_capability_port;
 mod static_capability_surface_profile_resolver;
 mod static_network_resolver;
@@ -34,6 +35,7 @@ pub(crate) use recording_host_runtime::RecordingHostRuntime;
 pub(crate) use recording_network_http_egress::RecordingNetworkHttpEgress;
 pub(crate) use recording_network_http_transport::RecordingNetworkHttpTransport;
 pub(crate) use recording_runtime_http_egress::RecordingRuntimeHttpEgress;
+pub(crate) use recording_security_audit_sink::RecordingSecurityAuditSink;
 // Consts consumed only by the binary-E2E harness in the parity/QA support tree
 // (unused in bins that don't mount it).
 #[allow(unused_imports)]

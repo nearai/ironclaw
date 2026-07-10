@@ -575,6 +575,9 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_process_count: usize,
     /// Network-egress-request count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_network_count: usize,
+    /// Security-audit-event count at harness construction. See
+    /// `baseline_invocation_count`.
+    pub(crate) baseline_security_audit_count: usize,
     /// Turn-lifecycle-event count on the group-shared `InMemoryTurnEventSink` at
     /// harness construction, if `.with_turn_event_sink()` opted in. The sink has
     /// no per-thread channel, so without this baseline a group thread's
@@ -1104,6 +1107,17 @@ impl RebornIntegrationHarness {
                 all[self.baseline_turn_event_count.min(all.len())..].to_vec()
             })
             .unwrap_or_default()
+    }
+
+    /// Security-audit events recorded by the always-wired harness recorder, for
+    /// this thread only. Reads the group-shared sink but slices
+    /// `[baseline_security_audit_count..]` so a group thread never sees an
+    /// earlier sibling thread's events.
+    pub(super) fn recorded_security_audit_events(
+        &self,
+    ) -> Vec<ironclaw_events::SecurityAuditEvent> {
+        let all = self._shared.security_audit_sink.events();
+        all[self.baseline_security_audit_count.min(all.len())..].to_vec()
     }
 
     /// Every `data:` URL from a `ContentPart::ImageUrl` part across all captured

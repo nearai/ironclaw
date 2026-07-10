@@ -109,6 +109,7 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_turns_fs_composite,
     thread_scope_from_binding,
 };
+use super::doubles::RecordingSecurityAuditSink;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -215,6 +216,10 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// W5-WIRING-PARITY: production local-dev always wires a security-audit
+    /// sink; the harness mirrors that shape with a recording sink so tests can
+    /// assert events emitted through real caller paths.
+    pub(crate) security_audit_sink: Arc<RecordingSecurityAuditSink>,
     /// Enabler (c): the `trace_scope_key(tenant, owner)` the production
     /// trace-capture sink was seeded with when `.with_trace_capture()` opted
     /// in; `None` otherwise. Recorded at wiring time so a test asserts against
@@ -804,6 +809,10 @@ impl RebornIntegrationGroupBuilder {
         } else {
             (None, None, None)
         };
+        let security_audit_sink: Arc<RecordingSecurityAuditSink> =
+            Arc::new(RecordingSecurityAuditSink::default());
+        let hook_security_audit_sink: Arc<dyn ironclaw_events::SecurityAuditSink> =
+            security_audit_sink.clone();
 
         // W5-WIRING-PARITY: bind the literal to a local before consuming it so
         // `harness_planned_runtime_parts_shape` can read the REAL Some/None
@@ -882,9 +891,10 @@ impl RebornIntegrationGroupBuilder {
             // C-COMMCTX: delivery-preference / connected-channel provider (Some
             // only when `communication_context_provider()` was set).
             communication_context_provider: self.communication_context_provider,
-            // No RecordingSecurityAuditSink double exists yet (nearai/ironclaw#5640);
-            // wiring_parity.rs's ALLOWED_DIVERGENCES tracks this field by name, not line.
-            hook_security_audit_sink: None,
+            // W5-WIRING-PARITY: production local-dev always wires
+            // TracingSecurityAuditSink; the harness mirrors the shape with a
+            // recorder so integration tests can assert emitted events.
+            hook_security_audit_sink: Some(hook_security_audit_sink),
             turn_event_sink: composed_turn_event_sink,
             attachment_read_port: capability_recorder
                 .attachment_test_support()
@@ -909,6 +919,7 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                security_audit_sink,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
                 budget_account,
@@ -1162,6 +1173,7 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_result_count = capability_recorder.capability_results().len();
         let baseline_process_count = capability_recorder.recorded_process_commands().len();
         let baseline_network_count = capability_recorder.network_http_requests().len();
+        let baseline_security_audit_count = shared.security_audit_sink.events().len();
         let baseline_turn_event_count = shared
             .turn_event_sink
             .as_ref()
@@ -1254,6 +1266,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_result_count,
             baseline_process_count,
             baseline_network_count,
+            baseline_security_audit_count,
             baseline_turn_event_count,
         })
     }

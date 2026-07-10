@@ -17,6 +17,7 @@
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
+use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
 use rust_decimal::Decimal;
@@ -384,6 +385,32 @@ impl RebornIntegrationHarness {
         }
         let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
         Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert the always-wired security-audit recorder captured an event with
+    /// the expected stable boundary/decision/code tuple.
+    pub async fn assert_security_audit_event_recorded(
+        &self,
+        boundary: SecurityBoundary,
+        decision: SecurityDecision,
+        code: &'static str,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_security_audit_events();
+        if events.iter().any(|event| {
+            event.boundary == boundary && event.decision == decision && event.code == code
+        }) {
+            return Ok(());
+        }
+        let seen: Vec<_> = events
+            .iter()
+            .map(|event| (event.boundary.as_str(), event.decision.as_str(), event.code))
+            .collect();
+        Err(format!(
+            "no recorded security-audit event ({}, {}, {code}); saw {seen:?}",
+            boundary.as_str(),
+            decision.as_str()
+        )
+        .into())
     }
 
     /// Assert a captured model request carried a multimodal `data:` image part

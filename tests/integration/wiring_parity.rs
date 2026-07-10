@@ -79,8 +79,8 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         // local-dev/harness scope this file compares.
         model_budget_accountant: false,
         safety_context: false,                  // hardcoded None
-        hook_security_audit_sink: true,         // :3452 always Some(TracingSecurityAuditSink)
-        turn_event_sink: true,                  // :3453 always Some(turn_event_sink)
+        hook_security_audit_sink: true, // runtime.rs:3780 always Some(TracingSecurityAuditSink)
+        turn_event_sink: true,          // runtime.rs:3781 always Some(turn_event_sink)
         hook_dispatcher_builder_factory: false, // :3230-3258 None, HooksActivationConfig defaults OFF
         communication_context_provider: true,   // :3337-3357 Some whenever local_runtime present
         scheduler_wake_wiring: false, // :2847-2857 None outside Production/MigrationDryRun
@@ -111,13 +111,6 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
         "communication_context_provider",
         "harness: None unless .communication_context_provider() was called (group.rs); \
          production: always Some whenever local_runtime is present (runtime.rs:3337-3357)",
-    ),
-    (
-        "hook_security_audit_sink",
-        "harness: always None (group.rs's into_group, hook_security_audit_sink field) — no \
-         RecordingSecurityAuditSink double exists yet (standing gap, tracked by \
-         nearai/ironclaw#5640, not a substitution); \
-         production: always Some(TracingSecurityAuditSink) (runtime.rs:3452)",
     ),
 ];
 
