@@ -41,12 +41,10 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         ],
         PermissionMode::Ask,
         Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(DEFAULT_SHELL_WALL_CLOCK_MS),
-                output_bytes: Some(DEFAULT_SHELL_OUTPUT_BYTES),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(DEFAULT_SHELL_WALL_CLOCK_MS)
+                .set_output_bytes(DEFAULT_SHELL_OUTPUT_BYTES)
+                .set_process_count(1),
             hard_ceiling: Some(ResourceCeiling {
                 max_usd: None,
                 max_input_tokens: None,

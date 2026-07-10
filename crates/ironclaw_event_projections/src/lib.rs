@@ -481,6 +481,13 @@ pub struct MemoryAuditProjectionMetadata {
     pub finding_count: Option<u64>,
 }
 
+impl MemoryAuditProjectionMetadata {
+    pub fn set_byte_count(mut self, byte_count: impl Into<Option<u64>>) -> Self {
+        self.byte_count = byte_count.into();
+        self
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AuditProjectionError {
     #[error("audit projection request rejected: {reason}")]
@@ -1546,10 +1553,7 @@ fn parse_memory_audit_metadata(
         return None;
     }
 
-    let mut metadata = MemoryAuditProjectionMetadata {
-        byte_count: output_bytes,
-        ..MemoryAuditProjectionMetadata::default()
-    };
+    let mut metadata = MemoryAuditProjectionMetadata::default().set_byte_count(output_bytes);
     for segment in segments {
         let (key, value) = segment.split_once('=')?;
         match key {

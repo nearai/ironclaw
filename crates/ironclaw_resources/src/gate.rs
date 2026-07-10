@@ -370,10 +370,7 @@ mod tests {
         let id = gate.id;
         store.open(&scope, gate).unwrap();
         let user = UserId::new("alice").unwrap();
-        let new_limits = ResourceLimits {
-            max_usd: Some(Decimal::from(50)),
-            ..ResourceLimits::default()
-        };
+        let new_limits = ResourceLimits::default().set_max_usd(Decimal::from(50));
         let resolved = store
             .resolve(
                 &scope,

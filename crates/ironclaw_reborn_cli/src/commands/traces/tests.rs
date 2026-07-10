@@ -90,11 +90,9 @@ fn redaction_summary_handles_empty_and_counts() {
 }
 
 fn trace_queue_policy_fixture() -> StandingTraceContributionPolicy {
-    StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example/internal/v1/traces".to_string()),
-        ..StandingTraceContributionPolicy::default()
-    }
+    StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example/internal/v1/traces")
 }
 
 fn trace_queue_envelope_fixture(
@@ -792,13 +790,11 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     );
 
     // Configured: non-empty invite code => true.
-    let configured_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: Some("INV-PILOT-001".to_string()),
-        ..Default::default()
-    };
+    let configured_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
+        .set_upload_token_invite_code("INV-PILOT-001");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &configured_policy,
@@ -814,13 +810,11 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
 
     // Whitespace-only invite code => false (matches show_policy_status's
     // trimmed-emptiness contract).
-    let whitespace_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: Some("   ".to_string()),
-        ..Default::default()
-    };
+    let whitespace_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
+        .set_upload_token_invite_code("   ");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &whitespace_policy,
@@ -834,13 +828,10 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     );
 
     // None => false.
-    let none_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: None,
-        ..Default::default()
-    };
+    let none_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &none_policy,
