@@ -6,14 +6,59 @@
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+/// Known per-token usage rates for a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelUsageRates {
+    pub input_per_token: Decimal,
+    pub output_per_token: Decimal,
+    pub cache_read_input_per_token: Option<Decimal>,
+}
+
+impl ModelUsageRates {
+    const fn new(input_per_token: Decimal, output_per_token: Decimal) -> Self {
+        Self {
+            input_per_token,
+            output_per_token,
+            cache_read_input_per_token: None,
+        }
+    }
+
+    const fn with_cache_read(
+        input_per_token: Decimal,
+        output_per_token: Decimal,
+        cache_read_input_per_token: Decimal,
+    ) -> Self {
+        Self {
+            input_per_token,
+            output_per_token,
+            cache_read_input_per_token: Some(cache_read_input_per_token),
+        }
+    }
+
+    const fn zero() -> Self {
+        Self {
+            input_per_token: Decimal::ZERO,
+            output_per_token: Decimal::ZERO,
+            cache_read_input_per_token: None,
+        }
+    }
+}
+
 /// Look up known per-token costs for a model by its identifier.
 ///
 /// Returns `Some((input_cost, output_cost))` for known models, `None` otherwise.
 pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
+    model_usage_rates(model_id).map(|rates| (rates.input_per_token, rates.output_per_token))
+}
+
+/// Look up known per-token usage rates for a model by its identifier.
+///
+/// Returns `Some(rates)` for known models, `None` otherwise.
+pub fn model_usage_rates(model_id: &str) -> Option<ModelUsageRates> {
     // OpenRouter free-tier models: `:free` suffix or the `openrouter/free` router
     // should always report zero cost (see #463).
-    if model_id.ends_with(":free") || model_id == "openrouter/free" || model_id == "free" {
-        return Some((Decimal::ZERO, Decimal::ZERO));
+    if is_explicit_free_model(model_id) {
+        return Some(ModelUsageRates::zero());
     }
 
     // Normalize: strip provider prefixes (e.g., "openai/gpt-4o" -> "gpt-4o")
@@ -21,33 +66,52 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         .rsplit_once('/')
         .map(|(_, name)| name)
         .unwrap_or(model_id);
+    let id = id.to_ascii_lowercase();
 
-    match id {
+    match id.as_str() {
         // OpenAI — GPT-5.x / Codex
-        "gpt-5.5" | "gpt-5.5-codex" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.3-codex" | "gpt-5.3-codex-spark" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.2-codex" | "gpt-5.2-pro" | "gpt-5.2" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.1-codex" | "gpt-5.1-codex-max" | "gpt-5.1" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5.1-codex-mini" => Some((dec!(0.0000003), dec!(0.0000012))),
-        "gpt-5-codex" | "gpt-5-pro" | "gpt-5" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-5-mini" | "gpt-5-nano" => Some((dec!(0.0000003), dec!(0.0000012))),
-        // OpenAI — GPT-4.x
-        "gpt-4.1" => Some((dec!(0.000002), dec!(0.000008))),
-        "gpt-4.1-mini" => Some((dec!(0.0000004), dec!(0.0000016))),
-        "gpt-4.1-nano" => Some((dec!(0.0000001), dec!(0.0000004))),
-        "gpt-4o" | "gpt-4o-2024-11-20" | "gpt-4o-2024-08-06" => {
-            Some((dec!(0.0000025), dec!(0.00001)))
+        "gpt-5.5" | "gpt-5.5-codex" => Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008))),
+        "gpt-5.3-codex" | "gpt-5.3-codex-spark" => {
+            Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008)))
         }
-        "gpt-4o-mini" | "gpt-4o-mini-2024-07-18" => Some((dec!(0.00000015), dec!(0.0000006))),
-        "gpt-4-turbo" | "gpt-4-turbo-2024-04-09" => Some((dec!(0.00001), dec!(0.00003))),
-        "gpt-4" | "gpt-4-0613" => Some((dec!(0.00003), dec!(0.00006))),
-        "gpt-3.5-turbo" | "gpt-3.5-turbo-0125" => Some((dec!(0.0000005), dec!(0.0000015))),
+        "gpt-5.2-codex" | "gpt-5.2-pro" | "gpt-5.2" => {
+            Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008)))
+        }
+        "gpt-5.1-codex" | "gpt-5.1-codex-max" | "gpt-5.1" => {
+            Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008)))
+        }
+        "gpt-5.1-codex-mini" => Some(ModelUsageRates::new(dec!(0.0000003), dec!(0.0000012))),
+        "gpt-5-codex" | "gpt-5-pro" | "gpt-5" => {
+            Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008)))
+        }
+        "gpt-5-mini" | "gpt-5-nano" => Some(ModelUsageRates::new(dec!(0.0000003), dec!(0.0000012))),
+        // OpenAI — GPT-4.x
+        "gpt-4.1" => Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008))),
+        "gpt-4.1-mini" => Some(ModelUsageRates::new(dec!(0.0000004), dec!(0.0000016))),
+        "gpt-4.1-nano" => Some(ModelUsageRates::new(dec!(0.0000001), dec!(0.0000004))),
+        "gpt-4o" | "gpt-4o-2024-11-20" | "gpt-4o-2024-08-06" => {
+            Some(ModelUsageRates::new(dec!(0.0000025), dec!(0.00001)))
+        }
+        "gpt-4o-mini" | "gpt-4o-mini-2024-07-18" => {
+            Some(ModelUsageRates::new(dec!(0.00000015), dec!(0.0000006)))
+        }
+        "gpt-4-turbo" | "gpt-4-turbo-2024-04-09" => {
+            Some(ModelUsageRates::new(dec!(0.00001), dec!(0.00003)))
+        }
+        "gpt-4" | "gpt-4-0613" => Some(ModelUsageRates::new(dec!(0.00003), dec!(0.00006))),
+        "gpt-3.5-turbo" | "gpt-3.5-turbo-0125" => {
+            Some(ModelUsageRates::new(dec!(0.0000005), dec!(0.0000015)))
+        }
         // OpenAI — reasoning
-        "o3" => Some((dec!(0.000002), dec!(0.000008))),
-        "o3-mini" | "o3-mini-2025-01-31" => Some((dec!(0.0000011), dec!(0.0000044))),
-        "o4-mini" => Some((dec!(0.0000011), dec!(0.0000044))),
-        "o1" | "o1-2024-12-17" => Some((dec!(0.000015), dec!(0.00006))),
-        "o1-mini" | "o1-mini-2024-09-12" => Some((dec!(0.000003), dec!(0.000012))),
+        "o3" => Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008))),
+        "o3-mini" | "o3-mini-2025-01-31" => {
+            Some(ModelUsageRates::new(dec!(0.0000011), dec!(0.0000044)))
+        }
+        "o4-mini" => Some(ModelUsageRates::new(dec!(0.0000011), dec!(0.0000044))),
+        "o1" | "o1-2024-12-17" => Some(ModelUsageRates::new(dec!(0.000015), dec!(0.00006))),
+        "o1-mini" | "o1-mini-2024-09-12" => {
+            Some(ModelUsageRates::new(dec!(0.000003), dec!(0.000012)))
+        }
 
         // Anthropic
         "claude-opus-4-6"
@@ -58,7 +122,7 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         | "claude-opus-4-0"
         | "claude-opus-4-20250514"
         | "claude-3-opus-20240229"
-        | "claude-3-opus-latest" => Some((dec!(0.000015), dec!(0.000075))),
+        | "claude-3-opus-latest" => Some(ModelUsageRates::new(dec!(0.000015), dec!(0.000075))),
         "claude-sonnet-4-6"
         | "claude-sonnet-4-5"
         | "claude-sonnet-4-5-20250929"
@@ -67,27 +131,31 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         | "claude-3-7-sonnet-20250219"
         | "claude-3-7-sonnet-latest"
         | "claude-3-5-sonnet-20241022"
-        | "claude-3-5-sonnet-latest" => Some((dec!(0.000003), dec!(0.000015))),
+        | "claude-3-5-sonnet-latest" => Some(ModelUsageRates::new(dec!(0.000003), dec!(0.000015))),
         "claude-haiku-4-5"
         | "claude-haiku-4-5-20251001"
         | "claude-3-5-haiku-20241022"
-        | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
-        "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
+        | "claude-3-5-haiku-latest" => Some(ModelUsageRates::new(dec!(0.0000008), dec!(0.000004))),
+        "claude-3-haiku-20240307" => Some(ModelUsageRates::new(dec!(0.00000025), dec!(0.00000125))),
 
         // DeepSeek
-        "DeepSeek-V4-Flash" | "deepseek-v4-flash" => Some((dec!(0.00000014), dec!(0.00000028))),
+        "deepseek-v4-flash" => Some(ModelUsageRates::with_cache_read(
+            dec!(0.00000014),
+            dec!(0.00000028),
+            dec!(0.0000000028),
+        )),
 
         // Ollama / local models -- free
-        _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
+        _ if is_local_model(&id) => Some(ModelUsageRates::zero()),
 
         // Family fallbacks: a new GPT-5.x minor release shouldn't need a table
         // edit just to be budgeted. Exact arms above win for known per-model
         // pricing; these only catch unrecognized `gpt-5*` slugs. `*-mini` /
         // `*-nano` bill at the small tier, everything else at the standard tier.
         _ if id.starts_with("gpt-5") && (id.ends_with("-mini") || id.ends_with("-nano")) => {
-            Some((dec!(0.0000003), dec!(0.0000012)))
+            Some(ModelUsageRates::new(dec!(0.0000003), dec!(0.0000012)))
         }
-        _ if id.starts_with("gpt-5") => Some((dec!(0.000002), dec!(0.000008))),
+        _ if id.starts_with("gpt-5") => Some(ModelUsageRates::new(dec!(0.000002), dec!(0.000008))),
 
         _ => None,
     }
@@ -97,6 +165,38 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
 pub fn default_cost() -> (Decimal, Decimal) {
     // Conservative estimate: roughly GPT-4o pricing
     (dec!(0.0000025), dec!(0.00001))
+}
+
+/// Returns true when the model identifier explicitly represents a free route.
+pub fn is_explicit_free_model(model_id: &str) -> bool {
+    model_id.ends_with(":free") || model_id == "openrouter/free" || model_id == "free"
+}
+
+/// Shared fallback rates for remote model usage accounting.
+///
+/// The static table reports local/self-hosted model families as free. Remote
+/// providers can expose similarly named models, so callers that are accounting
+/// for a remote provider should use this fallback to avoid silently reporting
+/// unknown remote usage as zero-cost unless the model is explicitly free.
+pub fn remote_model_fallback_usage_rates(model_id: &str) -> ModelUsageRates {
+    let rates = model_usage_rates(model_id).unwrap_or_else(|| {
+        let (input_per_token, output_per_token) = default_cost();
+        ModelUsageRates::new(input_per_token, output_per_token)
+    });
+    if rates.input_per_token == Decimal::ZERO
+        && rates.output_per_token == Decimal::ZERO
+        && !is_explicit_free_model(model_id)
+    {
+        let (input_per_token, output_per_token) = default_cost();
+        return ModelUsageRates::new(input_per_token, output_per_token);
+    }
+    rates
+}
+
+/// Shared fallback costs for remote model usage accounting.
+pub fn remote_model_fallback_cost(model_id: &str) -> (Decimal, Decimal) {
+    let rates = remote_model_fallback_usage_rates(model_id);
+    (rates.input_per_token, rates.output_per_token)
 }
 
 /// Heuristic to detect local/self-hosted models (Ollama, llama.cpp, etc.).
@@ -177,6 +277,32 @@ mod tests {
             model_cost("deepseek-ai/deepseek-v4-flash"),
             Some((dec!(0.00000014), dec!(0.00000028)))
         );
+        let mixed_case = model_cost("deepseek-ai/Deepseek-v4-Flash");
+        assert_eq!(mixed_case, Some((dec!(0.00000014), dec!(0.00000028))));
+        assert_ne!(mixed_case, Some((Decimal::ZERO, Decimal::ZERO)));
+        assert_eq!(
+            model_usage_rates("deepseek-ai/Deepseek-v4-Flash")
+                .unwrap()
+                .cache_read_input_per_token,
+            Some(dec!(0.0000000028))
+        );
+    }
+
+    #[test]
+    fn test_remote_model_fallback_rates_do_not_treat_remote_local_slugs_as_free() {
+        let rates = remote_model_fallback_usage_rates("Qwen/Qwen3-32B");
+        let (default_input, default_output) = default_cost();
+        assert_eq!(rates.input_per_token, default_input);
+        assert_eq!(rates.output_per_token, default_output);
+        assert_eq!(rates.cache_read_input_per_token, None);
+    }
+
+    #[test]
+    fn test_remote_model_fallback_rates_preserve_explicit_free_models() {
+        let rates = remote_model_fallback_usage_rates("stepfun/step-3.5-flash:free");
+        assert_eq!(rates.input_per_token, Decimal::ZERO);
+        assert_eq!(rates.output_per_token, Decimal::ZERO);
+        assert_eq!(rates.cache_read_input_per_token, None);
     }
 
     #[test]

@@ -1071,7 +1071,7 @@ impl LlmProvider for NearAiChatProvider {
         {
             return rates;
         }
-        remote_model_fallback_cost(&model)
+        costs::remote_model_fallback_cost(&model)
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -1202,18 +1202,6 @@ struct ChatCompletionMessage {
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatCompletionToolCall>>,
-}
-
-fn remote_model_fallback_cost(model: &str) -> (Decimal, Decimal) {
-    let rates = costs::model_cost(model).unwrap_or_else(costs::default_cost);
-    if rates == (Decimal::ZERO, Decimal::ZERO) && !is_explicit_free_model(model) {
-        return costs::default_cost();
-    }
-    rates
-}
-
-fn is_explicit_free_model(model: &str) -> bool {
-    model.ends_with(":free") || model == "openrouter/free" || model == "free"
 }
 
 // -- Pricing fetch types and logic -----------------------------------------

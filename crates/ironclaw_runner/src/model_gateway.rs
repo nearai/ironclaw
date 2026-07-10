@@ -19,7 +19,10 @@ use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
-    costs::{default_cost, model_cost},
+    costs::{
+        ModelUsageRates, default_cost, model_usage_rates, remote_model_fallback_cost,
+        remote_model_fallback_usage_rates,
+    },
     recover_codex_text_tool_calls_from_tool_names,
     vision_models::is_vision_model,
 };
@@ -88,31 +91,6 @@ fn normalized_request_model_override(model: Option<&str>) -> Option<&str> {
     }
 }
 
-fn fallback_usage_rates_for_model(model: &str) -> (Decimal, Decimal) {
-    let rates = model_cost(model).unwrap_or_else(default_cost);
-    if rates == (Decimal::ZERO, Decimal::ZERO) && !is_explicit_free_model(model) {
-        return default_cost();
-    }
-    rates
-}
-
-fn is_explicit_free_model(model: &str) -> bool {
-    model.ends_with(":free") || model == "openrouter/free" || model == "free"
-}
-
-fn cache_read_input_rate_for_model(model: &str) -> Option<Decimal> {
-    let id = model.rsplit('/').next().unwrap_or(model);
-    if id.eq_ignore_ascii_case("deepseek-v4-flash") {
-        Some(Decimal::new(28, 10))
-    } else {
-        None
-    }
-}
-
-fn locked_usage_rates_for_model(model: &str) -> Option<(Decimal, Decimal)> {
-    cache_read_input_rate_for_model(model).and_then(|_| model_cost(model))
-}
-
 fn model_usage_context<P: LlmProvider + ?Sized>(
     provider: &P,
     model_override: Option<&str>,
@@ -121,20 +99,27 @@ fn model_usage_context<P: LlmProvider + ?Sized>(
     let effective_model = normalized_request_model_override(model_override)
         .map(str::to_string)
         .unwrap_or_else(|| active_model.clone());
-    let (input_usd_per_token, output_usd_per_token) =
-        if let Some(rates) = locked_usage_rates_for_model(&effective_model) {
+    let static_rates = model_usage_rates(&effective_model);
+    let rates = if effective_model == active_model {
+        if let Some(rates) = static_rates.filter(|rates| rates.cache_read_input_per_token.is_some())
+        {
             rates
-        } else if effective_model == active_model {
-            provider.cost_per_token()
         } else {
-            fallback_usage_rates_for_model(&effective_model)
-        };
-    let cache_read_input_usd_per_token = cache_read_input_rate_for_model(&effective_model);
+            let (input_per_token, output_per_token) = provider.cost_per_token();
+            ModelUsageRates {
+                input_per_token,
+                output_per_token,
+                cache_read_input_per_token: None,
+            }
+        }
+    } else {
+        remote_model_fallback_usage_rates(&effective_model)
+    };
     ModelUsageContext {
         model: effective_model,
-        input_usd_per_token,
-        cache_read_input_usd_per_token,
-        output_usd_per_token,
+        input_usd_per_token: rates.input_per_token,
+        cache_read_input_usd_per_token: rates.cache_read_input_per_token,
+        output_usd_per_token: rates.output_per_token,
     }
 }
 
@@ -258,7 +243,7 @@ impl LlmModelProfilePolicy {
     }
 
     /// Build a [`StaticModelCostTable`] mapping every allowed `ModelProfileId`
-    /// to its per-token price via [`ironclaw_llm::costs::model_cost`].
+    /// to its per-token price via [`ironclaw_llm::costs::remote_model_fallback_cost`].
     /// Profiles whose `model_override` is unknown to the LLM cost table
     /// fall back to [`ironclaw_llm::costs::default_cost`] (roughly GPT-4o
     /// pricing) so the accountant always reconciles to a non-zero spend
@@ -269,7 +254,7 @@ impl LlmModelProfilePolicy {
             let cost = route
                 .model_override
                 .as_deref()
-                .and_then(model_cost)
+                .map(remote_model_fallback_cost)
                 .unwrap_or_else(default_cost);
             table.insert(
                 profile_id.clone(),

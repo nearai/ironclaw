@@ -1305,7 +1305,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         assert raised_error is not None
         self.assertIn("semantic_judge=", str(raised_error))
         self.assertNotIn("response_excerpt", str(raised_error))
+        self.assertNotIn("The response does not complete the task.", str(raised_error))
         self.assertEqual(raised_error.semantic_judge["completed"], False)
+        self.assertNotIn("reason", raised_error.semantic_judge)
         self.assertNotIn("response_excerpt", raised_error.semantic_judge)
 
     def test_semantic_judge_passed_respects_confidence_threshold(self):
@@ -5432,6 +5434,41 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 summary["events"][2]["pricing_source"],
                 "matched_product_rate",
             )
+
+    def test_case_inference_usage_counts_malformed_priced_product_calls_as_unpriced(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            (output_dir / "ironclaw-reborn-serve.stderr.log").write_text(
+                "--- ironclaw-reborn serve start 2026-07-10T12:00:00Z ---\n"
+                "INFO REBORN_INFERENCE_USAGE operation=provider_complete "
+                "model=deepseek-ai/DeepSeek-V4-Flash input_tokens=100 "
+                "output_tokens=20 cache_read_input_tokens=7 "
+                "cache_creation_input_tokens=3 input_usd_per_token=NaN "
+                "output_usd_per_token=0.00000028 estimated_usd=0.000014\n",
+                encoding="utf-8",
+            )
+            result = run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:test",
+                success=True,
+                latency_ms=1,
+                details={},
+            )
+
+            summary = run_live_qa._case_inference_usage(output_dir, result)
+
+            self.assertEqual(summary["call_count"], 1)
+            self.assertEqual(summary["input_tokens"], 100)
+            self.assertEqual(summary["output_tokens"], 20)
+            self.assertEqual(summary["cache_read_input_tokens"], 7)
+            self.assertEqual(summary["cache_creation_input_tokens"], 3)
+            self.assertEqual(summary["estimated_usd"], "0")
+            self.assertEqual(summary["unpriced_call_count"], 1)
+            self.assertEqual(
+                summary["events"][0]["pricing_source"],
+                "provider_usage_malformed",
+            )
+            self.assertNotIn("estimated_usd", summary["events"][0])
 
     def test_case_inference_usage_charges_cache_reads_at_cache_rate(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1241,9 +1241,6 @@ def _safe_semantic_judge_payload(value: dict[str, object]) -> dict[str, object]:
         safe["completed"] = value["completed"]
     if isinstance(value.get("confidence"), (int, float)):
         safe["confidence"] = value["confidence"]
-    reason = value.get("reason")
-    if isinstance(reason, str):
-        safe["reason"] = reason[:300]
     usage = _safe_semantic_judge_usage(value.get("inference_usage"))
     if usage is not None:
         safe["inference_usage"] = usage
@@ -6947,6 +6944,25 @@ def _decimal(value: object) -> Decimal | None:
     return parsed if parsed >= 0 else None
 
 
+def _unpriced_product_inference_event(
+    fields: dict[str, str],
+    *,
+    pricing_source: str,
+) -> dict[str, object]:
+    return {
+        "source": "product",
+        "operation": str(fields.get("operation") or "unknown"),
+        "model": str(fields.get("model") or "unknown"),
+        "input_tokens": _non_negative_int(fields.get("input_tokens")),
+        "output_tokens": _non_negative_int(fields.get("output_tokens")),
+        "cache_read_input_tokens": _non_negative_int(fields.get("cache_read_input_tokens")),
+        "cache_creation_input_tokens": _non_negative_int(
+            fields.get("cache_creation_input_tokens")
+        ),
+        "pricing_source": pricing_source,
+    }
+
+
 def _product_inference_usage(output_dir: Path) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     for name in ("ironclaw-reborn-serve.stdout.log", "ironclaw-reborn-serve.stderr.log"):
@@ -6966,16 +6982,10 @@ def _product_inference_usage(output_dir: Path) -> list[dict[str, object]]:
             )
             if fields.get("usage_available") == "false":
                 events.append(
-                    {
-                        "source": "product",
-                        "operation": str(fields.get("operation") or "unknown"),
-                        "model": str(fields.get("model") or "unknown"),
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
-                        "pricing_source": "provider_usage_unavailable",
-                    }
+                    _unpriced_product_inference_event(
+                        fields,
+                        pricing_source="provider_usage_unavailable",
+                    )
                 )
                 continue
             input_rate = _decimal(fields.get("input_usd_per_token"))
@@ -6983,6 +6993,12 @@ def _product_inference_usage(output_dir: Path) -> list[dict[str, object]]:
             output_rate = _decimal(fields.get("output_usd_per_token"))
             estimated_usd = _decimal(fields.get("estimated_usd"))
             if input_rate is None or output_rate is None or estimated_usd is None:
+                events.append(
+                    _unpriced_product_inference_event(
+                        fields,
+                        pricing_source="provider_usage_malformed",
+                    )
+                )
                 continue
             event = {
                 "source": "product",
@@ -7053,7 +7069,7 @@ def _summarize_inference_usage(events: list[dict[str, object]]) -> dict[str, obj
                     input_tokens,
                 )
                 uncached_input_tokens = max(input_tokens - cache_read_input_tokens, 0)
-                cache_read_input_rate = rates[2] or rates[0]
+                cache_read_input_rate = rates[2] if rates[2] is not None else rates[0]
                 cost = (
                     Decimal(uncached_input_tokens) * rates[0]
                     + Decimal(cache_read_input_tokens) * cache_read_input_rate
