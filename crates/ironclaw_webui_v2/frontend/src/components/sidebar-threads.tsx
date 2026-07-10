@@ -3,6 +3,7 @@ import React from "react";
 import { Icon } from "../design-system/icons";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
+import { deleteThreadErrorMessage } from "../lib/thread-errors";
 
 /* React adapter for the pinned-thread store. Lives here (not in pin-store.ts)
  * so the store stays a pure, unit-testable module free of a React import. */
@@ -82,7 +83,12 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
       event.preventDefault();
       event.stopPropagation();
       if (!window.confirm(t("thread.deleteConfirm"))) return;
-      onDelete?.(thread.id);
+      void Promise.resolve()
+        .then(() => onDelete?.(thread.id))
+        .catch((error) => {
+          console.error("Failed to delete thread:", error);
+          window.alert(deleteThreadErrorMessage(error, t));
+        });
     },
     [onDelete, thread.id, t]
   );

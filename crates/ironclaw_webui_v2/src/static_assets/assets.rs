@@ -510,7 +510,8 @@ mod tests {
         assert!(sidebar_threads.contains("data-thread-id={thread.id}"));
         assert!(sidebar_threads.contains("t(\"common.deleteChat\")"));
         assert!(sidebar_threads.contains("t(\"thread.deleteConfirm\")"));
-        assert!(!sidebar_threads.contains("window.alert"));
+        assert!(sidebar_threads.contains("deleteThreadErrorMessage"));
+        assert!(sidebar_threads.contains("window.alert"));
 
         let api = source_text("lib/api.ts");
         assert!(api.contains("export function deleteThread"));
