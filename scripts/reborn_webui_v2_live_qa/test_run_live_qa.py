@@ -3755,6 +3755,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             source,
             "the persisted excerpt must be redacted of raw user ids",
         )
+        self.assertIn(
+            "_raw_slack_conversation_ids_in_text",
+            source,
+            "the digest must also fail on leaked raw C…/D…/G… conversation "
+            "ids (the qa_10i channel-ID companion arm)",
+        )
         wait_source = inspect.getsource(run_live_qa._wait_for_assistant_reply)
         self.assertIn("full_text=", wait_source)
 
@@ -3771,6 +3777,342 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "page can flip the verdict",
         )
         self.assertIn("checked", source)
+
+    def test_raw_slack_conversation_id_pattern_requires_id_shape(self):
+        self.assertEqual(
+            run_live_qa._raw_slack_conversation_ids_in_text(
+                "history for C0BDC16TML3 and D0BDC16TML3 plus G0ABCD1234"
+            ),
+            ["C0BDC16TML3", "D0BDC16TML3", "G0ABCD1234"],
+        )
+        # Second char must be a digit and the id must be long enough: all-caps
+        # prose (DELIVERED / CHANNELS / GENERAL), lowercase echoes, and short
+        # fragments never false-positive.
+        self.assertEqual(
+            run_live_qa._raw_slack_conversation_ids_in_text(
+                "DELIVERED CHANNELS GENERAL c0bdc16tml3 C0SHORT CANARY"
+            ),
+            [],
+        )
+
+    def test_encoded_slack_mention_pattern_matches_notifying_forms_only(self):
+        self.assertIsNotNone(
+            run_live_qa.ENCODED_SLACK_MENTION_PATTERN.search(
+                "MENTION_123 ping <@U0BDC16TML3>"
+            )
+        )
+        # The labelled legacy form also notifies — it must count as encoded.
+        self.assertIsNotNone(
+            run_live_qa.ENCODED_SLACK_MENTION_PATTERN.search(
+                "MENTION_123 ping <@U0BDC16TML3|ben>"
+            )
+        )
+        self.assertIsNone(
+            run_live_qa.ENCODED_SLACK_MENTION_PATTERN.search(
+                "MENTION_123 ping @Benjamin Kurrek (literal, notifies nobody)"
+            )
+        )
+
+    def test_email_addresses_in_text_matches_only_real_addresses(self):
+        self.assertEqual(
+            run_live_qa._email_addresses_in_text(
+                "reach ben.kurrek+qa@near.ai or admin@example.co.uk"
+            ),
+            ["ben.kurrek+qa@near.ai", "admin@example.co.uk"],
+        )
+        self.assertEqual(
+            run_live_qa._email_addresses_in_text(
+                "EMAIL_UNAVAILABLE — no address, just @channel and user@localhost"
+            ),
+            [],
+        )
+
+    def test_name_token_in_text_matches_word_boundary_tokens(self):
+        self.assertTrue(
+            run_live_qa._name_token_in_text(
+                "synced with Benjamin earlier", "Benjamin Kurrek"
+            )
+        )
+        self.assertTrue(
+            run_live_qa._name_token_in_text("ping kurrek about it", "Benjamin Kurrek")
+        )
+        self.assertFalse(
+            run_live_qa._name_token_in_text("kurrekian artifacts", "Benjamin Kurrek")
+        )
+        # Tokens shorter than 3 chars never match — "QA X" must not match the
+        # answer-marker soup, and an all-short name yields no tokens at all.
+        self.assertFalse(
+            run_live_qa._name_token_in_text("REBORN_QA_10I_ANSWER_123", "QA X")
+        )
+        self.assertEqual(run_live_qa._display_name_tokens("QA X"), [])
+        self.assertEqual(
+            run_live_qa._display_name_tokens("Benjamin Kurrek"),
+            ["benjamin", "kurrek"],
+        )
+
+    def test_channel_name_mentioned_uses_hyphen_aware_boundaries(self):
+        self.assertTrue(
+            run_live_qa._channel_name_mentioned(
+                "you are in #general and #eng-canary", "general"
+            )
+        )
+        self.assertTrue(
+            run_live_qa._channel_name_mentioned("member of eng-canary today", "eng-canary")
+        )
+        # "general" inside "general-updates" is a DIFFERENT channel: plain \b
+        # matching would false-red the membership probe here.
+        self.assertFalse(
+            run_live_qa._channel_name_mentioned("member of general-updates only", "general")
+        )
+        self.assertFalse(
+            run_live_qa._channel_name_mentioned("generally speaking", "general")
+        )
+        self.assertFalse(run_live_qa._channel_name_mentioned("anything", ""))
+
+    def test_slack_non_member_public_channels_diffs_ground_truth(self):
+        view = {
+            "ok": True,
+            "member_channel_ids": ["C0MEMBER01"],
+            "listed": [
+                {"id": "C0MEMBER01", "name": "general"},
+                {"id": "C0OUTSIDE1", "name": "incidents"},
+                {"id": "C0OUTSIDE2", "name": "random", "is_member": False},
+                # Belt and braces: is_member=True excludes the channel even if
+                # the paginated users.conversations scan missed it — the
+                # negative arm must never call a real membership a lie.
+                {"id": "C0FLAGGED1", "name": "flagged-member", "is_member": True},
+                {"id": "", "name": "nameless"},
+                {"id": "C0NONAME01"},
+                "not-a-dict",
+            ],
+        }
+        self.assertEqual(
+            run_live_qa._slack_non_member_public_channels(view),
+            [
+                {"id": "C0OUTSIDE1", "name": "incidents"},
+                {"id": "C0OUTSIDE2", "name": "random"},
+            ],
+        )
+        self.assertEqual(run_live_qa._slack_non_member_public_channels({}), [])
+
+    def test_slack_status_profile_shapes_set_and_clear(self):
+        self.assertEqual(
+            run_live_qa._slack_status_profile("OOO_123 back July 20", ":palm_tree:"),
+            {
+                "status_text": "OOO_123 back July 20",
+                "status_emoji": ":palm_tree:",
+                "status_expiration": 0,
+            },
+        )
+        # The restore path must CLEAR the status (empty text/emoji, no
+        # expiration), not merely rewrite it.
+        self.assertEqual(
+            run_live_qa._slack_status_profile("", "", 0),
+            {"status_text": "", "status_emoji": "", "status_expiration": 0},
+        )
+
+    def test_slack_second_user_token_reads_optional_env_and_asserts_loudly(self):
+        self.assertEqual(
+            run_live_qa._slack_second_user_token(
+                {"AUTH_LIVE_SLACK_SECOND_USER_TOKEN": "xoxp-second-identity"}
+            ),
+            "xoxp-second-identity",
+        )
+        empty_env = {
+            "AUTH_LIVE_SLACK_SECOND_USER_TOKEN": "",
+            "AUTH_LIVE_SLACK_SECOND_USER_TOKEN_PATH": "",
+        }
+        with patch.dict(os.environ, empty_env, clear=False):
+            self.assertIsNone(run_live_qa._slack_second_user_token({}))
+            # Arms that strictly need a second HUMAN must fail with this exact
+            # precondition message — never silently skip.
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"probe precondition failed: second-identity token not "
+                r"provisioned \(AUTH_LIVE_SLACK_SECOND_USER_TOKEN\)",
+            ):
+                run_live_qa._require_slack_second_user_token(self._dummy_ctx())
+
+    def test_qa_10_case_specs_gate_and_stay_dispatch_only(self):
+        qa_10_cases = [
+            "qa_10a_slack_self_attribution",
+            "qa_10b_slack_ooo_status",
+            "qa_10c_slack_thread_replies",
+            "qa_10d_slack_channel_membership",
+            "qa_10e_slack_error_honesty",
+            "qa_10f_slack_mention_encoding",
+            "qa_10g_slack_last_message_sent",
+            "qa_10h_slack_email_hallucination_guard",
+            "qa_10i_slack_raw_entity_hygiene",
+        ]
+        seeded_dm_cases = {
+            "qa_10a_slack_self_attribution",
+            "qa_10c_slack_thread_replies",
+            "qa_10f_slack_mention_encoding",
+            "qa_10g_slack_last_message_sent",
+            "qa_10h_slack_email_hallucination_guard",
+            "qa_10i_slack_raw_entity_hygiene",
+        }
+        for case_name in qa_10_cases:
+            spec = run_live_qa.CASES[case_name]
+            self.assertTrue(spec.requires_slack, case_name)
+            self.assertTrue(
+                spec.requires_slack_personal_auth,
+                f"{case_name} seeds/reads with the personal token; without "
+                "the workspace-mismatch gate its arms are structurally blind",
+            )
+            self.assertFalse(
+                spec.default_enabled,
+                f"{case_name} is expected-red on pre-fix hosts and must stay "
+                "out of bare local default runs until promoted",
+            )
+            self.assertEqual(
+                spec.requires_slack_target,
+                case_name in seeded_dm_cases,
+                f"{case_name}: requires_slack_target must mark exactly the "
+                "cases that use the seeded personal DM",
+            )
+            self.assertIn(case_name, run_live_qa.QA_SHEET_CASES)
+        self.assertEqual(
+            [run_live_qa.QA_SHEET_CASES[name]["rows"] for name in qa_10_cases],
+            [["10A"], ["10B"], ["10C"], ["10D"], ["10E"], ["10F"], ["10G"], ["10H"], ["10I"]],
+        )
+
+    def test_qa_10_cases_pin_their_audited_failure_asserts(self):
+        import inspect
+
+        pins = {
+            run_live_qa.case_qa_10a_slack_self_attribution: (
+                "SELFMSG_A_",
+                "SELFMSG_B_",
+                "OTHERMSG_C_",
+                "OTHERMSG_D_",
+                "no-self-identity gap",
+            ),
+            run_live_qa.case_qa_10b_slack_ooo_status: (
+                "OOO_",
+                "missing_scope",
+                "users.profile:write",
+                "finally:",
+                '_slack_set_own_status(personal_token, "", "")',
+            ),
+            run_live_qa.case_qa_10c_slack_thread_replies: (
+                "THREADROOT_",
+                "REPLY_ONE_",
+                "REPLY_TWO_",
+                "REPLY_THREE_",
+                "TOPLEVEL_",
+                "thread_ts=root_ts",
+            ),
+            run_live_qa.case_qa_10d_slack_channel_membership: (
+                "_slack_membership_view",
+                "_slack_non_member_public_channels",
+                "no non-member public channel",
+                "_channel_name_mentioned",
+            ),
+            run_live_qa.case_qa_10e_slack_error_honesty: (
+                "C0CANARYNOPE",
+                "channel_not_found",
+            ),
+            run_live_qa.case_qa_10f_slack_mention_encoding: (
+                "MENTION_",
+                "ENCODED_SLACK_MENTION_PATTERN",
+                "_wait_for_authored_slack_message",
+                "author_mismatch",
+            ),
+            run_live_qa.case_qa_10g_slack_last_message_sent: (
+                "LASTSENT_",
+            ),
+            run_live_qa.case_qa_10h_slack_email_hallucination_guard: (
+                "EMAIL_UNAVAILABLE",
+                "_email_addresses_in_text",
+            ),
+            run_live_qa.case_qa_10i_slack_raw_entity_hygiene: (
+                "ENTITYMSG_",
+                "_raw_slack_user_ids_in_text",
+                "<@U",
+                "_name_token_in_text",
+            ),
+        }
+        for case_fn, needles in pins.items():
+            source = inspect.getsource(case_fn)
+            for needle in needles:
+                self.assertIn(
+                    needle,
+                    source,
+                    f"{case_fn.__name__} must keep its {needle!r} assert — it "
+                    "pins the audited failure",
+                )
+
+    def test_qa_10_cases_fail_closed_without_slack_tokens(self):
+        # Drive real case functions (not just their source): with no personal
+        # token provisioned they must return a FAILED ProbeResult carrying the
+        # distinct precondition message — never a vacuous pass, never an
+        # exception escaping into the shard runner, and no network/playwright
+        # side effects before the precondition fires.
+        blank_env = {}
+        for name in (
+            "AUTH_LIVE_SLACK_ACCESS_TOKEN",
+            "AUTH_LIVE_SLACK_USER_TOKEN",
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN",
+        ):
+            blank_env[name] = ""
+            blank_env[f"{name}_PATH"] = ""
+        for case_fn in (
+            run_live_qa.case_qa_10a_slack_self_attribution,
+            run_live_qa.case_qa_10b_slack_ooo_status,
+        ):
+            with patch.dict(os.environ, blank_env, clear=False):
+                result = asyncio.run(case_fn(self._dummy_ctx()))
+            self.assertFalse(result.success, case_fn.__name__)
+            self.assertIn(
+                "probe precondition failed: Slack personal token not "
+                "provisioned (AUTH_LIVE_SLACK_ACCESS_TOKEN)",
+                str(result.details.get("error")),
+                case_fn.__name__,
+            )
+        # The status probe must not report a restore it never attempted.
+        self.assertNotIn("status_restored", result.details)
+
+    def test_qa_10_seeding_and_api_helpers_are_guarded(self):
+        import inspect
+
+        for helper in (
+            run_live_qa._slack_api_get,
+            run_live_qa._slack_api_post,
+        ):
+            source = inspect.getsource(helper)
+            self.assertIn(
+                "_exc_text",
+                source,
+                "guarded-httpx rule: transport failures must come back as "
+                "{'ok': False, 'error': …}, never crash the shard runner",
+            )
+            self.assertIn('"ok": False', source)
+        # Every precondition path fails with a DISTINCT
+        # "probe precondition failed" message — never a vacuous pass, never a
+        # shard crash.
+        for precondition_helper in (
+            run_live_qa._require_slack_personal_token,
+            run_live_qa._require_slack_bot_token,
+            run_live_qa._require_seeded_dm_channel,
+            run_live_qa._require_slack_second_user_token,
+            run_live_qa._seed_slack_fixture_message,
+        ):
+            self.assertIn(
+                "probe precondition failed",
+                inspect.getsource(precondition_helper),
+                f"{precondition_helper.__name__} must raise the distinct "
+                "precondition message",
+            )
+        membership_source = inspect.getsource(run_live_qa._slack_membership_view)
+        self.assertIn(
+            "next_cursor",
+            membership_source,
+            "users.conversations membership ground truth must paginate; a "
+            "truncated member list calls a real membership a lie",
+        )
+        self.assertIn("exceeded the page cap", membership_source)
 
     def test_routine_confirmation_follow_up_respects_timezone_instruction(self):
         text = "I can create that routine — should I go ahead?"
@@ -3807,7 +4149,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         selected_cases = run_live_qa._selected_case_names(args)
 
-        self.assertEqual(len(selected_cases), 37)
+        self.assertEqual(len(selected_cases), 46)
         self.assertNotIn("qa_1a_telegram_connect", selected_cases)
         self.assertNotIn("qa_1b_telegram_near_news_chat", selected_cases)
         self.assertNotIn("qa_1c_telegram_near_news_routine", selected_cases)
@@ -3823,6 +4165,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_9b_routine_dm_delivery_exactly_once",
             "qa_9c_slack_digest_names_not_ids",
             "qa_9d_routine_per_trigger_delivery_target",
+            "qa_10a_slack_self_attribution",
+            "qa_10b_slack_ooo_status",
+            "qa_10c_slack_thread_replies",
+            "qa_10d_slack_channel_membership",
+            "qa_10e_slack_error_honesty",
+            "qa_10f_slack_mention_encoding",
+            "qa_10g_slack_last_message_sent",
+            "qa_10h_slack_email_hallucination_guard",
+            "qa_10i_slack_raw_entity_hygiene",
         ):
             self.assertIn(case_name, selected_cases)
 
@@ -3844,7 +4195,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
 
         shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
-        self.assertEqual(len(shard_case_lines), 8)
+        self.assertEqual(len(shard_case_lines), 9)
         sharded_cases = [
             case_name
             for line in shard_case_lines
