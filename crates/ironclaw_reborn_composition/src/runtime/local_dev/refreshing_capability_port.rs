@@ -30,8 +30,8 @@ use crate::runtime::local_dev::surface_disclosure::wrap_local_dev_surface_disclo
 use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
 use super::{
-    LocalDevVisibleCapabilityInputs, capability_io_error, effective_user_id,
-    host_api_agent_loop_error, local_dev_visible_capability_request,
+    LocalDevVisibleCapabilityInputs, capability_io_error, host_api_agent_loop_error,
+    local_dev_visible_capability_request,
 };
 
 pub(super) struct RefreshingLocalDevCapabilityPortConfig {
@@ -125,10 +125,11 @@ impl RefreshingLocalDevCapabilityPort {
         // T3-iso: resolve the SAME acting owner `local_dev_visible_capability_request`
         // below resolves, so the extension-surface filter and the granted
         // capability set never diverge on whose registered extensions are visible.
-        let owner = effective_user_id(&self.run_context, &self.fallback_user_id);
+        let scope =
+            super::local_dev_resource_scope_for_run(&self.run_context, &self.fallback_user_id);
         let extension_surface = self
             .extension_surface_source
-            .snapshot(&owner)
+            .snapshot(&scope)
             .await
             .map_err(host_api_agent_loop_error)?;
         let visible_request = local_dev_visible_capability_request(
@@ -373,6 +374,9 @@ url = "http://127.0.0.1:9/mcp"
 "#
             ),
             ManifestSource::UserRegistered {
+                tenant_id: ironclaw_host_api::TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
                 owner: owner.clone(),
             },
             &HostPortCatalog::empty(),

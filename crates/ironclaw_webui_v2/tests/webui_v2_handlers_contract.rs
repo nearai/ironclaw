@@ -2224,6 +2224,22 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
         content_type.starts_with("text/event-stream"),
         "SSE content type expected, got: {content_type}"
     );
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-transform"),
+        "SSE responses must not be cached or transformed by intermediaries"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-accel-buffering")
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "Nginx must stream SSE frames without response buffering"
+    );
 
     // The SSE body is lazy — drive it by polling the first frame, which
     // forces the handler's stream future to run. Notify resolves the

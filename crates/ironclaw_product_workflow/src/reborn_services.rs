@@ -183,10 +183,10 @@ pub struct RebornOperatorToolInfo {
 
 #[async_trait]
 pub trait RebornOperatorToolCatalog: Send + Sync {
-    /// T3-iso (correction 10): `caller` scopes the returned list to tools the
-    /// caller may see — a `UserRegistered` extension's capabilities must
-    /// never surface in another owner's Settings > Tools list.
-    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo>;
+    /// T3-iso (correction 10): the trusted resource scope scopes the returned
+    /// list to tools the caller may see — a `UserRegistered` extension's
+    /// capabilities must never surface in another tenant's Settings > Tools.
+    async fn list_operator_tools(&self, caller: &ResourceScope) -> Vec<RebornOperatorToolInfo>;
 }
 
 #[derive(Clone)]
@@ -1095,7 +1095,7 @@ async fn auto_approve_config_entry(
 async fn find_operator_tool(
     config: &RebornOperatorApprovalConfig,
     raw_capability_id: &str,
-    caller: &UserId,
+    caller: &ResourceScope,
 ) -> Result<RebornOperatorToolInfo, RebornServicesError> {
     config
         .tool_catalog
@@ -3458,13 +3458,9 @@ impl RebornServicesApi for RebornServices {
         };
         let scope = caller_resource_scope(&caller);
         let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        // Dropping `scope.tenant_id` is intentional: `UserId` is globally
-        // minted once per person, so it is already the discriminator for
-        // owner-scoped user registrations.
-        let tools = config
-            .tool_catalog
-            .list_operator_tools(&caller.user_id)
-            .await;
+        // Pass the trusted resource scope through the catalog so equal user
+        // ids in different tenants cannot share registered tools or schemas.
+        let tools = config.tool_catalog.list_operator_tools(&scope).await;
         let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
         entries.extend(
             try_join_all(
@@ -3499,7 +3495,7 @@ impl RebornServicesApi for RebornServices {
         let entry = if key == AUTO_APPROVE_CONFIG_KEY {
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id, &caller.user_id).await?;
+            let tool = find_operator_tool(config, capability_id, &scope).await?;
             tool_config_entry(config, &scope, &tool).await?
         } else {
             return Err(operator_config_unknown_key_error("key"));
@@ -3536,7 +3532,7 @@ impl RebornServicesApi for RebornServices {
                 .map_err(operator_config_store_error)?;
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id, &caller.user_id).await?;
+            let tool = find_operator_tool(config, capability_id, &scope).await?;
             if tool_permission_locked(&tool) {
                 return Err(operator_config_invalid_value("state"));
             }

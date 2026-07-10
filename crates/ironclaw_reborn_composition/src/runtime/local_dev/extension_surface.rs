@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use chrono::Utc;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, EffectKind, ExtensionId, GrantConstraints,
-    MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, UserId,
+    MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -42,12 +42,9 @@ impl LocalDevExtensionSurfaceSource {
         }
     }
 
-    // T3-iso: `owner` is the resolved acting owner (see `effective_user_id`
-    // in `runtime/local_dev.rs`), threaded through so a `UserRegistered`
-    // extension's capabilities are scoped to the caller who registered it.
     pub(in crate::runtime) async fn snapshot(
         &self,
-        owner: &UserId,
+        scope: &ResourceScope,
     ) -> Result<LocalDevExtensionSurface, ProductWorkflowError> {
         #[cfg(test)]
         if let Some(surface) = &self.static_surface {
@@ -56,7 +53,7 @@ impl LocalDevExtensionSurfaceSource {
         let Some(extension_management) = self.extension_management.as_deref() else {
             return Ok(LocalDevExtensionSurface::default());
         };
-        LocalDevExtensionSurface::from_extension_management(extension_management, owner).await
+        LocalDevExtensionSurface::from_extension_management(extension_management, scope).await
     }
 }
 
@@ -77,11 +74,11 @@ impl LocalDevExtensionSurface {
 
     pub(super) async fn from_extension_management(
         extension_management: &RebornLocalExtensionManagementPort,
-        owner: &UserId,
+        scope: &ResourceScope,
     ) -> Result<Self, ProductWorkflowError> {
         Ok(Self {
             active_capabilities: extension_management
-                .active_model_visible_capabilities(owner)
+                .active_model_visible_capabilities(scope)
                 .await?,
         })
     }

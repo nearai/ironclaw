@@ -159,7 +159,7 @@ mod tests {
     };
     use ironclaw_host_api::{
         InvocationId, RequestedTrustClass, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, TrustClass, UserId, VirtualPath,
+        RuntimeHttpEgressResponse, TenantId, TrustClass, UserId, VirtualPath,
     };
 
     use super::*;
@@ -173,7 +173,12 @@ mod tests {
         )];
         let scanner = ironclaw_safety::Sanitizer::new();
         apply_publication_safety(
-            &ManifestSource::UserRegistered { owner },
+            &ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
+                owner,
+            },
             &mut registered,
             &scanner,
         )
@@ -209,6 +214,9 @@ mod tests {
 
         apply_publication_safety(
             &ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
                 owner: UserId::new("owner-a").expect("valid owner"),
             },
             &mut candidates,

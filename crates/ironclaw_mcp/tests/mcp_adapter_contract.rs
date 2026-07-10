@@ -905,6 +905,43 @@ async fn provider_discovery_rejects_capability_credentials_before_any_egress() {
     assert!(egress.requests().is_empty());
 }
 
+#[tokio::test]
+async fn concrete_mcp_http_client_rejects_provider_discovery_tool_calls_before_egress() {
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(host_http_plan());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        planner.clone(),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            authority: McpRequestAuthority::ProviderDiscovery {
+                network_policy_authority: CapabilityId::new("builtin.extension_activate").unwrap(),
+            },
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("provider discovery authority cannot invoke tools/call");
+
+    assert_eq!(error.stable_reason(), "mcp_invalid_request_authority");
+    assert!(
+        planner.calls().is_empty(),
+        "authority must be rejected before planning"
+    );
+    assert!(
+        egress.requests().is_empty(),
+        "authority must be rejected before egress"
+    );
+}
+
 /// Coverage gap noted in review of the SSE contract tests: the loopback MCP
 /// path predeclares its tool schemas, so `discover_tools` (host-mediated HTTP
 /// path) is only ever exercised over JSON-framed `tools/list` responses

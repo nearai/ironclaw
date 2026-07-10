@@ -118,9 +118,9 @@ pub fn package_with_discovered_hosted_mcp_tools(
                 declarations.push(declaration);
                 capabilities.push(descriptor);
             }
-            Err(()) => rejections.push(HostedMcpToolRejection {
+            Err(reason) => rejections.push(HostedMcpToolRejection {
                 tool_index: candidate.source_index,
-                reason: HostedMcpToolRejectionReason::InvalidCapabilityProjection,
+                reason,
             }),
         }
     }
@@ -230,21 +230,21 @@ fn discovered_capability_pair(
     package: &ExtensionPackage,
     template: &HostedMcpCapabilityTemplate,
     candidate: &HostedMcpToolCandidate,
-) -> Result<(CapabilityManifest, CapabilityDescriptor), ()> {
+) -> Result<(CapabilityManifest, CapabilityDescriptor), HostedMcpToolRejectionReason> {
     let tool = &candidate.tool;
-    let capability_id =
-        CapabilityId::new(format!("{}.{}", package.id.as_str(), tool.name)).map_err(|_| ())?;
+    let capability_id = CapabilityId::new(format!("{}.{}", package.id.as_str(), tool.name))
+        .map_err(|_| HostedMcpToolRejectionReason::InvalidCapabilityProjection)?;
     let schema_path = tool.name.replace('.', "/");
     let input_schema_ref = CapabilityProfileSchemaRef::new(format!(
         "schemas/{}/dynamic/{schema_path}.input.v1.json",
         package.id.as_str()
     ))
-    .map_err(|_| ())?;
+    .map_err(|_| HostedMcpToolRejectionReason::InvalidCapabilityProjection)?;
     let output_schema_ref = CapabilityProfileSchemaRef::new(format!(
         "schemas/{}/dynamic/{schema_path}.output.v1.json",
         package.id.as_str()
     ))
-    .map_err(|_| ())?;
+    .map_err(|_| HostedMcpToolRejectionReason::InvalidCapabilityProjection)?;
     let mut effects = vec![EffectKind::DispatchCapability, EffectKind::Network];
     if !template.runtime_credentials.is_empty() {
         effects.push(EffectKind::UseSecret);
@@ -339,8 +339,8 @@ mod tests {
     use super::*;
     use crate::{ExtensionManifest, HostPortCatalog, ManifestSource};
     use ironclaw_host_api::{
-        EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, PermissionMode, RuntimeKind, UserId,
-        VirtualPath,
+        EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, PermissionMode, RuntimeKind, TenantId,
+        UserId, VirtualPath,
     };
 
     const NOTION_MANIFEST: &str = r#"
@@ -674,6 +674,7 @@ transport = "http"
 url = "https://mcp.acme.example/mcp"
 "#,
             ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted("default".to_string()),
                 owner: UserId::new("owner-a").expect("valid owner"),
             },
             &HostPortCatalog::default(),

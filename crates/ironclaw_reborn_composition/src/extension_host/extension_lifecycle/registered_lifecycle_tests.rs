@@ -1,6 +1,12 @@
 //! Registered hosted-MCP lifecycle cleanup and inventory regression tests.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
@@ -24,12 +30,13 @@ use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, HostPath,
     InvocationId, MountView, NetworkMethod, NetworkPolicy, Principal, ResourceScope,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    UserId, VirtualPath,
+    TenantId, UserId, VirtualPath,
 };
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 use tokio::sync::Mutex;
 
 use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
+use super::tests::extension_port_with_file_delete_failing_filesystem;
 use super::*;
 
 struct RegisteredLifecycleFixture {
@@ -83,6 +90,26 @@ impl RegisteredLifecycleFixture {
             Arc::new(InMemoryCapabilityPermissionOverrideStore::new()),
             true,
         )
+    }
+
+    fn with_inventory_restore_failure(
+        installation_store: Arc<dyn ExtensionInstallationStore>,
+        persistent_approval_policies: Arc<dyn PersistentApprovalPolicyStore>,
+        tool_permission_overrides: Arc<dyn CapabilityPermissionOverrideStore>,
+    ) -> Self {
+        let mut fixture = Self::with_stores(
+            installation_store,
+            persistent_approval_policies,
+            tool_permission_overrides,
+        );
+        let inner = Arc::clone(&fixture.port.filesystem);
+        Arc::get_mut(&mut fixture.port)
+            .expect("fixture port has a unique owner")
+            .filesystem = Arc::new(InventoryRestoreFailingFilesystem {
+            inner,
+            cleanup_inventory_puts: AtomicUsize::new(0),
+        });
+        fixture
     }
 
     fn with_catalog_and_stores(
@@ -149,7 +176,6 @@ impl RegisteredLifecycleFixture {
         let registered = self
             .port
             .register_hosted_mcp(
-                owner,
                 format!("{path} MCP"),
                 format!("https://93.184.216.34/{path}"),
                 &scope,
@@ -215,6 +241,65 @@ async fn registered_mcp_transient_discovery_fails_closed_without_inventory_or_pu
 }
 
 #[tokio::test]
+async fn unregister_fails_closed_when_active_publication_lacks_installation_state() {
+    let fixture = RegisteredLifecycleFixture::new();
+    let owner = UserId::new("unregister-drift-owner").expect("valid owner");
+    let (scope, package_ref, extension_id) = fixture.register(&owner, "unregister-drift").await;
+
+    fixture
+        .port
+        .activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: scope.clone(),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+                network_policy_authority: extension_activate_capability_id(),
+            },
+        )
+        .await
+        .expect("activate registered MCP");
+    assert!(
+        fixture
+            .active_registry
+            .snapshot()
+            .get_extension(&extension_id)
+            .is_some(),
+        "fixture must start with an active publication"
+    );
+
+    let installation_id =
+        ExtensionInstallationId::new(extension_id.as_str().to_string()).expect("installation id");
+    fixture
+        .installation_store
+        .delete_installation(&installation_id)
+        .await
+        .expect("delete installation to model state drift");
+    fixture
+        .installation_store
+        .delete_manifest(&extension_id)
+        .await
+        .expect("delete manifest to model state drift");
+
+    let error = fixture
+        .port
+        .unregister_hosted_mcp(package_ref, &scope)
+        .await
+        .expect_err("active publication without installation state must fail closed");
+    assert!(
+        matches!(error, ProductWorkflowError::Transient { .. }),
+        "unexpected state-drift error: {error}"
+    );
+    assert!(
+        fixture
+            .active_registry
+            .snapshot()
+            .get_extension(&extension_id)
+            .is_some(),
+        "failed unregister must not leave an untracked stale publication silently claimed as removed"
+    );
+}
+
+#[tokio::test]
 async fn registered_mcp_activation_rejects_other_owner_before_egress_or_state_mutation() {
     let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
     let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
@@ -231,9 +316,9 @@ async fn registered_mcp_activation_rejects_other_owner_before_egress_or_state_mu
         ExtensionInstallationId::new(extension_id.as_str().to_string()).expect("installation id");
     let prior_id =
         CapabilityId::new(format!("{}.prior", extension_id.as_str())).expect("prior capability id");
-    RegisteredExtensionStore::replace_discovered_capability_ids(
+    RegisteredExtensionStore::replace_discovered_capability_ids_for_scope(
         fixture.port.filesystem.as_ref(),
-        &owner,
+        &owner_scope,
         &extension_id,
         std::slice::from_ref(&prior_id),
     )
@@ -298,9 +383,9 @@ async fn registered_mcp_activation_rejects_other_owner_before_egress_or_state_mu
         ExtensionActivationState::Installed
     );
     assert_eq!(
-        RegisteredExtensionStore::load_discovered_capability_ids(
+        RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
             fixture.port.filesystem.as_ref(),
-            &owner,
+            &owner_scope,
             &extension_id,
         )
         .await
@@ -374,9 +459,9 @@ async fn registered_mcp_activation_commit_failure_restores_prior_cleanup_invento
     let (scope, package_ref, extension_id) = fixture.register(&owner, "rollback-mcp").await;
     let prior_id =
         CapabilityId::new(format!("{}.prior", extension_id.as_str())).expect("prior capability id");
-    RegisteredExtensionStore::replace_discovered_capability_ids(
+    RegisteredExtensionStore::replace_discovered_capability_ids_for_scope(
         fixture.port.filesystem.as_ref(),
-        &owner,
+        &scope,
         &extension_id,
         std::slice::from_ref(&prior_id),
     )
@@ -388,7 +473,7 @@ async fn registered_mcp_activation_commit_failure_restores_prior_cleanup_invento
         .activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
-                scope,
+                scope: scope.clone(),
                 runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
                 network_policy_authority: extension_activate_capability_id(),
             },
@@ -398,9 +483,9 @@ async fn registered_mcp_activation_commit_failure_restores_prior_cleanup_invento
 
     assert!(error.to_string().contains("set activation state failed"));
     assert_eq!(
-        RegisteredExtensionStore::load_discovered_capability_ids(
+        RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
             fixture.port.filesystem.as_ref(),
-            &owner,
+            &scope,
             &extension_id,
         )
         .await
@@ -413,6 +498,191 @@ async fn registered_mcp_activation_commit_failure_restores_prior_cleanup_invento
             .snapshot()
             .get_extension(&extension_id)
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn registered_mcp_activation_inventory_restore_failure_still_restores_authority() {
+    let installation_store = Arc::new(SetActivationFailingStore::default());
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let overrides = Arc::new(InMemoryCapabilityPermissionOverrideStore::new());
+    let fixture = RegisteredLifecycleFixture::with_inventory_restore_failure(
+        installation_store,
+        policies.clone(),
+        overrides.clone(),
+    );
+    let owner = UserId::new("registered-inventory-restore-owner").expect("valid owner");
+    let (scope, package_ref, extension_id) = fixture.register(&owner, "inventory-restore").await;
+    let prior_id =
+        CapabilityId::new(format!("{}.prior", extension_id.as_str())).expect("prior capability id");
+    RegisteredExtensionStore::replace_discovered_capability_ids_for_scope(
+        fixture.port.filesystem.as_ref(),
+        &scope,
+        &extension_id,
+        std::slice::from_ref(&prior_id),
+    )
+    .await
+    .expect("seed prior inventory");
+    let settings_scope = scope.tenant_user_settings_scope();
+    let grantee = Principal::Extension(extension_id.clone());
+    seed_authority(
+        fixture.port.as_ref(),
+        &settings_scope,
+        &owner,
+        &grantee,
+        &prior_id,
+    )
+    .await;
+
+    let error = fixture
+        .port
+        .activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: scope.clone(),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+                network_policy_authority: extension_activate_capability_id(),
+            },
+        )
+        .await
+        .expect_err("activation-state failure rejects activation");
+    assert!(
+        error
+            .to_string()
+            .contains("capability inventory restore failed")
+    );
+
+    let policy = policies
+        .lookup(&PersistentApprovalPolicyKey::new(
+            &settings_scope,
+            PersistentApprovalAction::Dispatch,
+            prior_id.clone(),
+            grantee,
+        ))
+        .await
+        .expect("lookup restored policy")
+        .expect("prior policy remains");
+    assert!(
+        policy.revoked_at.is_none(),
+        "authority restore must run even when inventory restore fails"
+    );
+    assert!(
+        overrides
+            .get(&CapabilityPermissionOverrideKey::new(
+                &settings_scope,
+                prior_id
+            ))
+            .await
+            .expect("lookup restored override")
+            .is_some(),
+        "permission override must be restored even when inventory restore fails"
+    );
+}
+
+#[tokio::test]
+async fn registered_mcp_refresh_commit_failure_restores_publication_and_authority() {
+    let installation_store = Arc::new(SetActivationFailingStore::fail_on_second_enable());
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let overrides = Arc::new(InMemoryCapabilityPermissionOverrideStore::new());
+    let fixture = RegisteredLifecycleFixture::with_stores(
+        installation_store,
+        policies.clone(),
+        overrides.clone(),
+    );
+    let owner = UserId::new("registered-refresh-rollback-owner").expect("valid owner");
+    let (scope, package_ref, extension_id) = fixture.register(&owner, "refresh-rollback").await;
+    fixture
+        .port
+        .activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: scope.clone(),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+                network_policy_authority: extension_activate_capability_id(),
+            },
+        )
+        .await
+        .expect("initial discovery succeeds");
+    let active_before = fixture
+        .active_registry
+        .snapshot()
+        .get_extension(&extension_id)
+        .cloned()
+        .expect("initial publication");
+    let prior_ids = RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
+        fixture.port.filesystem.as_ref(),
+        &scope,
+        &extension_id,
+    )
+    .await
+    .expect("load initial inventory");
+    let prior_capability_id = prior_ids.first().cloned().expect("initial capability");
+    let settings_scope = scope.tenant_user_settings_scope();
+    let grantee = Principal::Extension(extension_id.clone());
+    seed_authority(
+        fixture.port.as_ref(),
+        &settings_scope,
+        &owner,
+        &grantee,
+        &prior_capability_id,
+    )
+    .await;
+
+    let error = fixture
+        .port
+        .activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: scope.clone(),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "refreshed-search",
+                )),
+                network_policy_authority: extension_activate_capability_id(),
+            },
+        )
+        .await
+        .expect_err("refresh commit failure must be surfaced");
+    assert!(error.to_string().contains("set activation state failed"));
+
+    assert_eq!(
+        fixture
+            .active_registry
+            .snapshot()
+            .get_extension(&extension_id)
+            .expect("prior publication remains"),
+        &active_before,
+        "refresh failure must not replace the active package"
+    );
+    assert_eq!(
+        RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
+            fixture.port.filesystem.as_ref(),
+            &scope,
+            &extension_id,
+        )
+        .await
+        .expect("load restored inventory"),
+        prior_ids
+    );
+    let policy = policies
+        .lookup(&PersistentApprovalPolicyKey::new(
+            &settings_scope,
+            PersistentApprovalAction::Dispatch,
+            prior_capability_id.clone(),
+            grantee,
+        ))
+        .await
+        .expect("lookup restored policy")
+        .expect("prior policy remains");
+    assert!(policy.revoked_at.is_none());
+    assert!(
+        overrides
+            .get(&CapabilityPermissionOverrideKey::new(
+                &settings_scope,
+                prior_capability_id,
+            ))
+            .await
+            .expect("lookup restored override")
+            .is_some()
     );
 }
 
@@ -445,6 +715,17 @@ async fn registered_mcp_remove_failure_restores_exact_discovered_publication() {
         .cloned()
         .expect("discovered package is active");
     assert!(!active_before.capabilities.is_empty());
+    let active_capability_id = active_before.capabilities[0].id.clone();
+    let settings_scope = scope.tenant_user_settings_scope();
+    let grantee = Principal::Extension(extension_id.clone());
+    seed_authority(
+        fixture.port.as_ref(),
+        &settings_scope,
+        &owner,
+        &grantee,
+        &active_capability_id,
+    )
+    .await;
 
     let error = fixture
         .port
@@ -474,6 +755,129 @@ async fn registered_mcp_remove_failure_restores_exact_discovered_publication() {
     assert_eq!(
         active_after.capabilities, active_before.capabilities,
         "rollback must restore the exact runtime-discovered tools"
+    );
+    let restored_policy = fixture
+        .port
+        .capability_authority_cleanup
+        .persistent_approval_policies
+        .lookup(&PersistentApprovalPolicyKey::new(
+            &settings_scope,
+            PersistentApprovalAction::Dispatch,
+            active_capability_id.clone(),
+            grantee,
+        ))
+        .await
+        .expect("lookup restored policy");
+    assert!(
+        restored_policy.is_some_and(|policy| policy.revoked_at.is_none()),
+        "rollback must restore the active dispatch policy"
+    );
+    assert!(
+        fixture
+            .port
+            .capability_authority_cleanup
+            .tool_permission_overrides
+            .get(&CapabilityPermissionOverrideKey::new(
+                &settings_scope,
+                active_capability_id,
+            ))
+            .await
+            .expect("lookup restored override")
+            .is_some(),
+        "rollback must restore the explicit permission override"
+    );
+}
+
+#[tokio::test]
+async fn registered_mcp_descriptor_delete_failure_restores_authority_and_inventory() {
+    let (dir, port, _active_registry, _installation_store, _trust_policy) =
+        extension_port_with_file_delete_failing_filesystem();
+    let owner = UserId::new("registered-descriptor-rollback-owner").expect("valid owner");
+    let scope = hosted_mcp_scope(owner.as_str());
+    let registered = port
+        .register_hosted_mcp(
+            "Descriptor rollback MCP".to_string(),
+            "https://93.184.216.34/descriptor-rollback".to_string(),
+            &scope,
+        )
+        .await
+        .expect("register MCP");
+    let package_ref = registered.package_ref.expect("package ref");
+    let extension_id = ExtensionId::new(package_ref.id.as_str()).expect("extension id");
+    let capability_id =
+        CapabilityId::new(format!("{}.search", extension_id.as_str())).expect("capability id");
+    let inventory_dir = dir
+        .path()
+        .join("local-dev/system/extensions/registered-cleanup")
+        .join(scope.tenant_id.as_str())
+        .join(owner.as_str());
+    std::fs::create_dir_all(inventory_dir.join(extension_id.as_str()))
+        .expect("inventory directory");
+    std::fs::write(
+        inventory_dir.join(format!(
+            "{}/discovered-capability-ids.json",
+            extension_id.as_str()
+        )),
+        serde_json::json!({
+            "schema_version": "registered_mcp.discovered_capability_ids.v1",
+            "owner": owner.as_str(),
+            "extension_id": extension_id.as_str(),
+            "capability_ids": [capability_id.as_str()],
+        })
+        .to_string(),
+    )
+    .expect("seed inventory");
+    let settings_scope = scope.tenant_user_settings_scope();
+    let grantee = Principal::Extension(extension_id.clone());
+    seed_authority(&port, &settings_scope, &owner, &grantee, &capability_id).await;
+
+    let error = port
+        .unregister_hosted_mcp(package_ref, &scope)
+        .await
+        .expect_err("descriptor delete failure must reject unregister");
+    assert!(error.to_string().contains("delete failed"));
+    let policy = port
+        .capability_authority_cleanup
+        .persistent_approval_policies
+        .lookup(&PersistentApprovalPolicyKey::new(
+            &settings_scope,
+            PersistentApprovalAction::Dispatch,
+            capability_id.clone(),
+            grantee,
+        ))
+        .await
+        .expect("lookup restored policy")
+        .expect("policy remains");
+    assert!(policy.revoked_at.is_none());
+    assert!(
+        port.capability_authority_cleanup
+            .tool_permission_overrides
+            .get(&CapabilityPermissionOverrideKey::new(
+                &settings_scope,
+                capability_id.clone(),
+            ))
+            .await
+            .expect("lookup restored override")
+            .is_some()
+    );
+    assert_eq!(
+        RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
+            port.filesystem.as_ref(),
+            &scope,
+            &extension_id,
+        )
+        .await
+        .expect("load preserved inventory"),
+        vec![capability_id]
+    );
+    assert!(
+        dir.path()
+            .join("local-dev/system/extensions/registered")
+            .join(scope.tenant_id.as_str())
+            .join(owner.as_str())
+            .join(extension_id.as_str())
+            .join("manifest.toml")
+            .exists()
     );
 }
 
@@ -513,9 +917,9 @@ async fn extension_unregister_cleans_inventory_and_exact_capability_authority() 
         .collect::<Vec<_>>();
     published_ids.sort();
     assert_eq!(
-        RegisteredExtensionStore::load_discovered_capability_ids(
+        RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
             fixture.port.filesystem.as_ref(),
-            &owner,
+            &scope,
             &extension_id,
         )
         .await
@@ -526,9 +930,9 @@ async fn extension_unregister_cleans_inventory_and_exact_capability_authority() 
     let stale_id =
         CapabilityId::new(format!("{}.stale", extension_id.as_str())).expect("stale capability id");
     let unrelated_id = CapabilityId::new("unrelated.keep").expect("unrelated capability id");
-    RegisteredExtensionStore::replace_discovered_capability_ids(
+    RegisteredExtensionStore::replace_discovered_capability_ids_for_scope(
         fixture.port.filesystem.as_ref(),
-        &owner,
+        &scope,
         &extension_id,
         std::slice::from_ref(&stale_id),
     )
@@ -611,9 +1015,9 @@ async fn extension_unregister_cleans_inventory_and_exact_capability_authority() 
             .is_some()
     );
     assert!(
-        RegisteredExtensionStore::load_discovered_capability_ids(
+        RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
             fixture.port.filesystem.as_ref(),
-            &owner,
+            &scope,
             &extension_id,
         )
         .await
@@ -633,9 +1037,9 @@ async fn extension_unregister_authority_cleanup_failure_preserves_descriptor_and
     let (scope, package_ref, extension_id) = fixture.register(&owner, "cleanup-failure").await;
     let capability_id =
         CapabilityId::new(format!("{}.search", extension_id.as_str())).expect("capability id");
-    RegisteredExtensionStore::replace_discovered_capability_ids(
+    RegisteredExtensionStore::replace_discovered_capability_ids_for_scope(
         fixture.port.filesystem.as_ref(),
-        &owner,
+        &scope,
         &extension_id,
         std::slice::from_ref(&capability_id),
     )
@@ -657,6 +1061,7 @@ async fn extension_unregister_authority_cleanup_failure_preserves_descriptor_and
         fixture
             .storage_root
             .join("system/extensions/registered")
+            .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
             .join(owner.as_str())
             .join(extension_id.as_str())
             .join("manifest.toml")
@@ -674,9 +1079,9 @@ async fn extension_unregister_authority_cleanup_failure_preserves_descriptor_and
             .is_some()
     );
     assert_eq!(
-        RegisteredExtensionStore::load_discovered_capability_ids(
+        RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
             fixture.port.filesystem.as_ref(),
-            &owner,
+            &scope,
             &extension_id,
         )
         .await
@@ -693,7 +1098,6 @@ async fn same_name_replacement_survives_prior_cleanup_inventory_delete_failure()
     let prior = fixture
         .port
         .register_hosted_mcp(
-            &owner,
             "Stable MCP".to_string(),
             "https://93.184.216.34/prior".to_string(),
             &scope,
@@ -705,7 +1109,6 @@ async fn same_name_replacement_survives_prior_cleanup_inventory_delete_failure()
     let replacement = fixture
         .port
         .register_hosted_mcp(
-            &owner,
             "Stable MCP".to_string(),
             "https://93.184.216.34/replacement".to_string(),
             &scope,
@@ -743,6 +1146,7 @@ async fn same_name_replacement_survives_prior_cleanup_inventory_delete_failure()
         fixture
             .storage_root
             .join("system/extensions/registered")
+            .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
             .join(owner.as_str())
             .join(replacement_ref.id.as_str())
             .join("manifest.toml")
@@ -753,6 +1157,7 @@ async fn same_name_replacement_survives_prior_cleanup_inventory_delete_failure()
         !fixture
             .storage_root
             .join("system/extensions/registered")
+            .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
             .join(owner.as_str())
             .join(prior_ref.id.as_str())
             .exists(),
@@ -767,20 +1172,20 @@ async fn extension_list_includes_own_registered_and_static_but_hides_other_owner
     );
     let owner_a = UserId::new("list-owner-a").expect("valid owner A");
     let owner_b = UserId::new("list-owner-b").expect("valid owner B");
-    let (_, owner_a_ref, _) = fixture.register(&owner_a, "owner-a-tools").await;
-    let (_, owner_b_ref, _) = fixture.register(&owner_b, "owner-b-tools").await;
+    let (scope_a, owner_a_ref, _) = fixture.register(&owner_a, "owner-a-tools").await;
+    let (scope_b, owner_b_ref, _) = fixture.register(&owner_b, "owner-b-tools").await;
     let static_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("static ref");
     fixture
         .port
-        .install(static_ref.clone(), Some(&owner_a))
+        .install(static_ref.clone(), Some(&scope_a))
         .await
         .expect("install static extension");
 
     let owner_a_ids = listed_extension_ids(
         fixture
             .port
-            .list_installed(&owner_a)
+            .list_installed(&scope_a)
             .await
             .expect("list owner A extensions"),
     );
@@ -791,13 +1196,136 @@ async fn extension_list_includes_own_registered_and_static_but_hides_other_owner
     let owner_b_ids = listed_extension_ids(
         fixture
             .port
-            .list_installed(&owner_b)
+            .list_installed(&scope_b)
             .await
             .expect("list owner B extensions"),
     );
     assert!(owner_b_ids.contains(owner_b_ref.id.as_str()));
     assert!(!owner_b_ids.contains(owner_a_ref.id.as_str()));
     assert!(owner_b_ids.contains(static_ref.id.as_str()));
+}
+
+#[tokio::test]
+async fn same_user_different_tenants_cannot_cross_registered_mcp_lifecycle() {
+    let fixture = RegisteredLifecycleFixture::new();
+    let user = UserId::new("same-user").expect("valid user");
+    let mut tenant_a = hosted_mcp_scope(user.as_str());
+    tenant_a.tenant_id = TenantId::new("tenant-a").expect("valid tenant A");
+    let mut tenant_b = hosted_mcp_scope(user.as_str());
+    tenant_b.tenant_id = TenantId::new("tenant-b").expect("valid tenant B");
+
+    let package_a = fixture
+        .port
+        .register_hosted_mcp(
+            "Tenant A MCP".to_string(),
+            "https://93.184.216.34/tenant-a".to_string(),
+            &tenant_a,
+        )
+        .await
+        .expect("register tenant A MCP")
+        .package_ref
+        .expect("tenant A package ref");
+    let package_b = fixture
+        .port
+        .register_hosted_mcp(
+            "Tenant B MCP".to_string(),
+            "https://93.184.216.34/tenant-b".to_string(),
+            &tenant_b,
+        )
+        .await
+        .expect("register tenant B MCP")
+        .package_ref
+        .expect("tenant B package ref");
+    assert_ne!(
+        package_a, package_b,
+        "tenant must participate in package identity"
+    );
+
+    let tenant_a_ids = listed_extension_ids(
+        fixture
+            .port
+            .list_installed(&tenant_a)
+            .await
+            .expect("list tenant A extensions"),
+    );
+    let tenant_b_ids = listed_extension_ids(
+        fixture
+            .port
+            .list_installed(&tenant_b)
+            .await
+            .expect("list tenant B extensions"),
+    );
+    assert!(tenant_a_ids.contains(package_a.id.as_str()));
+    assert!(!tenant_a_ids.contains(package_b.id.as_str()));
+    assert!(tenant_b_ids.contains(package_b.id.as_str()));
+    assert!(!tenant_b_ids.contains(package_a.id.as_str()));
+
+    let cross_tenant_egress = Arc::new(HostedMcpDiscoveryEgress::default());
+    let error = fixture
+        .port
+        .activate_with_prechecked_credentials_for_test(
+            package_a.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: tenant_b.clone(),
+                runtime_http_egress: cross_tenant_egress.clone(),
+                network_policy_authority: extension_activate_capability_id(),
+            },
+        )
+        .await
+        .expect_err("tenant B must not activate tenant A's MCP");
+    assert!(
+        error
+            .to_string()
+            .contains("available extension was not found")
+    );
+    assert!(
+        cross_tenant_egress.methods().is_empty(),
+        "cross-tenant activation must not egress"
+    );
+
+    fixture
+        .port
+        .activate_with_prechecked_credentials_for_test(
+            package_a.clone(),
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: tenant_a.clone(),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+                network_policy_authority: extension_activate_capability_id(),
+            },
+        )
+        .await
+        .expect("tenant A activates its MCP");
+
+    let error = fixture
+        .port
+        .unregister_hosted_mcp(package_a.clone(), &tenant_b)
+        .await
+        .expect_err("tenant B must not unregister tenant A's MCP");
+    assert!(
+        error
+            .to_string()
+            .contains("available extension was not found")
+    );
+    assert!(
+        listed_extension_ids(
+            fixture
+                .port
+                .list_installed(&tenant_a)
+                .await
+                .expect("list tenant A after rejected unregister")
+        )
+        .contains(package_a.id.as_str()),
+        "cross-tenant unregister must not remove tenant A's installation"
+    );
+    let extension_a = ExtensionId::new(package_a.id.as_str()).expect("tenant A extension id");
+    assert!(
+        fixture
+            .active_registry
+            .snapshot()
+            .get_extension(&extension_a)
+            .is_some(),
+        "cross-tenant unregister must not unpublish tenant A's tools"
+    );
 }
 
 fn listed_extension_ids(response: LifecycleProductResponse) -> BTreeSet<String> {
@@ -906,9 +1434,30 @@ impl PersistentApprovalPolicyStore for RevokeFailingPolicyStore {
     }
 }
 
-#[derive(Default)]
 struct SetActivationFailingStore {
     inner: InMemoryExtensionInstallationStore,
+    fail_on_second_enable: bool,
+    enable_calls: AtomicUsize,
+}
+
+impl Default for SetActivationFailingStore {
+    fn default() -> Self {
+        Self {
+            inner: InMemoryExtensionInstallationStore::default(),
+            fail_on_second_enable: false,
+            enable_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl SetActivationFailingStore {
+    fn fail_on_second_enable() -> Self {
+        Self {
+            inner: InMemoryExtensionInstallationStore::default(),
+            fail_on_second_enable: true,
+            enable_calls: AtomicUsize::new(0),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1072,7 +1621,10 @@ impl ExtensionInstallationStore for SetActivationFailingStore {
         installation_id: &ExtensionInstallationId,
         state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError> {
-        if state == ExtensionActivationState::Enabled {
+        let should_fail = state == ExtensionActivationState::Enabled
+            && (!self.fail_on_second_enable
+                || self.enable_calls.fetch_add(1, Ordering::SeqCst) >= 1);
+        if should_fail {
             return Err(ExtensionInstallationError::InvalidInstallation {
                 reason: "set activation state failed".to_string(),
             });
@@ -1155,6 +1707,62 @@ impl RootFilesystem for CleanupInventoryDeleteFailingFilesystem {
                 reason: "injected cleanup inventory delete failure".to_string(),
             });
         }
+        self.inner.delete(path).await
+    }
+}
+
+struct InventoryRestoreFailingFilesystem {
+    inner: Arc<dyn RootFilesystem>,
+    cleanup_inventory_puts: AtomicUsize,
+}
+
+#[async_trait]
+impl RootFilesystem for InventoryRestoreFailingFilesystem {
+    fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if path
+            .as_str()
+            .starts_with("/system/extensions/registered-cleanup/")
+            && self.cleanup_inventory_puts.fetch_add(1, Ordering::SeqCst) == 2
+        {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "injected cleanup inventory restore failure".to_string(),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
     }
 }

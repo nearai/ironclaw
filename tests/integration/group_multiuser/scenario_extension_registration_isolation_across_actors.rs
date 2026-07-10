@@ -18,7 +18,7 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId, ExtensionManifest,
     ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, ManifestSource,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, VirtualPath};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, InvocationId, ResourceScope, VirtualPath};
 
 use super::reborn_support::assertions::ToolErrorClass;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -128,8 +128,18 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .subject_user_id
         .as_ref()
         .ok_or("actor A's resolved binding has no subject_user_id")?;
+    let owner_scope = ResourceScope {
+        tenant_id: a.binding.tenant_id.clone(),
+        user_id: owner_user_id.clone(),
+        agent_id: a.binding.agent_id.clone(),
+        project_id: a.binding.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
     let manifest_dir = capability_harness.storage_root_for_test().join(format!(
-        "system/extensions/registered/{}/{}",
+        "system/extensions/registered/{}/{}/{}",
+        a.binding.tenant_id.as_str(),
         owner_user_id.as_str(),
         REGISTERED_EXTENSION_ID
     ));
@@ -246,6 +256,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let owner_manifest_record = ExtensionManifestRecord::from_toml(
         REGISTERED_MANIFEST_TOML,
         ManifestSource::UserRegistered {
+            tenant_id: a.binding.tenant_id.clone(),
             owner: owner_user_id.clone(),
         },
         &HostPortCatalog::empty(),
@@ -283,7 +294,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .as_ref()
         .ok_or("actor B's resolved binding has no subject_user_id")?;
     let b_manifest_dir = capability_harness.storage_root_for_test().join(format!(
-        "system/extensions/registered/{}/{}",
+        "system/extensions/registered/{}/{}/{}",
+        b_search.binding.tenant_id.as_str(),
         b_owner_user_id.as_str(),
         REGISTERED_EXTENSION_ID
     ));
@@ -397,7 +409,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // this harness activates no OTHER extension capability, so an empty
     // catalog for B is only meaningful once we know A's is non-empty.
     let a_visible_tool_ids: Vec<String> = tool_catalog
-        .list_operator_tools(owner_user_id)
+        .list_operator_tools(&owner_scope)
         .await
         .into_iter()
         .map(|tool| tool.capability_id.as_str().to_string())
@@ -495,6 +507,15 @@ async fn assert_registered_mcp_discovery_is_safe_and_owner_scoped() -> HarnessRe
         .subject_user_id
         .as_ref()
         .ok_or("[T3 discovery] actor A binding has no subject_user_id")?;
+    let owner_scope = ResourceScope {
+        tenant_id: activator.binding.tenant_id.clone(),
+        user_id: owner_user_id.clone(),
+        agent_id: activator.binding.agent_id.clone(),
+        project_id: activator.binding.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
     let capability_harness = g
         .capability_harness()
         .ok_or("[T3 discovery] group must wire HostRuntime capability harness")?;
@@ -507,7 +528,8 @@ async fn assert_registered_mcp_discovery_is_safe_and_owner_scoped() -> HarnessRe
     let installation_id = ExtensionInstallationId::new(REGISTERED_EXTENSION_ID.to_string())
         .map_err(|e| format!("[T3 discovery] installation id: {e}"))?;
     let descriptor_dir = capability_harness.storage_root_for_test().join(format!(
-        "system/extensions/registered/{}/{REGISTERED_EXTENSION_ID}",
+        "system/extensions/registered/{}/{}/{REGISTERED_EXTENSION_ID}",
+        activator.binding.tenant_id.as_str(),
         owner_user_id.as_str()
     ));
     std::fs::create_dir_all(&descriptor_dir)
@@ -579,7 +601,7 @@ async fn assert_registered_mcp_discovery_is_safe_and_owner_scoped() -> HarnessRe
     let tool_catalog = services
         .local_dev_operator_tool_catalog_for_test()
         .ok_or("[T3 discovery] local-dev operator tool catalog")?;
-    let owner_tools = tool_catalog.list_operator_tools(owner_user_id).await;
+    let owner_tools = tool_catalog.list_operator_tools(&owner_scope).await;
     for capability_id in [
         DISCOVERED_SAFE_READ_CAPABILITY_ID,
         DISCOVERED_SAFE_WRITE_CAPABILITY_ID,
@@ -682,13 +704,22 @@ async fn assert_registered_mcp_discovery_is_safe_and_owner_scoped() -> HarnessRe
     b.assert_tool_not_invoked(DISCOVERED_SAFE_READ_CAPABILITY_ID)
         .await
         .map_err(|e| format!("[T3 discovery] actor B dispatched owner A tool: {e}"))?;
+    let b_user_id = b
+        .binding
+        .subject_user_id
+        .as_ref()
+        .ok_or("[T3 discovery] actor B binding has no subject_user_id")?;
+    let b_scope = ResourceScope {
+        tenant_id: b.binding.tenant_id.clone(),
+        user_id: b_user_id.clone(),
+        agent_id: b.binding.agent_id.clone(),
+        project_id: b.binding.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
     if tool_catalog
-        .list_operator_tools(
-            b.binding
-                .subject_user_id
-                .as_ref()
-                .ok_or("[T3 discovery] actor B binding has no subject_user_id")?,
-        )
+        .list_operator_tools(&b_scope)
         .await
         .iter()
         .any(|tool| {

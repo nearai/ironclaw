@@ -18,7 +18,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{CasExpectation, Entry, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostPath, UserId, VirtualPath, sha256_digest_token,
+    CapabilityId, ExtensionId, HostPath, InvocationId, ResourceScope, TenantId, UserId,
+    VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
@@ -70,12 +71,13 @@ async fn restore_disables_owner_registered_extension_until_explicit_rediscovery(
         .expect("mount system extensions");
     let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
 
-    // Seed: write the registered manifest at T1's owner-scoped path convention
+    // Seed: write the registered manifest at the tenant/owner-scoped path convention
     // directly onto disk (`RegisteredExtensionStore::put()` doesn't exist yet)
     // and durably persist the installation the same way an owner-aware
     // `install()` would (that doesn't exist yet either).
     let owner_dir = storage_root
         .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(OWNER_USER_ID)
         .join(REGISTERED_EXTENSION_ID);
     std::fs::create_dir_all(&owner_dir).expect("registered manifest dir");
@@ -101,6 +103,9 @@ async fn restore_disables_owner_registered_extension_until_explicit_rediscovery(
         // source the boot-time restore fallback re-parses the on-disk manifest
         // under, so the seeded record matches what restore reconstructs.
         ManifestSource::UserRegistered {
+            tenant_id: TenantId::from_trusted(
+                ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+            ),
             owner: UserId::new(OWNER_USER_ID).expect("valid owner id"),
         },
         &host_ports,
@@ -238,7 +243,8 @@ const CORRUPT_MANIFEST_TOML: &str = "[runtime\nkind = \"mcp\"\n";
 ///        sibling, and
 ///   (ii) owner B — a wholly unrelated owner — still gets a successful boot
 ///        restore (`restore_extension_lifecycle_state` /
-///        `resolve_any_owner_for_restore`) with their extension published,
+///        `resolve_any_owner_for_restore`) with their extension restored and
+///        safely disabled pending runtime rediscovery,
 ///        even though owner A's directory (scanned as part of the any-owner
 ///        restore fallback) contains a corrupt manifest.
 /// RED before the skip-and-log fix: both assertions fail with a propagated
@@ -265,6 +271,7 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
     // right next to it in the same owner-scoped directory scan.
     let owner_a_good_dir = storage_root
         .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(OWNER_USER_ID)
         .join(OWNER_A_GOOD_EXTENSION_ID);
     std::fs::create_dir_all(&owner_a_good_dir).expect("owner A good manifest dir");
@@ -276,6 +283,7 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
 
     let owner_a_corrupt_dir = storage_root
         .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(OWNER_USER_ID)
         .join(OWNER_A_CORRUPT_EXTENSION_ID);
     std::fs::create_dir_all(&owner_a_corrupt_dir).expect("owner A corrupt manifest dir");
@@ -288,6 +296,7 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
     // Seed owner B: one healthy, wholly unrelated descriptor.
     let owner_b_dir = storage_root
         .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
         .join(OTHER_OWNER_USER_ID)
         .join(OWNER_B_EXTENSION_ID);
     std::fs::create_dir_all(&owner_b_dir).expect("owner B manifest dir");
@@ -295,12 +304,15 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
         .expect("write owner B manifest");
 
     // ── (i) owner A's OTHER registered entries still list ───────────────────
-    let owner_a_packages = RegisteredExtensionStore::list_for_owner(filesystem.as_ref(), &owner_a)
-        .await
-        .expect(
-            "owner A's listing must skip the corrupt sibling manifest and return the healthy \
+    let owner_a_scope = ResourceScope::local_default(owner_a.clone(), InvocationId::new())
+        .expect("default tenant owner scope");
+    let owner_a_packages =
+        RegisteredExtensionStore::list_for_scope(filesystem.as_ref(), &owner_a_scope)
+            .await
+            .expect(
+                "owner A's listing must skip the corrupt sibling manifest and return the healthy \
              entry, not propagate an error for the whole directory (RED until skip-and-log lands)",
-        );
+            );
     assert_eq!(
         owner_a_packages.len(),
         1,
@@ -323,7 +335,12 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
             .expect("manifest hash");
         let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
             manifest_toml,
-            ManifestSource::UserRegistered { owner },
+            ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
+                owner,
+            },
             &host_ports,
             Some(manifest_hash.clone()),
             &contracts,
@@ -387,13 +404,32 @@ async fn corrupt_manifest_under_one_owner_does_not_break_other_owners_listing_or
          skip-and-log lands)",
     );
 
+    let restored_owner_b = installation_store
+        .get_installation(
+            &ExtensionInstallationId::new(OWNER_B_EXTENSION_ID)
+                .expect("valid owner B installation id"),
+        )
+        .await
+        .expect("read owner B restored installation")
+        .expect("owner B installation remains after restore");
+    assert_eq!(
+        restored_owner_b.activation_state(),
+        ExtensionActivationState::Disabled,
+        "owner B's registered extension must restore disabled pending runtime rediscovery"
+    );
+    assert!(
+        !lifecycle_service
+            .lock()
+            .await
+            .is_enabled(&owner_b_extension_id),
+        "owner B's registered lifecycle package must be disabled after restore"
+    );
     assert!(
         active_registry
             .snapshot()
             .get_extension(&owner_b_extension_id)
-            .is_some(),
-        "owner B's registered extension must be published after restore, unaffected by owner \
-         A's corrupt sibling manifest"
+            .is_none(),
+        "owner B's registered extension must not publish a stale descriptor after restore"
     );
 }
 
@@ -505,8 +541,8 @@ runtime_credentials = [
     );
 }
 
-/// Safety invariant the registered-store's owner-scoped path convention
-/// (`/system/extensions/registered/<owner>/<id>/manifest.toml`, T1) relies
+/// Safety invariant the registered-store's tenant/owner-scoped path convention
+/// (`/system/extensions/registered/<tenant>/<owner>/<id>/manifest.toml`) relies
 /// on: `UserId`'s own validation rejects any value that could escape that
 /// path prefix, so composing a `VirtualPath` from a valid `UserId` can never
 /// traverse out of the owner's directory. Passes today (pins an existing
@@ -522,20 +558,22 @@ fn owner_user_id_rejects_path_traversal_segments_for_registered_store_paths() {
 
     let owner = UserId::new(OWNER_USER_ID).expect("valid owner id");
     let path = VirtualPath::new(format!(
-        "/system/extensions/registered/{}/{REGISTERED_EXTENSION_ID}/manifest.toml",
+        "/system/extensions/registered/{}/{}/{REGISTERED_EXTENSION_ID}/manifest.toml",
+        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID,
         owner.as_str()
     ))
     .expect("owner-scoped registered manifest path is valid");
     assert_eq!(
         path.as_str(),
         format!(
-            "/system/extensions/registered/{OWNER_USER_ID}/{REGISTERED_EXTENSION_ID}/manifest.toml"
+            "/system/extensions/registered/{}/{OWNER_USER_ID}/{REGISTERED_EXTENSION_ID}/manifest.toml",
+            ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID
         )
     );
 }
 
 #[test]
-fn registered_hosted_mcp_id_is_deterministic_owner_scoped_normalized_and_path_safe() {
+fn registered_hosted_mcp_id_is_deterministic_tenant_owner_scoped_normalized_and_path_safe() {
     let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
     let other_owner = UserId::new(OTHER_OWNER_USER_ID).expect("valid other owner");
 
@@ -556,6 +594,8 @@ fn registered_hosted_mcp_id_is_deterministic_owner_scoped_normalized_and_path_sa
     .expect("mint other owner id");
 
     let mut expected_input = Vec::new();
+    expected_input.extend_from_slice(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.as_bytes());
+    expected_input.push(0x1f);
     expected_input.extend_from_slice(owner.as_str().as_bytes());
     expected_input.push(0x1f);
     expected_input.extend_from_slice(b"https://mcp.example.com:8443/mcp");
@@ -572,6 +612,31 @@ fn registered_hosted_mcp_id_is_deterministic_owner_scoped_normalized_and_path_sa
     assert_eq!(id.as_str(), format!("mcp-{expected_suffix}"));
     assert_eq!(id.as_str().len(), "mcp-".len() + 16);
     assert!(id.as_str()[4..].chars().all(|ch| ch.is_ascii_hexdigit()));
+}
+
+#[test]
+fn registered_hosted_mcp_ipv6_url_normalizes_with_authority_brackets() {
+    let owner = UserId::new(OWNER_USER_ID).expect("valid owner");
+    let draft = RegisteredExtensionStore::synthesize_hosted_mcp_manifest_toml(
+        &owner,
+        &RegisterHostedMcpDescriptorInput {
+            name: "IPv6 MCP".to_string(),
+            url: "https://[2001:DB8::1]:8443/mcp/".to_string(),
+        },
+    )
+    .expect("IPv6 hosted MCP URL should normalize");
+
+    assert_eq!(
+        draft.normalized_url(),
+        "https://[2001:db8::1]:8443/mcp",
+        "normalized URL must preserve a valid bracketed IPv6 authority"
+    );
+    assert!(
+        draft
+            .manifest_toml()
+            .contains("url = \"https://[2001:db8::1]:8443/mcp\""),
+        "synthesized manifest must retain the bracketed IPv6 authority"
+    );
 }
 
 #[tokio::test]
@@ -923,6 +988,14 @@ async fn discovered_capability_inventory_rejects_corruption_foreign_ids_and_boun
     assert!(
         corrupt_error.to_string().contains("inventory"),
         "unexpected corruption error: {corrupt_error}"
+    );
+    assert!(
+        corrupt_error.to_string().contains("line 1, column 2"),
+        "corruption diagnostics should retain only bounded parse location: {corrupt_error}"
+    );
+    assert!(
+        !corrupt_error.to_string().contains("not-json"),
+        "corruption diagnostics must not echo persisted body contents: {corrupt_error}"
     );
 
     let injected_tool_definition = serde_json::json!({

@@ -6633,7 +6633,10 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities(&UserId::new(owner).unwrap())
+            .active_model_visible_capabilities(
+                &local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                    .expect("NEAR AI MCP owner scope"),
+            )
             .await
             .expect("active capabilities");
         let search = capabilities
@@ -6748,7 +6751,10 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Discovered);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities(&UserId::new(owner).unwrap())
+            .active_model_visible_capabilities(
+                &local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                    .expect("NEAR AI MCP owner scope"),
+            )
             .await
             .expect("active capabilities");
         assert!(
@@ -6913,7 +6919,10 @@ mod tests {
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
-            .active_model_visible_capabilities(&UserId::new(owner).unwrap())
+            .active_model_visible_capabilities(
+                &local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                    .expect("NEAR AI MCP owner scope"),
+            )
             .await
             .expect("active capabilities");
         assert!(

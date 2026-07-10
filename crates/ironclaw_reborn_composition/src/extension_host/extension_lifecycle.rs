@@ -6,7 +6,9 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    CapabilityPermissionOverrideStore, PersistentApprovalPolicyStore, cleanup_capability_authority,
+    CapabilityPermissionOverrideInput, CapabilityPermissionOverrideRecord,
+    CapabilityPermissionOverrideStore, PersistentApprovalPolicy, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyStore, cleanup_capability_authority,
 };
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
@@ -22,8 +24,8 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkPolicy, NetworkScheme,
     NetworkTarget, NetworkTargetPattern, PermissionMode, Principal, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
-    VirtualPath, sha256_digest_token,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
+    sha256_digest_token,
 };
 use ironclaw_network::{NetworkResolver, SystemNetworkResolver, resolve_public_ips};
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
@@ -93,8 +95,8 @@ use crate::extension_host::mcp_discovery::{
 };
 use crate::extension_host::registered_extension_store::{
     RegisterHostedMcpDescriptorInput, RegisteredExtensionStore, is_owner_registered,
-    manifest_visible_to_caller, owner_visible_enabled_extension_ids, resolve_any_owner_for_restore,
-    resolve_with_owner_overlay, search_with_owner_overlay,
+    owner_visible_enabled_extension_ids_for_scope, resolve_any_owner_for_restore,
+    resolve_with_owner_overlay_for_scope, search_with_owner_overlay_for_scope,
 };
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
@@ -130,6 +132,13 @@ pub(crate) struct RebornLocalExtensionManagementPort {
 pub(crate) struct ExtensionCapabilityAuthorityCleanup {
     persistent_approval_policies: Arc<dyn PersistentApprovalPolicyStore>,
     tool_permission_overrides: Arc<dyn CapabilityPermissionOverrideStore>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredCapabilityAuthoritySnapshot {
+    capability_id: CapabilityId,
+    policy: Option<PersistentApprovalPolicy>,
+    override_record: Option<CapabilityPermissionOverrideRecord>,
 }
 
 impl ExtensionCapabilityAuthorityCleanup {
@@ -392,7 +401,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         query: &str,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
-        owner: Option<&UserId>,
+        owner: Option<&ResourceScope>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let extensions = self.catalog.search(query);
         let mut summaries = Vec::new();
@@ -405,7 +414,7 @@ impl RebornLocalExtensionManagementPort {
         // Owner-registered packages never enter the shared catalog above
         // (boot-leak fix), so they are searched separately and overlaid here.
         let owner_overlay =
-            search_with_owner_overlay(self.filesystem.as_ref(), owner, query).await?;
+            search_with_owner_overlay_for_scope(self.filesystem.as_ref(), owner, query).await?;
         for extension in &owner_overlay {
             summaries.push(
                 self.search_summary(extension, credential_gate, owner)
@@ -437,7 +446,7 @@ impl RebornLocalExtensionManagementPort {
 
     pub(crate) async fn list_installed(
         &self,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let summaries = self.installed_summaries(owner).await?;
         let count = summaries.len();
@@ -461,7 +470,7 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn project_for_owner(
         &self,
         package_ref: LifecyclePackageRef,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         self.project_for_caller(package_ref, Some(owner)).await
     }
@@ -469,7 +478,7 @@ impl RebornLocalExtensionManagementPort {
     async fn project_for_caller(
         &self,
         package_ref: LifecyclePackageRef,
-        caller: Option<&UserId>,
+        caller: Option<&ResourceScope>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let phase = self
@@ -479,7 +488,7 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)?
             .map(|installation| phase_for_activation_state(installation.activation_state()))
             .unwrap_or(LifecyclePhase::Discovered);
-        let available = resolve_with_owner_overlay(
+        let available = resolve_with_owner_overlay_for_scope(
             &self.catalog,
             self.filesystem.as_ref(),
             caller,
@@ -507,10 +516,10 @@ impl RebornLocalExtensionManagementPort {
     // `registered_extension_store::owner_visible_enabled_extension_ids`.
     pub(crate) async fn active_model_visible_capabilities(
         &self,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Result<Vec<ActiveExtensionCapability>, ProductWorkflowError> {
         let visible_extension_ids =
-            owner_visible_enabled_extension_ids(self.installation_store.as_ref(), owner)
+            owner_visible_enabled_extension_ids_for_scope(self.installation_store.as_ref(), owner)
                 .await
                 .map_err(map_extension_installation_error)?;
         let registry = self.active_extensions.snapshot();
@@ -538,7 +547,7 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn activation_credential_requirements_for_owner(
         &self,
         package_ref: &LifecyclePackageRef,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
         self.activation_credential_requirements_for_caller(package_ref, Some(owner))
             .await
@@ -547,7 +556,7 @@ impl RebornLocalExtensionManagementPort {
     async fn activation_credential_requirements_for_caller(
         &self,
         package_ref: &LifecyclePackageRef,
-        caller: Option<&UserId>,
+        caller: Option<&ResourceScope>,
     ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
@@ -561,7 +570,7 @@ impl RebornLocalExtensionManagementPort {
 
     async fn installed_summaries(
         &self,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductWorkflowError> {
         let installations = self
             .installation_store
@@ -569,6 +578,10 @@ impl RebornLocalExtensionManagementPort {
             .await
             .map_err(map_extension_installation_error)?;
         let mut summaries = Vec::with_capacity(installations.len());
+        // Registered packages are stored in one owner/tenant overlay. Load it
+        // lazily once for this listing instead of rescanning the same directory
+        // for every registered installation (O(k) filesystem work, not O(k²)).
+        let mut registered_owner_packages: Option<Vec<AvailableExtensionPackage>> = None;
         for installation in installations {
             let Ok(package_ref) = LifecyclePackageRef::new(
                 LifecyclePackageKind::Extension,
@@ -588,24 +601,43 @@ impl RebornLocalExtensionManagementPort {
                         .await
                         .map_err(map_extension_installation_error)?;
                     if manifest.is_none_or(|record| {
-                        !manifest_visible_to_caller(&record.manifest().source, Some(owner))
+                        !record
+                            .manifest()
+                            .source
+                            .visible_to_resource_scope(Some(owner))
                     }) {
                         continue;
                     }
-                    match resolve_with_owner_overlay(
-                        &self.catalog,
-                        self.filesystem.as_ref(),
-                        Some(owner),
-                        &package_ref,
-                    )
-                    .await
-                    {
-                        Ok(available) => available,
-                        Err(ProductWorkflowError::InvalidBindingRequest { .. }) => continue,
-                        Err(error) => return Err(error),
+                    if registered_owner_packages.is_none() {
+                        registered_owner_packages = Some(
+                            RegisteredExtensionStore::list_for_scope(
+                                self.filesystem.as_ref(),
+                                owner,
+                            )
+                            .await?,
+                        );
                     }
+                    registered_owner_packages
+                        .as_ref()
+                        .and_then(|packages| {
+                            packages
+                                .iter()
+                                .find(|package| package.package_ref == package_ref)
+                                .cloned()
+                        })
+                        .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+                            reason: "available extension was not found".to_string(),
+                        })?
                 }
             };
+            if !available
+                .package
+                .manifest
+                .source
+                .visible_to_resource_scope(Some(owner))
+            {
+                continue;
+            }
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
                 phase: phase_for_activation_state(installation.activation_state()),
@@ -618,7 +650,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
-        owner: Option<&UserId>,
+        owner: Option<&ResourceScope>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
@@ -646,7 +678,7 @@ impl RebornLocalExtensionManagementPort {
     async fn search_installation(
         &self,
         extension_id: &ExtensionId,
-        owner: Option<&UserId>,
+        owner: Option<&ResourceScope>,
     ) -> Result<Option<ExtensionInstallation>, ProductWorkflowError> {
         let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
             .map_err(map_extension_installation_error)?;
@@ -672,8 +704,7 @@ impl RebornLocalExtensionManagementPort {
             .get_manifest(extension_id)
             .await
             .map_err(map_extension_installation_error)?;
-        if manifest
-            .is_some_and(|record| !manifest_visible_to_caller(&record.manifest().source, owner))
+        if manifest.is_some_and(|record| !record.manifest().source.visible_to_resource_scope(owner))
         {
             return Ok(None);
         }
@@ -683,11 +714,11 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn install(
         &self,
         package_ref: LifecyclePackageRef,
-        owner: Option<&UserId>,
+        owner: Option<&ResourceScope>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         // Owner-registered packages never enter the shared catalog (boot-leak
         // fix), so a catalog miss falls back to `owner`'s registered set.
-        let available = resolve_with_owner_overlay(
+        let available = resolve_with_owner_overlay_for_scope(
             &self.catalog,
             self.filesystem.as_ref(),
             owner,
@@ -715,13 +746,13 @@ impl RebornLocalExtensionManagementPort {
 
     pub(crate) async fn register_hosted_mcp(
         &self,
-        owner: &UserId,
         name: String,
         url: String,
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let input = RegisterHostedMcpDescriptorInput { name, url };
-        let draft = RegisteredExtensionStore::synthesize_hosted_mcp_manifest_toml(owner, &input)?;
+        let draft =
+            RegisteredExtensionStore::synthesize_hosted_mcp_manifest_toml_for_scope(scope, &input)?;
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             draft.extension_id().as_str(),
@@ -738,34 +769,34 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)?
             .is_some()
         {
-            let available = resolve_with_owner_overlay(
+            let available = resolve_with_owner_overlay_for_scope(
                 &self.catalog,
                 self.filesystem.as_ref(),
-                Some(owner),
+                Some(scope),
                 &package_ref,
             )
             .await?;
             return Ok(registered_install_response(package_ref, &available));
         }
 
-        let put = RegisteredExtensionStore::put_hosted_mcp_descriptor(
+        let put = RegisteredExtensionStore::put_hosted_mcp_descriptor_for_scope(
             self.filesystem.as_ref(),
-            owner,
+            scope,
             input,
         )
         .await?;
-        let available = resolve_with_owner_overlay(
+        let available = resolve_with_owner_overlay_for_scope(
             &self.catalog,
             self.filesystem.as_ref(),
-            Some(owner),
+            Some(scope),
             &package_ref,
         )
         .await?;
 
         if let Err(error) = self.install_available_locked(&available).await {
-            if let Err(rollback_error) = RegisteredExtensionStore::delete_descriptor(
+            if let Err(rollback_error) = RegisteredExtensionStore::delete_descriptor_for_scope(
                 self.filesystem.as_ref(),
-                owner,
+                scope,
                 &put.descriptor.extension_id,
             )
             .await
@@ -785,11 +816,11 @@ impl RebornLocalExtensionManagementPort {
                 prior.extension_id.as_str(),
             )?;
             if let Err(error) = self
-                .unregister_hosted_mcp_locked(prior_ref, owner, scope)
+                .unregister_hosted_mcp_locked(prior_ref, scope, scope)
                 .await
             {
                 if let Err(rollback_error) = self
-                    .unregister_hosted_mcp_locked(package_ref.clone(), owner, scope)
+                    .unregister_hosted_mcp_locked(package_ref.clone(), scope, scope)
                     .await
                 {
                     return Err(compensation_failure(
@@ -867,7 +898,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
         self.activate_inner(package_ref, mode, Some(owner), &credential_gate)
@@ -888,7 +919,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
-        owner: &UserId,
+        owner: &ResourceScope,
         credential_gate: impl ExtensionActivationCredentialGate,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         self.activate_inner(package_ref, mode, Some(owner), &credential_gate)
@@ -904,9 +935,7 @@ impl RebornLocalExtensionManagementPort {
         let credential_gate =
             crate::extension_host::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
         let owner = match &mode {
-            ExtensionActivationMode::HostedMcpDiscovery { scope, .. } => {
-                Some(scope.user_id.clone())
-            }
+            ExtensionActivationMode::HostedMcpDiscovery { scope, .. } => Some(scope.clone()),
             ExtensionActivationMode::Static => None,
         };
         self.activate_inner(package_ref, mode, owner.as_ref(), &credential_gate)
@@ -917,7 +946,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
-        caller: Option<&UserId>,
+        caller: Option<&ResourceScope>,
         credential_gate: &dyn ExtensionActivationCredentialGate,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
@@ -997,7 +1026,7 @@ impl RebornLocalExtensionManagementPort {
         };
         ensure_package_visible_to_caller(&current_package, caller)?;
         credential_gate.ensure_credentials(&active_package).await?;
-        let ManifestSource::UserRegistered { owner } = &current_package.manifest.source else {
+        let ManifestSource::UserRegistered { .. } = &current_package.manifest.source else {
             return self
                 .commit_activation(
                     package_ref,
@@ -1008,12 +1037,20 @@ impl RebornLocalExtensionManagementPort {
                 )
                 .await;
         };
-        let prior_capability_ids = RegisteredExtensionStore::load_discovered_capability_ids(
-            self.filesystem.as_ref(),
-            owner,
-            &extension_id,
-        )
-        .await?;
+        let prior_capability_ids =
+            RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
+                self.filesystem.as_ref(),
+                &discovery.scope,
+                &extension_id,
+            )
+            .await?;
+        let prior_authority = self
+            .snapshot_registered_capability_authority(
+                &discovery.scope,
+                &extension_id,
+                &prior_capability_ids,
+            )
+            .await?;
         let current_capability_ids = active_package
             .capabilities
             .iter()
@@ -1034,9 +1071,9 @@ impl RebornLocalExtensionManagementPort {
             &removed_capability_ids,
         )
         .await?;
-        RegisteredExtensionStore::replace_discovered_capability_ids(
+        RegisteredExtensionStore::replace_discovered_capability_ids_for_scope(
             self.filesystem.as_ref(),
-            owner,
+            &discovery.scope,
             &extension_id,
             &current_capability_ids,
         )
@@ -1054,22 +1091,43 @@ impl RebornLocalExtensionManagementPort {
         {
             Ok(response) => Ok(response),
             Err(error) => {
-                if let Err(rollback_error) =
-                    RegisteredExtensionStore::replace_discovered_capability_ids(
+                // Attempt both compensations even when the first one fails:
+                // inventory and authority are independent stores, and an
+                // inventory write failure must not strand the prior approval
+                // policy/override in its revoked state.
+                let inventory_restore_error =
+                    RegisteredExtensionStore::replace_discovered_capability_ids_for_scope(
                         self.filesystem.as_ref(),
-                        owner,
+                        &discovery.scope,
                         &extension_id,
                         &prior_capability_ids,
                     )
                     .await
-                {
-                    return Err(compensation_failure(
+                    .err();
+                let authority_restore_error = self
+                    .restore_registered_capability_authority(&discovery.scope, &prior_authority)
+                    .await
+                    .err();
+                match (inventory_restore_error, authority_restore_error) {
+                    (None, None) => Err(error),
+                    (Some(rollback_error), None) => Err(compensation_failure(
                         "registered MCP activation failed and capability inventory restore failed",
-                        error,
+                        &error,
                         rollback_error,
-                    ));
+                    )),
+                    (None, Some(rollback_error)) => Err(compensation_failure(
+                        "registered MCP activation failed and capability authority restore failed",
+                        &error,
+                        rollback_error,
+                    )),
+                    (Some(inventory_error), Some(authority_error)) => {
+                        Err(ProductWorkflowError::Transient {
+                            reason: format!(
+                                "registered MCP activation failed; original error: {error}; capability inventory restore error: {inventory_error}; capability authority restore error: {authority_error}"
+                            ),
+                        })
+                    }
                 }
-                Err(error)
             }
         }
     }
@@ -1095,6 +1153,96 @@ impl RebornLocalExtensionManagementPort {
         .map_err(|error| ProductWorkflowError::Transient {
             reason: format!("registered MCP capability authority cleanup failed: {error}"),
         })
+    }
+
+    async fn snapshot_registered_capability_authority(
+        &self,
+        scope: &ResourceScope,
+        extension_id: &ExtensionId,
+        capability_ids: &[CapabilityId],
+    ) -> Result<Vec<RegisteredCapabilityAuthoritySnapshot>, ProductWorkflowError> {
+        let authority_scope = scope.tenant_user_settings_scope();
+        let grantee = Principal::Extension(extension_id.clone());
+        let mut snapshots = Vec::with_capacity(capability_ids.len());
+        for capability_id in capability_ids {
+            let policy_key = ironclaw_approvals::PersistentApprovalPolicyKey::new(
+                &authority_scope,
+                ironclaw_approvals::PersistentApprovalAction::Dispatch,
+                capability_id.clone(),
+                grantee.clone(),
+            );
+            let policy = self
+                .capability_authority_cleanup
+                .persistent_approval_policies
+                .lookup(&policy_key)
+                .await
+                .map_err(|error| ProductWorkflowError::Transient {
+                    reason: format!("registered MCP authority snapshot failed: {error}"),
+                })?;
+            let override_record = self
+                .capability_authority_cleanup
+                .tool_permission_overrides
+                .get(&ironclaw_approvals::CapabilityPermissionOverrideKey::new(
+                    &authority_scope,
+                    capability_id.clone(),
+                ))
+                .await
+                .map_err(|error| ProductWorkflowError::Transient {
+                    reason: format!("registered MCP authority snapshot failed: {error}"),
+                })?;
+            snapshots.push(RegisteredCapabilityAuthoritySnapshot {
+                capability_id: capability_id.clone(),
+                policy,
+                override_record,
+            });
+        }
+        Ok(snapshots)
+    }
+
+    async fn restore_registered_capability_authority(
+        &self,
+        scope: &ResourceScope,
+        snapshots: &[RegisteredCapabilityAuthoritySnapshot],
+    ) -> Result<(), ProductWorkflowError> {
+        for snapshot in snapshots {
+            if let Some(policy) = &snapshot.policy {
+                // A previously revoked policy must remain revoked. Active
+                // policy restoration is sufficient to undo this unregister's
+                // cleanup without resurrecting older authority.
+                if policy.revoked_at.is_none() {
+                    self.capability_authority_cleanup
+                        .persistent_approval_policies
+                        .allow(PersistentApprovalPolicyInput {
+                            scope: scope.tenant_user_settings_scope(),
+                            action: policy.key.action,
+                            capability_id: policy.key.capability_id.clone(),
+                            grantee: policy.key.grantee.clone(),
+                            approved_by: policy.approved_by.clone(),
+                            constraints: policy.constraints.clone(),
+                            source_approval_request_id: policy.source_approval_request_id,
+                        })
+                        .await
+                        .map_err(|error| ProductWorkflowError::Transient {
+                            reason: format!("registered MCP authority restore failed: {error}"),
+                        })?;
+                }
+            }
+            if let Some(override_record) = &snapshot.override_record {
+                self.capability_authority_cleanup
+                    .tool_permission_overrides
+                    .set(CapabilityPermissionOverrideInput {
+                        scope: scope.tenant_user_settings_scope(),
+                        capability_id: snapshot.capability_id.clone(),
+                        state: override_record.state,
+                        updated_by: override_record.updated_by.clone(),
+                    })
+                    .await
+                    .map_err(|error| ProductWorkflowError::Transient {
+                        reason: format!("registered MCP override restore failed: {error}"),
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     async fn commit_activation(
@@ -1163,16 +1311,31 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn package_requires_hosted_mcp_discovery_for_owner(
         &self,
         package_ref: &LifecyclePackageRef,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Result<bool, ProductWorkflowError> {
         self.package_requires_hosted_mcp_discovery_for_caller(package_ref, Some(owner))
             .await
     }
 
+    pub(crate) async fn package_uses_provider_discovery_for_owner(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        owner: &ResourceScope,
+    ) -> Result<bool, ProductWorkflowError> {
+        let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
+        let _operation_guard = self.operation_lock.lock().await;
+        let package = self.lifecycle_package(&extension_id).await?;
+        ensure_package_visible_to_caller(&package, Some(owner))?;
+        Ok(matches!(
+            package.manifest.source,
+            ManifestSource::UserRegistered { .. }
+        ))
+    }
+
     async fn package_requires_hosted_mcp_discovery_for_caller(
         &self,
         package_ref: &LifecyclePackageRef,
-        caller: Option<&UserId>,
+        caller: Option<&ResourceScope>,
     ) -> Result<bool, ProductWorkflowError> {
         let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
@@ -1199,12 +1362,10 @@ impl RebornLocalExtensionManagementPort {
         // taking the operation lock: `activation_credential_requirements` takes
         // the same lock, and the manifest is gone once removal succeeds.
         let removed_extension_id = package_ref.id.as_str().to_string();
-        let removed_providers = self
-            .removed_extension_providers(&package_ref, &scope.user_id)
-            .await;
+        let removed_providers = self.removed_extension_providers(&package_ref, scope).await;
         let response = {
             let _operation_guard = self.operation_lock.lock().await;
-            self.remove_locked(package_ref, Some(&scope.user_id)).await
+            self.remove_locked(package_ref, Some(scope)).await
         };
         if response.is_ok() {
             self.revoke_exclusive_credentials(scope, &removed_extension_id, &removed_providers)
@@ -1219,26 +1380,28 @@ impl RebornLocalExtensionManagementPort {
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let _operation_guard = self.operation_lock.lock().await;
-        self.unregister_hosted_mcp_locked(package_ref, &scope.user_id, scope)
+        self.unregister_hosted_mcp_locked(package_ref, scope, scope)
             .await
     }
 
     async fn unregister_hosted_mcp_locked(
         &self,
         package_ref: LifecyclePackageRef,
-        owner: &UserId,
+        owner: &ResourceScope,
         scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-        let mut cleanup_capability_ids = RegisteredExtensionStore::load_discovered_capability_ids(
-            self.filesystem.as_ref(),
-            owner,
-            &extension_id,
-        )
-        .await?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+        let mut cleanup_capability_ids =
+            RegisteredExtensionStore::load_discovered_capability_ids_for_scope(
+                self.filesystem.as_ref(),
+                owner,
+                &extension_id,
+            )
+            .await?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let active_snapshot = self.active_extensions.snapshot();
+        let has_active_publication = active_snapshot.get_extension(&extension_id).is_some();
         if let Some(active_package) = active_snapshot.get_extension(&extension_id) {
             cleanup_capability_ids.extend(
                 active_package
@@ -1248,10 +1411,10 @@ impl RebornLocalExtensionManagementPort {
             );
         }
         let cleanup_capability_ids = cleanup_capability_ids.into_iter().collect::<Vec<_>>();
-        let available = match resolve_with_owner_overlay(
+        let available = match resolve_with_owner_overlay_for_scope(
             &self.catalog,
             self.filesystem.as_ref(),
-            Some(owner),
+            Some(scope),
             &package_ref,
         )
         .await
@@ -1271,13 +1434,21 @@ impl RebornLocalExtensionManagementPort {
                         .map_err(map_extension_installation_error)?
                         .is_none()
                 {
+                    if has_active_publication {
+                        return Err(ProductWorkflowError::Transient {
+                            reason: format!(
+                                "cannot unregister extension {} while an active publication exists without installation state",
+                                extension_id.as_str()
+                            ),
+                        });
+                    }
                     self.cleanup_registered_capability_authority(
                         scope,
                         &extension_id,
                         &cleanup_capability_ids,
                     )
                     .await?;
-                    RegisteredExtensionStore::delete_descriptor(
+                    RegisteredExtensionStore::delete_descriptor_for_scope(
                         self.filesystem.as_ref(),
                         owner,
                         &extension_id,
@@ -1298,27 +1469,51 @@ impl RebornLocalExtensionManagementPort {
                 ),
             });
         }
-        self.cleanup_registered_capability_authority(scope, &extension_id, &cleanup_capability_ids)
-            .await?;
-        if self
+        let has_installation = self
             .installation_store
             .get_installation(&installation_id)
             .await
             .map_err(map_extension_installation_error)?
-            .is_some()
-        {
+            .is_some();
+        if !has_installation && has_active_publication {
+            return Err(ProductWorkflowError::Transient {
+                reason: format!(
+                    "cannot unregister extension {} while an active publication exists without installation state",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let authority_snapshot = self
+            .snapshot_registered_capability_authority(scope, &extension_id, &cleanup_capability_ids)
+            .await?;
+        self.cleanup_registered_capability_authority(scope, &extension_id, &cleanup_capability_ids)
+            .await?;
+        if has_installation {
             let restore_input = registered_descriptor_input_from_available(&available)?;
-            RegisteredExtensionStore::delete_descriptor(
+            if let Err(error) = RegisteredExtensionStore::delete_descriptor_for_scope(
                 self.filesystem.as_ref(),
                 owner,
                 &extension_id,
             )
-            .await?;
+            .await
+            {
+                if let Err(restore_error) = self
+                    .restore_registered_capability_authority(scope, &authority_snapshot)
+                    .await
+                {
+                    return Err(compensation_failure(
+                        "registered extension unregister failed and authority restore failed",
+                        error,
+                        restore_error,
+                    ));
+                }
+                return Err(error);
+            }
             let response = match self.remove_locked(package_ref, Some(owner)).await {
                 Ok(response) => response,
                 Err(error) => {
                     if let Err(rollback_error) =
-                        RegisteredExtensionStore::put_hosted_mcp_descriptor(
+                        RegisteredExtensionStore::put_hosted_mcp_descriptor_for_scope(
                             self.filesystem.as_ref(),
                             owner,
                             restore_input,
@@ -1331,6 +1526,16 @@ impl RebornLocalExtensionManagementPort {
                             rollback_error,
                         ));
                     }
+                    if let Err(restore_error) = self
+                        .restore_registered_capability_authority(scope, &authority_snapshot)
+                        .await
+                    {
+                        return Err(compensation_failure(
+                            "registered extension unregister failed and authority restore failed",
+                            error,
+                            restore_error,
+                        ));
+                    }
                     return Err(error);
                 }
             };
@@ -1340,8 +1545,12 @@ impl RebornLocalExtensionManagementPort {
                 .await;
             return Ok(response);
         }
-        RegisteredExtensionStore::delete_descriptor(self.filesystem.as_ref(), owner, &extension_id)
-            .await?;
+        RegisteredExtensionStore::delete_descriptor_for_scope(
+            self.filesystem.as_ref(),
+            owner,
+            &extension_id,
+        )
+        .await?;
         self.delete_registered_cleanup_intent_after_commit(owner, &extension_id)
             .await;
         Ok(registered_remove_response(package_ref))
@@ -1357,10 +1566,10 @@ impl RebornLocalExtensionManagementPort {
     /// same-id activation retry its deletion/replacement.
     async fn delete_registered_cleanup_intent_after_commit(
         &self,
-        owner: &UserId,
+        owner: &ResourceScope,
         extension_id: &ExtensionId,
     ) {
-        if let Err(error) = RegisteredExtensionStore::delete_discovered_capability_ids(
+        if let Err(error) = RegisteredExtensionStore::delete_discovered_capability_ids_for_scope(
             self.filesystem.as_ref(),
             owner,
             extension_id,
@@ -1381,7 +1590,7 @@ impl RebornLocalExtensionManagementPort {
     async fn removed_extension_providers(
         &self,
         package_ref: &LifecyclePackageRef,
-        owner: &UserId,
+        owner: &ResourceScope,
     ) -> Vec<AuthProviderId> {
         match self
             .activation_credential_requirements_for_owner(package_ref, owner)
@@ -1435,7 +1644,7 @@ impl RebornLocalExtensionManagementPort {
         if removed_providers.is_empty() {
             return;
         }
-        let Some(providers_still_in_use) = self.providers_still_in_use(&scope.user_id).await else {
+        let Some(providers_still_in_use) = self.providers_still_in_use(scope).await else {
             return;
         };
         let extension_id = match ExtensionId::new(removed_extension_id) {
@@ -1470,7 +1679,10 @@ impl RebornLocalExtensionManagementPort {
     /// removal. Returns `None` when the set cannot be resolved so the caller
     /// fails safe and skips revocation rather than risk deleting a shared
     /// credential.
-    async fn providers_still_in_use(&self, owner: &UserId) -> Option<BTreeSet<AuthProviderId>> {
+    async fn providers_still_in_use(
+        &self,
+        owner: &ResourceScope,
+    ) -> Option<BTreeSet<AuthProviderId>> {
         let response = match self.list_installed(owner).await {
             Ok(response) => response,
             Err(error) => {
@@ -1522,7 +1734,7 @@ impl RebornLocalExtensionManagementPort {
     async fn remove_locked(
         &self,
         package_ref: LifecyclePackageRef,
-        caller: Option<&UserId>,
+        caller: Option<&ResourceScope>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
@@ -2293,9 +2505,9 @@ fn extension_ids_from_package_ref(
 
 fn ensure_package_visible_to_caller(
     package: &ExtensionPackage,
-    caller: Option<&UserId>,
+    caller: Option<&ResourceScope>,
 ) -> Result<(), ProductWorkflowError> {
-    if manifest_visible_to_caller(&package.manifest.source, caller) {
+    if package.manifest.source.visible_to_resource_scope(caller) {
         return Ok(());
     }
     Err(ProductWorkflowError::InvalidBindingRequest {
@@ -2951,9 +3163,7 @@ mod tests {
         .expect("activate Slack tools extension");
 
         let active_capability_ids = port
-            .active_model_visible_capabilities(
-                &UserId::new("lifecycle-test-owner").expect("valid user id"),
-            )
+            .active_model_visible_capabilities(&hosted_mcp_scope("lifecycle-test-owner"))
             .await
             .expect("active capabilities")
             .into_iter()
@@ -3103,9 +3313,7 @@ mod tests {
         .expect("activate fixture extension");
 
         let capability_ids = port
-            .active_model_visible_capabilities(
-                &UserId::new("lifecycle-test-owner").expect("valid user id"),
-            )
+            .active_model_visible_capabilities(&hosted_mcp_scope("lifecycle-test-owner"))
             .await
             .expect("active capabilities")
             .into_iter()
@@ -3140,6 +3348,10 @@ mod tests {
             );
         let owner_a = UserId::new("ac2-owner-a").expect("valid user id");
         let owner_b = UserId::new("ac2-owner-b").expect("valid user id");
+        let owner_a_scope = ResourceScope::local_default(owner_a.clone(), InvocationId::new())
+            .expect("valid owner A scope");
+        let owner_b_scope = ResourceScope::local_default(owner_b.clone(), InvocationId::new())
+            .expect("valid owner B scope");
         let extension_id = ExtensionId::new("acme-registered").expect("valid extension id");
 
         let manifest_record = ExtensionManifestRecord::from_toml(
@@ -3157,6 +3369,7 @@ transport = "http"
 url = "http://127.0.0.1:9/mcp"
 "#,
             ManifestSource::UserRegistered {
+                tenant_id: owner_a_scope.tenant_id.clone(),
                 owner: owner_a.clone(),
             },
             &HostPortCatalog::empty(),
@@ -3222,7 +3435,7 @@ output_schema_ref = "schemas/search.output.json"
             .expect("publish capability into registry");
 
         let owner_capability_ids = port
-            .active_model_visible_capabilities(&owner_a)
+            .active_model_visible_capabilities(&owner_a_scope)
             .await
             .expect("owner A capabilities")
             .into_iter()
@@ -3234,7 +3447,7 @@ output_schema_ref = "schemas/search.output.json"
         );
 
         let other_owner_capability_ids = port
-            .active_model_visible_capabilities(&owner_b)
+            .active_model_visible_capabilities(&owner_b_scope)
             .await
             .expect("owner B capabilities")
             .into_iter()
@@ -4706,7 +4919,9 @@ output_schema_ref = "schemas/search.output.json"
         );
         assert!(
             storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join("lifecycle-tenant")
+                .join("lifecycle-owner")
                 .join(package_ref.id.as_str())
                 .join("manifest.toml")
                 .exists(),
@@ -4738,7 +4953,7 @@ output_schema_ref = "schemas/search.output.json"
             .expect("manifest record");
         assert!(matches!(
             manifest_record.manifest().source,
-            ManifestSource::UserRegistered { ref owner } if owner.as_str() == "lifecycle-owner"
+            ManifestSource::UserRegistered { ref owner, .. } if owner.as_str() == "lifecycle-owner"
         ));
     }
 
@@ -4772,7 +4987,9 @@ output_schema_ref = "schemas/search.output.json"
         );
         assert!(
             !storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join("lifecycle-tenant")
+                .join("lifecycle-owner")
                 .join(extension_id.as_str())
                 .exists(),
             "private URL rejection must not leave an owner descriptor"
@@ -4865,7 +5082,9 @@ output_schema_ref = "schemas/search.output.json"
         assert_eq!(first_ref, second_ref);
         assert!(
             storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join("lifecycle-tenant")
+                .join("lifecycle-owner")
                 .join(first_ref.id.as_str())
                 .join("manifest.toml")
                 .exists(),
@@ -4915,14 +5134,18 @@ output_schema_ref = "schemas/search.output.json"
         assert_ne!(first_ref, second_ref);
         assert!(
             !storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join("lifecycle-tenant")
+                .join("lifecycle-owner")
                 .join(first_ref.id.as_str())
                 .exists(),
             "same-name update removes prior descriptor"
         );
         assert!(
             storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join("lifecycle-tenant")
+                .join("lifecycle-owner")
                 .join(second_ref.id.as_str())
                 .join("manifest.toml")
                 .exists(),
@@ -4956,6 +5179,8 @@ output_schema_ref = "schemas/search.output.json"
     async fn extension_register_same_name_and_url_is_isolated_across_owners() {
         let owner_a = UserId::new("lifecycle-owner-a").expect("valid user");
         let owner_b = UserId::new("lifecycle-owner-b").expect("valid user");
+        let owner_a_scope = hosted_mcp_scope(owner_a.as_str());
+        let owner_b_scope = hosted_mcp_scope(owner_b.as_str());
         let url = "https://93.184.216.34/mcp";
         let (dir, _storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
@@ -4965,21 +5190,11 @@ output_schema_ref = "schemas/search.output.json"
         let storage_root = dir.path().join("local-dev");
 
         let first = port
-            .register_hosted_mcp(
-                &owner_a,
-                "Acme MCP".to_string(),
-                url.to_string(),
-                &hosted_mcp_scope(owner_a.as_str()),
-            )
+            .register_hosted_mcp("Acme MCP".to_string(), url.to_string(), &owner_a_scope)
             .await
             .expect("register owner A");
         let second = port
-            .register_hosted_mcp(
-                &owner_b,
-                "Acme MCP".to_string(),
-                url.to_string(),
-                &hosted_mcp_scope(owner_b.as_str()),
-            )
+            .register_hosted_mcp("Acme MCP".to_string(), url.to_string(), &owner_b_scope)
             .await
             .expect("register owner B");
         let first_ref = first.package_ref.expect("first package ref");
@@ -4993,6 +5208,7 @@ output_schema_ref = "schemas/search.output.json"
             assert!(
                 storage_root
                     .join("system/extensions/registered")
+                    .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
                     .join(owner.as_str())
                     .join(package_ref.id.as_str())
                     .join("manifest.toml")
@@ -5038,22 +5254,13 @@ output_schema_ref = "schemas/search.output.json"
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
         let storage_root = dir.path().join("local-dev");
+        let scope = hosted_mcp_scope(owner.as_str());
 
-        port.register_hosted_mcp(
-            &owner,
-            "Acme MCP".to_string(),
-            old_url.to_string(),
-            &hosted_mcp_scope("lifecycle-owner"),
-        )
-        .await
-        .expect("register old");
+        port.register_hosted_mcp("Acme MCP".to_string(), old_url.to_string(), &scope)
+            .await
+            .expect("register old");
         let error = port
-            .register_hosted_mcp(
-                &owner,
-                "Acme MCP".to_string(),
-                new_url.to_string(),
-                &hosted_mcp_scope("lifecycle-owner"),
-            )
+            .register_hosted_mcp("Acme MCP".to_string(), new_url.to_string(), &scope)
             .await
             .expect_err("prior removal failure rejects replacement");
 
@@ -5065,7 +5272,9 @@ output_schema_ref = "schemas/search.output.json"
         );
         assert!(
             storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+                .join("lifecycle-owner")
                 .join(old_id.as_str())
                 .join("manifest.toml")
                 .exists(),
@@ -5073,7 +5282,9 @@ output_schema_ref = "schemas/search.output.json"
         );
         assert!(
             !storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+                .join("lifecycle-owner")
                 .join(new_id.as_str())
                 .join("manifest.toml")
                 .exists(),
@@ -5135,7 +5346,9 @@ output_schema_ref = "schemas/search.output.json"
         assert_eq!(unregister.phase, LifecyclePhase::Removed);
         assert!(
             !storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join("lifecycle-tenant")
+                .join("lifecycle-owner")
                 .join(package_ref.id.as_str())
                 .exists(),
             "unregister removes descriptor"
@@ -5200,15 +5413,11 @@ output_schema_ref = "schemas/search.output.json"
         let (dir, port, _active_registry, installation_store, _trust_policy) =
             extension_port_with_file_delete_failing_filesystem();
         let storage_root = dir.path().join("local-dev");
+        let scope = hosted_mcp_scope(owner.as_str());
 
-        port.register_hosted_mcp(
-            &owner,
-            "Acme MCP".to_string(),
-            url.to_string(),
-            &hosted_mcp_scope("lifecycle-owner"),
-        )
-        .await
-        .expect("register");
+        port.register_hosted_mcp("Acme MCP".to_string(), url.to_string(), &scope)
+            .await
+            .expect("register");
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
                 .expect("package ref");
@@ -5223,7 +5432,9 @@ output_schema_ref = "schemas/search.output.json"
         );
         assert!(
             storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+                .join("lifecycle-owner")
                 .join(extension_id.as_str())
                 .join("manifest.toml")
                 .exists(),
@@ -5255,14 +5466,10 @@ output_schema_ref = "schemas/search.output.json"
         let url = "https://9.9.9.9/mcp";
         let extension_id =
             RegisteredExtensionStore::mint_hosted_mcp_extension_id(&owner, url).expect("mint id");
+        let scope = hosted_mcp_scope(owner.as_str());
 
         let error = port
-            .register_hosted_mcp(
-                &owner,
-                "Rollback MCP".to_string(),
-                url.to_string(),
-                &hosted_mcp_scope("lifecycle-owner"),
-            )
+            .register_hosted_mcp("Rollback MCP".to_string(), url.to_string(), &scope)
             .await
             .expect_err("install persistence failure rejects register");
 
@@ -5272,7 +5479,9 @@ output_schema_ref = "schemas/search.output.json"
         );
         assert!(
             !storage_root
-                .join("system/extensions/registered/lifecycle-owner")
+                .join("system/extensions/registered")
+                .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+                .join("lifecycle-owner")
                 .join(extension_id.as_str())
                 .exists(),
             "descriptor write is rolled back when lifecycle install persistence fails"
@@ -6092,7 +6301,7 @@ output_schema_ref = "schemas/search.output.json"
         (dir, port, active_registry, failing_store, trust_policy)
     }
 
-    fn extension_port_with_file_delete_failing_filesystem() -> (
+    pub(super) fn extension_port_with_file_delete_failing_filesystem() -> (
         tempfile::TempDir,
         RebornLocalExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
@@ -6115,6 +6324,15 @@ output_schema_ref = "schemas/search.output.json"
                 HostPath::from_path_buf(storage_root.join("system/extensions")),
             )
             .expect("mount system extensions");
+        std::fs::create_dir_all(storage_root.join("system/extensions/registered-cleanup/default"))
+            .expect("cleanup root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions/registered-cleanup")
+                    .expect("valid cleanup path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions/registered-cleanup")),
+            )
+            .expect("mount registered cleanup");
         let filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
         let root_filesystem: Arc<dyn RootFilesystem> =
             Arc::new(DeleteFailingRootFilesystem { inner: filesystem });
@@ -6527,7 +6745,8 @@ output_schema_ref = "schemas/search.output.json"
         assert!(matches!(
             manifest.manifest().source,
             ManifestSource::UserRegistered {
-                owner: ref manifest_owner
+                owner: ref manifest_owner,
+                ..
             }
                 if manifest_owner == owner
         ));

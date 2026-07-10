@@ -589,6 +589,56 @@ mod tests {
         Arc::new(TestConnections::with_connections(entries))
     }
 
+    struct MissingRegisterPackageRefFacade;
+
+    #[async_trait]
+    impl LifecycleProductFacade for MissingRegisterPackageRefFacade {
+        async fn execute(
+            &self,
+            _context: LifecycleProductContext,
+            action: LifecycleProductAction,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            assert!(matches!(
+                action,
+                LifecycleProductAction::ExtensionRegister { .. }
+            ));
+            Ok(LifecycleProductResponse {
+                package_ref: None,
+                phase: LifecyclePhase::Installed,
+                blockers: Vec::new(),
+                message: None,
+                payload: None,
+            })
+        }
+
+        async fn project_package(
+            &self,
+            _context: LifecycleProductContext,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+            panic!("register_extension should not project a package");
+        }
+    }
+
+    #[tokio::test]
+    async fn register_extension_rejects_lifecycle_response_without_package_ref() {
+        let error = register_extension(
+            &MissingRegisterPackageRefFacade,
+            caller(),
+            RebornRegisterExtensionRequest {
+                name: "fixture".to_string(),
+                url: "https://example.com/mcp".to_string(),
+            },
+        )
+        .await
+        .expect_err("missing package ref must be an internal adapter error");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Internal);
+        assert_eq!(error.kind, RebornServicesErrorKind::Internal);
+        assert_eq!(error.status_code, 500);
+        assert!(!error.retryable);
+    }
+
     #[tokio::test]
     async fn install_action_projects_lifecycle_onboarding_when_available() {
         let facade = ActionProjectionFacade {

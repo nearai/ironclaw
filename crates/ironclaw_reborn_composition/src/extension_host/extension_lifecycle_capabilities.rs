@@ -159,11 +159,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Arc::clone(&self.credential_accounts),
                 );
                 self.extension_management
-                    .search(
-                        &input.query,
-                        Some(&credential_gate),
-                        Some(&request.scope.user_id),
-                    )
+                    .search(&input.query, Some(&credential_gate), Some(&request.scope))
                     .await
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
@@ -171,7 +167,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 self.extension_management
                     .install(
                         extension_package_ref(input.extension_id)?,
-                        Some(&request.scope.user_id),
+                        Some(&request.scope),
                     )
                     .await
             }
@@ -180,10 +176,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 let package_ref = extension_package_ref(input.extension_id)?;
                 let requirements = self
                     .extension_management
-                    .activation_credential_requirements_for_owner(
-                        &package_ref,
-                        &request.scope.user_id,
-                    )
+                    .activation_credential_requirements_for_owner(&package_ref, &request.scope)
                     .await
                     .map_err(lifecycle_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(
@@ -200,9 +193,18 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     )
                     .with_usage(resource_usage(started)));
                 }
-                let runtime_http_egress = if let Some(host_egress) =
-                    request.services.host_runtime_http_egress.as_ref()
-                {
+                let provider_discovery = self
+                    .extension_management
+                    .package_uses_provider_discovery_for_owner(&package_ref, &request.scope)
+                    .await
+                    .map_err(lifecycle_error)?;
+                let runtime_http_egress = if provider_discovery {
+                    let Some(host_egress) = request.services.host_runtime_http_egress.as_ref()
+                    else {
+                        return Err(FirstPartyCapabilityError::new(
+                            RuntimeDispatchErrorKind::NetworkDenied,
+                        ));
+                    };
                     let provider =
                         ExtensionId::new(package_ref.id.as_str().to_string()).map_err(|_| {
                             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
@@ -221,7 +223,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activate_with_credential_gate_for_owner(
                         package_ref,
                         mode,
-                        &request.scope.user_id,
+                        &request.scope,
                         credential_gate,
                     )
                     .await
@@ -376,8 +378,9 @@ mod tests {
     };
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
-        ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
-        PermissionMode, Principal, ResourceScope, RuntimeKind, SecretHandle, TrustClass, UserId,
+        ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy,
+        NetworkTargetPattern, PermissionMode, Principal, ResourceScope, RuntimeKind, SecretHandle,
+        TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeFailureKind, SurfaceKind,
@@ -1366,8 +1369,10 @@ mod tests {
         extension_management: &RebornLocalExtensionManagementPort,
         owner: &UserId,
     ) -> Vec<String> {
+        let scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
+            .expect("valid owner scope");
         extension_management
-            .active_model_visible_capabilities(owner)
+            .active_model_visible_capabilities(&scope)
             .await
             .expect("active extension capabilities")
             .into_iter()

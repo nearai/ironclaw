@@ -358,6 +358,9 @@ mod tests {
             "user-notion.notion-search",
             "mcp_user_notion_access_token",
             ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
                 owner: UserId::new("owner-1").unwrap(),
             },
         )));
@@ -389,6 +392,9 @@ mod tests {
             "user-notion.notion-search",
             "mcp_user_notion_access_token",
             ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
                 owner: UserId::new("owner-1").unwrap(),
             },
         )));
@@ -447,6 +453,9 @@ mod tests {
             "user-notion.notion-search",
             "mcp_user_notion_access_token",
             ManifestSource::UserRegistered {
+                tenant_id: TenantId::from_trusted(
+                    ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                ),
                 owner: UserId::new("owner-1").unwrap(),
             },
         )));
@@ -499,6 +508,9 @@ mod tests {
                 "notion.notion-search",
                 "mcp_notion_access_token",
                 ManifestSource::UserRegistered {
+                    tenant_id: TenantId::from_trusted(
+                        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+                    ),
                     owner: UserId::new("owner-1").unwrap(),
                 },
             )));

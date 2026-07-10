@@ -1682,6 +1682,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_tools_list_result_rejects_non_object_annotations() {
+        let mut tool = valid_tool("search", json!({"type": "object"}));
+        tool["annotations"] = json!(["readOnlyHint"]);
+
+        let error = parse_tools_list_result(&json!({ "tools": [tool] }))
+            .expect_err("annotations must be an object when present");
+
+        assert_eq!(error, "mcp_invalid_tool_list");
+    }
+
+    #[test]
     fn parse_tools_list_result_rejects_unsafe_schema_strings_and_shape() {
         let cases = [
             valid_tool(

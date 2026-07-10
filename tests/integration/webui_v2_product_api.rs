@@ -211,6 +211,7 @@ async fn register_extension_via_webui_api_persists_descriptor_and_installation()
     assert!(
         storage_root
             .join("system/extensions/registered")
+            .join(tenant_id)
             .join(owner_id)
             .join(extension_id)
             .join("manifest.toml")
@@ -241,7 +242,7 @@ async fn register_extension_via_webui_api_persists_descriptor_and_installation()
         .expect("manifest record");
     assert!(matches!(
         manifest.manifest().source,
-        ManifestSource::UserRegistered { ref owner } if owner.as_str() == owner_id
+        ManifestSource::UserRegistered { ref owner, .. } if owner.as_str() == owner_id
     ));
     let ExtensionRuntimeV2::Mcp {
         transport,
@@ -628,6 +629,7 @@ async fn unregister_registered_mcp_after_restart_revokes_only_its_durable_author
     assert!(
         !storage_root
             .join("system/extensions/registered")
+            .join(tenant_id)
             .join(owner_id)
             .join(extension_id.as_str())
             .exists(),
@@ -643,7 +645,7 @@ struct TestOperatorToolCatalog;
 impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
     async fn list_operator_tools(
         &self,
-        _caller: &ironclaw_host_api::UserId,
+        _caller: &ironclaw_host_api::ResourceScope,
     ) -> Vec<RebornOperatorToolInfo> {
         vec![RebornOperatorToolInfo {
             capability_id: CapabilityId::new("builtin.http").expect("capability id"),

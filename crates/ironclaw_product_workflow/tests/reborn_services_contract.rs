@@ -8249,8 +8249,29 @@ struct StaticOperatorToolCatalogForTest {
 
 #[async_trait]
 impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
-    async fn list_operator_tools(&self, _caller: &UserId) -> Vec<RebornOperatorToolInfo> {
+    async fn list_operator_tools(&self, _caller: &ResourceScope) -> Vec<RebornOperatorToolInfo> {
         self.tools.clone()
+    }
+}
+
+#[derive(Clone)]
+struct SameUserTenantOperatorToolCatalog;
+
+#[async_trait]
+impl RebornOperatorToolCatalog for SameUserTenantOperatorToolCatalog {
+    async fn list_operator_tools(&self, caller: &ResourceScope) -> Vec<RebornOperatorToolInfo> {
+        let (capability_id, provider) = match caller.tenant_id.as_str() {
+            "tenant-alpha" => ("tool.tenant_alpha", "extension.tenant_alpha"),
+            "tenant-beta" => ("tool.tenant_beta", "extension.tenant_beta"),
+            _ => return Vec::new(),
+        };
+        vec![RebornOperatorToolInfo {
+            capability_id: CapabilityId::new(capability_id).expect("capability id"),
+            provider: ExtensionId::new(provider).expect("provider id"),
+            description: Arc::from("tenant-scoped test tool"),
+            default_permission: PermissionMode::Ask,
+            effects: Arc::from([EffectKind::ExecuteCode]),
+        }]
     }
 }
 
@@ -8816,6 +8837,82 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
             "global"
         );
     }
+}
+
+#[tokio::test]
+async fn operator_config_same_user_different_tenants_hides_catalog_schema() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_approval_config(
+        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(SameUserTenantOperatorToolCatalog),
+    );
+    let alpha = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("same-user").expect("user"),
+        None,
+        None,
+    );
+    let beta = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-beta").expect("tenant"),
+        UserId::new("same-user").expect("user"),
+        None,
+        None,
+    );
+
+    let alpha_config = services
+        .list_operator_config(alpha.clone())
+        .await
+        .expect("alpha operator config");
+    let beta_config = services
+        .list_operator_config(beta.clone())
+        .await
+        .expect("beta operator config");
+    assert!(
+        alpha_config
+            .entries
+            .iter()
+            .any(|entry| entry.key == "tool.tool.tenant_alpha")
+    );
+    assert!(
+        !alpha_config
+            .entries
+            .iter()
+            .any(|entry| entry.key == "tool.tool.tenant_beta")
+    );
+    assert!(
+        beta_config
+            .entries
+            .iter()
+            .any(|entry| entry.key == "tool.tool.tenant_beta")
+    );
+    assert!(
+        !beta_config
+            .entries
+            .iter()
+            .any(|entry| entry.key == "tool.tool.tenant_alpha")
+    );
+
+    let error = services
+        .get_operator_config_key(beta.clone(), "tool.tool.tenant_alpha".to_string())
+        .await
+        .expect_err("same user in another tenant must not read alpha tool schema");
+    assert_eq!(error.status_code, 400);
+    let error = services
+        .set_operator_config_key(
+            beta,
+            "tool.tool.tenant_alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "disabled" }),
+            },
+        )
+        .await
+        .expect_err("same user in another tenant must not mutate alpha tool config");
+    assert_eq!(error.status_code, 400);
 }
 
 #[tokio::test]

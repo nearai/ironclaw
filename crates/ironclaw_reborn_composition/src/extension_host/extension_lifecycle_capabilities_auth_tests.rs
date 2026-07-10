@@ -298,8 +298,10 @@ async fn active_extension_capability_ids(
     extension_management: &RebornLocalExtensionManagementPort,
     owner: &UserId,
 ) -> Vec<String> {
+    let scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
+        .expect("valid owner scope");
     extension_management
-        .active_model_visible_capabilities(owner)
+        .active_model_visible_capabilities(&scope)
         .await
         .expect("active extension capabilities") // safety: test-only helper asserts fixture setup.
         .into_iter()

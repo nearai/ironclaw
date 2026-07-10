@@ -8,9 +8,17 @@ use ironclaw_host_api::{
 pub(super) struct HostedMcpDiscoveryEgress {
     methods: std::sync::Mutex<Vec<String>>,
     credential_counts: std::sync::Mutex<Vec<usize>>,
+    tool_name: Option<String>,
 }
 
 impl HostedMcpDiscoveryEgress {
+    pub(super) fn with_tool_name(tool_name: impl Into<String>) -> Self {
+        Self {
+            tool_name: Some(tool_name.into()),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn methods(&self) -> Vec<String> {
         self.methods
             .lock()
@@ -79,7 +87,7 @@ impl RuntimeHttpEgress for HostedMcpDiscoveryEgress {
                 serde_json::json!({
                     "tools": [
                         {
-                            "name": "live-search",
+                            "name": self.tool_name.as_deref().unwrap_or("live-search"),
                             "description": "Search live Notion content",
                             "inputSchema": {
                                 "type": "object",

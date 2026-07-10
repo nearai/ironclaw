@@ -40,9 +40,9 @@ use std::sync::Arc;
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
     HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
+    RequestedTrustClass, ResourceProfile, ResourceScope, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass, UserId,
+    TenantId, TrustClass, UserId,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -128,10 +128,11 @@ pub enum ManifestSource {
     /// eligible for effective FirstParty/System in v2.
     RegistryInstalled,
     /// Registered by a specific user through the MCP-registration store
-    /// (`/system/extensions/registered/<owner>/<id>/`). Never eligible for
-    /// effective FirstParty/System. Carries the owning [`UserId`] so
-    /// downstream storage/composition code can scope visibility per owner.
-    UserRegistered { owner: UserId },
+    /// (`/system/extensions/registered/<tenant>/<owner>/<id>/`). Never
+    /// eligible for effective FirstParty/System. Carries the owning tenant
+    /// and user so downstream storage/composition code can scope visibility
+    /// per tenant-user owner.
+    UserRegistered { tenant_id: TenantId, owner: UserId },
 }
 
 impl ManifestSource {
@@ -155,7 +156,21 @@ impl ManifestSource {
     /// private installs land.
     pub fn visible_to_caller(&self, caller: Option<&UserId>) -> bool {
         match self {
-            Self::UserRegistered { owner } => caller.is_some_and(|caller| caller == owner),
+            Self::UserRegistered { owner, .. } => caller.is_some_and(|caller| caller == owner),
+            _ => true,
+        }
+    }
+
+    /// Tenant-aware visibility for registered manifests. New lifecycle paths
+    /// must use this method so equal user ids in different tenants cannot
+    /// share a registration.
+    pub fn visible_to_resource_scope(&self, caller: Option<&ResourceScope>) -> bool {
+        match self {
+            Self::UserRegistered {
+                tenant_id, owner, ..
+            } => {
+                caller.is_some_and(|scope| &scope.tenant_id == tenant_id && &scope.user_id == owner)
+            }
             _ => true,
         }
     }

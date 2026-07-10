@@ -69,7 +69,7 @@ impl LocalDevApprovalLeaseTermsProvider {
         };
         let surface = self
             .extension_surface_source
-            .snapshot(&gate.resource_scope().user_id)
+            .snapshot(gate.resource_scope())
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
@@ -104,7 +104,7 @@ impl LocalDevApprovalLeaseTermsProvider {
     ) -> Result<bool, ProductWorkflowError> {
         let surface = self
             .extension_surface_source
-            .snapshot(&gate.resource_scope().user_id)
+            .snapshot(gate.resource_scope())
             .await
             .map_err(|error| {
                 tracing::error!(%error, "local-dev extension approval surface is unavailable");

@@ -1618,7 +1618,7 @@ where
 /// that has a `manifest.toml`, tagging each with `source`. Reused for both
 /// the shared first-party catalog root (`/system/extensions`, `source =
 /// HostBundled`) and an owner's registered-extension subtree
-/// (`/system/extensions/registered/<owner>`, `source = UserRegistered`) —
+/// (`/system/extensions/registered/<tenant>/<owner>`, `source = UserRegistered`) —
 /// see [`crate::extension_host::registered_extension_store`]. The resulting
 /// package's `root` is always the canonical `/system/extensions/<id>` path
 /// (see [`canonical_extension_root`]), never `root` itself, so a package
