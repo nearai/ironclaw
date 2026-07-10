@@ -26,6 +26,12 @@ use crate::extension_host::extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,
 };
+use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::{
+    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
+    SLACK_EXTENSION_REMOVAL_CHANNEL_ID, SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
+};
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
@@ -173,6 +179,9 @@ pub(crate) struct AvailableExtensionPackage {
     /// first-party/system trust and runtime claims.
     pub(crate) source: ManifestSource,
     pub(crate) package: ExtensionPackage,
+    /// Trusted host-catalog declarations for mandatory external cleanup before
+    /// local removal. Never inferred from manifest presentation metadata.
+    pub(crate) cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
     /// Surface kinds projected once from the manifest record at construction and
     /// cached here. Deliberately not re-derived in `summary()`: the projection
     /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
@@ -605,7 +614,15 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
+    let mut package =
+        bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())?;
+    package
+        .cleanup_requirements
+        .push(ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID)?,
+            ExtensionRemovalChannelId::new(SLACK_EXTENSION_REMOVAL_CHANNEL_ID)?,
+        ));
+    Ok(package)
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -787,6 +804,7 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         source: ManifestSource::HostBundled,
         package,
+        cleanup_requirements: Vec::new(),
         surface_kinds,
         assets,
     })
@@ -1717,6 +1735,7 @@ where
         // first-party trust (#5459 review: import → restart → install).
         source: ManifestSource::InstalledLocal,
         package,
+        cleanup_requirements: Vec::new(),
         surface_kinds,
         assets,
     }))
@@ -2651,6 +2670,39 @@ mod tests {
         assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn bundled_extension_removal_cleanup_metadata_is_explicit_and_slack_personal_only() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let slack = catalog
+            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap())
+            .unwrap();
+        let slack_bot = catalog
+            .resolve(
+                &LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap(),
+            )
+            .unwrap();
+        let github = catalog
+            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap())
+            .unwrap();
+
+        assert_eq!(
+            slack.cleanup_requirements,
+            vec![ExtensionRemovalCleanupRequirement::channel_connection(
+                ExtensionRemovalCleanupAdapterId::new("slack.personal_connection").unwrap(),
+                ExtensionRemovalChannelId::new("slack").unwrap(),
+            )]
+        );
+        assert!(
+            slack_bot.cleanup_requirements.is_empty(),
+            "operator-owned slack_bot must not inherit personal cleanup"
+        );
+        assert!(
+            github.cleanup_requirements.is_empty(),
+            "ordinary bundled packages default to no host-owned cleanup"
+        );
+    }
+
     #[test]
     fn non_channel_product_adapter_surface_does_not_project_channel_surface() {
         const MANIFEST: &str = r#"
@@ -2931,6 +2983,10 @@ credential_handle = "channel_ext_token"
             vec![LifecycleExtensionSurfaceKind::ExternalChannel],
             "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
         );
+        assert!(
+            package.cleanup_requirements.is_empty(),
+            "ExternalChannel presentation metadata must not infer host-owned cleanup"
+        );
     }
 
     #[derive(Default)]
@@ -3108,6 +3164,7 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             source: ManifestSource::HostBundled,
             package,
+            cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
