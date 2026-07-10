@@ -148,7 +148,7 @@ test("handleDeleteThread deletes the requested thread and refreshes the list", a
         deleted.push(threadId);
       },
       queryClient: {
-        invalidateQueries: (request) => invalidations.push(request),
+        invalidateQueries: (request) => invalidations.push([...request.queryKey]),
       },
     },
   );
@@ -156,7 +156,7 @@ test("handleDeleteThread deletes the requested thread and refreshes the list", a
   await hook.deleteThread("thread-old");
 
   assert.deepEqual(deleted, ["thread-old"]);
-  assert.equal(JSON.stringify(invalidations), JSON.stringify([{ queryKey: ["threads"] }]));
+  assert.deepEqual(invalidations, [["threads"]]);
 });
 
 test("normalizes raw thread id titles out of sidebar records", () => {
