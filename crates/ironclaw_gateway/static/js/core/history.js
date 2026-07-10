@@ -64,6 +64,7 @@ function loadHistory(before) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
+        const isInProgressTurn = !!(data.in_progress && isSameInProgressTurn(turn, data.in_progress));
         if (turn.user_input) {
           let renderedPending = false;
           const pendingQueue = pendingByContent && pendingByContent.get(turn.user_input);
@@ -81,6 +82,7 @@ function loadHistory(before) {
               const div = addMessage('user', nextPending.content, {
                 attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
                 copyText: nextPending.copyText || nextPending.content,
+                liveTurnActivityAnchor: isInProgressTurn,
               });
               if (nextPending.images && nextPending.images.length > 0) {
                 appendImagesToMessage(div, nextPending.images);
@@ -90,7 +92,9 @@ function loadHistory(before) {
             pendingQueue.shift();
           }
           if (!renderedPending) {
-            addMessage('user', turn.user_input);
+            addMessage('user', turn.user_input, {
+              liveTurnActivityAnchor: isInProgressTurn,
+            });
           }
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
@@ -132,13 +136,16 @@ function loadHistory(before) {
             const div = addMessage('user', nextPending.content, {
               attachments: Array.isArray(nextPending.attachments) ? nextPending.attachments : [],
               copyText: nextPending.copyText || nextPending.content,
+              liveTurnActivityAnchor: true,
             });
             if (nextPending.images && nextPending.images.length > 0) {
               appendImagesToMessage(div, nextPending.images);
             }
             pendingQueue.shift();
           } else {
-            addMessage('user', data.in_progress.user_input);
+            addMessage('user', data.in_progress.user_input, {
+              liveTurnActivityAnchor: true,
+            });
           }
         }
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
@@ -154,6 +161,7 @@ function loadHistory(before) {
           const div = addMessage('user', p.content, {
             attachments: Array.isArray(p.attachments) ? p.attachments : [],
             copyText: p.copyText || p.content,
+            liveTurnActivityAnchor: true,
           });
           if (p.images && p.images.length > 0) {
             appendImagesToMessage(div, p.images);
@@ -259,6 +267,9 @@ function createMessageElement(role, content, options) {
   const opts = options || {};
   const div = document.createElement('div');
   div.className = 'message ' + role;
+  if (role === 'user' && opts.liveTurnActivityAnchor) {
+    div.setAttribute('data-live-turn-activity-anchor', 'true');
+  }
 
   const ts = document.createElement('span');
   ts.className = 'message-timestamp';

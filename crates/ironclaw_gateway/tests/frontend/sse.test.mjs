@@ -56,6 +56,7 @@ function createHarness() {
     },
     clearInterval: () => {},
     clearTimeout: () => {},
+    clearLiveTurnActivityAnchors: () => calls.push("clearLiveTurnActivityAnchors"),
     cleanupConnectionState: () => {},
     console,
     currentThreadId: "thread-1",
@@ -90,7 +91,7 @@ function createHarness() {
   };
 
   vm.runInNewContext(
-    readFileSync(new URL("./sse.js", import.meta.url), "utf8"),
+    readFileSync(new URL("../../static/js/core/sse.js", import.meta.url), "utf8"),
     context,
   );
 
@@ -121,6 +122,10 @@ test("connectSSE appends fallback when Done has no response and history stays si
   assert.deepEqual(harness.calls.filter((call) => call === "loadHistory"), [
     "loadHistory",
   ]);
+  assert.deepEqual(
+    harness.calls.filter((call) => call === "clearLiveTurnActivityAnchors"),
+    ["clearLiveTurnActivityAnchors"],
+  );
   assert.equal(harness.messages.length, 2);
   assert.equal(harness.messages[1].role, "system");
   assert.equal(

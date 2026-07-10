@@ -1,4 +1,5 @@
 const MAX_TOOL_ACTIVITY_RESULT_CHARS = 1000;
+const LIVE_TURN_ACTIVITY_ANCHOR_ATTR = 'data-live-turn-activity-anchor';
 
 function formatToolActivityDurationMs(durationMs) {
   if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return '';
@@ -262,17 +263,41 @@ function trailingAssistantMessageAnchor(container) {
   return child.classList.contains('assistant') ? child : null;
 }
 
-// Live tool events can arrive after the same turn's assistant response has
-// rendered. Insert a new activity group before only a trailing assistant bubble
-// so the visible turn stays user -> activity -> final reply; once any other
-// child follows that reply, keep normal append order for the newer UI state.
-function appendActivityGroupInTurnOrder(container, group) {
+function hasLiveTurnActivityAnchorBefore(container, anchor) {
+  const anchorIndex = Array.prototype.indexOf.call(container.children, anchor);
+  if (anchorIndex < 0) return false;
+  for (let index = anchorIndex - 1; index >= 0; index--) {
+    const child = container.children[index];
+    if (
+      child.classList.contains('message')
+      && child.classList.contains('user')
+      && child.getAttribute(LIVE_TURN_ACTIVITY_ANCHOR_ATTR) === 'true'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Delayed tool events from the current browser-submitted turn can arrive after
+// the assistant response has rendered. Reorder only when the caller explicitly
+// requests late-tool placement and the transcript still has that live user
+// anchor; read-only/routine live turns without a user bubble append normally.
+function appendActivityGroupInTurnOrder(container, group, placement) {
   const anchor = trailingAssistantMessageAnchor(container);
-  if (anchor) {
+  let insertedBeforeAssistant = false;
+  if (
+    placement
+    && placement.allowBeforeTrailingAssistant
+    && anchor
+    && hasLiveTurnActivityAnchorBefore(container, anchor)
+  ) {
     container.insertBefore(group, anchor);
+    insertedBeforeAssistant = true;
   } else {
     container.appendChild(group);
   }
+  return insertedBeforeAssistant;
 }
 
 function createToolActivityController(options) {
@@ -339,13 +364,25 @@ function createToolActivityController(options) {
     entriesByName = new Map();
   }
 
-  function getOrCreateGroup() {
+  function clearLiveTurnAnchors() {
+    const container = getContainer();
+    if (!container || !container.children) return;
+    for (let index = 0; index < container.children.length; index++) {
+      const child = container.children[index];
+      if (child.classList.contains('message')) {
+        child.removeAttribute(LIVE_TURN_ACTIVITY_ANCHOR_ATTR);
+      }
+    }
+  }
+
+  function getOrCreateGroup(placement) {
     if (activeGroup) return activeGroup;
     const container = getContainer();
     if (!container) return null;
     activeGroup = document.createElement('div');
     activeGroup.className = 'activity-group';
-    appendActivityGroupInTurnOrder(container, activeGroup);
+    const insertedBeforeAssistant = appendActivityGroupInTurnOrder(container, activeGroup, placement);
+    if (insertedBeforeAssistant) clearLiveTurnAnchors();
     scrollToBottom();
     return activeGroup;
   }
@@ -379,9 +416,9 @@ function createToolActivityController(options) {
     }
   }
 
-  function startTool(event) {
+  function startTool(event, placement) {
     if (thinkingEl) thinkingEl.style.display = 'none';
-    const group = getOrCreateGroup();
+    const group = getOrCreateGroup(placement);
     if (!group) return;
 
     const entry = {
@@ -521,6 +558,7 @@ function createToolActivityController(options) {
     completeTool,
     setResult,
     finalizeGroup,
+    clearLiveTurnAnchors,
     reset,
   };
 }
@@ -538,7 +576,9 @@ function removeActivityThinking() {
 }
 
 function addToolCard(toolEvent) {
-  _chatToolActivity.startTool(toolEvent);
+  _chatToolActivity.startTool(toolEvent, {
+    allowBeforeTrailingAssistant: true,
+  });
 }
 
 function completeToolCard(toolEvent) {
@@ -551,6 +591,11 @@ function setToolCardOutput(toolEvent) {
 
 function finalizeActivityGroup() {
   _chatToolActivity.finalizeGroup();
+}
+
+function clearLiveTurnActivityAnchors() {
+  if (!_chatToolActivity || typeof _chatToolActivity.clearLiveTurnAnchors !== 'function') return;
+  _chatToolActivity.clearLiveTurnAnchors();
 }
 
 function humanizeToolName(rawName) {

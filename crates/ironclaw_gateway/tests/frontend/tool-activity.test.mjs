@@ -25,7 +25,7 @@ function createToolActivityHarness(initialChildren = []) {
     setInterval: () => 1,
   };
   vm.runInNewContext(
-    readFileSync(new URL("./tool-activity.js", import.meta.url), "utf8"),
+    readFileSync(new URL("../../static/js/core/tool-activity.js", import.meta.url), "utf8"),
     context,
   );
 
@@ -38,17 +38,23 @@ function createToolActivityHarness(initialChildren = []) {
 }
 
 test("tool activity started after a trailing assistant reply renders before that reply", () => {
+  const user = createMessageElement("user");
+  user.setAttribute("data-live-turn-activity-anchor", "true");
   const { container, controller } = createToolActivityHarness([
-    createMessageElement("user"),
+    user,
     createMessageElement("assistant"),
   ]);
 
-  controller.startTool({
-    call_id: "call-extension-search",
-    name: "extension_search",
-  });
+  controller.startTool(
+    {
+      call_id: "call-extension-search",
+      name: "extension_search",
+    },
+    { allowBeforeTrailingAssistant: true },
+  );
 
   assert.deepEqual(chatChildKinds(container), ["user", "activity", "assistant"]);
+  assert.equal(user.getAttribute("data-live-turn-activity-anchor"), null);
 
   controller.completeTool({
     call_id: "call-extension-search",
@@ -62,16 +68,21 @@ test("tool activity started after a trailing assistant reply renders before that
 });
 
 test("tool activity after a follow-up user message stays with the active follow-up turn", () => {
+  const user = createMessageElement("user");
+  user.setAttribute("data-live-turn-activity-anchor", "true");
   const { container, controller } = createToolActivityHarness([
-    createMessageElement("user"),
+    user,
     createMessageElement("assistant"),
     createMessageElement("user"),
   ]);
 
-  controller.startTool({
-    call_id: "call-calendar",
-    name: "calendar",
-  });
+  controller.startTool(
+    {
+      call_id: "call-calendar",
+      name: "calendar",
+    },
+    { allowBeforeTrailingAssistant: true },
+  );
 
   assert.deepEqual(chatChildKinds(container), [
     "user",
@@ -81,19 +92,55 @@ test("tool activity after a follow-up user message stays with the active follow-
   ]);
 });
 
+test("tool activity without a live user anchor appends after a trailing assistant reply", () => {
+  const { container, controller } = createToolActivityHarness([
+    createMessageElement("user"),
+    createMessageElement("assistant"),
+  ]);
+
+  controller.startTool(
+    {
+      call_id: "call-readonly",
+      name: "routine_tool",
+    },
+    { allowBeforeTrailingAssistant: true },
+  );
+
+  assert.deepEqual(chatChildKinds(container), ["user", "assistant", "activity"]);
+});
+
+test("default activity groups append after a trailing assistant reply", () => {
+  const user = createMessageElement("user");
+  user.setAttribute("data-live-turn-activity-anchor", "true");
+  const { container, controller } = createToolActivityHarness([
+    user,
+    createMessageElement("assistant"),
+  ]);
+
+  controller.getOrCreateGroup();
+
+  assert.deepEqual(chatChildKinds(container), ["user", "assistant", "activity"]);
+  assert.equal(user.getAttribute("data-live-turn-activity-anchor"), "true");
+});
+
 test("tool activity does not skip non-message cards after an assistant reply", () => {
   const card = new FakeElement("div");
   card.className = "auth-card";
+  const user = createMessageElement("user");
+  user.setAttribute("data-live-turn-activity-anchor", "true");
   const { container, controller } = createToolActivityHarness([
-    createMessageElement("user"),
+    user,
     createMessageElement("assistant"),
     card,
   ]);
 
-  controller.startTool({
-    call_id: "call-drive",
-    name: "drive",
-  });
+  controller.startTool(
+    {
+      call_id: "call-drive",
+      name: "drive",
+    },
+    { allowBeforeTrailingAssistant: true },
+  );
 
   assert.deepEqual(chatChildKinds(container), [
     "user",
