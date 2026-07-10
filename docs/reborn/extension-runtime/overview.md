@@ -498,6 +498,17 @@ If a future vendor genuinely defeats the descriptor, add a narrow quirk hook
 
 ## 5. Core flows
 
+Four host pipelines wrap the extension surfaces. Each pipeline is implemented
+once and owns semantics, security, and reliability; the extension contributes
+one narrow call — or nothing:
+
+| Flow | Host pipeline (once) | Extension contribution |
+| --- | --- | --- |
+| Tool call | dispatcher (§5.2) | `ToolAdapter::invoke` |
+| Inbound message | ingress router (§5.3) | `ChannelAdapter::inbound` |
+| Outbound message | delivery coordinator (§5.4) | `ChannelAdapter::deliver` |
+| Auth | auth engine (§5.5) | recipe data only |
+
 ### 5.1 Activation
 
 1. Load the persisted resolved record (compile the manifest if new/changed;
@@ -562,16 +573,69 @@ Conversation binding honors the channel's declared `conversation_model`
 installations on one route the host verifies each candidate's secret (bounded,
 small constant); hints are unnecessary at current scale.
 
-### 5.4 Outbound delivery
+### 5.4 Outbound delivery — the coordinator
 
-Every user-visible channel output — final reply, progress, gate/auth prompt,
-failure/connect/busy notice, cleanup — is a semantic intent entering **one
-delivery coordinator** (product workflow). It validates the target, persists
-the attempt, resolves the bound channel from the active snapshot, and calls
-`deliver`. The coordinator is the **sole writer of delivery state**: retries,
-backoff, dedupe, drain. A crash after vendor send and before persistence
-records `Unknown` — never a blind resend. No direct product send path exists
-anywhere else.
+Sending a message decomposes into two halves, and the split is the design:
+
+- **Semantics and reliability** — which target, is it allowed, was it already
+  sent, persist the attempt, retry with backoff, crash recovery, drain on
+  shutdown. Identical for every channel → the **delivery coordinator**, one
+  host component in product workflow.
+- **Vendor mechanics** — Block Kit vs plain text, message splitting, which API
+  method, threading syntax, DM provisioning, vendor error mapping. Different
+  per channel → the adapter's **`deliver()`**.
+
+Every user-visible channel output is a semantic intent, not an API call:
+`FinalReply`, `Progress`, `GatePrompt`, `AuthPrompt`, `FailureNotice`,
+`ConnectRequired`, `Working`, `Cleanup` (e.g. delete the working message),
+`TriggeredDelivery` (routines/heartbeat). Emitters never know what channel the
+user is on. One delivery, end to end:
+
+1. An intent is emitted ("FinalReply for run X").
+2. The coordinator resolves the target: reply where the message came from
+   (via the stored `reply_context`) or a stored preference target for
+   proactive sends. Unauthorized or unavailable targets fail closed.
+3. It persists a delivery attempt (`Prepared` → `Sending`) **before** any
+   network call.
+4. It resolves the bound channel adapter from the active snapshot
+   (generation-pinned; an in-flight delivery survives an upgrade).
+5. `adapter.deliver(envelope, egress)` renders and sends; the host injects
+   credentials.
+6. The adapter returns a structured per-part report (sent + vendor message
+   ref / retryable / permanent). It has no store access and cannot mark
+   anything delivered.
+7. The coordinator records the outcome, schedules retries, dedupes, and
+   drains on shutdown.
+
+The **sole-writer rule** is what makes the crash story tractable: if the
+process dies after the vendor accepted a message but before the result was
+recorded, the attempt is found in `Sending` and becomes `Unknown` — never
+blindly resent (that is how users get duplicate messages) unless the vendor
+supports an idempotency key that makes a resend provably safe. This works only
+because exactly one component owns delivery truth, which is why "no direct
+product send path" is an architecture-gated rule.
+
+The coordinator is **not folded into `ChannelAdapter`** for the same reason
+the dispatcher is not folded into `ToolAdapter` and the ingress router is not
+folded into `inbound()`: folding it in would hand every channel its own copy
+of retry/persistence/crash semantics, give adapters store access (a buggy or
+malicious adapter could mark failures delivered), and something above the
+adapter must resolve the target before an adapter can even be chosen. From an
+extension author's perspective the coordinator is invisible plumbing:
+envelope in, report out.
+
+Boundary notes: `slack.send_message` (the tool) is the *model* acting as the
+user — a job side effect through the tool pipeline — never how the
+assistant's replies are delivered. The WebUI is not a delivery target: it
+renders run state directly; the coordinator exists for external channels
+reached through vendor APIs.
+
+This is a promotion, not an invention: the lower layer already exists
+(`ironclaw_outbound`: target policy, preferences, attempt types, stores; plus
+`outbound_delivery.rs` in product workflow). The coordinator unifies those
+pieces and absorbs the generic halves of today's Slack-fused
+`slack_delivery.rs` — completing the decomposition that file's own header
+already tracks (#4818).
 
 ### 5.5 Auth connect
 
