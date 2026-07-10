@@ -22,22 +22,19 @@
 
 ---
 
-## Task 1: Write the complete RED regression suite
+## Task 1: Capture the current behavior RED regressions
 
 **Files:**
 
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle_capabilities.rs`
 
 ### Steps
 
-- [ ] Add catalog tests proving `slack` has one explicit personal cleanup requirement while `slack_bot`, ordinary packages, and a generic `ExternalChannel` package have none.
 - [ ] Replace `extension_remove_fails_required_cleanup_when_channel_facade_is_unset` with a test expecting a generic external channel to remove successfully without a facade, including package-file, manifest, and installation assertions.
-- [ ] Add lifecycle tests for exact adapter dispatch, unrelated-adapter non-invocation, missing adapter fail-closed behavior, adapter-error fail-closed behavior, authenticated-actor scoping, and cleanup-before-file-deletion ordering.
-- [ ] Extend the production-shaped caller test so WebUI and `builtin.extension_remove` each remove a generic channel and never call Slack cleanup.
 - [ ] Update the Slack caller double to count `caller_channel_connections` calls, then assert Slack removal calls disconnect but never status discovery.
-- [ ] Run each new focused test against current production code and record the expected failures in the task report. Do not modify production behavior in this task.
+- [ ] Add a lifecycle regression showing that a registered Slack facade must not receive a disconnect for an unrelated generic channel.
+- [ ] Run each new focused test against current production code and record the expected failures in the task report. Keep this task compileable and do not modify production behavior.
 - [ ] Commit the red tests as `test(reborn): specify explicit extension removal cleanup`.
 
 ## Task 2: Implement explicit cleanup and delete obsolete channel logic
@@ -52,11 +49,15 @@
 
 ### Steps
 
+- [ ] Before implementing each production seam below, add and run the corresponding test so it fails for the expected reason. Record every RED and GREEN command/result in the task report.
+- [ ] Add catalog tests proving `slack` has one explicit personal cleanup requirement while `slack_bot`, ordinary packages, and a generic `ExternalChannel` package have none.
 - [ ] Define validated typed adapter/channel ids, `ExtensionRemovalCleanupBinding`, and `ExtensionRemovalCleanupRequirement`.
 - [ ] Add cleanup requirements to `AvailableExtensionPackage`, defaulting to empty for filesystem and ordinary bundled packages.
 - [ ] Attach Slack personal cleanup only in `slack_package()`; do not infer it inside removal.
 - [ ] Implement an adapter trait/registry that rejects duplicates and unknown required adapters. Its cleanup call receives trusted `ResourceScope` plus the authenticated actor.
+- [ ] Add lifecycle tests for exact adapter dispatch, unrelated-adapter non-invocation, missing adapter fail-closed behavior, adapter-error fail-closed behavior, authenticated-actor scoping, and cleanup-before-file-deletion ordering before implementing the registry wiring.
 - [ ] Implement the Slack adapter over the existing late-bound channel facade. Call `disconnect_channel_for_caller` directly; never call `caller_channel_connections`.
+- [ ] Extend the production-shaped caller test before wiring the final path so WebUI and `builtin.extension_remove` each remove a generic channel and never call Slack cleanup.
 - [ ] Rewire `RebornLocalExtensionManagementPort::remove` to resolve explicit requirements, execute them in deterministic order, then run the existing local and credential cleanup behavior.
 - [ ] Delete every legacy channel-removal item named in the design spec, including credential-based channel probing and the management-port channel-facade field/builder.
 - [ ] Run all Task 1 tests and confirm they turn green.
