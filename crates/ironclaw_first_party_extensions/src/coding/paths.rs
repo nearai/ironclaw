@@ -41,25 +41,41 @@ fn resolve_path(
     let mounts = request
         .mounts
         .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
-    let scoped_path = mounts
-        .scoped_path(scoped_path_input(path))
-        .map_err(|_| input_error())?;
+    // Name the offending path and the roots that DO exist: an agent that
+    // targeted an out-of-scope absolute path (e.g. one copied verbatim from a
+    // task description) can only correct course when the rejection says so.
+    let scoped_path = mounts.scoped_path(scoped_path_input(path)).map_err(|_| {
+        CodingCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::InputEncode,
+            format!(
+                "path {path} is not under an available scoped root ({})",
+                available_roots(mounts)
+            ),
+        )
+    })?;
     if is_sensitive_scoped_path(scoped_path.as_str()) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let (virtual_path, grant) = mounts
-        .resolve_with_grant(&scoped_path)
-        .map_err(|_| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
+    let (virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).map_err(|_| {
+        CodingCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::FilesystemDenied,
+            format!(
+                "path {path} does not resolve inside an available scoped root ({})",
+                available_roots(mounts)
+            ),
+        )
+    })?;
     if is_sensitive_resolved_path(&virtual_path) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if !operation_allowed(&grant.permissions, operation) {
-        return Err(CodingCapabilityError::new(
+        return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
+            format!("the mount for {path} does not permit this operation"),
         ));
     }
     Ok(ResolvedPath {
@@ -67,6 +83,16 @@ fn resolve_path(
         virtual_path,
         grant: grant.clone(),
     })
+}
+
+fn available_roots(mounts: &ironclaw_host_api::MountView) -> String {
+    let mut roots: Vec<&str> = mounts
+        .mounts
+        .iter()
+        .map(|mount| mount.alias.as_str())
+        .collect();
+    roots.sort_unstable();
+    roots.join(", ")
 }
 
 fn scoped_path_input(path: &str) -> String {

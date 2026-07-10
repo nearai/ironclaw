@@ -441,4 +441,56 @@ mod tests {
         )])
         .expect("mount view")
     }
+
+    #[tokio::test]
+    async fn out_of_scope_path_rejection_names_the_path_and_available_roots() {
+        // A model that targets a path outside the scoped mounts (the classic
+        // failure: absolute paths like /testbed/... from a task description)
+        // must learn WHY the call failed and which roots exist — a bare
+        // input-encode category leaves it retrying the same call blind.
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = workspace_mounts();
+        let scope = ResourceScope::local_default(
+            UserId::new("out-of-scope-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+        let read_capability_id = CapabilityId::new("builtin.read_file").expect("capability id");
+
+        let input = json!({ "path": "/testbed/replacer.go" });
+        let request = super::CodingCapabilityRequest::new(
+            &read_capability_id,
+            super::CodingCapabilityKind::ReadFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &input,
+        );
+        let err = state
+            .dispatch(&request)
+            .await
+            .expect_err("out-of-scope absolute path must be rejected");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::FilesystemDenied);
+        let summary = err
+            .safe_summary()
+            .expect("rejection must carry a model-visible reason");
+        assert!(
+            summary.contains("/testbed/replacer.go"),
+            "summary should name the offending path, got: {summary}"
+        );
+        assert!(
+            summary.contains("/workspace"),
+            "summary should name the available scoped roots, got: {summary}"
+        );
+    }
 }

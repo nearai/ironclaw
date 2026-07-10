@@ -248,27 +248,92 @@ fn reject_unbacked_scoped_workdir(
     ))
 }
 
+/// Bound a failure reason before it becomes the dispatch safe summary. The
+/// summary is validated downstream (fixed category fallback if it fails the
+/// strict validator) and also flows to the model-visible diagnostic detail,
+/// so it must stay short.
+fn bounded_failure_reason(reason: String) -> String {
+    const MAX_CHARS: usize = 512;
+    if reason.chars().count() <= MAX_CHARS {
+        return reason;
+    }
+    let bounded: String = reason.chars().take(MAX_CHARS - 3).collect();
+    format!("{bounded}...")
+}
+
 fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityError {
-    let kind = match error {
-        shell_core::ShellExecutionError::InvalidParameters(_) => {
-            RuntimeDispatchErrorKind::InputEncode
+    // Carry the reason: the model can only repair its call (fix a parameter,
+    // pick another approach) when the failure says what went wrong.
+    let (kind, reason) = match error {
+        shell_core::ShellExecutionError::InvalidParameters(reason) => {
+            (RuntimeDispatchErrorKind::InputEncode, reason)
         }
-        shell_core::ShellExecutionError::NotAuthorized(_) => RuntimeDispatchErrorKind::Client,
+        shell_core::ShellExecutionError::NotAuthorized(reason) => {
+            (RuntimeDispatchErrorKind::Client, reason)
+        }
     };
-    FirstPartyCapabilityError::new(kind)
+    FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))
 }
 
 fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
-    let kind = match error {
-        RuntimeProcessError::Timeout(_) => RuntimeDispatchErrorKind::Resource,
-        RuntimeProcessError::ExecutionFailed(_) => RuntimeDispatchErrorKind::Executor,
+    let (kind, reason) = match error {
+        RuntimeProcessError::Timeout(duration) => (
+            RuntimeDispatchErrorKind::Resource,
+            format!("shell command timed out after {}s", duration.as_secs()),
+        ),
+        RuntimeProcessError::ExecutionFailed(reason) => (
+            RuntimeDispatchErrorKind::Executor,
+            format!("shell execution failed: {reason}"),
+        ),
     };
-    FirstPartyCapabilityError::new(kind)
+    FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dispatch_safe_summary(error: &FirstPartyCapabilityError) -> Option<&str> {
+        match error {
+            FirstPartyCapabilityError::Dispatch { safe_summary, .. } => safe_summary.as_deref(),
+            FirstPartyCapabilityError::AuthRequired { .. } => None,
+        }
+    }
+
+    #[test]
+    fn shell_error_carries_the_invalid_parameter_reason() {
+        // The model must see WHY its shell call was rejected (e.g. which
+        // parameter was missing); a bare input-encode category leaves it
+        // retrying the identical call blind.
+        let error = shell_error(shell_core::ShellExecutionError::InvalidParameters(
+            "missing 'command' parameter".to_string(),
+        ));
+
+        let summary = dispatch_safe_summary(&error).expect("reason must be carried");
+        assert!(
+            summary.contains("missing 'command' parameter"),
+            "summary should carry the parameter reason, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn process_error_carries_timeout_and_execution_reasons() {
+        let timeout = process_error(RuntimeProcessError::Timeout(Duration::from_secs(30)));
+        let summary = dispatch_safe_summary(&timeout).expect("timeout reason must be carried");
+        assert!(
+            summary.contains("timed out"),
+            "summary should describe the timeout, got: {summary}"
+        );
+
+        let failed = process_error(RuntimeProcessError::ExecutionFailed(
+            "spawn failed: no such file".to_string(),
+        ));
+        let summary = dispatch_safe_summary(&failed).expect("execution reason must be carried");
+        assert!(
+            summary.contains("spawn failed: no such file"),
+            "summary should carry the execution failure reason, got: {summary}"
+        );
+    }
 
     #[test]
     fn render_shell_output_preserves_unsaved_output() {

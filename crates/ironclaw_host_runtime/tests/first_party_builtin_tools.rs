@@ -3423,6 +3423,30 @@ async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
 }
 
 #[tokio::test]
+async fn builtin_shell_invalid_input_failure_carries_the_reason_through_the_runtime() {
+    // Test-through-the-caller for the shell_error mapping: the failure the
+    // loop (and ultimately the model) receives must say WHAT was wrong with
+    // the call, not just an input-encode category.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    let summary = failure
+        .safe_summary()
+        .expect("shell invalid-input failure must carry a reason");
+    assert!(
+        summary.contains("missing 'command' parameter"),
+        "failure should carry the parameter reason, got: {summary}"
+    );
+}
+
+#[tokio::test]
 async fn builtin_shell_rejects_timeout_above_manifest_ceiling() {
     let err = invoke_shell(json!({"command": "echo hi", "timeout": 121}))
         .await
