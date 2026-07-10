@@ -22,38 +22,39 @@ import { cn } from "../utils/cn";
 import { Spinner } from "./spinner";
 
 /* ── Gradient assets (Tailwind can't express these) ────────────────── */
+/* The brand-blue ramp lives in the --v2-btn-* tokens (app.css),
+   backfilled from the nux / ironclaw.com landing button language. */
 
-const PRIMARY_BG =
-  "radial-gradient(ellipse 100% 100% at 50% 130%, #4CA7E6 0%, #2882c8 65%)";
-const PRIMARY_HOVER_BG =
-  "radial-gradient(ellipse 200% 220% at 50% 110%, #5BBAF5 0%, #2882c8 60%)";
+const PRIMARY_BG = "var(--v2-btn-primary-bg)";
+const PRIMARY_HOVER_BG = "var(--v2-btn-primary-bg-hover)";
 
 /* ── Base ──────────────────────────────────────────────────────────── */
 
 const BASE =
-  "inline-flex items-center justify-center font-semibold select-none " +
+  "inline-flex items-center justify-center font-medium select-none " +
+  "transition-[background,border-color,color,box-shadow] " +
+  "duration-[var(--v2-duration-fast)] ease-[var(--v2-ease-standard)] " +
   "disabled:cursor-not-allowed disabled:opacity-50 " +
   "focus-visible:outline-none focus-visible:ring-2 " +
   "focus-visible:ring-[var(--v2-accent)]/50 focus-visible:ring-offset-1 " +
   "focus-visible:ring-offset-[var(--v2-canvas)]";
 
 /* ── Size classes ──────────────────────────────────────────────────── */
-/* Compact control-density scale (design system PR #5563): heights and
-   paddings come from the --v2-control-* tokens (app.css) so buttons,
-   inputs, selects, and tab rows align in mixed toolbar rows, and every
-   corner comes from the shared --v2-radius-* ramp — no per-size magic
-   radii. sm 28px / md 32px / lg 36px. */
+/* Compact control-density scale (see "Control density" in app.css +
+   DESIGN_SYSTEM.md §4): heights/paddings come from the
+   --v2-control-* tokens so buttons, inputs, and future controls
+   align in mixed rows. sm 28px / md 32px / lg 36px. */
 
 const SIZES = {
   sm:
     "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] " +
-    "px-[var(--v2-control-px-sm)] text-xs",
+    "px-[var(--v2-control-px-sm)] text-[length:var(--v2-font-size-caption)]",
   md:
     "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] " +
-    "px-[var(--v2-control-px-md)] text-[13px]",
+    "px-[var(--v2-control-px-md)] text-[length:var(--v2-font-size-body-sm)]",
   lg:
     "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] " +
-    "px-[var(--v2-control-px-lg)] text-sm",
+    "px-[var(--v2-control-px-lg)] text-[length:var(--v2-font-size-body)]",
   icon:
     "h-[var(--v2-control-h-md)] w-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)]",
   "icon-sm":
@@ -62,12 +63,17 @@ const SIZES = {
 
 /* ── Variant classes ───────────────────────────────────────────────── */
 // Primary has no Tailwind variant string — it uses inline style for the gradient.
+// Outline is the nux SECONDARY role: translucent accent outline that
+// fills solid blue on hover.
 
 const VARIANTS = {
+  // hover text uses --v2-on-accent, NOT the `text-white` utility: the
+  // legacy Tailwind-alias shim in app.css remaps `.text-white` /
+  // `hover:text-white` to --v2-text-strong (dark ink in light mode).
   outline:
-    "border border-[rgba(76,167,230,0.7)] bg-transparent text-[#8fc8f2] " +
-    "hover:bg-[rgba(76,167,230,0.1)] hover:border-[#4ca7e6] " +
-    "active:bg-[rgba(76,167,230,0.15)]",
+    "border-2 border-[var(--v2-btn-secondary-border)] bg-[var(--v2-btn-secondary-bg)] text-[var(--v2-text-strong)] " +
+    "hover:bg-[var(--v2-accent)] hover:border-[var(--v2-accent)] hover:text-[var(--v2-on-accent)] " +
+    "active:bg-[var(--v2-accent-strong)]",
 
   secondary:
     "border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)] " +
@@ -79,8 +85,8 @@ const VARIANTS = {
     "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
 
   danger:
-    "border border-[rgba(217,101,116,0.6)] bg-transparent text-[#ff6480] " +
-    "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
+    "border border-[color-mix(in_srgb,var(--v2-danger-text)_60%,transparent)] bg-transparent text-[var(--v2-danger-text)] " +
+    "hover:bg-[var(--v2-danger-soft)] active:bg-[var(--v2-danger-soft)]",
 };
 
 type ButtonOwnProps = {
@@ -152,15 +158,19 @@ export function Button({
       <Element
         style={{
           background: PRIMARY_BG,
-          border: "1px solid rgba(76, 167, 230, 0.72)",
+          border: "1px solid var(--v2-btn-primary-border)",
         }}
         className={cn(
           BASE,
           sizeClass,
           fullClass,
           disabledAnchorClass,
-          "relative overflow-hidden text-white group",
-          "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
+          // text-[var(--v2-on-accent)], not `text-white`: the legacy
+          // alias shim in app.css remaps `.text-white` to the theme
+          // ink color, which rendered dark text on the blue gradient
+          // in light mode.
+          "relative overflow-hidden text-[var(--v2-on-accent)] group",
+          "hover:shadow-[var(--v2-shadow-accent-hover)]",
           className
         )}
         disabled={nativeDisabled}
@@ -172,7 +182,10 @@ export function Button({
         <span
           aria-hidden="true"
           style={{ background: PRIMARY_HOVER_BG }}
-          className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100"
+          className={
+            "pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100 " +
+            "transition-opacity duration-[var(--v2-duration-base)] ease-[var(--v2-ease-standard)]"
+          }
         />
         <span className="relative z-10 flex items-center gap-2">
           {loading && <Spinner />}

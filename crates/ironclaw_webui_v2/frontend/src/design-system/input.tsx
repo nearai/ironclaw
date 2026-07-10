@@ -26,13 +26,12 @@ const INPUT_BASE =
   "focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_28%,transparent)] " +
   "disabled:cursor-not-allowed disabled:opacity-50";
 
-/* Sizes mirroring reference AppInput. `sm` is the compact toolbar size:
-   it uses the shared --v2-control-* tokens (like Button md) so a small
-   Select/Input lines up with buttons and tab rows in mixed toolbars. */
+/* Compact control-density scale — same --v2-control-* tokens as
+   Button so mixed control rows align (see DESIGN_SYSTEM.md §4). */
 const INPUT_SIZES = {
-  sm: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-sm)] text-xs",
-  md: "h-[44px] rounded-[14px] px-3.5 text-[13px] md:h-[50px] md:rounded-[16px] md:px-4 md:text-sm",
-  lg: "h-[54px] rounded-[18px] px-4 text-base",
+  sm: "h-[var(--v2-control-h-sm)] rounded-[var(--v2-radius-sm)] px-[var(--v2-control-px-sm)] text-[length:var(--v2-font-size-caption)]",
+  md: "h-[var(--v2-control-h-md)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] text-[length:var(--v2-font-size-body-sm)]",
+  lg: "h-[var(--v2-control-h-lg)] rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-lg)] text-[length:var(--v2-font-size-body)]",
 };
 
 /* ─── Input ───────────────────────────────────────────────────────── */
@@ -69,8 +68,8 @@ export function Textarea({
       rows={rows}
       className={cn(
         INPUT_BASE,
-        "rounded-[14px] px-3.5 py-3 text-[13px] md:rounded-[16px] md:px-4 md:text-sm",
-        "resize-y min-h-[80px]",
+        "rounded-[var(--v2-radius-md)] px-[var(--v2-control-px-md)] py-2 text-[length:var(--v2-font-size-body-sm)]",
+        "resize-y min-h-[72px]",
         error && "border-[var(--v2-danger-text)] focus:ring-[color-mix(in_srgb,var(--v2-danger-text)_28%,transparent)]",
         className
       )}
@@ -84,13 +83,12 @@ export function Textarea({
 export function Select({
   children,
   className = "",
-  wrapperClassName = "w-full",
   size = "md",
   error = false,
   ...rest
 }) {
   return (
-    <div className={cn("relative", wrapperClassName)}>
+    <div className="relative w-full">
       <select
         className={cn(
           INPUT_BASE,

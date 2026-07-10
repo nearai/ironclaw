@@ -164,6 +164,34 @@
   --v2-control-px-lg: 16px;
 
   --v2-on-accent: #ffffff;
+
+  /* Tokens consumed by the shared design-system components
+     (button.tsx / input.tsx adopted verbatim from the design-system
+     branch, PR #5563). Values mirror that branch's app.css exactly so
+     the shared files render identically on both branches. */
+  --v2-font-size-label:      0.6875rem;  /* 11px  tags, badges, eyebrows */
+  --v2-font-size-caption:    0.75rem;    /* 12px  hints, meta, errors */
+  --v2-font-size-body-sm:    0.8125rem;  /* 13px  controls + body (mobile) */
+  --v2-font-size-body:       0.875rem;   /* 14px  controls + body (desktop) */
+
+  --v2-duration-instant: 100ms;  /* hover fills, color shifts */
+  --v2-duration-fast:    150ms;  /* borders, small transforms */
+  --v2-duration-base:    250ms;  /* panel/sheet entrances */
+  --v2-duration-slow:    400ms;  /* large surface transitions */
+  --v2-ease-standard:     ease;
+  --v2-ease-in-out:       cubic-bezier(0.4, 0, 0.2, 1);
+  --v2-ease-out-expo:     cubic-bezier(0.16, 1, 0.3, 1);   /* entrances */
+
+  --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+
+  /* Action-button language (ironclaw.com / nux parity). */
+  --v2-btn-primary-bg:
+    radial-gradient(ellipse 100% 100% at 50% 130%, #4ca7e6 0%, #2882c8 65%);
+  --v2-btn-primary-bg-hover:
+    radial-gradient(ellipse 200% 220% at 50% 110%, #5bbaf5 0%, #2882c8 60%);
+  --v2-btn-primary-border: rgba(76, 167, 230, 0.72);
+  --v2-btn-secondary-border: rgba(76, 167, 230, 0.6);
+  --v2-btn-secondary-bg: rgba(76, 167, 230, 0.05);
 }
 
 /* ── Global resets ───────────────────────────────────────────────── */
