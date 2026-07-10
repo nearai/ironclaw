@@ -223,14 +223,18 @@ impl OAuthDcrProvider {
     pub(crate) async fn start_setup_flow(
         &self,
         flow_manager: &Arc<dyn AuthFlowManager>,
-        scope: AuthProductScope,
-        account_label: CredentialAccountLabel,
-        provider_scopes: &[ProviderScope],
-        continuation: AuthContinuationRef,
-        update_binding: Option<CredentialAccountUpdateBinding>,
-        expires_at: ironclaw_auth::Timestamp,
+        request: DcrSetupFlowRequest,
     ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-        if provider_scopes != self.scopes.as_slice() {
+        let DcrSetupFlowRequest {
+            scope,
+            provider: _,
+            account_label,
+            provider_scopes,
+            continuation,
+            update_binding,
+            expires_at,
+        } = request;
+        if provider_scopes.as_slice() != self.scopes.as_slice() {
             return Err(AuthProductError::BackendUnavailable);
         }
         let flow_id = AuthFlowId::new();
@@ -928,28 +932,11 @@ impl OAuthDcrProviderRegistry {
         flow_manager: &Arc<dyn AuthFlowManager>,
         request: DcrSetupFlowRequest,
     ) -> Result<Option<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
-        let DcrSetupFlowRequest {
-            scope,
-            provider,
-            account_label,
-            provider_scopes,
-            continuation,
-            update_binding,
-            expires_at,
-        } = request;
-        let Some(dcr_provider) = self.providers.get(provider.as_str()) else {
+        let Some(dcr_provider) = self.providers.get(request.provider.as_str()) else {
             return Ok(None);
         };
         dcr_provider
-            .start_setup_flow(
-                flow_manager,
-                scope,
-                account_label,
-                &provider_scopes,
-                continuation,
-                update_binding,
-                expires_at,
-            )
+            .start_setup_flow(flow_manager, request)
             .await
             .map(Some)
     }
@@ -1264,12 +1251,7 @@ mod tests {
         let flow = provider
             .start_setup_flow(
                 &flow_manager,
-                sample_auth_scope(),
-                CredentialAccountLabel::new("work notion").unwrap(),
-                &[],
-                AuthContinuationRef::SetupOnly,
-                None,
-                Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS),
+                sample_setup_flow_request(sample_auth_scope(), Vec::new()),
             )
             .await
             .unwrap();
@@ -1316,12 +1298,10 @@ mod tests {
         let error = provider
             .start_setup_flow(
                 &flow_manager,
-                sample_auth_scope(),
-                CredentialAccountLabel::new("work notion").unwrap(),
-                &[ProviderScope::new("read").unwrap()],
-                AuthContinuationRef::SetupOnly,
-                None,
-                Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS),
+                sample_setup_flow_request(
+                    sample_auth_scope(),
+                    vec![ProviderScope::new("read").unwrap()],
+                ),
             )
             .await
             .expect_err("scope mismatch should be rejected before registration");
@@ -1521,12 +1501,7 @@ mod tests {
         let error = provider
             .start_setup_flow(
                 &flow_manager,
-                scope.clone(),
-                CredentialAccountLabel::new("work notion").unwrap(),
-                &[],
-                AuthContinuationRef::SetupOnly,
-                None,
-                Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS),
+                sample_setup_flow_request(scope.clone(), Vec::new()),
             )
             .await
             .expect_err("second secret write fails");
@@ -1723,6 +1698,21 @@ mod tests {
             },
             ironclaw_auth::AuthSurface::Callback,
         )
+    }
+
+    fn sample_setup_flow_request(
+        scope: AuthProductScope,
+        provider_scopes: Vec<ProviderScope>,
+    ) -> DcrSetupFlowRequest {
+        DcrSetupFlowRequest {
+            scope,
+            provider: AuthProviderId::new("notion").unwrap(),
+            account_label: CredentialAccountLabel::new("work notion").unwrap(),
+            provider_scopes,
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS),
+        }
     }
 
     fn sample_turn_scope() -> TurnScope {

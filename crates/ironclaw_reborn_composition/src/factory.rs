@@ -1275,18 +1275,31 @@ fn auth_continuation_dispatcher(
     ))
 }
 
-fn compose_product_auth_services(
+struct ProductAuthServicesCompositionInput {
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    blocked_auth_snapshot_source: Option<
-        Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
-    >,
+    blocked_auth_snapshot_source:
+        Option<Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>>,
     lifecycle: LifecycleProductFacadeSlot,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
+}
+
+fn compose_product_auth_services(
+    input: ProductAuthServicesCompositionInput,
 ) -> Result<Arc<RebornProductAuthServices>, RebornBuildError> {
+    let ProductAuthServicesCompositionInput {
+        ports,
+        turn_coordinator,
+        blocked_auth_snapshot_source,
+        lifecycle,
+        provider_composition,
+        security_audit_sink,
+        secret_store,
+        nearai_mcp_host_managed_scope,
+    } = input;
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
@@ -1692,19 +1705,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
     let lifecycle_auth_continuation_slot: LifecycleProductFacadeSlot = Arc::new(OnceLock::new());
     let product_auth = match product_auth_ports {
-        Some(ports) => compose_product_auth_services(
+        Some(ports) => compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports,
-            turn_coordinator.clone(),
-            Some(Arc::clone(&store_graph.turn_state)
-                as Arc<
-                    dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
-                >),
-            Arc::clone(&lifecycle_auth_continuation_slot),
+            turn_coordinator: turn_coordinator.clone(),
+            blocked_auth_snapshot_source: Some(Arc::clone(&store_graph.turn_state)
+                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            lifecycle: Arc::clone(&lifecycle_auth_continuation_slot),
             provider_composition,
-            security_audit_sink.clone(),
-            Arc::clone(&secret_store),
-            Some(nearai_mcp_host_managed_scope.clone()),
-        )?,
+            security_audit_sink: security_audit_sink.clone(),
+            secret_store: Arc::clone(&secret_store),
+            nearai_mcp_host_managed_scope: Some(nearai_mcp_host_managed_scope.clone()),
+        })?,
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             {
@@ -4979,22 +4990,21 @@ where
             )
         }
     };
-    let product_auth_services = compose_product_auth_services(
-        product_auth_ports,
-        turn_coordinator.clone(),
-        Some(Arc::clone(&turn_state)
-            as Arc<
-                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
-            >),
-        Arc::new(OnceLock::new()),
-        provider_composition,
-        security_audit_sink,
-        Arc::clone(&secret_store),
-        // Host-managed NEAR AI MCP fallback is wired only by
-        // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
-        // preserves this builder's prior behavior of never attaching it.
-        None,
-    )?;
+    let product_auth_services =
+        compose_product_auth_services(ProductAuthServicesCompositionInput {
+            ports: product_auth_ports,
+            turn_coordinator: turn_coordinator.clone(),
+            blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
+                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            lifecycle: Arc::new(OnceLock::new()),
+            provider_composition,
+            security_audit_sink,
+            secret_store: Arc::clone(&secret_store),
+            // Host-managed NEAR AI MCP fallback is wired only by
+            // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
+            // preserves this builder's prior behavior of never attaching it.
+            nearai_mcp_host_managed_scope: None,
+        })?;
     // Bundle the keepalive worker deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
     // (no caller-supplied product_auth_ports); the leader lock and refresh port

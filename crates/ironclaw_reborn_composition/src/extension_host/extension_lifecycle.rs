@@ -1188,7 +1188,7 @@ impl RebornLocalExtensionManagementPort {
         if let Some(actor_user_id) = authenticated_actor_user_id {
             removal_scope.user_id = actor_user_id.clone();
         }
-        let response = {
+        let mut response = {
             let _operation_guard = self.operation_lock.lock().await;
             self.cleanup_channel_before_remove(
                 &removal_summary,
@@ -1200,28 +1200,31 @@ impl RebornLocalExtensionManagementPort {
             if self.search_installation(&extension_id).await?.is_some() {
                 self.remove_locked(package_ref, caller).await
             } else {
-                let mut response = response_with_payload(
+                let response = response_with_payload(
                     Some(package_ref),
                     LifecyclePhase::Removed,
                     LifecycleProductPayload::ExtensionRemove { removed: false },
                 );
-                response.message = Some(
-                    "Extension was already absent; connection and credential cleanup completed."
-                        .to_string(),
-                );
                 Ok(response)
             }
-        };
-        if response.is_ok() {
-            self.revoke_exclusive_credentials(
-                &removal_scope,
-                &removed_extension_id,
-                &removed_providers,
-                caller,
-            )
-            .await;
+        }?;
+        self.revoke_exclusive_credentials(
+            &removal_scope,
+            &removed_extension_id,
+            &removed_providers,
+            caller,
+        )
+        .await?;
+        if matches!(
+            response.payload.as_ref(),
+            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+        ) {
+            response.message = Some(
+                "Extension was already absent; connection and credential cleanup completed."
+                    .to_string(),
+            );
         }
-        response
+        Ok(response)
     }
 
     async fn cleanup_channel_before_remove(
@@ -1287,33 +1290,35 @@ impl RebornLocalExtensionManagementPort {
 
     /// After a successful removal, revoke the removed extension's reusable
     /// personal credentials for providers now exclusive to it (no other
-    /// installed extension still declares them). Best-effort: cleanup never
-    /// fails or rolls back the removal, and it fails safe (revokes nothing) when
-    /// it cannot prove a provider is unused, so a shared credential is never
-    /// deleted out from under another extension.
+    /// installed extension still declares them). Cleanup failures leave the
+    /// package absent but return a retryable error; an already-absent retry runs
+    /// this same path again until cleanup converges.
     async fn revoke_exclusive_credentials(
         &self,
         scope: &ResourceScope,
         removed_extension_id: &str,
         removed_providers: &[AuthProviderId],
         caller: &UserId,
-    ) {
+    ) -> Result<(), ProductWorkflowError> {
         let Some(cleanup) = self.credential_cleanup.as_ref() else {
-            return;
+            return Ok(());
         };
         if removed_providers.is_empty() {
-            return;
+            return Ok(());
         }
-        let Some(providers_still_in_use) = self.providers_still_in_use(caller).await else {
-            return;
-        };
-        let extension_id = match ExtensionId::new(removed_extension_id) {
-            Ok(extension_id) => extension_id,
-            Err(error) => {
-                tracing::debug!(%error, "removed extension id invalid for credential cleanup");
-                return;
+        let providers_still_in_use =
+            self.providers_still_in_use(caller)
+                .await
+                .ok_or_else(|| ProductWorkflowError::Transient {
+                    reason: "extension credential cleanup could not determine whether credentials are shared; retry removal"
+                        .to_string(),
+                })?;
+        let extension_id = ExtensionId::new(removed_extension_id).map_err(|error| {
+            tracing::debug!(%error, "removed extension id invalid for credential cleanup");
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: "removed extension id is invalid for credential cleanup".to_string(),
             }
-        };
+        })?;
         for provider in removed_providers {
             if providers_still_in_use.contains(provider) {
                 // Shared with another installed extension; preserve the account.
@@ -1325,14 +1330,32 @@ impl RebornLocalExtensionManagementPort {
                 provider: Some(provider.clone()),
                 action: SecretCleanupAction::Uninstall,
             };
-            if let Err(error) = cleanup.cleanup_for_lifecycle(request).await {
-                tracing::debug!(
-                    %error,
+            let report = cleanup.cleanup_for_lifecycle(request).await.map_err(|error| {
+                tracing::warn!(
+                    error_code = ?error.code,
                     %provider,
-                    "extension removal credential cleanup failed; continuing"
+                    "extension removal credential cleanup failed"
                 );
+                ProductWorkflowError::Transient {
+                    reason: format!(
+                        "extension credential cleanup did not complete for provider {provider}; retry removal"
+                    ),
+                }
+            })?;
+            if !report.quarantined_accounts.is_empty() {
+                tracing::warn!(
+                    %provider,
+                    quarantined_accounts = report.quarantined_accounts.len(),
+                    "extension removal credential cleanup was incomplete"
+                );
+                return Err(ProductWorkflowError::Transient {
+                    reason: format!(
+                        "extension credential cleanup was incomplete for provider {provider}; retry removal"
+                    ),
+                });
             }
         }
+        Ok(())
     }
 
     /// Providers still declared by extensions that remain installed after a
@@ -5371,6 +5394,105 @@ output_schema_ref = "schemas/run.output.json"
             self.requests.lock().expect("cleanup lock").push(request);
             Ok(SecretCleanupReport::default())
         }
+    }
+
+    #[derive(Default)]
+    struct FailThenQuarantineExtensionCredentialCleanup {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExtensionCredentialCleanup for FailThenQuarantineExtensionCredentialCleanup {
+        async fn cleanup_for_lifecycle(
+            &self,
+            _request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, RebornServicesError> {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(RebornServicesError::internal_from(
+                    "credential cleanup backend unavailable",
+                )),
+                1 => Ok(SecretCleanupReport {
+                    quarantined_accounts: vec![ironclaw_auth::SecretCleanupQuarantine {
+                        account_id: ironclaw_auth::CredentialAccountId::new(),
+                        reason: ironclaw_auth::SecretCleanupQuarantineReason::BackendUnavailable,
+                    }],
+                    ..SecretCleanupReport::default()
+                }),
+                _ => Ok(SecretCleanupReport::default()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_facade_extension_remove_retries_incomplete_credential_cleanup_until_converged() {
+        let cleanup = Arc::new(FailThenQuarantineExtensionCredentialCleanup::default());
+        let (_dir, storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+                AvailableExtensionCatalog::from_first_party_assets()
+                    .expect("first-party GitHub catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github");
+        let backend_error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect_err("cleanup backend failure must make removal retryable");
+        let ProductWorkflowError::Transient { reason } = backend_error else {
+            panic!("cleanup backend failure must be operational and retryable");
+        };
+        assert!(reason.contains("retry removal"));
+        assert!(
+            !storage_root.join("system/extensions/github").exists(),
+            "the package was removed before post-removal cleanup failed"
+        );
+
+        let quarantined_error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect_err("quarantined cleanup must not report removal success");
+        let ProductWorkflowError::Transient { reason } = quarantined_error else {
+            panic!("quarantined cleanup must be operational and retryable");
+        };
+        assert!(reason.contains("retry removal"));
+
+        let retry = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("already-absent retry completes quarantined cleanup");
+        assert!(matches!(
+            retry.payload,
+            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+        ));
+        assert_eq!(
+            retry.message.as_deref(),
+            Some("Extension was already absent; connection and credential cleanup completed.")
+        );
+        assert_eq!(cleanup.calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
