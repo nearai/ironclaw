@@ -77,7 +77,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 
 | Crate directory | Package | Human context |
 | --- | --- | --- |
-| `ironclaw_reborn` | `ironclaw_reborn` | Standalone Reborn composition and adapters. This is the high-level Reborn composition crate. |
+| `ironclaw_runner` | `ironclaw_runner` | Standalone Reborn composition and adapters. This is the high-level Reborn composition crate. |
 | `ironclaw_reborn_composition` | `ironclaw_reborn_composition` | Wiring layer that assembles Reborn services into the host runtime. Composition-only; no policy or persistence logic of its own. |
 | `ironclaw_reborn_config` | `ironclaw_reborn_config` | Reborn boot-config boundary: typed configuration, profiles, and validation consumed before services start. |
 | `ironclaw_reborn_cli` | `ironclaw_reborn_cli` | Reborn-first CLI surface (command modules, completion, shell entry points). Calls into composition; does not own host policy. |
@@ -117,7 +117,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Current invocation state**: use `ironclaw_run_state`, not event logs.
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.
 - **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters stay behind the `storage`/`libsql`/`postgres` features and the `IdempotencyLedger` port.
-- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_support`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_reborn` depending on layer.
+- **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_support`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
 - **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui_v2`, `ironclaw_reborn_webui_ingress`, or `ironclaw_tui`; keep authority and persistence in lower crates.
 
 ## Boundary rules

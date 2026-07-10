@@ -1075,6 +1075,13 @@ registerPack("ko", {
   "admin.dashboard.jobs": "작업",
   "admin.dashboard.lastActive": "마지막 활동",
 
+  // Admin — relative time
+  "admin.relative.never": "없음",
+  "admin.relative.justNow": "방금 전",
+  "admin.relative.minutesAgo": "{count}분 전",
+  "admin.relative.hoursAgo": "{count}시간 전",
+  "admin.relative.daysAgo": "{count}일 전",
+
   // Admin — users list
   "admin.users.user": "사용자",
   "admin.users.userFallback": "사용자",
@@ -1085,6 +1092,8 @@ registerPack("ko", {
   "admin.users.filter.active": "활성",
   "admin.users.filter.suspended": "정지",
   "admin.users.filter.admins": "관리자",
+  "admin.users.status.active": "활성",
+  "admin.users.status.suspended": "정지",
   "admin.users.newUser": "새 사용자",
   "admin.users.createUser": "사용자 생성",
   "admin.users.creating": "생성 중…",

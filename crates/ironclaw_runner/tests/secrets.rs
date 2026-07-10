@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
-use ironclaw_reborn::secrets::{
+use ironclaw_runner::secrets::{
     RebornLibSqlSecretStoreConfig, RebornSecretStoreError, RebornSecretStoreHealthStatus,
     build_libsql_reborn_secret_store, check_libsql_reborn_secret_store_health,
 };

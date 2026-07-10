@@ -72,7 +72,7 @@ is_reborn_test_path() {
     crates/ironclaw_architecture/*)
       return 0
       ;;
-    crates/ironclaw_reborn/*|crates/ironclaw_reborn_*/*)
+    crates/ironclaw_runner/*|crates/ironclaw_reborn_*/*)
       return 0
       ;;
     crates/ironclaw_product_*/*|crates/ironclaw_slack_v2_adapter/*|crates/ironclaw_telegram_v2_adapter/*)

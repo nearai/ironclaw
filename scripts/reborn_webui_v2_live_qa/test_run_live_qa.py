@@ -3563,7 +3563,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
 
         shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
-        self.assertEqual(len(shard_case_lines), 7)
+        self.assertEqual(len(shard_case_lines), 10)
         sharded_cases = [
             case_name
             for line in shard_case_lines
@@ -3592,10 +3592,61 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "Unknown Reborn WebUI v2 live QA case",
             match.group("body"),
         )
-        self.assertIn("target_pr is required when target_ref is supplied", match.group("body"))
-        self.assertIn("Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR", match.group("body"))
-        self.assertIn("target_ref does not match PR #${TARGET_PR} head SHA", match.group("body"))
-        self.assertIn("ref: ${{ steps.validate_reborn_webui_v2_target.outputs.checkout_ref", match.group("body"))
+        self.assertIn("target_pr is required when target_ref is supplied", workflow)
+        self.assertIn(
+            "Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR",
+            workflow,
+        )
+        self.assertIn("target_ref does not match PR #${TARGET_PR} head SHA", workflow)
+        self.assertIn("approve-reborn-webui-v2-pr-live-qa:", workflow)
+        self.assertIn("environment: reborn-live-canary-pr", workflow)
+        self.assertIn(
+            "requires an approving review from a collaborator with write access",
+            workflow,
+        )
+        self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn(
+            "ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}",
+            match.group("body"),
+        )
+        self.assertIn('SKIP_BUILD: "1"', match.group("body"))
+        self.assertIn("REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE", match.group("body"))
+        self.assertIn("Cache Playwright browsers", match.group("body"))
+        self.assertIn("cache: pip", match.group("body"))
+        self.assertNotIn("Build WASM channels", match.group("body"))
+        self.assertNotIn("Setup OVH sccache", match.group("body"))
+
+        prepare_match = re.search(
+            r"(?ms)^  prepare-reborn-webui-v2-live-qa:\n(?P<body>.*?)^  reborn-webui-v2-live-qa:",
+            workflow,
+        )
+        self.assertIsNotNone(prepare_match, "shared live QA binary preparation job missing")
+        prepare_body = prepare_match.group("body")
+        self.assertIn("needs: approve-reborn-webui-v2-pr-live-qa", prepare_body)
+        self.assertIn("reborn-webui-v2-binary-${TARGET_REF}", prepare_body)
+        self.assertIn("Build fallback Reborn WebUI v2 binary once", prepare_body)
+        self.assertIn("if ! (", prepare_body)
+        self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
+        self.assertIn("using the canary fallback build", prepare_body)
+        self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
+        self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
+
+        reborn_e2e_path = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/reborn-e2e.yml"
+        )
+        reborn_e2e = reborn_e2e_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "github.event.pull_request.head.sha",
+            reborn_e2e,
+        )
+        self.assertIn(
+            "--features webui-v2-beta,slack-v2-host-beta",
+            reborn_e2e,
+        )
+        self.assertIn(
+            "name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}",
+            reborn_e2e,
+        )
 
         command_workflow_path = (
             Path(__file__).resolve().parents[2] / ".github/workflows/live-canary-command.yml"

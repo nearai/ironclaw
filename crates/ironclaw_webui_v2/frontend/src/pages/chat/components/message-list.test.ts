@@ -24,8 +24,10 @@ function messageListSourceForTest() {
     lines.push(
       line
         .replace("export const BOTTOM_FOLLOW_THRESHOLD_PX", "const BOTTOM_FOLLOW_THRESHOLD_PX")
+        .replace("export const JUMP_TO_LATEST_THRESHOLD_PX", "const JUMP_TO_LATEST_THRESHOLD_PX")
         .replace("export function distanceFromBottom", "function distanceFromBottom")
         .replace("export function isNearBottom", "function isNearBottom")
+        .replace("export function shouldShowJumpToLatest", "function shouldShowJumpToLatest")
         .replace("export function scrollToBottom", "function scrollToBottom")
         .replace("export function messageKey", "function messageKey")
         .replace("export function isNewUserMessage", "function isNewUserMessage")
@@ -35,10 +37,12 @@ function messageListSourceForTest() {
   return `${lines.join("\n")}
 globalThis.__testExports = {
   BOTTOM_FOLLOW_THRESHOLD_PX,
+  JUMP_TO_LATEST_THRESHOLD_PX,
   FLOATING_CONTROL_BOTTOM_OFFSET_PX,
   FLOATING_CONTROL_STYLE,
   distanceFromBottom,
   isNearBottom,
+  shouldShowJumpToLatest,
   scrollToBottom,
   messageKey,
   isNewUserMessage,
@@ -54,8 +58,10 @@ function loadHelpers() {
 test("MessageList keeps scroll helpers exported", () => {
   for (const name of [
     "BOTTOM_FOLLOW_THRESHOLD_PX",
+    "JUMP_TO_LATEST_THRESHOLD_PX",
     "distanceFromBottom",
     "isNearBottom",
+    "shouldShowJumpToLatest",
     "scrollToBottom",
     "messageKey",
     "isNewUserMessage",
@@ -69,17 +75,29 @@ test("MessageList keeps scroll helpers exported", () => {
 });
 
 test("MessageList follows streamed content only while near the bottom", () => {
-  const { isNearBottom } = loadHelpers();
+  const {
+    BOTTOM_FOLLOW_THRESHOLD_PX,
+    JUMP_TO_LATEST_THRESHOLD_PX,
+    isNearBottom,
+    shouldShowJumpToLatest,
+  } = loadHelpers();
   const viewport = {
     scrollHeight: 1000,
     scrollTop: 420,
     clientHeight: 500,
   };
 
+  assert.equal(BOTTOM_FOLLOW_THRESHOLD_PX, 100);
+  assert.equal(JUMP_TO_LATEST_THRESHOLD_PX, 240);
   assert.equal(
     isNearBottom(viewport),
     true,
     "a reader within the follow threshold should keep auto-scrolling",
+  );
+  assert.equal(
+    shouldShowJumpToLatest(viewport),
+    false,
+    "the jump button should stay hidden while the reader is close to latest",
   );
 
   viewport.scrollTop = 300;
@@ -88,6 +106,19 @@ test("MessageList follows streamed content only while near the bottom", () => {
     isNearBottom(viewport),
     false,
     "a reader who scrolled up beyond the threshold should not be pulled down",
+  );
+  assert.equal(
+    shouldShowJumpToLatest(viewport),
+    false,
+    "small scrollback should pause follow-scroll without showing the jump button",
+  );
+
+  viewport.scrollTop = 240;
+
+  assert.equal(
+    shouldShowJumpToLatest(viewport),
+    true,
+    "the jump button should appear only after meaningful scrollback",
   );
 });
 
@@ -156,6 +187,16 @@ test("MessageList observes content growth from streamed markdown layout", () => 
   );
   assert.match(
     messageListSource,
+    /const \[showJumpToLatest, setShowJumpToLatest\] = React\.useState\(false\);[\s\S]*const showJump = shouldShowJumpToLatest\(el\);[\s\S]*setShowJumpToLatest\(showJump\);/,
+    "jump-to-latest visibility should use a larger threshold than follow-scroll",
+  );
+  assert.match(
+    messageListSource,
+    /if \(!shouldScrollRef\.current\) \{\s*setShowJumpToLatest\(shouldShowJumpToLatest\(el\)\);\s*return;\s*\}/,
+    "paused follow-scroll should still reveal the jump button once new content creates meaningful distance",
+  );
+  assert.match(
+    messageListSource,
     /else if \(userScrollIntentRef\.current\) \{[\s\S]*else \{[\s\S]*shouldScrollRef\.current = true;[\s\S]*followLatest\(\);/,
     "layout-driven scroll drift that is not upward should keep auto-follow enabled",
   );
@@ -207,8 +248,8 @@ test("MessageList renders a floating thread logs shortcut", () => {
     /bottom-\[\$\{|h-\[\$\{|bottom-\[128px\]|h-\[164px\]/,
     "floating controls should not rely on Tailwind generated arbitrary classes",
   );
-  assert.equal(FLOATING_CONTROL_BOTTOM_OFFSET_PX, 16);
-  assert.equal(FLOATING_CONTROL_STYLE.bottom, 16);
+  assert.equal(FLOATING_CONTROL_BOTTOM_OFFSET_PX, 8);
+  assert.equal(FLOATING_CONTROL_STYLE.bottom, 8);
   assert.doesNotMatch(
     messageListSource,
     /FLOATING_CONTROL_SPACER|className="hidden shrink-0 sm:block"/,
@@ -231,7 +272,7 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /const JUMP_TO_BOTTOM_BUTTON_CLASS =[\s\S]*absolute left-1\/2 z-10 inline-flex max-w-\[calc\(100%-2rem\)\][\s\S]*items-center gap-1\.5 whitespace-nowrap rounded-full border border-\[var\(--v2-panel-border\)\][\s\S]*bg-\[var\(--v2-surface\)\] px-3 py-1\.5 text-xs font-medium text-\[var\(--v2-text-strong\)\][\s\S]*className=\{JUMP_TO_BOTTOM_BUTTON_CLASS\}[\s\S]*style=\{FLOATING_CONTROL_STYLE\}/,
+    /const JUMP_TO_BOTTOM_BUTTON_CLASS =[\s\S]*absolute left-1\/2 z-10 inline-flex max-w-\[calc\(100%-2rem\)\][\s\S]*items-center gap-1\.5 whitespace-nowrap rounded-full border border-\[var\(--v2-panel-border\)\][\s\S]*bg-\[var\(--v2-surface\)\] px-3 py-1\.5 text-xs font-medium text-\[var\(--v2-text-strong\)\][\s\S]*\{showJumpToLatest &&[\s\S]*className=\{JUMP_TO_BOTTOM_BUTTON_CLASS\}[\s\S]*style=\{FLOATING_CONTROL_STYLE\}/,
     "jump-to-latest should keep the pill style while using the composer-safe floating offset",
   );
 });

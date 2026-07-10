@@ -1075,6 +1075,13 @@ registerPack("uk", {
   "admin.dashboard.jobs": "Завдання",
   "admin.dashboard.lastActive": "Остання активність",
 
+  // Admin — relative time
+  "admin.relative.never": "Ніколи",
+  "admin.relative.justNow": "щойно",
+  "admin.relative.minutesAgo": "{count} хв тому",
+  "admin.relative.hoursAgo": "{count} год тому",
+  "admin.relative.daysAgo": "{count} дн тому",
+
   // Admin — users list
   "admin.users.user": "користувач",
   "admin.users.userFallback": "користувача",
@@ -1085,6 +1092,8 @@ registerPack("uk", {
   "admin.users.filter.active": "Активні",
   "admin.users.filter.suspended": "Призупинені",
   "admin.users.filter.admins": "Адміни",
+  "admin.users.status.active": "Активний",
+  "admin.users.status.suspended": "Призупинений",
   "admin.users.newUser": "Новий користувач",
   "admin.users.createUser": "Створити користувача",
   "admin.users.creating": "Створення…",

@@ -1075,6 +1075,13 @@ registerPack("hi", {
   "admin.dashboard.jobs": "नौकरियाँ",
   "admin.dashboard.lastActive": "अंतिम सक्रिय",
 
+  // Admin — relative time
+  "admin.relative.never": "कभी नहीं",
+  "admin.relative.justNow": "अभी-अभी",
+  "admin.relative.minutesAgo": "{count} मिनट पहले",
+  "admin.relative.hoursAgo": "{count} घंटे पहले",
+  "admin.relative.daysAgo": "{count} दिन पहले",
+
   // Admin — users list
   "admin.users.user": "उपयोगकर्ता",
   "admin.users.userFallback": "उपयोगकर्ता",
@@ -1085,6 +1092,8 @@ registerPack("hi", {
   "admin.users.filter.active": "सक्रिय",
   "admin.users.filter.suspended": "निलंबित",
   "admin.users.filter.admins": "व्यवस्थापक",
+  "admin.users.status.active": "सक्रिय",
+  "admin.users.status.suspended": "निलंबित",
   "admin.users.newUser": "नया उपयोगकर्ता",
   "admin.users.createUser": "उपयोगकर्ता बनाएं",
   "admin.users.creating": "बनाया जा रहा है…",

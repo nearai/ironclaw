@@ -1,12 +1,12 @@
 //! Dependency-inversion seam for subagent await-edge delivery.
 //!
 //! `ironclaw_loop_support` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
-//! but cannot depend on `ironclaw_reborn`, which owns the concrete CAS'd
+//! but cannot depend on `ironclaw_runner`, which owns the concrete CAS'd
 //! filesystem await-edge store and resolver
-//! (`crates/ironclaw_reborn/src/subagent/await_edge/`). This module defines
+//! (`crates/ironclaw_runner/src/subagent/await_edge/`). This module defines
 //! the two traits that seam crosses — `AwaitEdgeWriter` (spawn-time writes,
 //! consumed by `subagent_spawn_port.rs`) and `AwaitEdgeSettler` (completion-time
-//! settle/resume/drain, consumed by `ironclaw_reborn`'s completion path) —
+//! settle/resume/drain, consumed by `ironclaw_runner`'s completion path) —
 //! per the design's §4.1 crate-placement ruling (permanent seam, category 2
 //! of `.claude/rules/type-placement.md`, no `arch-exempt`).
 //!
@@ -33,7 +33,7 @@ pub struct ScopeRecoveryInProgress {
 }
 
 /// Spawn-side writer seam (§3 replacement for `SubagentGateResolutionStore`).
-/// Implemented in `ironclaw_reborn` by `FilesystemAwaitEdgeStore` (production)
+/// Implemented in `ironclaw_runner` by `FilesystemAwaitEdgeStore` (production)
 /// and here by `InMemoryAwaitEdgeWriter` (loop_support's own unit tests, no
 /// filesystem/CAS semantics needed).
 #[async_trait]
@@ -116,7 +116,7 @@ impl ResolveReport {
 }
 
 /// Completion-side settle seam (§3 replacement for the gate store's terminal
-/// handling; implemented by `AwaitEdgeResolver` in `ironclaw_reborn`). Named
+/// handling; implemented by `AwaitEdgeResolver` in `ironclaw_runner`). Named
 /// per the design doc's §4.1/§3 explicit choice — kept distinct from the
 /// crate's `*Store`/`*Writer`/`*Resolver` naming convention deliberately,
 /// since the certified design doc names this exact trait `AwaitEdgeSettler`.
@@ -132,7 +132,7 @@ pub trait AwaitEdgeSettler: Send + Sync {
     /// Bind the back-reference to the wrapping `TurnCoordinator` so the
     /// blocking-resume path can call back into it after a child terminates.
     /// Trait method (not left as an inherent method on the concrete
-    /// resolver type) so `ironclaw_reborn::runtime` can call it through
+    /// resolver type) so `ironclaw_runner::runtime` can call it through
     /// `Arc<dyn AwaitEdgeSettler>` without depending on the resolver's
     /// concrete, filesystem-backend-generic type.
     fn bind_coordinator(&self, coordinator: Arc<dyn TurnCoordinator>) -> Result<(), TurnError>;

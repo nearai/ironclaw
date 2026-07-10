@@ -27,12 +27,12 @@ use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
-use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
