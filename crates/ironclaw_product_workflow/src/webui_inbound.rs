@@ -276,6 +276,28 @@ pub struct WebUiListThreadsRequest {
     pub needs_approval: bool,
 }
 
+impl WebUiListThreadsRequest {
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    pub fn set_candidate_thread_id(mut self, candidate_thread_id: impl Into<String>) -> Self {
+        self.candidate_thread_id = Some(candidate_thread_id.into());
+        self
+    }
+
+    pub fn set_needs_approval(mut self, needs_approval: bool) -> Self {
+        self.needs_approval = needs_approval;
+        self
+    }
+}
+
 /// Browser query for WebUI automation listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiListAutomationsRequest {
@@ -288,6 +310,23 @@ pub struct WebUiListAutomationsRequest {
     /// existing callers that do not set this flag are unaffected.
     #[serde(default)]
     pub include_completed: bool,
+}
+
+impl WebUiListAutomationsRequest {
+    pub fn set_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn set_run_limit(mut self, run_limit: u32) -> Self {
+        self.run_limit = Some(run_limit);
+        self
+    }
+
+    pub fn set_include_completed(mut self, include_completed: bool) -> Self {
+        self.include_completed = include_completed;
+        self
+    }
 }
 
 /// Browser body for WebUI automation rename mutation.

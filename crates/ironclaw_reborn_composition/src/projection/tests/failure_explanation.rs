@@ -1,5 +1,5 @@
 use super::*;
-use ironclaw_reborn::failure_categories::{
+use ironclaw_runner::failure_categories::{
     HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
     HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
     HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
@@ -1051,7 +1051,7 @@ fn loop_failure_kind_as_str_values_from_source() -> std::collections::BTreeSet<&
 
 fn reborn_failure_category_constant_values_from_source() -> std::collections::BTreeSet<&'static str>
 {
-    const SOURCE: &str = include_str!("../../../../ironclaw_reborn/src/failure_categories.rs");
+    const SOURCE: &str = include_str!("../../../../ironclaw_runner/src/failure_categories.rs");
     SOURCE
         .lines()
         .filter_map(|line| {

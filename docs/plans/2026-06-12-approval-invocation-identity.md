@@ -151,7 +151,7 @@ confirmable the same way.
 
 - Loop-level: integration test driving approve → AuthRequired → auth-resume → dispatch
   completes WITHOUT a second approval request (extends
-  `crates/ironclaw_reborn/tests/loop_driver_host.rs` approval/resume coverage, e.g.
+  `crates/ironclaw_runner/tests/loop_driver_host.rs` approval/resume coverage, e.g.
   `turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_run`).
 - Capability-host contract: auth-resume with original invocation id reuses run record;
   fingerprint mismatch still rejected.

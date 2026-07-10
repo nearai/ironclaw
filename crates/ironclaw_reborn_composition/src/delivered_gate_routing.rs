@@ -313,6 +313,8 @@ mod tests {
 
         // Request arrives on DM scope, not the run's original scope.
         let request = resolve_request(dm_scope(), gate_ref_str);
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -339,6 +341,8 @@ mod tests {
 
         let request = resolve_request(dm_scope(), "gate:routing-miss-001");
         let original_thread_id = request.scope.thread_id.clone();
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -395,6 +399,8 @@ mod tests {
 
         let request = resolve_request(dm_scope(), gate_ref_str);
         let original_thread_id = request.scope.thread_id.clone();
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -655,6 +661,8 @@ mod tests {
             Arc::clone(&inner) as _,
             Arc::clone(&route_store) as _,
         );
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = routed_approval_direct.resolve(retry_request).await;
 
         let calls2 = inner.resolve_calls();
@@ -763,6 +771,8 @@ mod tests {
         // Request arrives on DM scope — would be rewritten if record were fresh.
         let request = resolve_request(dm_scope(), gate_ref_str);
         let original_thread_id = request.scope.thread_id.clone();
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();
@@ -793,6 +803,8 @@ mod tests {
         let request = resolve_request(original_scope, "gate:store-fail-001");
         // The original request has run_id_hint = None (as constructed by
         // resolve_request).
+        #[allow(clippy::let_underscore_must_use)]
+        // resolve result intentionally unused; assertions check the recorded inner calls
         let _ = service.resolve(request).await;
 
         let calls = inner.resolve_calls();

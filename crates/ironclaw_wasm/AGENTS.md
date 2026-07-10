@@ -12,8 +12,9 @@
 ## What This Crate Owns
 
 - The Reborn WASM component runtime lane (load/compile/validate/meter/execute already-selected components), currently:
-- The runtime + execution surface: `WitToolRuntime` (`runtime`), `WitToolHost`, `WitToolRequest`/`WitToolExecution`/`PreparedWitTool`, `WasmLogLevel`/`WasmLogRecord` (`types`, `host`), and `bindings`/`limiter`/`store`.
-- Runtime config + ABI version: `WitToolRuntimeConfig`, `WIT_TOOL_VERSION` (`config`; per-execution limits use the shared `ironclaw_wasm_sandbox_core::SandboxLimits`); errors `WasmError`/`WasmHostError` (`error`).
+- The runtime + execution surface: `WitToolRuntime` (`runtime`), `WitToolHost`, `WitToolRequest`/`WitToolExecution`/`PreparedWitTool`, `WasmLogLevel`/`WasmLogRecord` (`types`, `host`), and `bindings`/`store`.
+- The folded `wasm_sandbox_core` module: domain-free Wasmtime/WASI sandbox primitives, component-engine setup, epoch ticker, minimal WASI p2 linker, resource limiter, limits, and store-core helpers.
+- Runtime config + ABI version: `WitToolRuntimeConfig`, `WIT_TOOL_VERSION` (`config`; per-execution limits use `wasm_sandbox_core::SandboxLimits`); errors `WasmError`/`WasmHostError` (`error`).
 - Mediated, fail-closed host-capability seams (`host`): the `WasmHostHttp`/`WasmHostSecrets`/`WasmHostTools`/`WasmHostWorkspace`/`WasmHostClock` traits with their `Deny*`/`Recording*`/`System*` implementations, `WasmRuntimeHttpAdapter` + `WasmHttpRequest`/`WasmHttpResponse`, and staged credential handoff (`WasmRuntimeCredentialProvider`/`WasmRuntimeCredentialRequest`, `WasmStagedRuntimeCredential`/`WasmStagedRuntimeCredentials`, `WasmRuntimePolicyDiscarder`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
@@ -31,5 +32,6 @@
 ## Agent Notes
 
 - Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
+- Keep `wasm_sandbox_core` domain-free: no ProductAdapter, tool, channel, workflow, dispatcher, secret, network, filesystem, host-runtime, or app composition dependencies.
 - Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.
 - If the contract and code disagree, stop and treat the task as a contract-change request instead of silently changing ownership.

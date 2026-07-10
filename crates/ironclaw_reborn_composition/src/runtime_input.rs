@@ -18,7 +18,7 @@
 //!   roots.
 //!
 //! The CLI builds this struct from env vars / config; it does not call into
-//! `ironclaw_reborn` or `ironclaw_llm` directly.
+//! `ironclaw_runner` or `ironclaw_llm` directly.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,13 +28,13 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
-use ironclaw_reborn::runtime::{
-    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
-    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
-};
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_runner::runtime::{
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
+};
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
 use crate::input::RebornBuildInput;
@@ -228,6 +228,31 @@ impl Default for TurnRunnerSettings {
             // `None` = conversations may use every slot not held by triggers.
             max_concurrent_conversation_runs: None,
         }
+    }
+}
+
+impl TurnRunnerSettings {
+    pub fn set_heartbeat_interval(mut self, heartbeat_interval: Duration) -> Self {
+        self.heartbeat_interval = heartbeat_interval;
+        self
+    }
+
+    pub fn set_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    pub fn set_worker_count(mut self, worker_count: std::num::NonZeroUsize) -> Self {
+        self.worker_count = Some(worker_count);
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
     }
 }
 

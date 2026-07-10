@@ -15,9 +15,9 @@ use ironclaw_turns::{
         LoopCompactionOutcome, LoopCompactionResponse, LoopContextCompactionKind, LoopInput,
         LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef,
         LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
-        ObservationTrust, ParentLoopOutput, ProcessHandleSummary, PromptMode,
-        ProviderToolCallReplay, SameCallRetryConstraint, ToolObservationDetail,
-        ToolObservationStatus, VisibleCapabilityRequest,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ObservationTrust, ParentLoopOutput,
+        ProcessHandleSummary, PromptMode, ProviderToolCallReplay, SameCallRetryConstraint,
+        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
     },
 };
 
@@ -2709,6 +2709,26 @@ async fn model_request_uses_current_visible_surface_not_prompt_bundle_version() 
 }
 
 #[tokio::test]
+async fn prompt_reuses_current_visible_surface_without_refetching() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_current_default_visible_surface()
+        .with_failing_visible_capabilities();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.visible_capability_request_count(), 0);
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].surface_version, Some(surface_version()));
+}
+
+#[tokio::test]
 async fn model_retry_success_clears_recovery_state() {
     let host = MockHost::new(vec![reply_response()])
         .with_model_errors(vec![AgentLoopHostError::new(
@@ -2858,7 +2878,15 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
     );
     let requests = host.model_requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].capability_view.is_none());
+    let explanation_capability_view = requests[1]
+        .capability_view
+        .as_ref()
+        .expect("failure explanation model request must suppress tools");
+    assert!(
+        explanation_capability_view
+            .visible_capability_ids
+            .is_empty()
+    );
     assert!(requests[1].surface_version.is_none());
     assert!(requests[1].model_preference.is_none());
 }
@@ -3365,11 +3393,12 @@ async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result(
 #[tokio::test]
 async fn completed_provider_call_appends_provider_replay_metadata() {
     let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
+    let safe_summary = "a".repeat(300);
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
-                safe_summary: "provider call completed".to_string(),
+                safe_summary: safe_summary.clone(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
@@ -3406,6 +3435,29 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
     );
     assert_eq!(provider_call.reasoning.as_deref(), Some("call reasoning"));
     assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
+    let model_observation = appended[0]
+        .model_observation
+        .as_ref()
+        .expect("model-visible observation");
+    assert_eq!(
+        model_observation.schema_version,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION
+    );
+    assert_eq!(model_observation.status, ToolObservationStatus::Success);
+    assert_eq!(model_observation.summary, safe_summary);
+    assert!(matches!(
+        &model_observation.detail,
+        ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail: None,
+        } if failure_kind.as_str() == "none"
+    ));
+    assert!(model_observation.artifacts.is_empty());
+    assert!(model_observation.recovery.is_none());
+    assert_eq!(
+        model_observation.trust,
+        ObservationTrust::UntrustedToolOutput
+    );
 }
 
 #[tokio::test]

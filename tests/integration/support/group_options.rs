@@ -15,8 +15,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_reborn::runtime::ToolDisclosureMode;
+use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
 use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 

@@ -39,6 +39,8 @@ pub struct ProcessRecord {
     pub parent_process_id: Option<ProcessId>,
     pub invocation_id: InvocationId,
     pub scope: ResourceScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
@@ -56,6 +58,7 @@ pub struct ProcessStart {
     pub parent_process_id: Option<ProcessId>,
     pub invocation_id: InvocationId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
@@ -192,6 +195,7 @@ pub struct ProcessExecutionRequest {
     pub process_id: ProcessId,
     pub invocation_id: InvocationId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
@@ -372,6 +376,38 @@ pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_process_record_without_authenticated_actor_deserializes() {
+        let invocation_id = InvocationId::new();
+        let scope =
+            ResourceScope::local_default(UserId::new("subject").unwrap(), invocation_id).unwrap();
+        let record = ProcessRecord {
+            process_id: ProcessId::new(),
+            parent_process_id: None,
+            invocation_id,
+            scope,
+            authenticated_actor_user_id: Some(UserId::new("slack-alice").unwrap()),
+            extension_id: ExtensionId::new("demo").unwrap(),
+            capability_id: CapabilityId::new("demo.background").unwrap(),
+            runtime: RuntimeKind::Script,
+            status: ProcessStatus::Running,
+            grants: CapabilitySet::default(),
+            mounts: MountView::default(),
+            estimated_resources: ResourceEstimate::default(),
+            resource_reservation_id: None,
+            error_kind: None,
+        };
+        let mut legacy = serde_json::to_value(record).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("authenticated_actor_user_id");
+
+        let decoded: ProcessRecord = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(decoded.authenticated_actor_user_id, None);
+    }
 
     /// Regression: the broad `From<HostApiError> for ProcessError` impl previously
     /// mismapped every `HostApiError` shape (validation, invariant, mount, network)

@@ -30,8 +30,8 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DispatchFailureKind,
-    InvocationId, PackageSource, Principal, ResourceEstimate, ResourceScope,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DenyReason,
+    DispatchFailureKind, InvocationId, PackageSource, Principal, ResourceEstimate, ResourceScope,
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
@@ -104,7 +104,7 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_present, plan_capability,
+    VisibleCapabilitySurface, obligations::secret_owner_scope, plan_capability,
     surface::CapabilityCatalog,
 };
 
@@ -726,6 +726,12 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
+        if let Some(outcome) = self
+            .resume_actor_preflight_guard(&context, &capability_id)
+            .await?
+        {
+            return Ok(outcome);
+        }
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
@@ -829,6 +835,12 @@ impl HostRuntime for DefaultHostRuntime {
             trust_decision: _caller_trust_decision,
             approval_request_id,
         } = request;
+        if let Some(outcome) = self
+            .resume_actor_preflight_guard(&context, &capability_id)
+            .await?
+        {
+            return Ok(outcome);
+        }
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
@@ -947,6 +959,12 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
+        if let Some(outcome) = self
+            .resume_actor_preflight_guard(&context, &capability_id)
+            .await?
+        {
+            return Ok(outcome);
+        }
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
             SpawnInputPreparation::ModelInputRejected(failure) => {
@@ -1429,6 +1447,42 @@ impl DefaultHostRuntime {
         }
     }
 
+    /// Rejects a resume whose sealed ingress actor differs from the actor that
+    /// started the run. Callers invoke this before any preflight that can fail
+    /// or mutate the blocked run; `CapabilityHost` repeats the check before
+    /// claiming leases or dispatching.
+    async fn resume_actor_preflight_guard(
+        &self,
+        context: &ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+    ) -> Result<Option<RuntimeCapabilityOutcome>, HostRuntimeError> {
+        context
+            .validate()
+            .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))?;
+        let Some(run_state) = self.run_state.as_ref() else {
+            return Ok(None);
+        };
+        let Some(record) = run_state
+            .get(&context.resource_scope, context.invocation_id)
+            .await
+            .map_err(unavailable_from_run_state)?
+        else {
+            return Ok(None);
+        };
+        if record.authenticated_actor_user_id == context.authenticated_actor_user_id {
+            return Ok(None);
+        }
+
+        let error = CapabilityInvocationError::AuthorizationDenied {
+            capability: capability_id.clone(),
+            reason: DenyReason::PolicyDenied,
+        };
+        Ok(Some(RuntimeCapabilityOutcome::Failed(failure_from(
+            error,
+            capability_id.clone(),
+        ))))
+    }
+
     async fn fail_matching_blocked_resume_on_preflight_error(
         &self,
         context: &ironclaw_host_api::ExecutionContext,
@@ -1461,6 +1515,7 @@ impl DefaultHostRuntime {
         if record.status != RunStatus::BlockedApproval
             || &record.capability_id != capability_id
             || record.approval_request_id != Some(approval_request_id)
+            || record.authenticated_actor_user_id != context.authenticated_actor_user_id
         {
             return;
         }
@@ -1519,7 +1574,10 @@ impl DefaultHostRuntime {
                 return;
             }
         };
-        if record.status != RunStatus::BlockedAuth || &record.capability_id != capability_id {
+        if record.status != RunStatus::BlockedAuth
+            || &record.capability_id != capability_id
+            || record.authenticated_actor_user_id != context.authenticated_actor_user_id
+        {
             return;
         }
         if let Err(error) = run_state
@@ -1676,13 +1734,17 @@ impl DefaultHostRuntime {
         }
 
         for handle in &required_secrets {
-            // `secret_present` is the single owner of the presence rule, shared with
-            // the dispatch-time obligation backstop (obligations::preflight_secret_injection)
-            // so the two paths cannot drift on "what counts as a present credential".
-            // The happy path intentionally re-checks at dispatch time; this pre-flight
-            // read is only for gate ordering. (Accepted double-read; the backstop is the
-            // authority — see the thread on collapsing it.)
-            match secret_present(secret_store.as_ref(), scope, handle).await {
+            // `secret_owner_scope` is the single owner of the presence+ownership rule,
+            // shared with the dispatch-time obligation backstop
+            // (obligations::preflight_secret_injection / inject_secrets) so the paths
+            // cannot drift on "what counts as a present credential" or "which scope owns
+            // it". Here we only need presence (Some vs None) for gate ordering; the happy
+            // path intentionally re-checks at dispatch time, where the backstop is the
+            // authority. (Accepted double-read.)
+            match secret_owner_scope(secret_store.as_ref(), scope, handle)
+                .await
+                .map(|owner| owner.is_some())
+            {
                 Ok(true) => {
                     // Secret present — continue checking.
                 }

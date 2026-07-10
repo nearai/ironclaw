@@ -17,13 +17,14 @@ mod fakes;
 mod flow;
 mod ids;
 mod interaction;
-mod oauth;
+mod loopback_oauth;
+pub mod oauth;
 mod provider;
 mod scope;
 
 pub use cleanup::{
-    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupQuarantine,
+    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
@@ -45,7 +46,7 @@ pub use flow::{
     CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
     NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
-    flow_matches_turn_gate_query,
+    flow_matches_durable_owner, flow_matches_turn_gate_query,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,

@@ -436,11 +436,9 @@ impl GsuiteExecutor {
                             .with_reason(GsuiteCredentialDispatchReason::AuthRequired {
                                 required_secrets: vec![refreshed.access_secret.clone()],
                             })
-                            .with_usage(ResourceUsage {
-                                network_egress_bytes: network_egress_bytes
-                                    .saturating_add(retry_network_egress_bytes),
-                                ..ResourceUsage::default()
-                            });
+                            .with_usage(ResourceUsage::default().set_network_egress_bytes(
+                                network_egress_bytes.saturating_add(retry_network_egress_bytes),
+                            ));
                         trace_gsuite_latency_error(
                             "execute_retry",
                             latency_fields.as_ref(),
@@ -512,12 +510,10 @@ impl GsuiteExecutor {
         let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         Ok(GsuiteDispatchResult {
             output,
-            usage: ResourceUsage {
-                wall_clock_ms,
-                output_bytes,
-                network_egress_bytes,
-                ..ResourceUsage::default()
-            },
+            usage: ResourceUsage::default()
+                .set_wall_clock_ms(wall_clock_ms)
+                .set_output_bytes(output_bytes)
+                .set_network_egress_bytes(network_egress_bytes),
         })
     }
 
@@ -1281,10 +1277,8 @@ fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
             RuntimeDispatchErrorKind::OutputTooLarge
         }
     };
-    GsuiteDispatchError::new(kind).with_usage(ResourceUsage {
-        network_egress_bytes: error.request_bytes(),
-        ..ResourceUsage::default()
-    })
+    GsuiteDispatchError::new(kind)
+        .with_usage(ResourceUsage::default().set_network_egress_bytes(error.request_bytes()))
 }
 
 fn map_recovery_kind(recovery: &CredentialRecoveryProjection) -> RuntimeDispatchErrorKind {

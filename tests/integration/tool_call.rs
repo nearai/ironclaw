@@ -125,6 +125,66 @@ async fn runs_http_save_tool_call_through_recorded_egress() {
         .expect("final reply finalized");
 }
 
+/// Regression for #5817: a decimal lifted from prose (`0.95`) tokenizes as
+/// `digits.digits`, satisfying the capability-id shape check. The guard must
+/// not mistake it for a requested-but-unavailable capability and suppress the
+/// model's real `builtin.http` call.
+#[tokio::test]
+async fn decimal_number_in_prompt_does_not_suppress_tool_call() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            RebornScriptedReply::text("fetched"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn(
+        "compute the correlation-adjusted 95% = 0.95 (use 0.95 in formulas), then fetch items",
+    )
+    .await
+    .expect("turn completes");
+    h.assert_tool_invoked("builtin.http")
+        .await
+        .expect("http tool ran; guard must not misfire on the decimal 0.95");
+    h.assert_egress_request_matching("api.example.test")
+        .await
+        .expect("scripted http call crossed the recording egress");
+    h.assert_reply_contains("fetched")
+        .await
+        .expect("final reply finalized");
+}
+
+/// Regression for #5782: a backticked code reference (`playwright.sync_api`,
+/// a Python module) tokenizes like a capability id sitting after "use". The
+/// guard must not mistake it for a capability request and suppress the
+/// model's real `builtin.http` call.
+#[tokio::test]
+async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            RebornScriptedReply::text("fetched"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("use `playwright.sync_api` (Python sync API) as reference, then fetch items")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("builtin.http")
+        .await
+        .expect("http tool ran; guard must not misfire on the code reference playwright.sync_api");
+    h.assert_egress_request_matching("api.example.test")
+        .await
+        .expect("scripted http call crossed the recording egress");
+    h.assert_reply_contains("fetched")
+        .await
+        .expect("final reply finalized");
+}
+
 /// The globally-disabled `builtin.spawn_subagent` capability (configured
 /// through `DefaultPlannedRuntimeConfig::disabled_capability_ids`, applied as
 /// the OUTERMOST `PerSurfaceCapabilityDenyDecorator` in

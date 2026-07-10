@@ -21,8 +21,6 @@ pub(crate) mod slack_outbound_targets;
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_personal_binding;
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) mod slack_personal_binding_serve;
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_personal_oauth;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;

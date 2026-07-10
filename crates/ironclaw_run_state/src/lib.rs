@@ -45,6 +45,8 @@ pub struct RunRecord {
     pub invocation_id: InvocationId,
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_actor_user_id: Option<UserId>,
     pub status: RunStatus,
     pub approval_request_id: Option<ApprovalRequestId>,
     pub error_kind: Option<String>,
@@ -56,6 +58,7 @@ pub struct RunStart {
     pub invocation_id: InvocationId,
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
 }
 
 /// Approval request lifecycle state.
@@ -319,6 +322,7 @@ impl RunStateStore for InMemoryRunStateStore {
             invocation_id: start.invocation_id,
             capability_id: start.capability_id,
             scope: start.scope,
+            authenticated_actor_user_id: start.authenticated_actor_user_id,
             status: RunStatus::Running,
             approval_request_id: None,
             error_kind: None,
@@ -656,6 +660,7 @@ where
             invocation_id: start.invocation_id,
             capability_id: start.capability_id,
             scope: start.scope,
+            authenticated_actor_user_id: start.authenticated_actor_user_id,
             status: RunStatus::Running,
             approval_request_id: None,
             error_kind: None,
