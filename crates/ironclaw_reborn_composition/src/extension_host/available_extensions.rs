@@ -1702,12 +1702,31 @@ where
             // merge supersedes first-party ids afterwards. Infrastructure
             // errors (`Transient`) stay fail-closed so a flaky volume does not
             // silently drop installed extensions.
+            //
+            // Log level is source-conditional: this loop is shared by every
+            // owner's registered-store listing
+            // (`RegisteredExtensionStore::list_for_scope`/`list_all`, reached
+            // from both the live search path and boot-time
+            // `resolve_any_owner_for_restore`) as well as the boot-time
+            // shared catalog scan. `warn!` on a live/foreground search path
+            // corrupts the REPL/TUI (CLAUDE.md); `UserRegistered` sources use
+            // `debug!` instead so one owner's corrupt `manifest.toml` stays a
+            // quiet skip rather than a REPL-visible warning or a cross-tenant
+            // DoS of every other owner's listing.
             Err(ProductWorkflowError::InvalidBindingRequest { reason }) => {
-                tracing::warn!(
-                    extension_id = %extension_id,
-                    %reason,
-                    "skipping invalid available extension manifest"
-                );
+                if matches!(source, ManifestSource::UserRegistered { .. }) {
+                    tracing::debug!(
+                        extension_id = %extension_id,
+                        %reason,
+                        "skipping unparseable registered extension manifest"
+                    );
+                } else {
+                    tracing::warn!(
+                        extension_id = %extension_id,
+                        %reason,
+                        "skipping invalid available extension manifest"
+                    );
+                }
             }
             Err(error) => return Err(error),
         }

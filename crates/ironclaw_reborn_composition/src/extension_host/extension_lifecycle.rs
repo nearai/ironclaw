@@ -1700,10 +1700,18 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(original_error);
         }
-        if let Err(error) = self
-            .delete_materialized_extension_files(&extension_id)
-            .await
-        {
+        // Owner-registered installs were never materialized under
+        // `/system/extensions/<id>/` (mirrors the install/restore guards —
+        // see `is_owner_registered`), so there are no files to delete; the
+        // registration descriptor itself is removed by the revoke verb, not
+        // by uninstall.
+        let delete_files_result = if is_owner_registered(&lifecycle_package.manifest.source) {
+            Ok(())
+        } else {
+            self.delete_materialized_extension_files(&extension_id)
+                .await
+        };
+        if let Err(error) = delete_files_result {
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
                 .await
