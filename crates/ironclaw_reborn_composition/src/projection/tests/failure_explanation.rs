@@ -338,25 +338,11 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
             "capability_internal",
             "The run failed because a tool returned an internal error. Retry the run, and check the tool integration if it keeps happening.",
         ),
-        // Note: the granular `compaction_*` categories
-        // (compaction_invalid_cut_point, compaction_unsupported_mode,
-        // compaction_input_too_large, compaction_security_rejected,
-        // compaction_inference_failed, compaction_cancelled,
-        // compaction_persistence_failed) are deliberately absent from this
-        // table. They used to be minted by
-        // `ironclaw_agent_loop::executor::prompt::compaction_failure_category`
-        // for a terminal `CompactionUnavailable` exit. Issue #5838 / PR #5895
-        // ("fix: continue after compaction failure") changed non-cancellation
-        // compaction failures from a terminal exit to a deferred candidate
-        // path that continues the run (see
-        // `.issue-work/5838-compaction-robustness-design.md` section 5,
-        // "Correct Non-Terminal Continuation") and deleted
-        // `compaction_failure_category` entirely — the agent loop no longer
-        // mints these categories. `crate::failure_summary` keeps display
-        // support for them so historical terminal-failure records written
-        // before this fix still render correctly, but the source-parity
-        // guard in this test must track only what the agent loop can mint
-        // today.
+        // The granular `compaction_*` categories are deliberately absent: the
+        // agent loop no longer mints them since non-cancellation compaction
+        // failures became a deferred-continue path instead of a terminal exit
+        // (#5838). `crate::failure_summary` keeps display support so
+        // historical records still render.
     ];
 
     // Parity guard: the hardcoded table above must stay exhaustive against the
