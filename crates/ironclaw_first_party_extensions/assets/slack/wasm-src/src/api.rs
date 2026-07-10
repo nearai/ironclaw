@@ -354,6 +354,12 @@ pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
 
     let user = &parsed["user"];
     let profile = &user["profile"];
+    let non_empty = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(|text| text.to_string())
+    };
 
     Ok(GetUserInfoResult {
         ok: true,
@@ -364,6 +370,16 @@ pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
             display_name: profile["display_name"].as_str().map(|s| s.to_string()),
             email: profile["email"].as_str().map(|s| s.to_string()),
             is_bot: user["is_bot"].as_bool().unwrap_or(false),
+            tz: non_empty(&user["tz"]),
+            tz_label: non_empty(&user["tz_label"]),
+            title: non_empty(&profile["title"]),
+            status_text: non_empty(&profile["status_text"]),
+            status_emoji: non_empty(&profile["status_emoji"]),
+            // Slack reports 0 for "no expiration"; only a real timestamp is
+            // presence-relevant.
+            status_expiration: profile["status_expiration"]
+                .as_i64()
+                .filter(|expiration| *expiration != 0),
         },
     })
 }

@@ -2833,6 +2833,55 @@ async fn slack_whoami_resolves_connected_identity() {
     );
 }
 
+const SLACK_USER_STATUS_BODY: &str = r#"{"ok":true,"user":{"id":"U0CCC","name":"george","is_bot":false,"tz":"America/New_York","tz_label":"Eastern Daylight Time","profile":{"display_name":"George","real_name":"George Harrison","title":"Guitarist","status_text":"On vacation until July 20","status_emoji":":palm_tree:","status_expiration":1753027199}}}"#;
+
+/// Presence honesty: `get_user_info` must surface the profile fields an
+/// "is George around?" question actually needs — Slack status text/emoji,
+/// timezone, title — instead of hiding them and letting the model guess.
+#[tokio::test]
+async fn slack_get_user_info_surfaces_status_and_timezone() {
+    let capability_id = CapabilityId::new("slack.get_user_info").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "users.info?user=U0CCC",
+        200,
+        SLACK_USER_STATUS_BODY,
+    )]);
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"user_id": "U0CCC"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let user = &output["user"];
+    assert_eq!(
+        user["status_text"],
+        json!("On vacation until July 20"),
+        "get_user_info must surface the Slack status text: {output}"
+    );
+    assert_eq!(user["status_emoji"], json!(":palm_tree:"));
+    assert_eq!(user["status_expiration"], json!(1_753_027_199));
+    assert_eq!(
+        user["tz"],
+        json!("America/New_York"),
+        "get_user_info must surface the user's timezone: {output}"
+    );
+    assert_eq!(user["tz_label"], json!("Eastern Daylight Time"));
+    assert_eq!(user["title"], json!("Guitarist"));
+}
+
 /// Review follow-up (PR #5898): name resolution is capped so a busy channel
 /// cannot turn one history read into dozens of sequential `users.info`
 /// round-trips (the WASM tool is synchronous). First-seen authors win the

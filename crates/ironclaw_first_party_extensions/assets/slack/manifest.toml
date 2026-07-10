@@ -60,7 +60,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.get_user_info"
-description = "Get information about a Slack user (name, real name, email when visible). History and DM-list outputs already carry resolved display names; use this only for extra fields on a specific user."
+description = "Get information about a Slack user (name, real name, email when visible); includes presence-relevant profile fields: status text/emoji, timezone, and title. History and DM-list outputs already carry resolved display names; use this for extra fields on a specific user, e.g. before answering whether someone is away or what time it is for them."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },

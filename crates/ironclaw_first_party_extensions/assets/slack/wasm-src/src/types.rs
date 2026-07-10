@@ -218,6 +218,24 @@ pub struct UserInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     pub is_bot: bool,
+    /// IANA timezone (e.g. "America/New_York"). Absent when Slack omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tz: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tz_label: Option<String>,
+    /// Job title from the profile. Absent when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Slack status text (e.g. "On vacation until July 20"). Absent when the
+    /// user has no status set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_emoji: Option<String>,
+    /// Unix timestamp when the status expires. Absent when there is no status
+    /// or the status does not expire (Slack reports 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_expiration: Option<i64>,
 }
 
 /// Result from get_user_info.
