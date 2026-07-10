@@ -430,6 +430,103 @@ output_schema_ref = "schemas/search.output.json"
         assert_eq!(catalog.search("slack_bot").count(), 0);
     }
 
+    #[tokio::test]
+    async fn filesystem_catalog_skips_manifest_with_forbidden_trust_instead_of_aborting() {
+        // #5966: pre-#5499 installs materialized bundled first-party manifests
+        // (trust = "first_party_requested") verbatim onto the persistent
+        // volume. Boot rescan stamps filesystem manifests `InstalledLocal`,
+        // which forbids that trust — one stale manifest must be skipped, not
+        // abort the whole catalog load (crash-looping the deployment); the
+        // bundled-assets merge supersedes first-party entries afterwards.
+        let fs = InMemoryBackend::default();
+        for (path, bytes) in importable_tool_bundle_files("aaa-stale") {
+            let bytes = if path == "manifest.toml" {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("\"third_party\"", "\"first_party_requested\"")
+                    .into_bytes()
+            } else {
+                bytes
+            };
+            fs.write_file(
+                &VirtualPath::new(format!("/system/extensions/aaa-stale/{path}")).unwrap(),
+                &bytes,
+            )
+            .await
+            .unwrap();
+        }
+        for (path, bytes) in importable_tool_bundle_files("uploaded-tool") {
+            fs.write_file(
+                &VirtualPath::new(format!("/system/extensions/uploaded-tool/{path}")).unwrap(),
+                &bytes,
+            )
+            .await
+            .unwrap();
+        }
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .expect("one stale manifest must not abort the catalog load");
+
+        assert!(
+            catalog
+                .search("")
+                .any(|package| package.package_ref.id.as_str() == "uploaded-tool"),
+            "valid extension sorted after the stale one must still load"
+        );
+        assert!(
+            !catalog
+                .search("")
+                .any(|package| package.package_ref.id.as_str() == "aaa-stale"),
+            "stale first-party-trust manifest must be skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_still_fails_closed_on_transient_manifest_read_error() {
+        // Per-entry fail-open is only for validation failures; infrastructure
+        // IO errors must keep aborting the load so a flaky volume does not
+        // silently drop installed extensions.
+        let error = AvailableExtensionCatalog::from_filesystem_root(
+            &UnreadableManifestFilesystem,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .expect_err("transient manifest read error must abort the catalog load");
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    }
+
+    struct UnreadableManifestFilesystem;
+
+    #[async_trait]
+    impl RootFilesystem for UnreadableManifestFilesystem {
+        async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Ok(vec![DirEntry {
+                name: "broken-ext".to_string(),
+                path: VirtualPath::new("/system/extensions/broken-ext").unwrap(),
+                file_type: FileType::Directory,
+            }])
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Stat,
+            })
+        }
+
+        async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "disk unavailable".to_string(),
+            })
+        }
+    }
+
     fn importable_tool_bundle_files(id: &str) -> Vec<(String, Vec<u8>)> {
         let manifest = format!(
             r#"
