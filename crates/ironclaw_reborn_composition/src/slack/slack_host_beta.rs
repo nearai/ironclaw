@@ -4589,6 +4589,10 @@ mod tests {
     // then assert that a `TriggeredRunDeliveryRecord` was written to the
     // host-state filesystem via the production hook → driver path.
 
+    const TRIGGER_HOOK_E2E_FIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    const TRIGGER_HOOK_E2E_DELIVERY_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(30);
+
     async fn runtime_with_trigger_poller() -> (RebornRuntime, tempfile::TempDir) {
         use ironclaw_triggers::TriggerPollerWorkerConfig;
         let root = tempfile::tempdir().expect("tempdir");
@@ -4733,8 +4737,12 @@ mod tests {
         // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
         // both `last_fired_slot` and `active_run_ref` atomically, so if we see
         // `last_fired_slot` we can also safely read the run_id.
-        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        // Keep this budget generous: under `cargo llvm-cov --all-targets`, this
+        // E2E runs alongside many instrumented async tests, so the background
+        // trigger poller can be scheduled much later than in a focused test.
+        let deadline = Instant::now() + TRIGGER_HOOK_E2E_FIRE_TIMEOUT;
         let mut fired_run_id = None;
+        let mut last_trigger_state = None;
         while Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let current = repo
@@ -4746,6 +4754,13 @@ mod tests {
                 fired_run_id = current.active_run_ref;
                 break;
             }
+            last_trigger_state = Some((
+                current.next_run_at,
+                current.last_run_at,
+                current.last_status.clone(),
+                current.active_fire_slot,
+                current.active_run_ref,
+            ));
         }
 
         // Read delivery records from the unified outbound store that the
@@ -4763,7 +4778,7 @@ mod tests {
         // within 2 s.
         let mut delivery_record = None;
         if let Some(run_id) = fired_run_id {
-            let delivery_deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let delivery_deadline = Instant::now() + TRIGGER_HOOK_E2E_DELIVERY_TIMEOUT;
             while Instant::now() < delivery_deadline {
                 if let Ok(Some(rec)) = delivery_store.load_triggered_run_delivery(run_id).await {
                     delivery_record = Some(rec);
@@ -4775,7 +4790,8 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within 15 s — hook wiring e2e stalled"
+            "trigger did not fire within {:?} — hook wiring e2e stalled; last_trigger_state={last_trigger_state:?}",
+            TRIGGER_HOOK_E2E_FIRE_TIMEOUT
         );
         assert!(
             delivery_record.is_some(),
