@@ -52,6 +52,7 @@ pub(super) enum AgenticLoopResult {
     /// Completed with a response.
     Response {
         text: String,
+        metadata: crate::llm::ResponseMetadata,
         turn_usage: TurnUsageSummary,
     },
     /// A tool requires approval before continuing.
@@ -330,7 +331,13 @@ impl Agent {
         let turn_usage = delegate.turn_usage_summary();
 
         match outcome {
-            Ok(LoopOutcome::Response(text)) => Ok(AgenticLoopResult::Response { text, turn_usage }),
+            Ok(LoopOutcome::Response { text, metadata }) => {
+                Ok(AgenticLoopResult::Response {
+                    text,
+                    metadata,
+                    turn_usage,
+                })
+            }
             Ok(LoopOutcome::Stopped) => Ok(AgenticLoopResult::Failed {
                 error: crate::error::JobError::ContextError {
                     id: thread_id,
@@ -767,20 +774,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
     async fn handle_text_response(
         &self,
         text: &str,
-        _metadata: crate::llm::ResponseMetadata,
+        metadata: crate::llm::ResponseMetadata,
         _reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
         // Strip internal "[Called tool ...]" text that can leak when
         // provider flattening (e.g. NEAR AI) converts tool_calls to
         // plain text and the LLM echoes it back.
         let sanitized = strip_internal_tool_call_text(text);
-        TextAction::Return(LoopOutcome::Response(sanitized))
+        TextAction::Return(LoopOutcome::Response {
+            text: sanitized,
+            metadata,
+        })
     }
 
     async fn execute_tool_calls(
         &self,
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
+        metadata: crate::llm::ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, Error> {
         // Extract and sanitize the narrative before consuming `content`.
@@ -800,9 +811,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // OpenAI protocol requires this before tool-result messages.
         reason_ctx
             .messages
-            .push(ChatMessage::assistant_with_tool_calls(
+            .push(ChatMessage::assistant_with_tool_calls_and_reasoning(
                 content,
                 tool_calls.clone(),
+                metadata.assistant_reasoning,
             ));
 
         // Execute tools and add results to context
@@ -1897,6 +1909,7 @@ mod tests {
         ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
             Ok(ToolCompletionResponse {
                 content: Some("ok".to_string()),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1939,6 +1952,7 @@ mod tests {
         ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
             Ok(ToolCompletionResponse {
                 content: Some("done".to_string()),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 input_tokens: 12,
                 output_tokens: 3,
@@ -1982,6 +1996,7 @@ mod tests {
             if request.tools.is_empty() {
                 return Ok(ToolCompletionResponse {
                     content: Some("ok".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
@@ -1993,6 +2008,7 @@ mod tests {
 
             Ok(ToolCompletionResponse {
                 content: None,
+                reasoning_content: None,
                 tool_calls: vec![
                     ToolCall {
                         id: crate::llm::generate_tool_call_id(0, 0),
@@ -3098,6 +3114,7 @@ mod tests {
                 // No tools = force_text mode; return text.
                 return Ok(ToolCompletionResponse {
                     content: Some("forced text response".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 5,
@@ -3109,6 +3126,7 @@ mod tests {
             // Tools available: always call one.
             Ok(ToolCompletionResponse {
                 content: None,
+                reasoning_content: None,
                 tool_calls: vec![ToolCall {
                     id: crate::llm::generate_tool_call_id(0, 0),
                     name: "echo".to_string(),
@@ -3307,6 +3325,7 @@ mod tests {
             if request.tools.is_empty() {
                 return Ok(ToolCompletionResponse {
                     content: Some("forced text".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 2,
@@ -3318,6 +3337,7 @@ mod tests {
             // Always call a tool that does not exist in the registry.
             Ok(ToolCompletionResponse {
                 content: None,
+                reasoning_content: None,
                 tool_calls: vec![ToolCall {
                     id: crate::llm::generate_tool_call_id(0, 0),
                     name: "nonexistent_tool".to_string(),
@@ -3373,6 +3393,7 @@ mod tests {
                 .push(names);
             Ok(ToolCompletionResponse {
                 content: Some("ok".to_string()),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 input_tokens: 0,
                 output_tokens: 1,
@@ -3812,7 +3833,11 @@ mod tests {
                 .expect("dispatcher run should succeed");
 
             match result {
-                super::AgenticLoopResult::Response { text, turn_usage } => {
+                super::AgenticLoopResult::Response {
+                    text,
+                    turn_usage,
+                    ..
+                } => {
                     assert_eq!(text, "done");
                     assert_eq!(turn_usage.usage.input_tokens, 12);
                     assert_eq!(turn_usage.usage.output_tokens, 3);

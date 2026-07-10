@@ -681,6 +681,7 @@ impl LlmProvider for NearAiChatProvider {
 
         Ok(ToolCompletionResponse {
             content,
+            reasoning_content: None,
             tool_calls,
             finish_reason,
             input_tokens,

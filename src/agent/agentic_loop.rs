@@ -38,7 +38,10 @@ pub enum TextAction {
 /// Final outcome of the agentic loop.
 pub enum LoopOutcome {
     /// Completed with a text response.
-    Response(String),
+    Response {
+        text: String,
+        metadata: ResponseMetadata,
+    },
     /// Loop was stopped by a signal.
     Stopped,
     /// Max iterations exceeded.
@@ -126,6 +129,7 @@ pub trait LoopDelegate: Send + Sync {
         &self,
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
+        metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, Error>;
 
@@ -253,6 +257,7 @@ pub async fn run_agentic_loop(
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                assistant_reasoning,
             } => {
                 let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
                 tracing::debug!(
@@ -307,6 +312,7 @@ pub async fn run_agentic_loop(
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                assistant_reasoning,
             } => {
                 // If the response was truncated, tool call parameters are likely
                 // incomplete. Discard them and tell the LLM to try a different
@@ -345,7 +351,15 @@ pub async fn run_agentic_loop(
                 reason_ctx.last_tool_batch_all_failed = false;
 
                 if let Some(outcome) = delegate
-                    .execute_tool_calls(tool_calls, content, reason_ctx)
+                    .execute_tool_calls(
+                        tool_calls,
+                        content,
+                        ResponseMetadata {
+                            anomaly: output.metadata.anomaly,
+                            assistant_reasoning,
+                        },
+                        reason_ctx,
+                    )
                     .await?
                 {
                     return Ok(outcome);
@@ -434,6 +448,7 @@ mod tests {
             result: RespondResult::ToolCalls {
                 tool_calls: calls,
                 content: None,
+                assistant_reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::ToolUse,
@@ -521,13 +536,17 @@ mod tests {
             _metadata: ResponseMetadata,
             _reason_ctx: &mut ReasoningContext,
         ) -> TextAction {
-            TextAction::Return(LoopOutcome::Response(text.to_string()))
+            TextAction::Return(LoopOutcome::Response {
+                text: text.to_string(),
+                metadata: ResponseMetadata::default(),
+            })
         }
 
         async fn execute_tool_calls(
             &self,
             _tool_calls: Vec<ToolCall>,
             _content: Option<String>,
+            _metadata: ResponseMetadata,
             reason_ctx: &mut ReasoningContext,
         ) -> Result<Option<LoopOutcome>, crate::error::Error> {
             self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
@@ -562,7 +581,7 @@ mod tests {
             .unwrap();
 
         match outcome {
-            LoopOutcome::Response(text) => assert_eq!(text, "Hello, world!"),
+            LoopOutcome::Response { text, .. } => assert_eq!(text, "Hello, world!"),
             _ => panic!("Expected LoopOutcome::Response"),
         }
         // after_iteration is NOT called when handle_text_response returns Return
@@ -591,7 +610,7 @@ mod tests {
             .unwrap();
 
         match outcome {
-            LoopOutcome::Response(text) => assert_eq!(text, "Done!"),
+            LoopOutcome::Response { text, .. } => assert_eq!(text, "Done!"),
             _ => panic!("Expected LoopOutcome::Response"),
         }
         assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 1);
@@ -628,7 +647,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert!(matches!(outcome, LoopOutcome::Response { .. }));
         assert!(
             ctx.messages
                 .iter()
@@ -667,6 +686,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     metadata: ResponseMetadata {
                         anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+                        assistant_reasoning: None,
                     },
                 })
             }
@@ -687,6 +707,7 @@ mod tests {
                 &self,
                 _: Vec<ToolCall>,
                 _: Option<String>,
+                _: ResponseMetadata,
                 _: &mut ReasoningContext,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
@@ -798,7 +819,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert!(matches!(outcome, LoopOutcome::Response { .. }));
         assert_eq!(delegate.nudge_count.load(Ordering::SeqCst), 2);
         let nudge_messages = ctx
             .messages
@@ -871,6 +892,7 @@ mod tests {
             result: RespondResult::ToolCalls {
                 tool_calls: vec![truncated_tool_call],
                 content: Some("I'll write the report.".to_string()),
+                assistant_reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length, // response was truncated
@@ -891,7 +913,7 @@ mod tests {
         // Tool calls should NOT have been executed
         assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 0);
         // The loop should have continued and returned the text response
-        assert!(matches!(outcome, LoopOutcome::Response(ref t) if t == "Summarized it."));
+        assert!(matches!(outcome, LoopOutcome::Response { text: ref t, .. } if t == "Summarized it."));
         // A truncation notice should have been injected into context
         assert!(
             ctx.messages
@@ -920,6 +942,7 @@ mod tests {
                     reasoning: None,
                 }],
                 content: None,
+                assistant_reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length,
@@ -943,7 +966,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert!(matches!(outcome, LoopOutcome::Response { .. }));
         assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 0);
         // After 3 truncations, force_text should be set
         assert!(
@@ -1075,7 +1098,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert!(matches!(outcome, LoopOutcome::Response { .. }));
         assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 3);
         // After 3 consecutive duplicate failures, a warning should be injected
         let warning_count = ctx
@@ -1125,7 +1148,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert!(matches!(outcome, LoopOutcome::Response { .. }));
         assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 5);
         assert!(
             ctx.force_text,
@@ -1182,7 +1205,10 @@ mod tests {
                 let count = self.text_response_count.fetch_add(1, Ordering::SeqCst);
                 if count >= 1 {
                     // Second text response — return final result
-                    TextAction::Return(LoopOutcome::Response(text.to_string()))
+                    TextAction::Return(LoopOutcome::Response {
+                        text: text.to_string(),
+                        metadata: ResponseMetadata::default(),
+                    })
                 } else {
                     ctx.messages.push(ChatMessage::assistant("thinking..."));
                     TextAction::Continue
@@ -1192,6 +1218,7 @@ mod tests {
                 &self,
                 _: Vec<ToolCall>,
                 _: Option<String>,
+                _: ResponseMetadata,
                 reason_ctx: &mut ReasoningContext,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 self.tool_exec_count.fetch_add(1, Ordering::SeqCst);

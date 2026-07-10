@@ -250,6 +250,7 @@ async fn llm_complete_with_tools(
 
     Ok(Json(ProxyToolCompletionResponse {
         content: resp.content,
+        reasoning_content: resp.reasoning_content,
         tool_calls: resp.tool_calls,
         input_tokens: resp.input_tokens,
         output_tokens: resp.output_tokens,

@@ -72,6 +72,7 @@ pub struct ProxyToolCompletionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyToolCompletionResponse {
     pub content: Option<String>,
+    pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -262,6 +263,7 @@ impl WorkerHttpClient {
 
         Ok(ToolCompletionResponse {
             content: proxy_resp.content,
+            reasoning_content: proxy_resp.reasoning_content,
             tool_calls: proxy_resp.tool_calls,
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,

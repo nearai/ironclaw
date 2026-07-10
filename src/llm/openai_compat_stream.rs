@@ -565,6 +565,7 @@ impl LlmProvider for OpenAiCompatStreamingProvider {
 
         Ok(ToolCompletionResponse {
             content,
+            reasoning_content: None,
             tool_calls: result.tool_calls,
             finish_reason: result.finish_reason,
             input_tokens: result.input_tokens,

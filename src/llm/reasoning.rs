@@ -427,9 +427,10 @@ pub enum ResponseAnomaly {
 
 /// Metadata attached to `RespondOutput` so callers can react to malformed
 /// provider behavior without inferring it from fallback strings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResponseMetadata {
     pub anomaly: Option<ResponseAnomaly>,
+    pub assistant_reasoning: Option<String>,
 }
 
 /// Result of a response with potential tool calls.
@@ -445,6 +446,7 @@ pub enum RespondResult {
     ToolCalls {
         tool_calls: Vec<ToolCall>,
         content: Option<String>,
+        assistant_reasoning: Option<String>,
     },
 }
 
@@ -873,6 +875,7 @@ Respond in JSON format:
                     result: RespondResult::ToolCalls {
                         tool_calls,
                         content: narrative,
+                        assistant_reasoning: response.reasoning_content.clone(),
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -900,6 +903,7 @@ Respond in JSON format:
                         } else {
                             Some(cleaned)
                         },
+                        assistant_reasoning: response.reasoning_content.clone(),
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -917,17 +921,17 @@ Respond in JSON format:
             // Pre-truncate at tool tags to preserve text before the tag.
             let pre_truncated = truncate_at_tool_tags(&content);
             let cleaned = clean_response(&pre_truncated);
-            let metadata = if cleaned.trim().is_empty() {
+            let mut metadata = ResponseMetadata {
+                anomaly: None,
+                assistant_reasoning: response.reasoning_content.clone(),
+            };
+            if cleaned.trim().is_empty() {
                 tracing::warn!(
                     "LLM response was empty after cleaning (original len={}), using fallback",
                     content.len()
                 );
-                ResponseMetadata {
-                    anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
-                }
-            } else {
-                ResponseMetadata::default()
-            };
+                metadata.anomaly = Some(ResponseAnomaly::EmptyToolCompletion);
+            }
             let final_text = if metadata.anomaly.is_some() {
                 "I'm not sure how to respond to that.".to_string()
             } else {
@@ -969,6 +973,7 @@ Respond in JSON format:
                 );
                 ResponseMetadata {
                     anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+                    assistant_reasoning: None,
                 }
             } else {
                 ResponseMetadata::default()

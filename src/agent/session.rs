@@ -582,7 +582,10 @@ impl Thread {
                 }
             }
             if let Some(ref response) = turn.response {
-                messages.push(ChatMessage::assistant(response));
+                messages.push(ChatMessage::assistant_with_reasoning(
+                    response,
+                    turn.response_reasoning.clone(),
+                ));
             }
         }
         messages
@@ -669,6 +672,7 @@ impl Thread {
                 });
                 if is_final_assistant && let Some(response) = iter.next() {
                     turn.conclude(TurnOutcome::Completed(response.content.clone()));
+                    turn.response_reasoning = response.assistant_reasoning.clone();
                 }
 
                 self.turns.push(turn);
@@ -721,6 +725,9 @@ pub struct Turn {
     pub user_input: String,
     /// Agent response (if completed).
     pub response: Option<String>,
+    /// Raw provider reasoning content for the final assistant response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_reasoning: Option<String>,
     /// Tool calls made during this turn.
     pub tool_calls: Vec<TurnToolCall>,
     /// Turn state.
@@ -750,6 +757,7 @@ impl Turn {
             user_message_id: None,
             user_input: user_input.into(),
             response: None,
+            response_reasoning: None,
             tool_calls: Vec::new(),
             state: TurnState::Processing,
             started_at: Utc::now(),

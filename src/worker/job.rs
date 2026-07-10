@@ -421,7 +421,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let outcome = run_agentic_loop(&delegate, reasoning, reason_ctx, &config).await?;
 
         match outcome {
-            LoopOutcome::Response(_) => {
+            LoopOutcome::Response { .. } => {
                 // Completion was already handled in handle_text_response via mark_completed
             }
             LoopOutcome::MaxIterations => {
@@ -1503,6 +1503,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     result: RespondResult::ToolCalls {
                         tool_calls,
                         content: reasoning_text,
+                        assistant_reasoning: None,
                     },
                     usage: crate::llm::TokenUsage::default(),
                     finish_reason: crate::llm::FinishReason::ToolUse,
@@ -1626,7 +1627,10 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     "Empty response after text output — treating as completion"
                 );
                 self.mark_completed_or_warn("empty text response").await;
-                return TextAction::Return(LoopOutcome::Response(String::new()));
+                return TextAction::Return(LoopOutcome::Response {
+                    text: String::new(),
+                    metadata: ResponseMetadata::default(),
+                });
             }
             // No prior text response — this is likely a rate-limit backoff retry.
             return TextAction::Continue;
@@ -1663,13 +1667,17 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }),
         );
 
-        TextAction::Return(LoopOutcome::Response(text))
+        TextAction::Return(LoopOutcome::Response {
+            text,
+            metadata: ResponseMetadata::default(),
+        })
     }
 
     async fn execute_tool_calls(
         &self,
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
+        _metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {

@@ -749,6 +749,7 @@ impl Agent {
         match result {
             Ok(AgenticLoopResult::Response {
                 text: response,
+                metadata,
                 turn_usage,
             }) => {
                 // Extract <suggestions> from response text before user sees it
@@ -777,6 +778,9 @@ impl Agent {
                 };
 
                 thread.conclude_turn(TurnOutcome::Completed(response.clone()));
+                if let Some(turn) = thread.turns.last_mut() {
+                    turn.response_reasoning = metadata.assistant_reasoning.clone();
+                }
                 let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
@@ -2057,11 +2061,15 @@ impl Agent {
             match result {
                 Ok(AgenticLoopResult::Response {
                     text: response,
+                    metadata,
                     turn_usage,
                 }) => {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.conclude_turn(TurnOutcome::Completed(response.clone()));
+                    if let Some(turn) = thread.turns.last_mut() {
+                        turn.response_reasoning = metadata.assistant_reasoning.clone();
+                    }
                     let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
@@ -2798,6 +2806,7 @@ mod tests {
             ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
                 Ok(crate::llm::ToolCompletionResponse {
                     content: Some("ok".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
@@ -3020,6 +3029,7 @@ mod tests {
     fn test_turn_usage_from_result_extracts_usage_for_interrupted_response() {
         let result = Ok(AgenticLoopResult::Response {
             text: "done".to_string(),
+            metadata: crate::llm::ResponseMetadata::default(),
             turn_usage: TurnUsageSummary {
                 usage: crate::llm::TokenUsage {
                     input_tokens: 12,

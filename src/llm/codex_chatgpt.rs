@@ -749,6 +749,7 @@ impl LlmProvider for CodexChatGptProvider {
             } else {
                 Some(result.text)
             },
+            reasoning_content: None,
             tool_calls,
             input_tokens: result.input_tokens,
             output_tokens: result.output_tokens,

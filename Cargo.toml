@@ -58,8 +58,8 @@ serde_json = "1"
 
 # Database - PostgreSQL (default, feature-gated)
 deadpool-postgres = { version = "0.14", optional = true }
-tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
-postgres-types = { version = "0.2", features = ["with-serde_json-1"], optional = true }
+tokio-postgres = { version = "0.7.18", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
+postgres-types = { version = "0.2.14", features = ["with-serde_json-1"], optional = true }
 refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false }
@@ -93,7 +93,7 @@ rust_decimal_macros = "1"
 async-trait = "0.1"
 
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 
 # Terminal
 crossterm = "0.29"
@@ -103,7 +103,7 @@ termimad = "0.34"
 # Channel integrations
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catch-panic"] }
+tower-http = { version = "0.6.11", features = ["trace", "cors", "set-header", "catch-panic"] }
 
 # Cron scheduling for routines
 cron = "0.13"
@@ -111,7 +111,7 @@ cron = "0.13"
 # JSON Schema validation (workspace document metadata).
 # default-features disabled to avoid pulling a second `reqwest` major version
 # for remote $ref resolution (we only validate against in-memory schemas).
-jsonschema = { version = "0.45", default-features = false }
+jsonschema = { version = "0.45.1", default-features = false }
 
 # Shared types
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.2.0" }
@@ -122,7 +122,7 @@ ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.1" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
-regex = "1"
+regex = "1.13.0"
 aho-corasick = "1"
 
 # YAML parsing for SKILL.md frontmatter
@@ -148,11 +148,11 @@ open = "5"
 
 # Vector embeddings for semantic search
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
-pgvector = { version = "0.4", features = ["postgres"], optional = true }
+pgvector = { version = "0.4.2", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "43.0.1", features = ["component-model"] }
-wasmtime-wasi = "43.0.1"  # WASI support for component model
+wasmtime = { version = "43.0.2", features = ["component-model"] }
+wasmtime-wasi = "43.0.2"  # WASI support for component model
 wasmparser = "0.245.1"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
@@ -165,12 +165,12 @@ rand = "0.8"
 subtle = "2"  # Constant-time comparisons for token validation
 
 # Multi-provider LLM support
-rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
+rig = { package = "rig-core", version = "0.39.0", default-features = false, features = ["reqwest", "rustls"] }
 
 # AWS Bedrock (native Converse API, opt-in via --features bedrock)
-aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
-aws-sdk-bedrockruntime = { version = "1", optional = true }
-aws-smithy-types = { version = "1", optional = true }
+aws-config = { version = "1.8.18", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1.135.0", optional = true }
+aws-smithy-types = { version = "1.5.0", optional = true }
 
 # Docker sandbox
 bollard = "0.18"
@@ -192,12 +192,12 @@ base64 = "0.22.1"
 cookie = "0.18"
 jsonwebtoken = "9"
 mime_guess = "2.0.5"
-clap_complete = "4.5.0"
-lru = "0.16.3"
+clap_complete = "4.6.7"
+lru = "0.16.4"
 
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }
-readabilityrs = { version = "0.1.2", optional = true }
+readabilityrs = { version = "0.1.3", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
 bs58 = "0.5"
 hex = "0.4.3"
@@ -227,7 +227,7 @@ tracing-test = "0.2"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
-insta = { version = "1.46.3", features = ["yaml"] }
+insta = { version = "1.48.0", features = ["yaml"] }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]

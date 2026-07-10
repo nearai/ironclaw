@@ -393,6 +393,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
     let mut chat = ChatMessage {
         role,
         content: msg.content.clone(),
+        assistant_reasoning: None,
         content_parts: Vec::new(),
         tool_call_id: msg.action_call_id.clone(),
         name: msg.action_name.clone(),
@@ -655,6 +656,7 @@ mod tests {
 
             Ok(ToolCompletionResponse {
                 content: Some("ok".to_string()),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
@@ -819,6 +821,7 @@ mod tests {
         ) -> Result<ToolCompletionResponse, LlmError> {
             Ok(ToolCompletionResponse {
                 content: Some(self.content.clone()),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,

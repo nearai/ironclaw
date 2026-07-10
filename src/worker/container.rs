@@ -196,7 +196,7 @@ Work independently to complete this job. When finished, your final message MUST 
         let iterations = *iteration_tracker.lock().await;
 
         match result {
-            Ok(Ok(LoopOutcome::Response(output))) => {
+            Ok(Ok(LoopOutcome::Response { text: output, .. })) => {
                 tracing::info!("Worker completed job {} successfully", self.config.job_id);
                 self.post_event(
                     "result",
@@ -498,7 +498,10 @@ impl LoopDelegate for ContainerDelegate {
             } else {
                 last.clone()
             };
-            return TextAction::Return(LoopOutcome::Response(output));
+            return TextAction::Return(LoopOutcome::Response {
+                text: output,
+                metadata: ResponseMetadata::default(),
+            });
         }
 
         reason_ctx.messages.push(ChatMessage::assistant(text));
@@ -509,6 +512,7 @@ impl LoopDelegate for ContainerDelegate {
         &self,
         tool_calls: Vec<crate::llm::ToolCall>,
         content: Option<String>,
+        _metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {

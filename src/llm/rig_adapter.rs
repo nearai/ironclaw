@@ -12,8 +12,8 @@ use rig::completion::{
 };
 use rig::message::{
     DocumentSourceKind, Image, ImageDetail, ImageMediaType, Message as RigMessage, MimeType,
-    ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
-    UserContent,
+    ReasoningContent, ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult,
+    ToolResultContent, UserContent,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -122,6 +122,10 @@ impl<M: CompletionModel> RigAdapter<M> {
 /// the artifact while preserving all meaningful precision for temperature.
 fn round_f32_to_f64(val: f32) -> f64 {
     ((val as f64) * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn should_include_assistant_reasoning_history(model_name: &str) -> bool {
+    model_name.to_ascii_lowercase().contains("deepseek")
 }
 
 /// Normalize a JSON Schema for OpenAI tool-calling compliance.
@@ -627,7 +631,10 @@ fn make_nullable(schema: &mut JsonValue) {
 ///
 /// Returns `(preamble, chat_history)` where preamble is extracted from
 /// any System message and chat_history contains the rest.
-fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage>) {
+fn convert_messages(
+    messages: &[ChatMessage],
+    include_assistant_reasoning_history: bool,
+) -> (Option<String>, Vec<RigMessage>) {
     let mut preamble: Option<String> = None;
     let mut history = Vec::new();
 
@@ -693,6 +700,11 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     let mut contents: Vec<AssistantContent> = Vec::new();
                     if !msg.content.is_empty() {
                         contents.push(AssistantContent::text(&msg.content));
+                        if include_assistant_reasoning_history {
+                            if let Some(reasoning) = msg.assistant_reasoning.as_deref() {
+                                contents.push(AssistantContent::reasoning(reasoning));
+                            }
+                        }
                     }
                     for (idx, tc) in tool_calls.iter().enumerate() {
                         let tool_call_id =
@@ -721,7 +733,17 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     if msg.content.is_empty() {
                         continue;
                     }
-                    history.push(RigMessage::assistant(&msg.content));
+                    if include_assistant_reasoning_history {
+                        let mut items = vec![AssistantContent::text(&msg.content)];
+                        if let Some(reasoning) = msg.assistant_reasoning.as_deref() {
+                            items.push(AssistantContent::reasoning(reasoning));
+                        }
+                        let content = OneOrMany::many(items)
+                            .expect("assistant content should produce non-empty content");
+                        history.push(RigMessage::Assistant { content, id: None });
+                    } else {
+                        history.push(RigMessage::assistant(&msg.content));
+                    }
                 }
             }
             crate::llm::Role::Tool => {
@@ -849,8 +871,9 @@ fn convert_tool_choice(choice: Option<&str>) -> Option<RigToolChoice> {
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
-) -> (Option<String>, Vec<IronToolCall>, FinishReason) {
+) -> (Option<String>, Option<String>, Vec<IronToolCall>, FinishReason) {
     let mut text_parts: Vec<String> = Vec::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<IronToolCall> = Vec::new();
 
     for content in choice.iter() {
@@ -867,7 +890,20 @@ fn extract_response(
                     reasoning: None,
                 });
             }
-            // Reasoning and Image variants are not mapped to IronClaw types
+            AssistantContent::Reasoning(r) => {
+                for block in &r.content {
+                    match block {
+                        ReasoningContent::Text { text, .. } if !text.is_empty() => {
+                            reasoning_parts.push(text.clone());
+                        }
+                        ReasoningContent::Summary(summary) if !summary.is_empty() => {
+                            reasoning_parts.push(summary.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Image variants are not mapped to IronClaw types
             _ => {}
         }
     }
@@ -884,7 +920,13 @@ fn extract_response(
         FinishReason::Stop
     };
 
-    (text, tool_calls, finish)
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n"))
+    };
+
+    (text, reasoning, tool_calls, finish)
 }
 
 /// Saturate u64 to u32 for token counts.
@@ -961,6 +1003,7 @@ fn build_rig_request(
     };
 
     Ok(RigRequest {
+        model: None,
         preamble,
         chat_history,
         documents: Vec::new(),
@@ -969,6 +1012,7 @@ fn build_rig_request(
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
+        output_schema: None,
     })
 }
 
@@ -1039,7 +1083,10 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(
+            &messages,
+            should_include_assistant_reasoning_history(&self.model_name),
+        );
 
         let mut rig_req = build_rig_request(
             preamble,
@@ -1059,7 +1106,8 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
-        let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, _reasoning, _tool_calls, finish) =
+            extract_response(&response.choice, &response.usage);
 
         let resp = CompletionResponse {
             content: text.unwrap_or_default(),
@@ -1096,7 +1144,10 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(
+            &messages,
+            should_include_assistant_reasoning_history(&self.model_name),
+        );
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
@@ -1118,7 +1169,8 @@ where
             .await
             .map_err(|e| map_rig_error(&self.model_name, e))?;
 
-        let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, reasoning_content, mut tool_calls, finish) =
+            extract_response(&response.choice, &response.usage);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -1135,6 +1187,7 @@ where
 
         let resp = ToolCompletionResponse {
             content: text,
+            reasoning_content,
             tool_calls,
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
@@ -1940,7 +1993,7 @@ mod tests {
             ChatMessage::system("You are a helpful assistant."),
             ChatMessage::user("Hello"),
         ];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, false);
         assert_eq!(preamble, Some("You are a helpful assistant.".to_string()));
         assert_eq!(history.len(), 1);
     }
@@ -1952,7 +2005,7 @@ mod tests {
             ChatMessage::system("System 2"),
             ChatMessage::user("Hi"),
         ];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, false);
         assert_eq!(preamble, Some("System 1\nSystem 2".to_string()));
         assert_eq!(history.len(), 1);
     }
@@ -1965,7 +2018,7 @@ mod tests {
             "search",
             "result text",
         )];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history) = convert_messages(&messages, false);
         assert!(preamble.is_none());
         assert_eq!(history.len(), 1);
         // Tool results become User messages in rig-core
@@ -1992,7 +2045,7 @@ mod tests {
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
         assert_eq!(history.len(), 1);
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -2009,6 +2062,60 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_messages_assistant_text_includes_reasoning_for_deepseek() {
+        let messages = vec![ChatMessage::assistant_with_reasoning(
+            "Hello from DeepSeek",
+            Some("Internal reasoning".to_string()),
+        )];
+
+        let (_preamble, history) = convert_messages(&messages, true);
+
+        assert_eq!(history.len(), 1);
+        match &history[0] {
+            RigMessage::Assistant { content, .. } => {
+                let mut saw_text = false;
+                let mut saw_reasoning = false;
+                for item in content.iter() {
+                    match item {
+                        AssistantContent::Text(text) => {
+                            saw_text = true;
+                            assert_eq!(text.text, "Hello from DeepSeek");
+                        }
+                        AssistantContent::Reasoning(reasoning) => {
+                            saw_reasoning = true;
+                            assert_eq!(reasoning.reasoning.join("\n"), "Internal reasoning");
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(saw_text, "assistant history should keep visible text");
+                assert!(
+                    saw_reasoning,
+                    "deepseek assistant history should include reasoning content"
+                );
+            }
+            other => panic!("Expected Assistant message, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_response_preserves_reasoning_content() {
+        let content = OneOrMany::many(vec![
+            AssistantContent::text("Visible answer"),
+            AssistantContent::reasoning("Internal reasoning"),
+        ])
+        .expect("non-empty content");
+        let usage = RigUsage::new();
+
+        let (text, reasoning, calls, finish) = extract_response(&content, &usage);
+
+        assert_eq!(text.as_deref(), Some("Visible answer"));
+        assert_eq!(reasoning.as_deref(), Some("Internal reasoning"));
+        assert!(calls.is_empty());
+        assert_eq!(finish, FinishReason::Stop);
+    }
+
+    #[test]
     fn test_convert_messages_tool_result_without_id_gets_fallback() {
         let messages = vec![ChatMessage {
             role: crate::llm::Role::Tool,
@@ -2018,7 +2125,7 @@ mod tests {
             name: Some("search".to_string()),
             tool_calls: None,
         }];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
         match &history[0] {
             RigMessage::User { content } => match content.first() {
                 UserContent::ToolResult(r) => {
@@ -2050,7 +2157,7 @@ mod tests {
             }],
         )];
 
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
         match &history[0] {
             RigMessage::User { content } => {
                 let image = content
@@ -2087,8 +2194,8 @@ mod tests {
             }],
         )];
 
-        let (_, low_history) = convert_messages(&low_messages);
-        let (_, high_history) = convert_messages(&high_messages);
+        let (_, low_history) = convert_messages(&low_messages, false);
+        let (_, high_history) = convert_messages(&high_messages, false);
 
         for (history, expected) in [
             (&low_history, ImageDetail::Low),
@@ -2181,7 +2288,7 @@ mod tests {
             reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -2213,7 +2320,7 @@ mod tests {
             reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -2256,7 +2363,7 @@ mod tests {
             tool_calls: None,
         };
         let messages = vec![assistant_msg, tool_result_msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         // Extract the generated call_id from the assistant tool call
         let assistant_call_id = match &history[0] {
@@ -2577,7 +2684,7 @@ mod tests {
         let result_b = ChatMessage::tool_result("call_b", "fetch", "fetch results");
 
         let messages = vec![assistant, result_a, result_b];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         // Should be: 1 assistant + 1 merged user (not 1 assistant + 2 users)
         assert_eq!(
@@ -2614,7 +2721,7 @@ mod tests {
         let tool_msg = ChatMessage::tool_result("call_1", "search", "results");
 
         let messages = vec![user_msg, tool_msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         // Should be 2 separate User messages (text user + tool result user)
         assert_eq!(history.len(), 2);
@@ -2627,7 +2734,7 @@ mod tests {
         let empty = ChatMessage::user("");
         let non_empty = ChatMessage::user("hello");
         let messages = vec![empty, non_empty];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         assert_eq!(history.len(), 1, "empty user message must be dropped");
         match &history[0] {
@@ -2656,7 +2763,7 @@ mod tests {
         };
         let non_empty = ChatMessage::user("hi");
         let messages = vec![empty_asst, non_empty];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         assert_eq!(history.len(), 1, "empty assistant message must be dropped");
         assert!(matches!(history[0], RigMessage::User { .. }));
@@ -2677,7 +2784,7 @@ mod tests {
         let user2 = ChatMessage::user("");
         let asst = ChatMessage::assistant("response");
         let messages = vec![user1, empty_asst, user2, asst];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history) = convert_messages(&messages, false);
 
         assert_eq!(history.len(), 2, "only non-empty messages should survive");
         assert!(matches!(history[0], RigMessage::User { .. }));

@@ -2216,6 +2216,7 @@ mod tests {
         ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
             Ok(ToolCompletionResponse {
                 content: Some("ok".to_string()),
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 input_tokens: 0,
                 output_tokens: 0,
