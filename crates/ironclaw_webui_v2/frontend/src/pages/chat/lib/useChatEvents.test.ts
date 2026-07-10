@@ -478,13 +478,60 @@ test("useChatEvents: unscoped activity uses only unambiguous run candidates", ()
           },
         }),
     },
+    {
+      label: "mixed terminal and active projection batch",
+      toolId: "tool-invocation-projection-active-install",
+      expectedOrder: [
+        "reply-run-old",
+        "follow-up-projection-active",
+        "activity-run-tool-invocation-projection-active-install",
+      ],
+      expectedRunId: "run-new",
+      arrange: (harness) => {
+        harness.replaceMessages([
+          {
+            id: "reply-run-old",
+            role: "assistant",
+            content: "The first run is done.",
+            timestamp: "2026-07-08T13:00:00Z",
+            turnRunId: "run-old",
+            isFinalReply: true,
+          },
+          {
+            id: "follow-up-projection-active",
+            role: "user",
+            content: "run something else",
+            timestamp: "2026-07-08T13:00:20Z",
+          },
+        ]);
+      },
+      emit: (harness) =>
+        harness.handleEvent({
+          type: "projection_update",
+          frame: {
+            state: {
+              items: [
+                { run_status: { run_id: "run-old", status: "completed" } },
+                { run_status: { run_id: "run-new", status: "running" } },
+                {
+                  capability_activity: {
+                    invocation_id: "invocation-projection-active-install",
+                    capability_id: "builtin.extension_install",
+                    status: "completed",
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    },
   ]) {
     const harness = createUseChatEventsHarness();
     scenario.arrange(harness);
     scenario.emit(harness);
 
     const toolMessage = harness.messages.find((message) => message.id === scenario.toolId);
-    assert.equal(toolMessage?.turnRunId, runId, scenario.label);
+    assert.equal(toolMessage?.turnRunId, scenario.expectedRunId || runId, scenario.label);
     assert.deepEqual(groupedIds(harness.messages), scenario.expectedOrder, scenario.label);
   }
 });
