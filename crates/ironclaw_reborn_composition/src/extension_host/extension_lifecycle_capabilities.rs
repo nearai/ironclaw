@@ -212,7 +212,9 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 // Credential revocation lives on the port's `remove` (the single
                 // convergence point shared with the WebUI facade), so the scope
                 // is threaded through rather than cleaned up here.
-                self.extension_management.remove(package_ref, &request.scope).await
+                self.extension_management
+                    .remove(package_ref, &request.scope)
+                    .await
             }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
