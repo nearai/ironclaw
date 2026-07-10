@@ -204,6 +204,78 @@ impl From<AuthProductError> for RebornAuthProductError {
 /// Stable sanitized callback failure safe for route rendering.
 pub type RebornOAuthCallbackError = RebornAuthProductError;
 
+/// Internal callback failure classification used by provider-owned route
+/// cleanup. A continuation acknowledgement failure happens only after the
+/// continuation side effect succeeded, so treating it as a terminal provider
+/// failure would tear down a working connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RebornOAuthCallbackFailureStage {
+    Terminal,
+    ContinuationSideEffect,
+    ContinuationAcknowledgement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RebornOAuthCallbackAttemptError {
+    error: RebornOAuthCallbackError,
+    stage: RebornOAuthCallbackFailureStage,
+}
+
+impl RebornOAuthCallbackAttemptError {
+    fn continuation_acknowledgement(error: AuthProductError) -> Self {
+        Self {
+            error: error.into(),
+            stage: RebornOAuthCallbackFailureStage::ContinuationAcknowledgement,
+        }
+    }
+
+    fn continuation_side_effect(error: AuthProductError) -> Self {
+        Self {
+            error: error.into(),
+            stage: RebornOAuthCallbackFailureStage::ContinuationSideEffect,
+        }
+    }
+
+    pub(crate) fn error(self) -> RebornOAuthCallbackError {
+        self.error
+    }
+
+    pub(crate) fn stage(self) -> RebornOAuthCallbackFailureStage {
+        self.stage
+    }
+}
+
+impl From<AuthProductError> for RebornOAuthCallbackAttemptError {
+    fn from(error: AuthProductError) -> Self {
+        Self {
+            error: error.into(),
+            stage: RebornOAuthCallbackFailureStage::Terminal,
+        }
+    }
+}
+
+impl From<RebornOAuthCallbackError> for RebornOAuthCallbackAttemptError {
+    fn from(error: RebornOAuthCallbackError) -> Self {
+        Self {
+            error,
+            stage: RebornOAuthCallbackFailureStage::Terminal,
+        }
+    }
+}
+
+enum ContinuationDispatchFailure {
+    SideEffect(AuthProductError),
+    Acknowledgement(AuthProductError),
+}
+
+impl ContinuationDispatchFailure {
+    fn into_auth_error(self) -> AuthProductError {
+        match self {
+            Self::SideEffect(error) | Self::Acknowledgement(error) => error,
+        }
+    }
+}
+
 /// Compensating action returned by a provider-identity hook that committed
 /// durable state (e.g. the Slack identity binding) before the flow completes.
 /// Awaited only when `complete_oauth_callback` fails after the hook
@@ -1009,13 +1081,14 @@ impl RebornProductAuthServices {
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
         self.handle_oauth_callback_with_optional_provider_identity_check(request, None)
             .await
+            .map_err(RebornOAuthCallbackAttemptError::error)
     }
 
     pub(crate) async fn handle_oauth_callback_with_optional_provider_identity_check(
         &self,
         request: RebornOAuthCallbackRequest,
         mut provider_identity_check: Option<OAuthProviderIdentityCheck>,
-    ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
+    ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackAttemptError> {
         let mut provider_identity = None;
         let mut identity_binding_rollback: Option<OAuthProviderIdentityBindingRollback> = None;
         let (mut completed, should_dispatch_continuation) = match request.outcome {
@@ -1233,13 +1306,10 @@ impl RebornProductAuthServices {
                 .await
             {
                 Ok(dispatched) => completed = dispatched,
-                Err(error) => {
+                Err(ContinuationDispatchFailure::SideEffect(error)) => {
                     if let AuthContinuationRef::LifecycleActivation { package_ref } =
                         &completed.continuation
                     {
-                        if let Some(rollback) = identity_binding_rollback.take() {
-                            rollback.await;
-                        }
                         match ExtensionId::new(package_ref.as_str()) {
                             Ok(extension_id) => {
                                 if let Err(cleanup_error) = self
@@ -1265,7 +1335,14 @@ impl RebornProductAuthServices {
                             ),
                         }
                     }
-                    return Err(error.into());
+                    return Err(RebornOAuthCallbackAttemptError::continuation_side_effect(
+                        error,
+                    ));
+                }
+                Err(ContinuationDispatchFailure::Acknowledgement(error)) => {
+                    return Err(
+                        RebornOAuthCallbackAttemptError::continuation_acknowledgement(error),
+                    );
                 }
             }
         }
@@ -1484,6 +1561,7 @@ impl RebornProductAuthServices {
         };
         self.dispatch_completed_continuation(completed)
             .await
+            .map_err(ContinuationDispatchFailure::into_auth_error)
             .map_err(RebornManualTokenError::from)?;
 
         Ok(RebornManualTokenSubmitResponse {
@@ -1563,7 +1641,7 @@ impl RebornProductAuthServices {
     async fn dispatch_completed_continuation(
         &self,
         completed: AuthFlowRecord,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
+    ) -> Result<AuthFlowRecord, ContinuationDispatchFailure> {
         if completed.continuation_emitted_at.is_some() {
             return Ok(completed);
         }
@@ -1593,11 +1671,12 @@ impl RebornProductAuthServices {
                 | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
                 error => error,
             };
-            return Err(error);
+            return Err(ContinuationDispatchFailure::SideEffect(error));
         }
         self.flow_manager
             .mark_continuation_dispatched(&completed.scope, completed.id, emitted_at)
             .await
+            .map_err(ContinuationDispatchFailure::Acknowledgement)
     }
 
     fn record_auth_continuation_dispatch_failure(&self, completed: &AuthFlowRecord) {

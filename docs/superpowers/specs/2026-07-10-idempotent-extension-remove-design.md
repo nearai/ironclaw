@@ -32,7 +32,7 @@ OAuth start for an extension will reject a catalog entry that is not currently i
 
 The WebUI will treat server-confirmed lifecycle activation as the completion authority. It must not close the modal, broadcast `channel-connected`, or claim success when activation fails. The existing best-effort post-OAuth activation call will be removed or reduced to an idempotent status refresh once the durable continuation owns activation.
 
-If lifecycle activation fails after Slack binding/token mutation, the existing OAuth callback compensation path must roll back the newly created credential and Slack identity binding rather than commit a half-configured connection. Callback replay remains safe because continuation dispatch is idempotent by flow ID and extension activation is idempotent for an already-active package.
+If lifecycle activation fails after Slack binding/token mutation, the callback compensation path revokes the credential and disconnects the failed connection epoch rather than commit a half-configured connection. A failed reconfiguration must not restore an older identity after its credential has already been replaced. If activation succeeds and only persistence of the continuation acknowledgement fails, the working binding and credential are preserved and the callback retains enough state for an idempotent acknowledgement retry.
 
 ## Error behavior
 
@@ -56,8 +56,10 @@ Add caller-level OAuth and WebUI coverage to prove installation behavior:
 2. OAuth callback dispatches the lifecycle continuation through the production-composed lifecycle facade and publishes the real Slack capability IDs, including `slack.search_messages`.
 3. Lifecycle activation failure makes the callback fail and invokes the existing Slack credential/binding rollback path.
 4. Callback replay does not duplicate activation or corrupt lifecycle state.
-5. The configuration modal does not close or broadcast channel-connected when activation/completion fails, and it renders a retryable error.
-6. A whole-path regression drives install -> OAuth callback -> activation and asserts against the active capability surface, not merely that an activation request was attempted.
+5. A post-activation continuation-marker failure preserves the active binding and credential, avoids a second provider exchange, and succeeds on callback retry.
+6. A lifecycle activation failure after reconfiguration revokes the replaced credential and leaves the Slack owner fully disconnected instead of restoring a stale binding.
+7. The configuration modal does not close or broadcast channel-connected when activation/completion fails, and it renders a retryable error.
+8. A whole-path regression drives install -> OAuth callback -> activation and asserts against the active capability surface, not merely that an activation request was attempted.
 
 ## Scope
 

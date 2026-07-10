@@ -69,7 +69,10 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::product_auth::api::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
+use crate::product_auth::api::auth::{
+    RebornDcrOAuthStartFlowRequest, RebornOAuthCallbackAttemptError,
+    RebornOAuthCallbackFailureStage, RebornOAuthStartFlowRequest,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -982,6 +985,7 @@ pub(super) struct GoogleOAuthCallbackQuery {
 pub(crate) struct ProductAuthRouteFailure {
     status: StatusCode,
     body: RebornOAuthCallbackError,
+    callback_failure_stage: RebornOAuthCallbackFailureStage,
 }
 
 impl ProductAuthRouteFailure {
@@ -992,6 +996,7 @@ impl ProductAuthRouteFailure {
                 code,
                 retryable: matches!(code, AuthErrorCode::BackendUnavailable),
             },
+            callback_failure_stage: RebornOAuthCallbackFailureStage::Terminal,
         }
     }
 
@@ -1051,6 +1056,15 @@ impl From<RebornOAuthCallbackError> for ProductAuthRouteFailure {
     }
 }
 
+impl From<RebornOAuthCallbackAttemptError> for ProductAuthRouteFailure {
+    fn from(error: RebornOAuthCallbackAttemptError) -> Self {
+        let callback_failure_stage = error.stage();
+        let mut failure = route_failure_from_callback_error(error.error());
+        failure.callback_failure_stage = callback_failure_stage;
+        failure
+    }
+}
+
 pub(super) fn route_failure_from_callback_error(
     error: RebornOAuthCallbackError,
 ) -> ProductAuthRouteFailure {
@@ -1074,6 +1088,7 @@ pub(super) fn route_failure_from_callback_error(
     ProductAuthRouteFailure {
         status,
         body: error,
+        callback_failure_stage: RebornOAuthCallbackFailureStage::Terminal,
     }
 }
 

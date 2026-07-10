@@ -34,7 +34,7 @@ use crate::extension_host::available_extensions::{
 };
 use crate::product_auth::api::auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
-    OAuthProviderIdentityCheckFuture, RebornOAuthStartFlowRequest,
+    OAuthProviderIdentityCheckFuture, RebornOAuthCallbackFailureStage, RebornOAuthStartFlowRequest,
 };
 use crate::product_auth::oauth::oauth_gate::{OAuthGateProvider, PreparedOAuthGateFlow};
 use crate::product_auth::oauth::oauth_provider_client::{
@@ -309,6 +309,7 @@ fn slack_personal_oauth_abandon_hook(
     state: ProductAuthRouteState,
     callback_scope: AuthProductScope,
     flow_id: AuthFlowId,
+    failure_stage: RebornOAuthCallbackFailureStage,
 ) -> OAuthCallbackTerminalHookFuture {
     Box::pin(async move {
         let Some(config) = state.slack_personal_oauth_binding_config() else {
@@ -327,6 +328,32 @@ fn slack_personal_oauth_abandon_hook(
             return;
         };
         let provider_user_id_prefix = format!("{}:", connection_owner.installation_id().as_str());
+        if failure_stage == RebornOAuthCallbackFailureStage::ContinuationSideEffect {
+            if let Err(error) = config
+                .binding_rollback_store
+                .delete_user_identity_bindings_for_user_at_epoch(
+                    crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                    &callback_scope.resource.user_id,
+                    Some(provider_user_id_prefix.as_str()),
+                    Some(connection_epoch),
+                )
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    flow_id = %flow_id,
+                    "retaining Slack OAuth lifecycle owner because failed activation identity cleanup did not complete"
+                );
+                return;
+            }
+            abandon_slack_connection_epoch(
+                config.lifecycle_store.as_ref(),
+                &callback_scope,
+                flow_id,
+            )
+            .await;
+            return;
+        }
         match config
             .binding_rollback_store
             .user_identity_bindings_for_user_at_epoch(
