@@ -171,10 +171,10 @@ impl FilesystemOpenAiCompatRefStore {
     }
 
     async fn delete_mapping_best_effort(&self, public_id: &OpenAiCompatPublicId) {
-        if let Ok(path) = self.mapping_path(public_id) {
-            if let Err(error) = self.filesystem.delete(&path).await {
-                tracing::debug!(?error, "best-effort mapping file cleanup failed");
-            }
+        if let Ok(path) = self.mapping_path(public_id)
+            && let Err(error) = self.filesystem.delete(&path).await
+        {
+            tracing::debug!(?error, "best-effort mapping file cleanup failed");
         }
     }
 

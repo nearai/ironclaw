@@ -299,10 +299,8 @@ where
         // after successful secret rotation.  The secret is already unreachable
         // via the account record; a delete failure leaves orphaned material in
         // SecretStore but does not affect auth-flow correctness.
-        if let Some(access_secret) = access_secret
-            && let Err(error) = self.secret_store.delete(scope, access_secret).await
-        {
-            tracing::debug!(?error, "best-effort secret cleanup failed");
+        if let Some(access_secret) = access_secret {
+            self.purge_secret_handle(scope, access_secret).await;
         }
     }
 }

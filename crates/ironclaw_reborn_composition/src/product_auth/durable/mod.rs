@@ -15,7 +15,9 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, RecordVersion, RootFilesystem,
     ScopedFilesystem,
 };
-use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, ProjectId, ResourceScope, ScopedPath, SecretHandle, TenantId, UserId,
+};
 use ironclaw_secrets::SecretStore;
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -138,6 +140,15 @@ where
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         locks.insert(key, Arc::downgrade(&lock));
         lock
+    }
+
+    async fn purge_secret_handle(&self, scope: &ResourceScope, handle: &SecretHandle) {
+        if let Err(error) = self.secret_store.delete(scope, handle).await {
+            tracing::debug!(
+                secret_store_reason = error.stable_reason(),
+                "best-effort secret cleanup failed"
+            );
+        }
     }
 
     async fn read_record<T>(
