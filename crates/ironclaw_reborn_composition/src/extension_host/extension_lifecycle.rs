@@ -367,8 +367,8 @@ impl RebornLocalExtensionManagementPort {
     /// Production access to the extension installation store, for
     /// `webui.rs`'s `ActiveRegistryOperatorToolCatalog` (T3-iso, correction
     /// 10): the operator-tool-config surface needs the SAME owner/enabled
-    /// visibility filter `active_model_visible_capabilities` uses, which
-    /// requires reading manifest sources off this store.
+    /// visibility filter `owner_visible_enabled_extension_ids_for_scope` uses,
+    /// which requires reading manifest sources off this store.
     pub(crate) fn installation_store(&self) -> Arc<dyn ExtensionInstallationStore> {
         Arc::clone(&self.installation_store)
     }
@@ -513,7 +513,7 @@ impl RebornLocalExtensionManagementPort {
     // `LocalDevExtensionSurface::from_extension_management(mgmt, owner)`. A
     // `UserRegistered` extension's capabilities are visible only when its
     // manifest's owner matches `owner` — see
-    // `registered_extension_store::owner_visible_enabled_extension_ids`.
+    // `registered_extension_store::owner_visible_enabled_extension_ids_for_scope`.
     pub(crate) async fn active_model_visible_capabilities(
         &self,
         owner: &ResourceScope,
@@ -1576,7 +1576,7 @@ impl RebornLocalExtensionManagementPort {
         )
         .await
         {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 extension_id = extension_id.as_str(),
                 "registered MCP removal committed but cleanup inventory deletion failed; retaining stale cleanup intent"
@@ -3338,7 +3338,8 @@ mod tests {
     /// of this filter. This test drives the SAME public method production's
     /// `LocalDevExtensionSurface::from_extension_management` calls, with a
     /// real `UserRegistered`-owned, enabled installation seeded through the
-    /// installation store (T3-reg's register verb doesn't exist yet).
+    /// installation store. Direct seeding keeps this filter test focused on
+    /// visibility rather than registration-route setup.
     #[tokio::test]
     async fn active_model_visible_capabilities_is_owner_scoped_for_user_registered_extensions() {
         let (_dir, _storage_root, port, active_registry, installation_store) =
@@ -3395,10 +3396,9 @@ url = "http://127.0.0.1:9/mcp"
             .await
             .expect("seed installation");
 
-        // Publish a capability into the registry under the SAME id — models
-        // T3-disc's eventual discovery-publish step; discovery itself is out
-        // of scope for T3-iso (registered extensions publish zero capabilities
-        // until T3-disc opens the gate).
+        // Publish a capability into the registry under the SAME id. This
+        // fixture directly seeds the post-discovery registry state so the test
+        // isolates owner-scoped visibility; live discovery has dedicated tests.
         let capability_manifest = ExtensionManifest::parse(
             r#"
 schema_version = "reborn.extension_manifest.v2"

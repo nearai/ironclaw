@@ -155,7 +155,7 @@ pub(crate) enum AvailableExtensionAssetContent {
 /// [`crate::extension_host::registered_extension_store`] (freshly loaded
 /// from disk, never borrowed from the shared first-party catalog) and a
 /// first-party catalog hit can flow through the same owned
-/// `AvailableExtensionPackage` return type in `resolve_with_owner_overlay`.
+/// `AvailableExtensionPackage` return type in `resolve_with_owner_overlay_for_scope`.
 #[derive(Debug, Clone)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,

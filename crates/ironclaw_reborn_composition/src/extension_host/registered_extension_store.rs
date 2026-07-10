@@ -1232,7 +1232,7 @@ where
 /// `restore_extension_lifecycle_state`. Deliberately any-owner because
 /// installations carry no owner field yet; never call it from a live
 /// search/install path, which must stay scoped via
-/// [`resolve_with_owner_overlay`].
+/// [`resolve_with_owner_overlay_for_scope`].
 pub(crate) async fn resolve_any_owner_for_restore<F>(
     fs: &F,
     package_ref: &LifecyclePackageRef,

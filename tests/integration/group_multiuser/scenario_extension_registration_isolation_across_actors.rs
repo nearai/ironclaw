@@ -6,10 +6,10 @@
 //! since ids aren't owner-minted yet), AC2 (a `UserRegistered` extension's
 //! capabilities must not appear in another owner's model toolbox), and
 //! correction 10 (the SAME rule on the independent operator-tool-config
-//! reader/writer). Seeding an ENABLED `UserRegistered` install directly via
-//! the installation store exercises a state only T3-reg's register verb can
-//! produce in production — acceptable only because T3-reg is stacked directly
-//! behind this slice.
+//! reader/writer). The scenario seeds an ENABLED `UserRegistered` install
+//! directly through the installation store so each isolation assertion
+//! exercises production owner-scoped filters without coupling the harness to
+//! registration-route setup.
 
 use std::sync::Arc;
 
@@ -47,11 +47,10 @@ url = "http://127.0.0.1:9/mcp"
 "#;
 
 /// A model-visible capability under the SAME extension id, for the T3-iso
-/// AC2 disclosure seam. Registered MCP servers publish zero capabilities
-/// until T3-disc opens the discovery gate; this manifest bypasses discovery
-/// (not the isolation filter under test) to give `active_model_visible_capabilities`
-/// something to filter, exactly as T3-disc will once it wires real MCP tool
-/// discovery through the same registry-publish step.
+/// AC2 disclosure seam. This fixture directly seeds the post-discovery
+/// registry state (rather than invoking live MCP discovery) to give
+/// `active_model_visible_capabilities` something to filter; the isolation
+/// assertion is independent of the discovery transport.
 const REGISTERED_CAPABILITY_ID: &str = "acme-mcp-registered.search";
 const DISCOVERED_SAFE_READ_CAPABILITY_ID: &str = "acme-mcp-registered.read-records";
 const DISCOVERED_SAFE_READ_PROVIDER_TOOL_NAME: &str = "acme-mcp-registered__read-records";
@@ -243,9 +242,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .map_err(|e| format!("[B install must fail, not silently succeed] {e}"))?;
 
     // ── T3-iso seed: an ENABLED UserRegistered install owned by A ────────────
-    // Seeded directly through the installation store (T3-reg's write side
-    // doesn't exist yet) so the three filters below have real enabled state to
-    // scope: AC1b's `search_installation`, AC2's `active_model_visible_capabilities`,
+    // Seed directly through the installation store so the three filters below
+    // exercise a real enabled state without coupling this isolation scenario
+    // to registration-route setup: AC1b's `search_installation`, AC2's `active_model_visible_capabilities`,
     // and correction 10's operator-tool-config catalog.
     let services = capability_harness
         .reborn_services_for_test()
@@ -285,9 +284,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .map_err(|e| format!("[seed] upsert installation: {e}"))?;
 
     // ── AC1b: search_installation must not leak A's install status to B ──────
-    // B independently has its OWN registered-store copy of the SAME bare id
-    // (ids aren't owner-minted until T3-reg) — a realistic id collision. B's
-    // search must show the id as available, never carrying A's `active` phase.
+    // B independently has its OWN registered-store copy of the SAME bare id —
+    // a realistic owner-overlay collision. B's search must show the id as
+    // available, never carrying A's `active` phase.
     let b_owner_user_id = b_search
         .binding
         .subject_user_id
@@ -367,7 +366,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── AC2 seed: publish a real capability descriptor under the SAME owner- ──
     // registered extension id, into the SAME shared registry. The enabled
     // UserRegistered install above supplies the owner-visible lifecycle state;
-    // this package supplies the model-visible descriptor T3-disc will discover.
+    // this package supplies the directly seeded model-visible descriptor.
     let capability_package = registered_capability_probe_package()
         .map_err(|e| format!("[seed] build capability probe package: {e}"))?;
     let schema_dir = capability_harness.storage_root_for_test().join(format!(

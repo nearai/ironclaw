@@ -347,8 +347,8 @@ mod tests {
     };
 
     /// Seeds an enabled owner-registered extension and one model-visible
-    /// capability. T3's register verb does not exist yet, so this uses the
-    /// installation store and registry directly.
+    /// capability directly through the installation store and registry so this
+    /// wrapper test stays focused on owner-scoped visibility.
     async fn seed_owner_registered_capability(
         installation_store: &Arc<dyn ExtensionInstallationStore>,
         shared_registry: &SharedExtensionRegistry,

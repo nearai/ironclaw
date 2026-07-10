@@ -97,7 +97,7 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
                     })
                     .collect::<Vec<_>>(),
                 Err(error) => {
-                    tracing::warn!(%error, "operator tool catalog store unavailable; hiding registry tools");
+                    tracing::debug!(%error, "operator tool catalog store unavailable; hiding registry tools");
                     Vec::new()
                 }
             },
@@ -1044,7 +1044,7 @@ mod tests {
             Arc::clone(&registry),
             // No installation store: this fixture never registers a
             // `UserRegistered` extension, so no owner/enabled filtering is
-            // under test here (see `owner_visible_enabled_extension_ids`
+            // under test here (see `owner_visible_enabled_extension_ids_for_scope`
             // coverage in `registered_extension_store.rs` for that).
             None,
             vec![

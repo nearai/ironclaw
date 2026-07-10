@@ -144,11 +144,14 @@ impl HostedMcpEndpoint {
 }
 
 /// Hosted-egress-eligible sources: `HostBundled` (first-party) and
-/// `UserRegistered` (T2, guarded by `CapabilitiesForbiddenForRegisteredSource`
-/// so a registered manifest can never carry a capability to dispatch here).
-/// The discovery twin gate (`hosted_http_mcp_url`, hosted_mcp_discovery.rs)
-/// stays closed for `UserRegistered` until T3 lands live-discovery
-/// capabilities — do not widen it here to "fix" the asymmetry.
+/// `UserRegistered` (owner-scoped, guarded by
+/// `CapabilitiesForbiddenForRegisteredSource` so a registered descriptor
+/// cannot grant arbitrary dispatch authority).
+///
+/// Registered providers do not supply model tool schemas in their manifests:
+/// activation performs live `tools/list` discovery through `RuntimeHttpEgress`,
+/// then publishes the discovered capabilities through this host-mediated path.
+/// Keep this source gate aligned with `mcp_discovery.rs`.
 pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
     if !matches!(
         package.manifest.source,
