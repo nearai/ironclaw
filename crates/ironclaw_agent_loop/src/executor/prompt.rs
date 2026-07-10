@@ -509,25 +509,8 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                     %safe_summary,
                     "agent loop compaction deferred; continuing with the existing prompt"
                 );
-                state.compaction_state.force_compact_on_next_iteration = false;
-                state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-                    through_seq: drop_through_seq,
-                    prompt_fingerprint: state.compaction_prompt.fingerprint(),
-                });
-                state = match CheckpointStage
-                    .cancel_if_requested_after_pending_input_ack(
-                        self.ctx,
-                        state,
-                        self.pending_input_ack,
-                    )
-                    .await?
-                {
-                    CancelCheck::Continue(state) => *state,
-                    CancelCheck::Exit(exit) => {
-                        return Ok(PromptCompactionOutcome::Exited(exit));
-                    }
-                };
-                return Ok(PromptCompactionOutcome::Skipped(state));
+                return defer_compaction(self.ctx, state, self.pending_input_ack, drop_through_seq)
+                    .await;
             }
             CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
             | CompactionCallOutcome::Cancelled => {
@@ -653,6 +636,20 @@ async fn compaction_failed_continue(
             },
         )
         .await;
+    defer_compaction(ctx, state, pending_input_ack, drop_through_seq).await
+}
+
+/// Shared tail for both compaction-deferral paths (explicit `Deferred`
+/// outcome and failure-fallback continue): clears the force-compact flag,
+/// records the deferred watermark, and honors cancellation. The
+/// mutate-then-cancel-check order is intentional — the watermark persists
+/// via the `Final` checkpoint even if the run is cancelled right after.
+async fn defer_compaction(
+    ctx: StageContext<'_>,
+    state: LoopExecutionState,
+    pending_input_ack: &mut PendingInputAck,
+    drop_through_seq: u64,
+) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
     let mut state = state;
     state.compaction_state.force_compact_on_next_iteration = false;
     state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
