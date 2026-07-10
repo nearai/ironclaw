@@ -61,13 +61,13 @@ source: tests/integration/support/golden.rs
       ]
     },
     {
-      "content": "capability completed",
+      "content": "{\"detail\":{\"failure_kind\":\"none\",\"kind\":\"generic_failure\"},\"schema_version\":1,\"status\":\"success\",\"summary\":\"capability completed\",\"trust\":\"untrusted_tool_output\"}",
       "name": "builtin__http",
       "role": "tool",
       "tool_call_id": "call-1"
     },
     {
-      "content": "capability completed",
+      "content": "{\"detail\":{\"failure_kind\":\"none\",\"kind\":\"generic_failure\"},\"schema_version\":1,\"status\":\"success\",\"summary\":\"capability completed\",\"trust\":\"untrusted_tool_output\"}",
       "name": "builtin__http",
       "role": "tool",
       "tool_call_id": "call-2"
