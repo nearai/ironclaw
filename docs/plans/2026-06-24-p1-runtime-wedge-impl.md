@@ -19,7 +19,7 @@ NOT in this track.
 ### Incident logs
 - `~/Downloads/logs.1782330623559.log` + `logs.1782331100360.log` (1000 lines each).
 - **Total silence window confirmed:** 82 log lines at `19:51:05`, then *nothing*
-  `19:51:06 → 19:54:58`, resuming `19:54:59` with `ironclaw_reborn::runtime:
+  `19:51:06 → 19:54:58`, resuming `19:54:59` with `ironclaw_runner::runtime:
   loaded boot config` — i.e. the process **died and restarted** after the ~4-min
   wedge. The slice captured here shows post-restart lease recovery (8
   `lease_expired`); the mass-expiry burst lives in the wider prod log set the

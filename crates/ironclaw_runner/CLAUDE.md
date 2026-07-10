@@ -1,4 +1,4 @@
-# ironclaw_reborn
+# ironclaw_runner
 
 Owns driver-side Reborn loop integration.
 
@@ -11,6 +11,8 @@ Owns driver-side Reborn loop integration.
 - `planned_driver_factory.rs` wires the default planned driver and profile.
 - `loop_driver_host.rs` composes concrete loop host ports for claimed runs.
 - `loop_exit_applier.rs` validates loop exits and applies runner transitions.
+- `turn_scheduler.rs` owns scheduler-backed claiming, heartbeat, lease recovery,
+  bounded concurrency, wake, and shutdown behavior next to the per-run executor.
 - `runtime.rs` builds default and product-live planned runtime compositions.
 - `production_readiness.rs` validates production readiness of the Reborn loop
   composition.
@@ -21,6 +23,8 @@ Owns driver-side Reborn loop integration.
   not define strategy traits, loop state, or canonical executor mechanics.
 - `ironclaw_agent_loop` owns loop families and executor behavior.
 - `ironclaw_turns` owns runner and host contracts.
+- `ironclaw_host_runtime` owns host services and production validation of the
+  transition port supplied to the scheduler; it does not own runner control.
 - `ironclaw_loop_support` owns reusable host-port adapters.
 - Product workflow owns product-facing binding/idempotency/gate routing; do not
   call around it from here.

@@ -26,7 +26,14 @@ use ironclaw_loop_support::{
     RunCancellationHandle, loop_driver_execution_extension_id,
     verify_product_live_cancellation_probe,
 };
-use ironclaw_reborn::{
+use ironclaw_reborn_composition::{
+    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
+    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
+    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
+    RebornServices, build_reborn_services, capability_allowlist,
+    visible_capability_request_for_run,
+};
+use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     model_routes::{ModelSelectionMode, ModelSlot},
     planned_driver_factory::default_planned_run_profile_resolver,
@@ -41,13 +48,6 @@ use ironclaw_reborn::{
         flavors::StaticSubagentDefinitionResolver,
         goal_store::InMemoryBoundedSubagentGoalStore,
     },
-};
-use ironclaw_reborn_composition::{
-    ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
-    ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
-    ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
-    RebornServices, build_reborn_services, capability_allowlist,
-    visible_capability_request_for_run,
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -1359,7 +1359,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         subagent_await_edge_settler: await_edge_resolver
             as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
         subagent_await_edge_evidence: Arc::clone(&await_edge_store)
-            as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+            as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             adapters.capability_input_resolver,
@@ -1370,7 +1370,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
             turn_state_for_evidence,
             loop_checkpoint_for_evidence,
             await_edge_store
-                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             thread_scope,
         )),
         config: DefaultPlannedRuntimeConfig::default(),

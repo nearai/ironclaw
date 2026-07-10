@@ -59,6 +59,7 @@ jobs:
       has_core_code: ${{ steps.non_diff.outputs.has_core_code || steps.diff.outputs.has_core_code }}
       has_runtime_heavy_risk: ${{ steps.non_diff.outputs.has_runtime_heavy_risk || steps.diff.outputs.has_runtime_heavy_risk }}
       has_web_risk: ${{ steps.non_diff.outputs.has_web_risk || steps.diff.outputs.has_web_risk }}
+      has_direct_wasm_abi_risk: ${{ steps.non_diff.outputs.has_direct_wasm_abi_risk || steps.diff.outputs.has_direct_wasm_abi_risk }}
       has_wasm_abi_risk: ${{ steps.non_diff.outputs.has_wasm_abi_risk || steps.diff.outputs.has_wasm_abi_risk }}
       has_telegram_risk: ${{ steps.non_diff.outputs.has_telegram_risk || steps.diff.outputs.has_telegram_risk }}
       has_slack_risk: ${{ steps.non_diff.outputs.has_slack_risk || steps.diff.outputs.has_slack_risk }}
@@ -76,6 +77,7 @@ jobs:
           # workflow. The merge queue runs only smoke coverage for web-risk
           # changes so queued merges remain fast.
           echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
+          echo "has_direct_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_telegram_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_slack_risk=true" >> "$GITHUB_OUTPUT"
@@ -118,7 +120,13 @@ jobs:
             echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|Cargo\.toml$|Cargo\.lock$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
+          has_direct_wasm_abi_risk=false
+          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|\.github/workflows/(platform-and-compat|test|nightly-deep-ci)\.yml$)'; then
+            has_direct_wasm_abi_risk=true
+          fi
+          echo "has_direct_wasm_abi_risk=$has_direct_wasm_abi_risk" >> "$GITHUB_OUTPUT"
+
+          if [ "$has_direct_wasm_abi_risk" = true ] || has_match '^(Cargo\.toml|Cargo\.lock)$'; then
             echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
@@ -235,10 +243,14 @@ jobs:
   wasm-wit-compat:
     name: WASM WIT Compatibility
     needs: changes
+    # WIT and registry paths are outside the shared legacy-test classifier;
+    # the event-specific WASM risk outputs are authoritative for this job.
     if: >
       needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || inputs.deep == true || needs.changes.outputs.has_wasm_abi_risk == 'true')
+      (github.event_name == 'push' ||
+       inputs.deep == true ||
+       (github.event_name == 'merge_group' && needs.changes.outputs.has_wasm_abi_risk == 'true') ||
+       (github.event_name == 'pull_request' && needs.changes.outputs.has_direct_wasm_abi_risk == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

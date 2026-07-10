@@ -27,7 +27,7 @@ Every model call ships all ~91 tool JSON schemas + system prompt (identity files
 - NEAR AI takes tools via the API `tools=` array (OpenAI function-schema). Caching, if any, is **automatic server-side prefix KV-cache** (vLLM/SGLang-style), eviction-driven and replica-dependent. **Prefix stability is necessary but not sufficient** for a cache hit. We do not assume `cached_tokens` is reported — it is an *empirical gate* (§7).
 - "LLM data is never deleted" — compression edits only the prompt *view*; the full transcript is always reconstructable from the DB.
 - Every tool execution routes through `ToolDispatcher::dispatch()`; bridge tools must be provably equivalent to direct dispatch.
-- Changes contained to: agent-loop prompt assembly (`crates/ironclaw_agent_loop/src/executor/prompt.rs`, `model.rs`), the model gateway (`crates/ironclaw_reborn/src/model_gateway.rs`), a new tool catalog/index, a new prompt-view compressor, and a new artifact store.
+- Changes contained to: agent-loop prompt assembly (`crates/ironclaw_agent_loop/src/executor/prompt.rs`, `model.rs`), the model gateway (`crates/ironclaw_runner/src/model_gateway.rs`), a new tool catalog/index, a new prompt-view compressor, and a new artifact store.
 - All thresholds below are **config defaults / rollout knobs** (`src/config/`), to be tuned from production traces — not baked constants. They land as **named constants on one config surface** (not scattered across the compressor/disclosure/cache modules) so canary tuning has a single home: `4k` per-result and `16k` aggregate cheap-prune triggers, the `~50%` input-budget dominant gate, the `24-tool / 12k-schema-token` advertise cap, and promotion `N=2`.
 
 ## 4. Final design
