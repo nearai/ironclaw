@@ -293,7 +293,10 @@ jobs:
       - name: Check Reborn E2E jobs
         run: |
           # shellcheck disable=SC1091
-          source .github/scripts/ci-job-result-ok.sh
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
 
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes (scope detection) failed: ${{ needs.changes.result }}"

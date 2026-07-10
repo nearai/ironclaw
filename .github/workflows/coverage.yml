@@ -311,14 +311,23 @@ jobs:
           persist-credentials: false
       - run: |
           # shellcheck disable=SC1091
-          source .github/scripts/ci-job-result-ok.sh
-
-          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "allow"; then
-            echo "Coverage job failed: ${{ needs.coverage.result }}"
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
             exit 1
           fi
-          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "allow"; then
+
+          failures=0
+
+          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "superseded_only"; then
+            echo "Coverage job failed: ${{ needs.coverage.result }}"
+            failures=$((failures + 1))
+          fi
+          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "superseded_only"; then
             echo "E2E coverage job failed: ${{ needs.e2e-coverage.result }}"
+            failures=$((failures + 1))
+          fi
+
+          if [[ "${failures}" -gt 0 ]]; then
             echo "One or more coverage jobs failed"
             exit 1
           fi

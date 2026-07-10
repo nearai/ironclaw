@@ -403,7 +403,10 @@ jobs:
           fi
 
           # shellcheck disable=SC1091
-          source .github/scripts/ci-job-result-ok.sh
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
 
           for job_result in \
             "format=${{ needs.format.result }}" \

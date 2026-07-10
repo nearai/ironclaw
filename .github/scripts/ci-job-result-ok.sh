@@ -8,6 +8,7 @@ job_result_ok() {
   local event_name="${GITHUB_EVENT_NAME:-}"
   local ref_name="${GITHUB_REF:-}"
   local current_sha="${GITHUB_SHA:-}"
+  local latest_sha=
 
   if [[ "$result" == "success" ]]; then
     return 0
@@ -31,13 +32,24 @@ job_result_ok() {
       return 0
       ;;
     superseded_only)
-      if git fetch --no-tags --depth=2 origin +refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1; then
-        local latest_sha
-        latest_sha="$(git rev-parse refs/remotes/origin/main)"
-        if [[ "${current_sha}" != "$latest_sha" ]]; then
-          echo "$name was cancelled on a superseded push-to-main run; treating as non-blocking"
-          return 0
+      if [[ -z "${_CI_JOB_RESULT_OK_MAIN_SHA_CACHE:-}" ]]; then
+        if ! timeout 10s git fetch --no-tags --depth=2 origin +refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1; then
+          echo "Could not refresh refs/remotes/origin/main; treating cancelled job as blocking for $name"
+          return 1
         fi
+        latest_sha="$(git rev-parse refs/remotes/origin/main)"
+        if [[ -z "$latest_sha" ]]; then
+          echo "Could not resolve refs/remotes/origin/main; treating cancelled job as blocking for $name"
+          return 1
+        fi
+        _CI_JOB_RESULT_OK_MAIN_SHA_CACHE="${latest_sha}"
+      else
+        latest_sha="${_CI_JOB_RESULT_OK_MAIN_SHA_CACHE}"
+      fi
+
+      if [[ "${current_sha}" == "$latest_sha" ]]; then
+        echo "$name was cancelled on a non-superseded push-to-main run; treating as non-blocking"
+        return 0
       fi
       return 1
       ;;
