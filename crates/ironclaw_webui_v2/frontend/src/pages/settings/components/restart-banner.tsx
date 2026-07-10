@@ -112,7 +112,7 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
         role="status"
         aria-live="polite"
       >
-        <div className="w-full max-w-sm rounded-[1.5rem] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-6 text-center shadow-[0_24px_60px_rgba(0,0,0,0.35)]">
+        <div className="w-full max-w-sm rounded-[1.5rem] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-6 text-center shadow-[var(--v2-shadow-modal)]">
           <div className="mx-auto grid h-12 w-12 place-items-center rounded-full border border-copper/30 bg-copper/10 text-copper">
             <Icon name="pulse" className="h-5 w-5 animate-pulse" />
           </div>

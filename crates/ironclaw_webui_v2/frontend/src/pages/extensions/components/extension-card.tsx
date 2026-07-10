@@ -68,7 +68,7 @@ function OverflowMenu({ actions, isBusy }) {
       (
         <div
           role="menu"
-          className="absolute right-0 top-8 z-10 min-w-[156px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]"
+          className="absolute right-0 top-8 z-10 min-w-[156px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[var(--v2-shadow-menu)]"
         >
           {actions.map(
             (action) => (

@@ -28,6 +28,8 @@ import {
   InputSection,
   ModalSection,
   PrimitivesSection,
+  SelectMenuSection,
+  TabsSection,
 } from "./components/component-sections";
 
 const THEME_STORAGE_KEY = "ironclaw:v2-theme";
@@ -61,7 +63,7 @@ const SECTIONS = [
       { id: "colors", name: "Colors", icon: "spark", render: ColorsSection, blurb: "Semantic color roles — every value is a --v2-* custom property that resolves per theme." },
       { id: "typography", name: "Typography", icon: "file", render: TypographySection, blurb: "Type scale, tracking, and weights derived from what components render." },
       { id: "spacing", name: "Spacing", icon: "list", render: SpacingSection, blurb: "The 4px grid. Pick the named step that matches the relationship, not a raw value." },
-      { id: "radii", name: "Radii & Shadows", icon: "layers", render: RadiiSection, blurb: "Corner radii by control size, plus the two elevation shadows." },
+      { id: "radii", name: "Radii & Shadows", icon: "layers", render: RadiiSection, blurb: "Corner radii by control size, plus the restrained elevation scale — borders separate, shadows only lift." },
       { id: "motion", name: "Motion", icon: "pulse", render: MotionSection, blurb: "The restrained-motion system: duration + easing tokens, entrances, and the ambient work indicators." },
       { id: "z-index", name: "Z-index", icon: "logs", render: ZIndexSection, blurb: "The five-layer ladder. Every overlay picks a layer, never a number." },
     ],
@@ -73,6 +75,8 @@ const SECTIONS = [
       { id: "badge", name: "Badge", icon: "check", render: BadgeSection, blurb: "Status chips. Tone communicates state; label carries the translated copy." },
       { id: "card", name: "Card", icon: "folder", render: CardSection, blurb: "The panel surface. Compose with CardHeader / CardBody / CardFooter / CardLabel." },
       { id: "input", name: "Inputs", icon: "terminal", render: InputSection, blurb: "Input, Textarea, Select, Label, and the FormField wrapper with hint/error slots." },
+      { id: "select-menu", name: "SelectMenu", icon: "chevron", render: SelectMenuSection, blurb: "Listbox-backed custom select: option tones, keyboard support, and an inline prefix label for dense toolbars." },
+      { id: "tabs", name: "Tabs", icon: "list", render: TabsSection, blurb: "Underline tab row for single-select filters — sized by the control tokens so it aligns with adjacent toolbar controls." },
       { id: "modal", name: "Modal", icon: "plus", render: ModalSection, blurb: "The only dialog primitive. Escape + backdrop close, scroll lock, modal layer." },
       { id: "icons", name: "Icons", icon: "settings", render: IconSection, blurb: "Inline 24px stroke icons. Add new glyphs to icons.tsx, never inline new SVG." },
       { id: "primitives", name: "Primitives", icon: "shield", render: PrimitivesSection, blurb: "Higher-level composites: StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel." },

@@ -34,7 +34,7 @@ export const COLOR_TOKENS = [
     group: "Cards & borders",
     tokens: [
       { var: "--v2-card-bg", note: "Card/panel surface" },
-      { var: "--v2-card-border", note: "Card border (transparent in dark)" },
+      { var: "--v2-card-border", note: "Card border (hairline in both themes)" },
       { var: "--v2-panel-border", note: "Default border: dividers, form borders" },
     ],
   },
@@ -150,14 +150,18 @@ export const TYPE_TOKENS = [
   { var: "--v2-font-size-display", note: "Page headings, desktop (36px)", sample: "Automations" },
 ];
 
-/** Shadow tokens — nux layered elevation scale (sm/md/lg + card are
- * themed: the light-mode scale is much softer than dark's). */
+/** Shadow tokens — restrained elevation scale, all themed (the
+ * light-mode scale is much softer than dark's). Borders do the
+ * separation work; shadows only lift the surface: cards get a 1px
+ * lift, menus/popovers/tooltips share --v2-shadow-menu, and modal
+ * dialogs sit one step higher on --v2-shadow-modal. */
 export const SHADOW_TOKENS = [
   { var: "--v2-shadow-sm", note: "Subtle lift: rows, small chips (themed)" },
-  { var: "--v2-shadow-md", note: "Raised controls, popovers (themed)" },
+  { var: "--v2-shadow-md", note: "Raised controls (themed)" },
   { var: "--v2-shadow-lg", note: "Floating panels, sheets (themed)" },
-  { var: "--v2-card-shadow", note: "Card elevation (themed per mode)" },
-  { var: "--v2-shadow-modal", note: "Modal / dialog elevation" },
+  { var: "--v2-card-shadow", note: "Card elevation: minimal 1px lift (themed)" },
+  { var: "--v2-shadow-menu", note: "Menus, popovers, tooltips, toasts (themed)" },
+  { var: "--v2-shadow-modal", note: "Modal / dialog elevation (themed)" },
   { var: "--v2-shadow-accent-hover", note: "Primary button hover glow" },
 ];
 

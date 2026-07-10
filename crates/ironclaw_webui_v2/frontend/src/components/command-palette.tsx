@@ -84,7 +84,7 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label={t("command.dialogLabel")}>
       <button type="button" aria-label={t("common.close")} onClick={onClose} className="absolute inset-0 bg-black/50"></button>
-      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]">
+      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-modal)]">
         <div className="flex items-center gap-2 border-b border-[var(--v2-panel-border)] px-3">
           <Icon name="search" className="h-4 w-4 text-[var(--v2-text-faint)]" />
           <input

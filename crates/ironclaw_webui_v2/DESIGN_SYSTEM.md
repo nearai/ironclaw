@@ -222,12 +222,16 @@ add a token first — do not inline the raw value.
   surfaces 24px, pills `full`. Never a new radius value. (The nux
   landing's 16px button radius is reserved for hero CTAs — at the
   compact control heights, 8–10px is the correct proportion.)
-- Shadows come from the nux layered scale: `--v2-shadow-sm/md/lg`
-  for lifts (themed — the light scale is much softer, so never
-  hardcode a shadow that "looks right" in one theme), the themed
-  `--v2-card-shadow` (via `Card`), `--v2-shadow-modal` for dialogs,
-  and `--v2-shadow-accent-hover` only on the primary button. Nothing
-  else invents a shadow.
+- Shadows follow a restrained elevation scale (all themed — the
+  light scale is much softer, so never hardcode a shadow that
+  "looks right" in one theme). Borders do the separation work;
+  shadows only lift: `--v2-card-shadow` is a minimal 1px lift (via
+  `Card`; use `variant="flat"` for in-page cards that should sit
+  flush with no shadow at all), `--v2-shadow-menu` is shared by
+  menus/popovers/tooltips/toasts, `--v2-shadow-modal` sits one step
+  higher for dialogs, `--v2-shadow-sm/md/lg` cover other lifts, and
+  `--v2-shadow-accent-hover` appears only on the primary button.
+  Nothing else invents a shadow.
 - Overlay dims come from the scrim tokens: `--v2-scrim` behind
   modals (what `Modal` renders), `--v2-scrim-soft` behind side
   sheets / task panels. Both sit on the overlay/modal layers below.
@@ -267,6 +271,8 @@ quick, and token-driven.
 | Status chip | `Badge tone=…` with a **translated** `label` | hand-rolled pill |
 | Panel / grouped content | `Card` (+ `CardHeader/Body/Footer/Label`) | `.v2-panel` (legacy shim) or bare bordered divs |
 | Form control | `Input` / `Textarea` / `Select` inside `FormField` | raw inputs (they only get partial theming) |
+| Toolbar select / sort control | `SelectMenu` (use `prefix` for the inline label) | an external label next to a bare select |
+| Single-select view filter | `Tabs` (swap to `SelectMenu` below `sm`) | pill buttons or hand-rolled tab rows |
 | Dialog / confirmation | `Modal` (+ `ModalBody/Footer`) | new overlay markup |
 | Inline icon | `Icon name=…` (add glyphs to `icons.js`) | inline `<svg>` in a page |
 | Metric, empty state, step list, section heading | `StatCard` / `EmptyPanel` / `FlowList` / `SectionHeader` / `SubLabel` | re-deriving them |

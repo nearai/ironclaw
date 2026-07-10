@@ -19,6 +19,8 @@ import {
   StatCard,
   SubLabel,
 } from "../../../design-system/primitives";
+import { SelectMenu } from "../../../design-system/select-menu";
+import { Tabs } from "../../../design-system/tabs";
 import { STATUS_CANON } from "../../../design-system/tokens";
 import { SectionTitle } from "./token-sections";
 
@@ -165,7 +167,7 @@ export function BadgeSection() {
 
 /* ── Card ─────────────────────────────────────────────────────────── */
 
-const CARD_VARIANTS = ["default", "bordered", "subtle", "inset"];
+const CARD_VARIANTS = ["default", "bordered", "flat", "subtle", "inset"];
 
 export function CardSection() {
   return (
@@ -183,6 +185,12 @@ export function CardSection() {
           </Card>
         ))}
       </div>
+      <p className="mt-4 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        <code className="font-mono text-[0.75rem]">flat</code> is
+        border-defined with no shadow at all — use it for in-page cards
+        (tables, stat grids) that should sit flush on the canvas instead
+        of floating above it.
+      </p>
 
       <SectionTitle>Composed: header / body / footer</SectionTitle>
       <Card className="max-w-lg">
@@ -237,6 +245,123 @@ export function InputSection() {
           <Textarea placeholder="Optional deployment notes" rows={3} />
         </FormField>
       </div>
+    </div>
+  );
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────── */
+
+const DEMO_TABS = [
+  { value: "all", label: "All", count: 12 },
+  { value: "active", label: "Active", count: 8 },
+  { value: "paused", label: "Paused", count: 3 },
+  { value: "failing", label: "Failing", count: 1 },
+];
+
+export function TabsSection() {
+  const [tab, setTab] = useState("all");
+  const [toolbarTab, setToolbarTab] = useState("active");
+  return (
+    <div>
+      <ImportLine>import {"{ Tabs }"} from "../../design-system/tabs";</ImportLine>
+
+      <SectionTitle>Underline tabs</SectionTitle>
+      <Tabs
+        tabs={DEMO_TABS}
+        value={tab}
+        onChange={setTab}
+        ariaLabel="Filter automations"
+        className="max-w-xl"
+      />
+      <p className="mt-4 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        Single-select filters over one collection. Row height derives from
+        the shared control tokens (
+        <code className="font-mono text-[0.75rem]">--v2-control-h-md + --v2-control-px-sm</code>
+        ) so a tab row lines up with buttons and selects in adjacent
+        toolbars. Below the <code className="font-mono text-[0.75rem]">sm</code>{" "}
+        breakpoint, swap to a SelectMenu instead of shrinking the row.
+      </p>
+
+      <SectionTitle>In a toolbar (bordered=false)</SectionTitle>
+      <div className="flex max-w-xl items-stretch justify-between gap-3 border-b border-[var(--v2-panel-border)]">
+        <Tabs
+          tabs={DEMO_TABS.slice(0, 3)}
+          value={toolbarTab}
+          onChange={setToolbarTab}
+          ariaLabel="Toolbar tabs demo"
+          bordered={false}
+        />
+        <div className="flex items-center gap-2 pb-2">
+          <Button variant="secondary" size="sm">Set defaults</Button>
+        </div>
+      </div>
+      <p className="mt-4 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        Pass <code className="font-mono text-[0.75rem]">bordered=false</code>{" "}
+        when a parent toolbar owns the baseline hairline, so right-side
+        controls share the same rule and the tabs stretch to center
+        against them.
+      </p>
+    </div>
+  );
+}
+
+/* ── SelectMenu ───────────────────────────────────────────────────── */
+
+const SORT_OPTIONS = [
+  { value: "next-run", label: "Next run" },
+  { value: "name", label: "Name" },
+  { value: "recent", label: "Recently created" },
+];
+
+const STATUS_OPTIONS = [
+  { value: "ok", label: "Healthy", tone: "positive" },
+  { value: "degraded", label: "Degraded", tone: "warning" },
+  { value: "down", label: "Failing", tone: "danger" },
+];
+
+export function SelectMenuSection() {
+  const [sort, setSort] = useState("next-run");
+  const [status, setStatus] = useState("ok");
+  return (
+    <div>
+      <ImportLine>import {"{ SelectMenu }"} from "../../design-system/select-menu";</ImportLine>
+
+      <SectionTitle>With a prefix label</SectionTitle>
+      <Row>
+        <SelectMenu
+          prefix="Sort"
+          ariaLabel="Sort automations"
+          value={sort}
+          options={SORT_OPTIONS}
+          onChange={setSort}
+          className="w-48"
+          align="left"
+        />
+      </Row>
+      <p className="mt-4 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        <code className="font-mono text-[0.75rem]">prefix</code> renders a
+        muted inline label inside the trigger, before the selected value —
+        use it instead of an external label so the control stays
+        self-describing in dense toolbars.
+      </p>
+
+      <SectionTitle>Option tones</SectionTitle>
+      <Row>
+        <SelectMenu
+          ariaLabel="Status filter"
+          value={status}
+          options={STATUS_OPTIONS}
+          onChange={setStatus}
+          className="w-44"
+          align="left"
+        />
+      </Row>
+      <p className="mt-4 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+        The menu floats on{" "}
+        <code className="font-mono text-[0.75rem]">--v2-shadow-menu</code>:
+        the hairline border does the separation work and the shadow only
+        lifts the surface (see Radii &amp; Shadows).
+      </p>
     </div>
   );
 }

@@ -61,20 +61,26 @@
 :root {
   color-scheme: light;
 
-  /* Canvas / surfaces — nux light: white surfaces on a #f5f5f7 field */
+  /* Canvas / surfaces */
   --v2-canvas:        #f5f5f7;
   --v2-canvas-strong: #ffffff;
   --v2-surface:       #ffffff;
   --v2-surface-soft:  #f5f5f7;
   --v2-surface-muted: #ebebed;
 
-  /* Card tokens — used by Card component. nux light cards float on a
-     soft shadow instead of the legacy hairline-only treatment. */
+  /* Card tokens — used by Card component */
   --v2-card-bg:     #ffffff;
   --v2-card-border: rgba(0, 0, 0, 0.08);
-  --v2-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 
-  /* Panel border (nav items, dividers, form borders) — nux ink line */
+  /* Elevation scale for floating surfaces. Deliberately restrained
+     (Linear/Vercel-style): a hairline border does most of the separation
+     work and the shadow only lifts the surface slightly. Menus/popovers/
+     tooltips share --v2-shadow-menu; modal dialogs sit a step higher. */
+  --v2-shadow-menu:  0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --v2-shadow-modal: 0 16px 40px -8px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
+
+  /* Panel border (nav items, dividers, form borders) */
   --v2-panel-border: rgba(0, 0, 0, 0.08);
 
   /* Rail (input bg in dark) */
@@ -92,7 +98,11 @@
   --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
   --v2-shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
 
-  /* Typography — nux light ink */
+  /* Glass (topbar / floating chrome) */
+  --v2-glass-bg:   rgba(255, 255, 255, 0.85);
+  --v2-glass-blur: blur(16px) saturate(180%);
+
+  /* Typography */
   --v2-text:        #1a1a2e;
   --v2-text-strong: #090909;
   --v2-text-muted:  #555555;
@@ -120,10 +130,6 @@
   --v2-info-soft:     rgba(37, 99, 235, 0.1);
   --v2-info-text:     #2563eb;
 
-  /* Glass (topbar / floating chrome) */
-  --v2-glass-bg:   rgba(255, 255, 255, 0.85);
-  --v2-glass-blur: blur(16px) saturate(180%);
-
   background: var(--v2-canvas);
 }
 
@@ -131,19 +137,27 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  /* nux zinc-dark field: #09090b page, #0f0f11 panels, #1a1a1e raised */
+  /* nux zinc-dark field: #09090b page, #0f0f11 panels, #1b1b1f raised */
   --v2-canvas:        var(--bg-canvas, #09090b);
   --v2-canvas-strong: #060608;
   --v2-surface:       var(--bg-surface, #0f0f11);
   --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.04));
   --v2-surface-muted: rgba(255, 255, 255, 0.07);
 
-  /* Card tokens in dark: raised zinc surface + nux card shadow */
-  --v2-card-bg:     #1a1a1e;
-  --v2-card-border: rgba(255, 255, 255, 0);
-  --v2-card-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  /* Card tokens in dark: a hairline border does the separation work and
+     the shadow stays minimal — dark surfaces read through contrast, not
+     large blurs. */
+  --v2-card-bg:     #1b1b1f;
+  --v2-card-border: rgba(255, 255, 255, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 
-  --v2-panel-border: rgba(255, 255, 255, 0.08);
+  /* Elevation scale in dark: shadows barely register on a near-black
+     canvas, so floating surfaces lean on their border + lighter fill and
+     keep only a soft, tight shadow for depth. */
+  --v2-shadow-menu:  0 4px 16px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --v2-shadow-modal: 0 16px 48px -8px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+
+  --v2-panel-border: rgba(255, 255, 255, 0.1);
 
   --v2-rail:     #0f0f11;
   --v2-input-bg: #111113;
@@ -183,10 +197,6 @@
 
   --v2-glass-bg:   rgba(9, 9, 11, 0.72);
   --v2-glass-blur: blur(16px) saturate(180%);
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
 }
 
 /* ── Structural tokens (theme-independent) ───────────────────────── */
@@ -273,10 +283,10 @@
   --v2-tracking-tight: -0.02em; /* headings (nux --heading-tracking) */
   --v2-tracking-display: -0.04em; /* oversized display headings */
 
-  /* Shadows — --v2-shadow-sm/md/lg are THEMED (defined per theme
-     above; the light scale is much softer). Only the modal shadow
-     and the primary-button hover glow are theme-independent. */
-  --v2-shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.35);
+  /* Shadows — --v2-shadow-sm/md/lg and the elevation scale
+     (--v2-card-shadow / --v2-shadow-menu / --v2-shadow-modal) are
+     THEMED (defined per theme above; the light scale is much softer).
+     Only the primary-button hover glow is theme-independent. */
   --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
 
   /* Scrims. `soft` sits behind side sheets / task panels (the demo's
@@ -326,6 +336,10 @@
   --v2-z-overlay: 40;
   --v2-z-modal:   50;
   --v2-z-toast:   60;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 /* ── Global resets ───────────────────────────────────────────────── */
