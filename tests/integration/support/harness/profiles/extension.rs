@@ -46,7 +46,7 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     // bundled extension capability post-activation, which crosses HTTP.
     let network_egress: Arc<dyn NetworkHttpEgress> =
         Arc::new(RecordingNetworkHttpEgress::with_body(
-            br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec(),
+            br#"{"ok":true,"channels":[],"messages":[],"resultSizeEstimate":0,"response_metadata":{"next_cursor":""}}"#.to_vec(),
         ));
     Ok(ToolsProfile {
         capability_ids,

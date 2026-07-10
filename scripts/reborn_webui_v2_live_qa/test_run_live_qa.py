@@ -6527,6 +6527,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_10g_slack_last_message_sent_global",
             "qa_10h_slack_email_hallucination_guard",
             "qa_10i_slack_raw_entity_hygiene",
+            "qa_10j_slack_stale_unavailable_history",
         ]
         seeded_dm_cases = {
             "qa_10a_slack_self_attribution",
@@ -6585,6 +6586,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 ["10G"],
                 ["10H"],
                 ["10I"],
+                ["10J"],
             ],
         )
 
@@ -6660,6 +6662,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "<@U",
                 "_name_token_in_text",
             ),
+            run_live_qa.case_qa_10j_slack_stale_unavailable_history: (
+                "Slack tools are unavailable",
+                "_capability_run_statuses",
+                "slack.list_conversations",
+                "completed_before_retry",
+                "no new completed Slack invocation",
+                "_with_page",
+            ),
         }
         for case_fn, needles in pins.items():
             source = inspect.getsource(case_fn)
@@ -6714,6 +6724,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             run_live_qa.case_qa_10g_slack_last_message_sent_global,
             run_live_qa.case_qa_10h_slack_email_hallucination_guard,
             run_live_qa.case_qa_10i_slack_raw_entity_hygiene,
+            run_live_qa.case_qa_10j_slack_stale_unavailable_history,
         ):
             with self.subTest(case=case_fn.__name__):
                 with patch.dict(os.environ, blank_env, clear=False):
@@ -7013,6 +7024,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "qa_10g_slack_last_message_sent_global",
             "qa_10h_slack_email_hallucination_guard",
             "qa_10i_slack_raw_entity_hygiene",
+            "qa_10j_slack_stale_unavailable_history",
         ):
             self.assertIn(case_name, selected_cases)
 

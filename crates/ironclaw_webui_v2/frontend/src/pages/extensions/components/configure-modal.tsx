@@ -37,7 +37,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       : extension?.packageRef?.id || "";
   const channelId = extension?.channel || packageId;
   const lifecycleState = extensionLifecycleState(extension);
-  // This flag gates the tools extension's post-OAuth auto-activate.
+  // Slack tools use OAuth rather than the proof-code pairing flow below.
   const isSlackToolsExtension =
     channelId.toLowerCase() === SLACK_TOOLS_EXTENSION_ID;
   const handleOauthConfigured = React.useCallback(async () => {
