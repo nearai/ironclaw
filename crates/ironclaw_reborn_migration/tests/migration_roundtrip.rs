@@ -374,7 +374,8 @@ async fn seed_secret(handles: &DatabaseHandles) {
 async fn seed_wasm_tool(handles: &DatabaseHandles) {
     let db = handles.libsql_db.clone().expect("libsql handle");
     let store = LibSqlWasmToolStore::new(db.clone());
-    // A default (Active) install so the migration derives Enabled activation.
+    // The source artifact is inventoried and reported for reinstall; it must
+    // not become a synthesized Reborn installation.
     let tool = store
         .store(StoreToolParams {
             user_id: USER.to_string(),
@@ -391,9 +392,8 @@ async fn seed_wasm_tool(handles: &DatabaseHandles) {
         .expect("seed wasm tool");
 
     // Seed tool_capabilities with an allowed secret (no trait writer exists) so
-    // the migration derives a credential binding to the migrated secret and
-    // records the capability-config gap. `openai_api_key` matches the seeded
-    // secret above.
+    // the migration records the unsupported capability and credential-binding
+    // policy explicitly.
     let conn = db.connect().expect("connect");
     conn.execute(
         "INSERT INTO tool_capabilities (id, wasm_tool_id, allowed_secrets) VALUES (?1, ?2, ?3)",
