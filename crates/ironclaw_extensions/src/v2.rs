@@ -538,6 +538,17 @@ pub enum ManifestV2Error {
     )]
     LegacyTopLevelCapabilitiesForInstalledSource { manifest_source: ManifestSource },
     #[error(
+        "manifest source {manifest_source:?} may not declare capabilities via [[host_api]] or any other projection; a registered server's capabilities come from live discovery, never its manifest"
+    )]
+    CapabilitiesForbiddenForRegisteredSource { manifest_source: ManifestSource },
+    #[error(
+        "manifest source {manifest_source:?} may only declare runtime kind 'mcp'; got '{kind:?}' — a registered server's module never resolves under the shared, owner-unscoped extension root"
+    )]
+    RuntimeKindForbiddenForRegisteredSource {
+        manifest_source: ManifestSource,
+        kind: RuntimeKind,
+    },
+    #[error(
         "capability {capability} declares unknown host port '{port}' (not in host-defined catalog)"
     )]
     UnknownHostPort {
@@ -709,6 +720,16 @@ impl ExtensionManifestV2 {
     ) -> Result<(), ManifestV2Error> {
         let projection = registry.project_manifest(self, sections, host_port_catalog)?;
         self.capabilities.extend(projection.capabilities);
+        // Checked on the projected output, not the raw `[[host_api]]` shape, so no
+        // future contract type can slip capabilities past it. A registered server's
+        // capabilities come from live discovery, never from its manifest.
+        if matches!(self.source, ManifestSource::UserRegistered { .. })
+            && !self.capabilities.is_empty()
+        {
+            return Err(ManifestV2Error::CapabilitiesForbiddenForRegisteredSource {
+                manifest_source: self.source.clone(),
+            });
+        }
         Ok(())
     }
 
@@ -793,6 +814,20 @@ impl ExtensionManifestV2 {
         let runtime = raw.runtime.into_runtime()?;
         if !source.allows_first_party() && !runtime.installed_allows() {
             return Err(ManifestV2Error::RuntimeForbiddenForSource {
+                manifest_source: source,
+                kind: runtime.kind(),
+            });
+        }
+        // `installed_allows()` permits Wasm/Mcp/Script for any non-bundled source,
+        // but a `UserRegistered` descriptor is server-synthesized by the register
+        // verb and must carry no locally-resolved module: it is never materialized
+        // under an owner-scoped path, only the shared `canonical_extension_root`.
+        // Reject any runtime kind other than `mcp` explicitly rather than relying
+        // on downstream zero-capability gating alone.
+        if matches!(source, ManifestSource::UserRegistered { .. })
+            && runtime.kind() != RuntimeKind::Mcp
+        {
+            return Err(ManifestV2Error::RuntimeKindForbiddenForRegisteredSource {
                 manifest_source: source,
                 kind: runtime.kind(),
             });

@@ -18,6 +18,7 @@ mod support;
 mod scenario_auto_approve_isolation_across_actors;
 mod scenario_extension_registration_isolation_across_actors;
 mod scenario_memory_isolation_across_actors;
+mod scenario_registered_manifest_cannot_forge_capabilities;
 mod scenario_turn_state_isolation_across_actors;
 mod scenario_two_actors_own_threads;
 
@@ -78,6 +79,16 @@ async fn multiuser_group_e2e() {
         "extension_registration_isolation_across_actors",
         scenario_extension_registration_isolation_across_actors::run(&extension_registration_group)
             .await,
+    );
+
+    // Scenario 6 (T2 security regression): a registered manifest must not be able
+    // to forge a credential-bearing capability via [[host_api]] projection.
+    let forged_manifest_group = RebornIntegrationGroup::multiuser_extension_lifecycle_tools()
+        .await
+        .expect("multiuser extension-lifecycle group builds");
+    report.record(
+        "registered_manifest_cannot_forge_capabilities",
+        scenario_registered_manifest_cannot_forge_capabilities::run(&forged_manifest_group).await,
     );
 
     report.assert_all_passed();

@@ -138,8 +138,17 @@ impl HostedMcpEndpoint {
     }
 }
 
+/// Hosted-egress-eligible sources: `HostBundled` (first-party) and
+/// `UserRegistered` (T2, guarded by `CapabilitiesForbiddenForRegisteredSource`
+/// so a registered manifest can never carry a capability to dispatch here).
+/// The discovery twin gate (`hosted_http_mcp_url`, hosted_mcp_discovery.rs)
+/// stays closed for `UserRegistered` until T3 lands live-discovery
+/// capabilities — do not widen it here to "fix" the asymmetry.
 pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
-    if package.manifest.source != ManifestSource::HostBundled {
+    if !matches!(
+        package.manifest.source,
+        ManifestSource::HostBundled | ManifestSource::UserRegistered { .. }
+    ) {
         return None;
     }
     let ExtensionRuntime::Mcp {
@@ -332,6 +341,139 @@ mod tests {
         assert!(plan.credential_injections.is_empty());
     }
 
+    // ── UserRegistered egress arm (T2) ──────────────────────────────────────
+
+    #[test]
+    fn planner_accepts_user_registered_provider_to_its_registered_url() {
+        // Egress arm parity: a UserRegistered provider must be dispatchable to
+        // exactly its registered URL, same as HostBundled.
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+            "user-notion",
+            NOTION_MCP_URL,
+            "user-notion.notion-search",
+            "mcp_user_notion_access_token",
+            ManifestSource::UserRegistered {
+                owner: UserId::new("owner-1").unwrap(),
+            },
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("user-notion").unwrap();
+        let cap = CapabilityId::new("user-notion.notion-search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(&provider, &cap, NOTION_MCP_URL, &scope));
+
+        assert_eq!(plan.credential_injections.len(), 1);
+        assert_eq!(plan.network_policy.allowed_targets.len(), 1);
+        assert_eq!(
+            plan.network_policy.allowed_targets[0].host_pattern,
+            NOTION_MCP_HOST
+        );
+    }
+
+    #[test]
+    fn hosted_http_mcp_endpoint_excludes_installed_local_and_registry_installed() {
+        // Scope-creep guard for the `!=` -> `matches!` swap: only HostBundled
+        // and UserRegistered are hosted-egress-eligible. Other sources must
+        // keep returning None.
+        for source in [
+            ManifestSource::InstalledLocal,
+            ManifestSource::RegistryInstalled,
+        ] {
+            let registry = registry_with_provider_source(
+                "notion",
+                NOTION_MCP_URL,
+                "notion.notion-search",
+                "mcp_notion_access_token",
+                source.clone(),
+            );
+            let package = registry
+                .get_extension(&ExtensionId::new("notion").unwrap())
+                .unwrap();
+
+            assert!(
+                hosted_http_mcp_endpoint(package).is_none(),
+                "expected None for source {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_registered_provider_gets_locked_policy_parity_with_host_bundled() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+            "user-notion",
+            NOTION_MCP_URL,
+            "user-notion.notion-search",
+            "mcp_user_notion_access_token",
+            ManifestSource::UserRegistered {
+                owner: UserId::new("owner-1").unwrap(),
+            },
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("user-notion").unwrap();
+        let cap = CapabilityId::new("user-notion.notion-search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(&provider, &cap, NOTION_MCP_URL, &scope));
+
+        assert!(plan.network_policy.deny_private_ip_ranges);
+        assert_eq!(
+            plan.network_policy.max_egress_bytes,
+            Some(MCP_NETWORK_EGRESS_LIMIT)
+        );
+        assert_eq!(plan.network_policy.allowed_targets.len(), 1);
+        assert_eq!(
+            plan.network_policy.allowed_targets[0].scheme,
+            Some(NetworkScheme::Https)
+        );
+    }
+
+    #[test]
+    fn user_registered_provider_gets_same_credential_injection_as_host_bundled() {
+        // Credential parity: a UserRegistered provider must receive exactly
+        // the injections a HostBundled provider with the same descriptor
+        // would receive — no more, no less.
+        let scope = sample_scope();
+        let cap = CapabilityId::new("notion.notion-search").unwrap();
+
+        let host_bundled_registry = Arc::new(SharedExtensionRegistry::new(registry_with_notion()));
+        let host_bundled_planner = RegistryMcpEgressPlanner::new(host_bundled_registry);
+        let host_bundled_provider = ExtensionId::new("notion").unwrap();
+        let host_bundled_plan = host_bundled_planner.plan(sample_plan_request(
+            &host_bundled_provider,
+            &cap,
+            NOTION_MCP_URL,
+            &scope,
+        ));
+
+        let user_registered_registry =
+            Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+                "notion",
+                NOTION_MCP_URL,
+                "notion.notion-search",
+                "mcp_notion_access_token",
+                ManifestSource::UserRegistered {
+                    owner: UserId::new("owner-1").unwrap(),
+                },
+            )));
+        let user_registered_planner = RegistryMcpEgressPlanner::new(user_registered_registry);
+        let user_registered_plan = user_registered_planner.plan(sample_plan_request(
+            &host_bundled_provider,
+            &cap,
+            NOTION_MCP_URL,
+            &scope,
+        ));
+
+        assert_eq!(
+            host_bundled_plan.credential_injections.len(),
+            user_registered_plan.credential_injections.len()
+        );
+        assert_eq!(
+            host_bundled_plan.credential_injections[0].handle,
+            user_registered_plan.credential_injections[0].handle
+        );
+    }
+
     // ── happy path policy ─────────────────────────────────────────────────
 
     #[test]
@@ -473,6 +615,25 @@ mod tests {
         capability_id: &str,
         credential_handle: &str,
     ) -> ironclaw_extensions::ExtensionRegistry {
+        registry_with_provider_source(
+            provider,
+            url,
+            capability_id,
+            credential_handle,
+            ManifestSource::HostBundled,
+        )
+    }
+
+    /// Same fixture as [`registry_with_provider`] but with a caller-supplied
+    /// [`ManifestSource`] — used to pin egress-arm parity between
+    /// `HostBundled` and `UserRegistered` providers.
+    fn registry_with_provider_source(
+        provider: &str,
+        url: &str,
+        capability_id: &str,
+        credential_handle: &str,
+        source: ManifestSource,
+    ) -> ironclaw_extensions::ExtensionRegistry {
         let mut registry = ironclaw_extensions::ExtensionRegistry::new();
         let host = url::Url::parse(url)
             .unwrap()
@@ -488,7 +649,7 @@ mod tests {
                         name: provider.to_string(),
                         version: "0.1.0".to_string(),
                         description: "Hosted MCP".to_string(),
-                        source: ManifestSource::HostBundled,
+                        source,
                         requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
                         descriptor_trust_default: TrustClass::Sandbox,
                         runtime: ironclaw_extensions::ExtensionRuntime::Mcp {
