@@ -2104,6 +2104,63 @@ data: [DONE]
     }
 
     #[tokio::test]
+    async fn complete_with_tools_streaming_recovers_args_with_trailing_content() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let (headers, body) = read_http_request_body(&mut socket).await;
+            assert!(headers.starts_with("POST /v1/chat/completions "));
+            let request_json: serde_json::Value =
+                serde_json::from_str(&body).expect("request json");
+            assert_eq!(request_json["stream"], true);
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write sse headers");
+            // A reasoning model streams a complete arguments object followed by a
+            // stray trailing token. The leading object must be recovered, not
+            // collapsed to an empty `{}` (which would call the tool with no args).
+            socket
+                .write_all(
+                    br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":\"test\"}trailing"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+                )
+                .await
+                .expect("write trailing-content tool call stream");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let response = complete_search_tool_streaming(provider)
+            .await
+            .expect("trailing content after valid args should be recovered, not fail the turn");
+
+        server_task.await.expect("server task");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_search");
+        assert_eq!(response.tool_calls[0].name, "search");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({"query": "test"}),
+            "the leading valid object must be recovered, not dropped to empty"
+        );
+        assert!(
+            response.tool_calls[0].arguments_parse_error.is_none(),
+            "trailing content after a valid object must not mark the args for repair"
+        );
+    }
+
+    #[tokio::test]
     async fn complete_with_tools_streaming_marks_empty_tool_arguments_for_repair() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;

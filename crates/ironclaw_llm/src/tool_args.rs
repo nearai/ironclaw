@@ -41,9 +41,24 @@ pub(crate) struct ArgsParseError {
 /// accepted — `Ok` is returned. Callers decide whether a non-object shape
 /// should be rejected. Only a parse failure produces `Err`.
 pub(crate) fn parse_tool_call_args(raw: &str) -> Result<Value, ArgsParseError> {
-    serde_json::from_str(raw).map_err(|e| ArgsParseError {
-        reason: format!("failed to parse tool-call arguments JSON: {e}"),
-    })
+    // Some tool-capable reasoning models append a stray token after a complete
+    // JSON arguments object (`{...}` + junk). A strict `from_str` rejects that as
+    // "trailing characters". On the streaming tool-call path
+    // (`NearAiStreamingToolCallState::into_tool_call`), `parse_tool_call_args_lossy`
+    // then collapses the arguments to an empty `{}` (recording an
+    // `arguments_parse_error`), so the tool is invoked with the model's real
+    // arguments silently dropped. Take the first complete JSON value and ignore
+    // any trailing content; only empty or genuinely malformed input errors.
+    let mut values = serde_json::Deserializer::from_str(raw).into_iter::<Value>();
+    match values.next() {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(error)) => Err(ArgsParseError {
+            reason: format!("failed to parse tool-call arguments JSON: {error}"),
+        }),
+        None => Err(ArgsParseError {
+            reason: "failed to parse tool-call arguments JSON: empty input".to_owned(),
+        }),
+    }
 }
 
 /// Migration helper: silent-`{}` fallback with error capture.
@@ -135,6 +150,22 @@ mod tests {
     fn parse_args_lossy_valid_returns_no_error() {
         let (val, err) = parse_tool_call_args_lossy(r#"{"a": 2}"#);
         assert_eq!(val["a"], 2);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn parse_args_ignores_trailing_content_after_first_value() {
+        // Regression: reasoning models stream a valid arguments object followed
+        // by a stray token. The leading object must be recovered, not rejected
+        // as "trailing characters" (which otherwise silently dropped the args
+        // to `{}` on the streaming path).
+        let result = parse_tool_call_args(r#"{"a": 2} x"#).expect("leading object should parse");
+        assert_eq!(result["a"], 2);
+
+        // And through the lossy wrapper: the real arguments survive with no
+        // captured parse error, rather than collapsing to `{}`.
+        let (val, err) = parse_tool_call_args_lossy(r#"{"query": "test"}trailing"#);
+        assert_eq!(val["query"], "test");
         assert!(err.is_none());
     }
 
