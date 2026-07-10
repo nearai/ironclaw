@@ -5497,6 +5497,84 @@ async def _seed_slack_fixture_message(
     return ts
 
 
+def _classify_encoded_mention_messages(
+    messages: object,
+    *,
+    marker: str,
+    author_user_id: str,
+) -> dict[str, object]:
+    """Classify marker messages for the mention-encoding probe (pure).
+
+    Target selection is ENCODED-MENTION-FIRST: only marker messages whose
+    RAW text carries an encoded ``<@U…>`` mention are authorship candidates —
+    a marker echo without an encoded mention (e.g. an assistant reply
+    delivered into the same DM) is never selected, so it can neither pass
+    nor mask the real post.
+
+    Authorship is judged by Slack's authoritative ``user`` field, which no
+    other token can forge (``chat:write.customize`` changes display
+    name/icon only — never ``user``). ``bot_id`` alone does NOT disqualify:
+    new (granular) Slack apps stamp EVERY user-token post with the app's
+    ``bot_id``/``bot_profile`` ("via app"), while ``user`` remains the
+    human author — this workspace's own personal-token seeds all carry the
+    stamp, and the legacy classic-app ``as_user`` escape hatch does not
+    exist for new apps. A true bot-identity post (the serving bot, the
+    host's reply delivery) has ``user`` = the BOT user id and still fails
+    the author check. The stamp is surfaced as ``via_app`` for forensics.
+
+    Returns a dict:
+      found            — first encoded marker message with user == author
+                          ({text, ts, via_app}) or None
+      author_mismatch  — redacted {ts, bot, user_matches_author} entries for
+                          encoded marker messages from other identities
+      unencoded_author_marker_ts — ts of a marker message the connected user
+                          posted WITHOUT an encoded mention (the literal-@
+                          failure), else None
+      unencoded_author_text — that message's raw text (for redacted
+                          diagnostics), else None
+    """
+    found: dict[str, object] | None = None
+    author_mismatch: list[dict[str, object]] = []
+    unencoded_author_marker_ts: object = None
+    unencoded_author_text: str | None = None
+    for message in messages if isinstance(messages, list) else []:
+        if not isinstance(message, dict):
+            continue
+        text = str(message.get("text") or "")
+        if marker not in text:
+            continue
+        author_matches = (
+            bool(author_user_id)
+            and str(message.get("user") or "") == author_user_id
+        )
+        if not ENCODED_SLACK_MENTION_PATTERN.search(text):
+            if author_matches and unencoded_author_marker_ts is None:
+                unencoded_author_marker_ts = message.get("ts")
+                unencoded_author_text = text
+            continue
+        if author_matches:
+            if found is None:
+                found = {
+                    "text": text,
+                    "ts": message.get("ts"),
+                    "via_app": bool(message.get("bot_id")),
+                }
+            continue
+        author_mismatch.append(
+            {
+                "ts": message.get("ts"),
+                "bot": bool(message.get("bot_id")),
+                "user_matches_author": False,
+            }
+        )
+    return {
+        "found": found,
+        "author_mismatch": author_mismatch,
+        "unencoded_author_marker_ts": unencoded_author_marker_ts,
+        "unencoded_author_text": unencoded_author_text,
+    }
+
+
 async def _wait_for_authored_slack_message(
     token: str,
     *,
@@ -5506,17 +5584,21 @@ async def _wait_for_authored_slack_message(
     oldest_epoch: float,
     timeout: float = 90.0,
 ) -> dict[str, object]:
-    """Poll conversations.history for a marker message authored by the given
-    HUMAN user and return its raw text (mention-encoding ground truth).
+    """Poll conversations.history for the ENCODED-mention marker message
+    authored by the connected user and return its raw text (ground truth
+    for the mention-encoding probe). Selection/authorship semantics live in
+    :func:`_classify_encoded_mention_messages`.
 
     Guarded like every probe API arm: transient errors keep the poll alive
     and only the last error is reported — never raised, never a shard crash.
-    Marker messages from OTHER identities are reported as ``author_mismatch``
-    so a wrong-identity post fails with its real cause.
+    Encoded marker messages from OTHER identities are reported as
+    ``author_mismatch`` so a wrong-identity post fails with its real cause,
+    and a marker post by the connected user WITHOUT an encoded mention is
+    reported as ``unencoded_author_marker`` (the literal-@ failure).
     """
     deadline = time.monotonic() + timeout
     last_error: str | None = None
-    wrong_authors: list[dict[str, object]] = []
+    verdict: dict[str, object] = {}
     while True:
         payload = await _slack_api_get(
             token,
@@ -5529,24 +5611,27 @@ async def _wait_for_authored_slack_message(
             },
         )
         if payload.get("ok"):
-            messages = payload.get("messages")
-            wrong_authors = []
-            for message in messages if isinstance(messages, list) else []:
-                if not isinstance(message, dict):
-                    continue
-                text = str(message.get("text") or "")
-                if marker not in text:
-                    continue
-                is_bot = bool(message.get("bot_id"))
-                if str(message.get("user") or "") == author_user_id and not is_bot:
-                    return {"found": True, "text": text, "ts": message.get("ts")}
-                wrong_authors.append({"ts": message.get("ts"), "bot": is_bot})
+            verdict = _classify_encoded_mention_messages(
+                payload.get("messages"),
+                marker=marker,
+                author_user_id=author_user_id,
+            )
+            found = verdict.get("found")
+            if isinstance(found, dict):
+                return {"found": True, **found}
         else:
             last_error = str(payload.get("error") or "slack_history_failed")
         if time.monotonic() >= deadline:
             result: dict[str, object] = {"found": False, "error": last_error}
-            if wrong_authors:
-                result["author_mismatch"] = wrong_authors
+            if verdict.get("author_mismatch"):
+                result["author_mismatch"] = verdict["author_mismatch"]
+            if verdict.get("unencoded_author_marker_ts") is not None:
+                result["unencoded_author_marker_ts"] = verdict[
+                    "unencoded_author_marker_ts"
+                ]
+                result["unencoded_author_text"] = verdict.get(
+                    "unencoded_author_text"
+                )
             return result
         await asyncio.sleep(5.0)
 
@@ -6063,6 +6148,18 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
         )
         details["posted_message_found"] = bool(posted.get("found"))
         if not posted.get("found"):
+            # Selection is encoded-mention-first, so a marker post by the
+            # connected user WITHOUT an encoded mention is the literal-@
+            # failure — the original pin this probe exists for.
+            if posted.get("unencoded_author_marker_ts") is not None:
+                details["mention_encoded"] = False
+                details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
+                    "U_REDACTED", str(posted.get("unencoded_author_text") or "")
+                )
+                raise AssertionError(
+                    "posted mention is NOT <@U…>-encoded in the raw message "
+                    "text — a literal @-name notifies nobody"
+                )
             if posted.get("author_mismatch"):
                 raise AssertionError(
                     "the mention message was posted from the wrong identity "
@@ -6074,16 +6171,10 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
                 f"({posted.get('error') or 'marker never appeared in history'})"
             )
         raw_text = str(posted.get("text") or "")
-        encoded = bool(ENCODED_SLACK_MENTION_PATTERN.search(raw_text))
-        details["mention_encoded"] = encoded
-        if not encoded:
-            details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                "U_REDACTED", raw_text
-            )
-            raise AssertionError(
-                "posted mention is NOT <@U…>-encoded in the raw message text "
-                "— a literal @-name notifies nobody"
-            )
+        # Selection guarantees the encoded-mention shape; record the granular
+        # "via app" stamp (bot_id on a user-token post) for forensics.
+        details["mention_encoded"] = True
+        details["mention_via_app"] = bool(posted.get("via_app"))
         # Encoded is not enough: the mention must target the counterpart the
         # prompt named — a self-mention or an unrelated <@U…> notifies the
         # wrong person and must fail.
