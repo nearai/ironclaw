@@ -66,9 +66,18 @@ pub(crate) struct RefreshingLocalDevCapabilityPortConfig {
     /// provider-trust map. Always empty at the sole production call site
     /// (`local_dev.rs`'s `create_capability_port`); populated only by the `test-support` constructor.
     pub(super) additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
-    /// Narrows the builtin-grant set to this id set (empty = no filtering,
-    /// production's value). Always empty at the sole production call site
-    /// (`local_dev.rs`'s `create_capability_port`); populated only by the `test-support` constructor.
+    /// Narrows the FULL granted-capability set -- builtin grants AND any
+    /// activated extension grants `local_dev_visible_capability_request`
+    /// appended -- to this id set (empty = no filtering, production's
+    /// value). Applied in `build_inner` as a single `retain` AFTER
+    /// extension grants are appended, so callers that want an extension
+    /// capability visible must list its id explicitly; there is no
+    /// separate builtin-only carve-out (see the harness-port-seam plan's
+    /// "one narrowing input at the grants layer" design: this field is the
+    /// only narrowing surface, and it narrows everything a run could see).
+    /// Always empty at the sole production call site (`local_dev.rs`'s
+    /// `create_capability_port`); populated only by the `test-support`
+    /// constructor.
     pub(super) capability_id_filter: HashSet<CapabilityId>,
 }
 
@@ -160,8 +169,10 @@ impl RefreshingLocalDevCapabilityPort {
             },
         )?;
         // Test-support-only narrowing (empty in production, see the config
-        // field doc-comment): restrict the builtin-granted capability set to
-        // `capability_id_filter` after `builtin_grants` has run.
+        // field doc-comment): restrict the FULL granted capability set --
+        // builtin grants plus any activated extension grants the call above
+        // just appended -- to `capability_id_filter`. Callers must list
+        // extension capability ids explicitly to keep them visible.
         if !self.capability_id_filter.is_empty() {
             visible_request
                 .context

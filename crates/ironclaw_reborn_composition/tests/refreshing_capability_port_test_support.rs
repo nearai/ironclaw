@@ -442,9 +442,21 @@ async fn port_builds_and_includes_synthetic_capabilities() {
     );
 }
 
-/// (iii) `capability_id_filter` narrows the builtin-policy-derived surface
-/// (synthetic capabilities are unaffected, since they bypass the filtered
-/// grants entirely).
+/// (iii) `capability_id_filter` narrows the FULL granted-capability set
+/// (builtin AND any activated extension grants -- see the config field's
+/// doc-comment), not a builtin-only subset. Synthetic capabilities are
+/// unaffected, since they bypass the filtered grants entirely.
+///
+/// This test only exercises builtin grants because there is no cheap way to
+/// inject an extension-grant fixture from this external integration-test
+/// crate: `LocalDevExtensionSurfaceSource`'s test constructors
+/// (`from_surface`/`from_active_capabilities`) are `#[cfg(test)]`-gated to
+/// the crate's own unit tests, and `RefreshingLocalDevCapabilityPortTestParts`
+/// does not expose `extension_surface_source` at all -- the test-support
+/// constructor always wires `LocalDevExtensionSurfaceSource::new(None)`
+/// (empty extension surface). The whole-set semantic is pinned by the
+/// doc-comment on `RefreshingLocalDevCapabilityPortConfig::capability_id_filter`
+/// and the inline comment at its `retain` call site in `build_inner`.
 #[tokio::test]
 async fn capability_id_filter_narrows_visible_surface() {
     let shared_io = Arc::new(SharedStubCapabilityIo::new());
