@@ -892,7 +892,10 @@ async fn failure_details_for_turn_event(
     // cause instead of only the bounded category.
     let detail = detail_for_turn_event(event, &category);
     let invalid_output_detail =
-        InvalidModelOutputFailureDetail::from_projection_detail(detail.as_deref());
+        InvalidModelOutputFailureDetail::from_failure_category_and_projection_detail(
+            &category,
+            detail.as_deref(),
+        );
     let fallback_summary =
         reborn_failure_summary_for_category_and_detail(Some(&category), invalid_output_detail)
             .to_string();

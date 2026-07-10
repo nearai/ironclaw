@@ -194,6 +194,23 @@ pub(crate) enum InvalidModelOutputFailureDetail {
 }
 
 impl InvalidModelOutputFailureDetail {
+    /// Classify the host-authored model-gateway safe summaries emitted for
+    /// invalid model output by `ironclaw_runner::model_gateway`.
+    ///
+    /// This list intentionally mirrors the runner's fixed `InvalidOutput`
+    /// summaries without making those wording details part of `ironclaw_runner`
+    /// public API. Keep `invalid_model_output_detail_whitelist_covers_known_runner_summaries`
+    /// in sync when adding or renaming one of those upstream safe summaries.
+    pub(crate) fn from_failure_category_and_projection_detail(
+        category: &str,
+        detail: Option<&str>,
+    ) -> Option<Self> {
+        if !matches!(category, "model_invalid_output" | "invalid_model_output") {
+            return None;
+        }
+        Self::from_projection_detail(detail)
+    }
+
     pub(crate) fn from_projection_detail(detail: Option<&str>) -> Option<Self> {
         let detail = detail?;
         if !is_invalid_model_output_projection_detail_shape(detail) {
@@ -325,6 +342,66 @@ mod tests {
         assert_eq!(
             reborn_failure_summary_for_category_and_detail(Some("model_invalid_output"), detail),
             "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+        );
+    }
+
+    #[test]
+    fn invalid_model_output_detail_whitelist_covers_known_runner_summaries() {
+        use InvalidModelOutputFailureDetail as Detail;
+
+        for (safe_summary, expected) in [
+            (
+                "model returned an empty assistant response",
+                Detail::EmptyAssistantResponse,
+            ),
+            (
+                "model returned textual tool-call syntax instead of structured tool calls",
+                Detail::TextualToolCallSyntax,
+            ),
+            (
+                "model returned a tool call outside the advertised capability surface",
+                Detail::OutsideCapabilitySurface,
+            ),
+            (
+                "model returned tool-use finish without tool calls",
+                Detail::ToolUseFinishWithoutToolCalls,
+            ),
+            (
+                "model returned unsupported tool calls for a text-only loop",
+                Detail::UnsupportedToolCallsForTextOnlyLoop,
+            ),
+            (
+                "model returned an invalid provider tool name",
+                Detail::InvalidReturnedToolName,
+            ),
+            (
+                "model returned invalid tool-call arguments",
+                Detail::InvalidToolCallArguments,
+            ),
+            (
+                "failed to parse tool-call arguments JSON: expected value at line 1 column 1",
+                Detail::MalformedToolCallArguments,
+            ),
+        ] {
+            assert_eq!(
+                InvalidModelOutputFailureDetail::from_failure_category_and_projection_detail(
+                    "model_invalid_output",
+                    Some(safe_summary),
+                ),
+                Some(expected),
+                "{safe_summary:?} should remain mapped to a specific summary"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_model_output_detail_matching_is_category_gated() {
+        assert_eq!(
+            InvalidModelOutputFailureDetail::from_failure_category_and_projection_detail(
+                "model_unavailable",
+                Some("model returned an empty assistant response"),
+            ),
+            None
         );
     }
 
