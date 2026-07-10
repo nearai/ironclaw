@@ -594,9 +594,15 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
         if let Err(error) = self.persist_install_plan(plan).await {
-            let _ = self
+            if let Err(cleanup_error) = self
                 .delete_materialized_extension_files(&available.package.id)
-                .await;
+                .await
+            {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort extension file cleanup failed"
+                );
+            }
             if let Err(rollback_error) =
                 self.rollback_lifecycle_install(&available.package.id).await
             {
@@ -739,12 +745,24 @@ impl RebornLocalExtensionManagementPort {
             .set_activation_state(installation_id, ExtensionActivationState::Enabled)
             .await
         {
-            self.disable_lifecycle_package(extension_id).await;
+            if let Err(rollback_error) = self.disable_lifecycle_package(extension_id).await {
+                return Err(compensation_failure(
+                    "extension activation failed to persist enabled state and lifecycle disable rollback failed",
+                    map_extension_installation_error(error),
+                    rollback_error,
+                ));
+            }
             return Err(map_extension_installation_error(error));
         }
         if let Err(error) = self.active_extensions.publish(&active_package) {
-            if previous_state != ExtensionActivationState::Enabled {
-                self.disable_lifecycle_package(extension_id).await;
+            if previous_state != ExtensionActivationState::Enabled
+                && let Err(rollback_error) = self.disable_lifecycle_package(extension_id).await
+            {
+                return Err(compensation_failure(
+                    "extension activation failed to publish active package and lifecycle disable rollback failed",
+                    error,
+                    rollback_error,
+                ));
             }
             if let Err(cleanup_error) = self
                 .installation_store
@@ -1294,13 +1312,16 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_error)
     }
 
-    async fn disable_lifecycle_package(&self, extension_id: &ExtensionId) {
-        let _ = self
-            .lifecycle_service
+    async fn disable_lifecycle_package(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError> {
+        self.lifecycle_service
             .lock()
             .await
             .disable(extension_id)
-            .await;
+            .await
+            .map_err(map_extension_error)
     }
 
     async fn remove_lifecycle_package(
@@ -1406,7 +1427,20 @@ impl RebornLocalExtensionManagementPort {
             .upsert_installation(plan.installation)
             .await
         {
-            let _ = self.installation_store.delete_manifest(&extension_id).await;
+            if let Err(cleanup_error) = self.installation_store.delete_manifest(&extension_id).await
+            {
+                // Fail loud: the installation upsert failed *and* the manifest
+                // rollback failed, so a manifest is now orphaned with no
+                // installation. `ensure_not_installed` treats any manifest as
+                // installed, which would block every retry — surface both
+                // failures so the orphan is visible rather than silently
+                // poisoning future installs.
+                return Err(compensation_failure(
+                    "extension install persistence failed and manifest rollback failed",
+                    map_extension_installation_error(error),
+                    map_extension_installation_error(cleanup_error),
+                ));
+            }
             return Err(map_extension_installation_error(error));
         }
         Ok(())
@@ -5225,9 +5259,12 @@ mod tests {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                 {
+                    #[allow(clippy::let_underscore_must_use)]
+                    // oneshot notify; dropped receiver is expected
                     let _ = started.send(());
                 }
                 let mut release = self.release.lock().await;
+                #[allow(clippy::let_underscore_must_use)] // gate await; result intentionally unused
                 let _ = (&mut *release).await;
             }
             hosted_mcp_response_for_body(

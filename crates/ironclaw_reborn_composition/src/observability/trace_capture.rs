@@ -651,6 +651,7 @@ mod tests {
 
     fn cleanup_scope(scope: &str) {
         let dir = trace::trace_contribution_dir_for_scope(Some(scope));
+        #[allow(clippy::let_underscore_must_use)] // best-effort per-test scope dir cleanup
         let _ = std::fs::remove_dir_all(dir);
     }
 

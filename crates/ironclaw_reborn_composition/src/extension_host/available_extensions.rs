@@ -1572,7 +1572,12 @@ where
                     Ok(bytes) => bytes,
                     Err(error) => {
                         for written_path in written_paths.iter().rev() {
-                            let _ = fs.delete(written_path).await;
+                            if let Err(error) = fs.delete(written_path).await {
+                                tracing::debug!(
+                                    ?error,
+                                    "best-effort extension asset rollback cleanup failed"
+                                );
+                            }
                         }
                         return Err(ProductWorkflowError::Transient {
                             reason: format!(
@@ -1589,7 +1594,12 @@ where
         }
         if let Err(error) = fs.write_file(&path, &bytes).await {
             for written_path in written_paths.iter().rev() {
-                let _ = fs.delete(written_path).await;
+                if let Err(error) = fs.delete(written_path).await {
+                    tracing::debug!(
+                        ?error,
+                        "best-effort extension asset rollback cleanup failed"
+                    );
+                }
             }
             return Err(ProductWorkflowError::Transient {
                 reason: format!(

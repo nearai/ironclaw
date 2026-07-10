@@ -3003,6 +3003,7 @@ where
                         if let Err(error) = state.renew_channel_route_replace_lease(&lease).await {
                             tracing::warn!(?error, "failed to renew Slack channel route replacement lease");
                             if let Some(failure) = failure.take() {
+                                #[allow(clippy::let_underscore_must_use)] // oneshot send; dropped receiver is expected
                                 let _ = failure.send(error);
                             }
                             return;
@@ -3036,10 +3037,15 @@ where
 
     async fn stop(mut self) -> Result<(), SlackChannelRouteError> {
         if let Ok(error) = self.failure.try_recv() {
+            #[allow(clippy::let_underscore_must_use)]
+            // join result unused during shutdown; error already captured
             let _ = self.handle.await;
             return Err(error);
         }
+        #[allow(clippy::let_underscore_must_use)]
+        // oneshot stop signal; dropped receiver means the task already exited
         let _ = self.stop.send(());
+        #[allow(clippy::let_underscore_must_use)] // join result unused during shutdown
         let _ = self.handle.await;
         match self.failure.try_recv() {
             Ok(error) => Err(error),
