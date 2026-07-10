@@ -76,6 +76,65 @@ impl SessionSummary {
     }
 }
 
+const RECENT_HEADER: &str = "# Recent conversations\n\n";
+
+fn split_entries(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in body.lines() {
+        if line.starts_with("### ") && !cur.trim().is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if line.starts_with("# Recent conversations") {
+            continue;
+        }
+        cur.push_str(line);
+        cur.push('\n');
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn has_open(entry: &str) -> bool {
+    entry.contains("_open:_")
+}
+
+/// Rebuild `memory/recent.md`: prepend `new_entry` to the entries parsed out
+/// of `existing`, cap the entry count, then cap total size — preferring to
+/// drop fully-wrapped entries (no open threads) before dropping open ones.
+pub fn build_recent(
+    new_entry: &str,
+    existing: &str,
+    max_entries: usize,
+    max_chars: usize,
+) -> String {
+    let mut entries = vec![new_entry.to_string()];
+    entries.extend(split_entries(existing));
+    // Count cap (newest-first order preserved).
+    entries.truncate(max_entries);
+    // Size cap: drop from the end; prefer dropping wrapped (no open threads) entries.
+    loop {
+        let total: usize = RECENT_HEADER.len() + entries.iter().map(|e| e.len()).sum::<usize>();
+        if total <= max_chars || entries.len() <= 1 {
+            break;
+        }
+        // find the last wrapped entry to drop; else drop the last entry.
+        let idx = entries
+            .iter()
+            .rposition(|e| !has_open(e))
+            .unwrap_or(entries.len() - 1);
+        entries.remove(idx);
+    }
+    let mut out = String::from(RECENT_HEADER);
+    for e in &entries {
+        out.push_str(e.trim_end());
+        out.push_str("\n\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +179,33 @@ mod tests {
         assert!(d.contains("Wired local STT/TTS"));
         assert!(d.contains("Test on the phone PWA")); // open threads kept
         assert!(!d.contains("Prefers all-local")); // user_notes NOT in the terse digest
+    }
+
+    #[test]
+    fn build_recent_prepends_and_caps_count() {
+        let e1 = "### 2026-07-01 — A\ngist a\n";
+        let e2 = "### 2026-07-02 — B\ngist b\n";
+        let e3 = "### 2026-07-03 — C\ngist c\n";
+        let r1 = build_recent(e1, "", 2, 6000);
+        assert!(r1.starts_with("# Recent conversations"));
+        let r2 = build_recent(e2, &r1, 2, 6000);
+        let r3 = build_recent(e3, &r2, 2, 6000);
+        // newest first, only 2 kept
+        let pos_c = r3.find("— C").unwrap();
+        let pos_b = r3.find("— B").unwrap();
+        assert!(pos_c < pos_b, "newest first");
+        assert!(!r3.contains("— A"), "oldest dropped by count cap");
+    }
+
+    #[test]
+    fn build_recent_size_cap_drops_wrapped_before_open() {
+        let open = "### 2026-07-01 — Open\ngist\n  \n  _open:_ finish X\n";
+        let wrapped = "### 2026-07-02 — Wrapped\ngist\n";
+        let acc = build_recent(open, "", 5, 6000);
+        let acc = build_recent(wrapped, &acc, 5, 60); // tiny cap forces a drop
+        assert!(
+            acc.contains("— Open"),
+            "open-thread entry retained under size pressure"
+        );
     }
 }
