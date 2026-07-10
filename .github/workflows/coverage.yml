@@ -58,12 +58,18 @@ jobs:
           - name: all-features
             flags: "--all-features"
             has_postgres: true
+            regression_tests: |
+              local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart
+              postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race
           - name: default
             flags: ""
             has_postgres: true
+            regression_tests: |
+              postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race
           - name: libsql-only
             flags: "--no-default-features --features libsql"
             has_postgres: false
+            regression_tests: ""
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -150,7 +156,32 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Generate coverage
-        run: cargo llvm-cov ${{ matrix.flags }} --workspace --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov ${{ matrix.flags }} --workspace --lcov --output-path lcov.info
+
+          if [[ -n "${{ matrix.regression_tests }}" ]]; then
+            while read -r test_name; do
+              if [[ "$test_name" == "local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart" ]]; then
+                cargo llvm-cov ${{ matrix.flags }} \
+                  --package ironclaw_reborn_composition \
+                  --no-report \
+                  -- --exact "$test_name"
+                continue
+              fi
+
+              if [[ "$test_name" == "postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race" ]]; then
+                cargo llvm-cov ${{ matrix.flags }} \
+                  --package ironclaw_filesystem \
+                  --test db_root_filesystem_contract \
+                  --no-report \
+                  -- --exact "$test_name"
+                continue
+              fi
+
+              echo "Unknown regression test in matrix: $test_name"
+              exit 1
+            done <<< "${{ matrix.regression_tests }}"
+          fi
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0

@@ -5527,9 +5527,9 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "root-llm-provider")]
     struct RuntimeEnvGuard {
-        // Serializes tokio tests that mutate the runtime env overlay. The
-        // set/remove helpers lock only the separate override map, not
-        // ENV_MUTEX, so restoration can safely run while this guard is held.
+        // Serializes tests that mutate the runtime env overlay. The
+        // set/remove helpers lock only the separate override map, so
+        // restoration can safely run while this guard is held.
         _async_lock: tokio::sync::MutexGuard<'static, ()>,
         _env_lock: std::sync::MutexGuard<'static, ()>,
         previous: Vec<(&'static str, Option<String>)>,
