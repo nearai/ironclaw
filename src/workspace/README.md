@@ -96,6 +96,40 @@ Four tools for LLM use:
 - **`memory_read`** - Read any file by path
 - **`memory_tree`** - View workspace structure as a tree (depth parameter, default 1)
 
+## Episodic Memory
+
+IronClaw automatically distills every conversation into durable, searchable
+memory so it carries context across sessions without the user having to
+re-explain anything.
+
+Two files back this, both under the workspace at `memory/`:
+
+- **`memory/sessions/YYYY-MM-DD-<conv>.md`** — one full, structured summary
+  per conversation (dated by end time, keyed by conversation id). Each file
+  is YAML frontmatter (`conversation_id`, `channel`, `timestamp`, `title`)
+  plus a body with the gist, decisions, open threads, and user notes. These
+  are ordinary workspace documents, so they are indexed and reachable via
+  `memory_search` (the pull channel — deep recall on demand).
+
+- **`memory/recent.md`** — a terse digest of the last few conversations
+  (title + gist + open threads only). It is capped by count (default 5
+  entries) and by size (~1500 tokens), with open-thread entries retained
+  preferentially under size pressure. This digest is injected silently into
+  the system prompt for new conversations (the push channel — ambient recent
+  context), excluded in group chats the same way `MEMORY.md` is.
+
+Both files are written on two triggers:
+
+1. **Idle-prune** — when the session manager prunes a stale conversation, its
+   turns are summarized and stored.
+2. **Backstop sweep** — a heartbeat/startup sweep summarizes any recently
+   ended conversation that has no per-session file yet (durable-from-DB, so a
+   crash or missed prune never loses a summary).
+
+Writes are idempotent on `conversation_id` (an existing per-session file means
+"already summarized" — skip) and fully fail-soft: a summarization or write
+error is logged and the turn continues — memory never blocks a conversation.
+
 ## Hybrid Search (RRF)
 
 Combines full-text search and vector similarity using Reciprocal Rank Fusion:
