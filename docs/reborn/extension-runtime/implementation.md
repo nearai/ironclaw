@@ -1,7 +1,7 @@
 # Unified Extension Runtime — Implementation
 
 **Companions:** `overview.md` (model — read it first), `checklist.md` (acceptance).
-**Baseline:** the NEA-25 stack on this branch (`origin/nea25/08-audit-fixes`).
+**Baseline:** this branch. It already contains the pending unified-extension-taxonomy PR stack (eight PRs, merge chain ending in #5850) that must land on main before this work starts.
 
 This document says what changes and where. It follows the repo's testing law:
 every workstream starts with failing tests at the tier that can observe the
@@ -9,8 +9,9 @@ behavior, and persistent behavior is proven on libSQL **and** PostgreSQL.
 
 ## 1. Landing strategy
 
-1. **Merge the NEA-25 stack first.** It is reviewed and this design builds on
-   its taxonomy. Do not stack this work further on an unmerged base — main is
+1. **Merge the pending taxonomy PR stack first** (the eight-PR chain ending
+   in #5850, already contained in this branch). It is reviewed and this design
+   builds on it. Do not stack this work further on an unmerged base — main is
    actively churning the same Slack files.
 2. Implement in phases P0–P7 (section 13), each an independently green,
    reviewable PR into main. A phase may not leave two indefinite runtime paths:
@@ -22,7 +23,7 @@ behavior, and persistent behavior is proven on libSQL **and** PostgreSQL.
 
 ## 2. Current state (verified against this branch)
 
-Already generic (NEA-25): one manifest per extension parsed through
+Already generic on this branch: one manifest per extension parsed through
 `ExtensionManifestV2::parse`; surfaces projected by `capability_surfaces()`
 (`crates/ironclaw_extensions/src/v2.rs`); surface kinds in
 `crates/ironclaw_host_api/src/surface.rs`; channel surfaces on the extensions
@@ -248,7 +249,7 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   account; there is no background refresher job.
 - Shared vendors: unify recipes at activation (identical except
   `scopes`/`display_name`, else conflict); scope union and incremental
-  re-consent keep NEA-25 behavior; grants are vendor-scoped and survive
+  re-consent keep today's behavior; grants are vendor-scoped and survive
   removal of one consumer while another active extension shares the vendor.
 - Recipe reference (fields beyond `overview.md` §3): `scope_param` (default
   `scope`), `scope_join` (default space), `exchange_auth = "post_body"|"basic"`,
@@ -492,7 +493,7 @@ carries a removal note in `checklist.md`.
 
 ## 13. Execution order
 
-Phases are PRs into main (after NEA-25 merges). Each lands green: `cargo fmt`,
+Phases are PRs into main (after the taxonomy stack merges). Each lands green: `cargo fmt`,
 `cargo clippy --all --benches --tests --examples --all-features` (zero
 warnings), `cargo test` (+ integration features where touched),
 `cargo test -p ironclaw_architecture`, frontend `vitest` when touched.

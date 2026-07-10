@@ -2,7 +2,7 @@
 
 **Status:** Approved design.
 **Companions:** `implementation.md` (what changes, where), `checklist.md` (acceptance).
-**Baseline:** the NEA-25 unified-extension stack (`origin/nea25/08-audit-fixes`), which this branch contains.
+**Baseline:** the unified extension taxonomy this branch already contains (extension as the only installable product object).
 
 This document is the complete mental model: the product shape, the manifest, the
 adapter seams, and how the generic core uses them. It deliberately contains no
@@ -31,7 +31,8 @@ Acceptance is three concrete tests:
 
 ## 2. Product model
 
-Unchanged from NEA-25 except one rename; restated so this document stands alone.
+One rename aside, this is the taxonomy the codebase already establishes,
+restated so this document stands alone.
 
 - **Extension** — the only installable product object. One `ExtensionId`
   (`slack`, `github`, `gmail`) owns every surface in the package.
@@ -275,7 +276,7 @@ Extensions that use the same `VendorId` each carry the recipe (gmail, drive,
 calendar all embed the `[auth.google]` recipe). At activation the host unifies
 them: recipes for one vendor must be **identical except `scopes` and
 `display_name`**, or activation fails with a conflict. Scope ceilings union
-across active extensions exactly as NEA-25 does today; a new extension needing
+across active extensions exactly as the system does today; a new extension needing
 more scopes triggers incremental re-consent. Accounts and grants are stored per
 vendor and shared — connecting Google once serves gmail and drive.
 
