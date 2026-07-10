@@ -227,7 +227,7 @@ test("normalizeAutomations does not treat a running fire timestamp as last compl
   assert.equal(automations[0].current_run.run_id, "run-running");
 });
 
-test("normalizeAutomations falls back to aggregate last_run_at for terminal runs missing completed_at", () => {
+test("normalizeAutomations falls back to terminal run timestamp when completed_at is missing", () => {
   const automations = normalizeAutomations({
     automations: [
       {
@@ -235,9 +235,16 @@ test("normalizeAutomations falls back to aggregate last_run_at for terminal runs
         name: "Missing completed timestamp",
         source: { type: "schedule", cron: "0 9 * * *" },
         state: "active",
-        last_run_at: "2026-06-04T16:01:00Z",
+        last_run_at: "2026-06-05T16:00:01Z",
         last_status: "ok",
         recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
           {
             status: "ok",
             fire_slot: "2026-06-04T16:00:00Z",
@@ -254,6 +261,7 @@ test("normalizeAutomations falls back to aggregate last_run_at for terminal runs
   assert.match(automations[0].last_run_label, /Jun 4/);
   assert.equal(automations[0].last_status_label, "Done");
   assert.equal(automations[0].success_rate_label, "100% visible runs");
+  assert.equal(automations[0].current_run.run_id, "run-running");
 });
 
 test("scheduleLabel presents common recurring schedules in friendly language", () => {
