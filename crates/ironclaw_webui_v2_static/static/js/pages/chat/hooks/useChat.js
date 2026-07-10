@@ -25,6 +25,11 @@ import {
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
+import {
+  RECORD_STATUS,
+  uiStatusFromRecordStatus,
+} from "../lib/message-status.js";
+import { buildOptimisticMessage } from "../lib/optimistic-message.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
@@ -81,7 +86,9 @@ function submitResponseResumedTurnGate(response) {
 function resolveGateOutcome(response) {
   if (response?.outcome) return response.outcome;
   const status = String(response?.status || "").toLowerCase();
-  if (status === "queued" || status === "running") return "resumed";
+  if (status === RECORD_STATUS.QUEUED || status === RECORD_STATUS.RUNNING) {
+    return "resumed";
+  }
   if (status === "cancelled" || response?.already_terminal === true) {
     return "cancelled";
   }
@@ -211,11 +218,6 @@ export function useChat(threadId) {
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
-  const authTokenSubmitRef = React.useRef({
-    gateKey: null,
-    credentialRef: null,
-    inFlight: false,
-  });
   const submitBusyRef = React.useRef(false);
   const localRunAdmissionRef = React.useRef(null);
 
@@ -298,56 +300,15 @@ export function useChat(threadId) {
     return () => clearInterval(timer);
   }, [cooldownUntil]);
 
-  React.useEffect(() => {
-    if (authTokenSubmitRef.current.gateKey !== pendingAuthGateKey) {
-      authTokenSubmitRef.current = {
-        gateKey: pendingAuthGateKey,
-        credentialRef: null,
-        inFlight: false,
-      };
-    }
-  }, [pendingAuthGateKey]);
+  const submitAuthToken = useAuthTokenSubmit({
+    pendingGate,
+    pendingAuthGateKey,
+    threadId,
+    setPendingGate,
+    setIsProcessing,
+  });
 
-  React.useEffect(() => {
-    if (!isPendingOAuthGate(pendingGate)) return;
-    const listeningSince = Date.now();
-
-    const handleCompletion = (payload) => {
-      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
-      setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
-      setIsProcessing(true);
-    };
-
-    let channel = null;
-    if (typeof window.BroadcastChannel === "function") {
-      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
-      channel.onmessage = (event) => handleCompletion(event.data);
-    }
-
-    const onStorage = (event) => {
-      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
-      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
-    };
-
-    window.addEventListener("storage", onStorage);
-    handleCompletion(
-      parseOAuthCallbackStoragePayload(
-        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-      ),
-    );
-    const timer = window.setInterval(() => {
-      handleCompletion(
-        parseOAuthCallbackStoragePayload(
-          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-        ),
-      );
-    }, 500);
-    return () => {
-      window.clearInterval(timer);
-      if (channel) channel.close();
-      window.removeEventListener("storage", onStorage);
-    };
-  }, [pendingGate]);
+  useOAuthCallbackResume({ pendingGate, setPendingGate, setIsProcessing });
 
   const handleEvent = useChatEvents({
     threadId,
@@ -422,35 +383,15 @@ export function useChat(threadId) {
       if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
       }
-      // Admission: block a send only when the *destination* thread is the one
-      // that's busy. The destination is `targetThreadId` when the caller names
-      // one, otherwise the open thread (the same `targetThreadId || threadId`
-      // resolved below). BOTH the in-flight-run guard and the viewed-thread
-      // `isProcessing` flag must key on that destination — a running thread
-      // carries both, so narrowing only one still drops a parallel send to
-      // another thread, or a new chat, just because the thread on screen is
-      // running. Keying either guard on the viewed thread (or on the mere
-      // absence of a target) is what broke parallel threads and "new chat
-      // while a run is active".
-      const sendTargetThreadId = targetThreadId || threadId;
-      const activeRunForSend = activeRunRef.current;
-      const activeRunBlocksSend =
-        Boolean(activeRunForSend) &&
-        Boolean(sendTargetThreadId) &&
-        activeRunForSend.threadId === sendTargetThreadId;
-      const processingBlocksSend =
-        isProcessingRef.current &&
-        Boolean(sendTargetThreadId) &&
-        sendTargetThreadId === threadId;
-      const localRunBlocksSend =
-        Boolean(sendTargetThreadId) &&
-        localRunAdmissionRef.current?.threadId === sendTargetThreadId;
-      if (
-        submitBusyRef.current ||
-        processingBlocksSend ||
-        activeRunBlocksSend ||
-        localRunBlocksSend
-      ) {
+      // The only local admission guard is the in-flight-POST re-entrancy lock:
+      // it blocks a duplicate submit while the previous send request has not
+      // settled. Run/processing state must NOT block a send — a follow-up into
+      // a still-running thread (same or parallel) must reach the backend so
+      // Reborn can queue it (deferred_busy), and sends to other threads / new
+      // chats must never be dropped just because the viewed thread is running.
+      // Per-destination busy state is the backend queue's responsibility, not
+      // this guard's.
+      if (submitBusyRef.current) {
         return null;
       }
 
@@ -478,25 +419,14 @@ export function useChat(threadId) {
       }
 
       const pendingKey = sendThreadId;
-      const pendingRecord = {
+      const optimisticMessage = buildOptimisticMessage({
         id: `pending-${pendingSeqRef.current++}`,
-        role: "user",
         content,
         attachments: renderAttachments,
-        timestamp: new Date().toISOString(),
-        isOptimistic: true,
-      };
-      const pendingRenderMessage = {
-        id: pendingRecord.id,
-        role: "user",
-        content,
-        attachments: renderAttachments,
-        timestamp: pendingRecord.timestamp,
-        isOptimistic: true,
-      };
-      addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
+      });
+      addPending(pendingMessagesRef.current, pendingKey, optimisticMessage);
 
-      const optimisticId = pendingRecord.id;
+      const optimisticId = optimisticMessage.id;
       const shouldRenderInCurrentThread = !threadId || sendThreadId === threadId;
       const updateCurrentThread = (updater) => {
         if (shouldRenderInCurrentThread) setMessages(updater);
@@ -518,8 +448,8 @@ export function useChat(threadId) {
         };
       }
       submitBusyRef.current = true;
-      updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
-      updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
+      updateCurrentThread((prev) => [...prev, optimisticMessage]);
+      updateSeededTarget((prev) => [...prev, optimisticMessage]);
 
       updateCurrentRunState(() => {
         setIsProcessing(true);
@@ -588,23 +518,26 @@ export function useChat(threadId) {
           updateCurrentThread(markAccepted);
           updateSeededTarget(markAccepted);
         }
-        // When the thread was busy, the message is rejected (not deferred).
-        // Mark the optimistic user message as failed and display the
-        // server's notice (if present) as a system message so the user
-        // knows to resend.
-        if (response?.outcome === "rejected_busy") {
+        const busyOutcome = BUSY_OUTCOME[response?.outcome];
+        if (busyOutcome) {
+          // A busy outcome (deferred or rejected) started no new local run, so
+          // drop any local-run admission this send optimistically recorded.
           if (shouldTrackLocalRun) {
             localRunAdmissionRef.current = null;
           }
-          const markRejected = (prev) =>
+          // One mapper drives the UI status for both busy outcomes so the
+          // optimistic bubble matches what `messagesFromTimeline` renders
+          // after a reload (deferred -> queued, rejected -> error).
+          const uiStatus = uiStatusFromRecordStatus(response.outcome);
+          const markBusy = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
-                ? { ...m, isOptimistic: false, status: "error" }
+                ? { ...m, isOptimistic: false, status: uiStatus }
                 : m,
             );
-          updateCurrentThread(markRejected);
-          updateSeededTarget(markRejected);
-          if (response?.notice) {
+          updateCurrentThread(markBusy);
+          updateSeededTarget(markBusy);
+          if (busyOutcome.withNotice && response?.notice) {
             const appendSystemNotice = (renderCurrent = shouldRenderInCurrentThread) => {
               const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,
@@ -638,14 +571,20 @@ export function useChat(threadId) {
               appendSystemNotice(false);
             }
           }
-          updateCurrentRunState(() => setIsProcessing(false));
-          submitBusyRef.current = false;
+          // A rejected message frees the run (it never entered the queue); a
+          // deferred message stays queued behind the active run, so its
+          // processing state must be preserved.
+          if (busyOutcome.stopProcessing) {
+            updateCurrentRunState(() => setIsProcessing(false));
+          }
         } else if (!response?.run_id) {
+          // No run started and not a busy outcome: drop the optimistic local
+          // admission so a later send is not blocked by stale state.
           if (shouldTrackLocalRun) {
             localRunAdmissionRef.current = null;
           }
-          submitBusyRef.current = false;
         }
+        // submitBusyRef is released in `finally` (single source) — see below.
         return response;
       } catch (err) {
         if (shouldTrackLocalRun) {
@@ -668,7 +607,6 @@ export function useChat(threadId) {
         updateCurrentThread(markFailed);
         updateSeededTarget(markFailed);
         updateCurrentRunState(() => setIsProcessing(false));
-        submitBusyRef.current = false;
         throw err;
       } finally {
         // Release the re-entrancy guard once the send POST settles — that is
@@ -678,8 +616,9 @@ export function useChat(threadId) {
         // the moment the user navigates to a new chat while a run is in
         // flight — that thread's SSE is torn down, its settle event never
         // arrives, the guard stays `true`, and every later send is silently
-        // dropped. Blocking a resubmit into a still-running thread is the job
-        // of the per-destination run guards above, not this.
+        // dropped. Follow-up sends into a still-running thread must be allowed
+        // to reach the backend queue after this POST completes — blocking a
+        // resubmit into a busy thread is the backend queue's job, not this.
         submitBusyRef.current = false;
         // Drop the optimistic from the pending ref unconditionally:
         // on success the confirmed row arrives via /timeline, and on
@@ -736,7 +675,7 @@ export function useChat(threadId) {
         setActiveRun({
           runId: response?.run_id || runId,
           threadId: response?.thread_id || threadId,
-          status: response?.status || "queued",
+          status: response?.status || RECORD_STATUS.QUEUED,
         });
         return;
       }
@@ -746,87 +685,6 @@ export function useChat(threadId) {
     [pendingGate, threadId, setMessages, setActiveRun],
   );
 
-  const submitAuthToken = React.useCallback(
-    async (token) => {
-      if (!pendingGate) {
-        throw new Error("auth gate is no longer pending");
-      }
-      const { runId, gateRef, provider } = pendingGate;
-      if (!runId || !gateRef || !provider) {
-        throw new Error("auth gate is missing required credential metadata");
-      }
-      // `account_label` is optional on the prompt (gates.js defaults it to
-      // an empty string), so don't gate submission on it — derive a sensible
-      // label when the prompt didn't carry one.
-      const accountLabel = pendingGate.accountLabel || `${provider} credential`;
-      const gateKey = `${runId}\n${gateRef}`;
-      if (authTokenSubmitRef.current.gateKey !== gateKey) {
-        authTokenSubmitRef.current = {
-          gateKey,
-          credentialRef: null,
-          inFlight: false,
-        };
-      }
-      if (authTokenSubmitRef.current.inFlight) {
-        throw new Error("auth token submission already in progress");
-      }
-      authTokenSubmitRef.current.inFlight = true;
-
-      try {
-        let credentialRef = authTokenSubmitRef.current.credentialRef;
-        let submitted = null;
-        if (!credentialRef) {
-          submitted = await withAuthTokenTimeout((signal) =>
-            submitManualToken({
-              provider,
-              accountLabel,
-              token,
-              threadId,
-              runId,
-              gateRef,
-              signal,
-            }),
-          );
-          credentialRef = submitted?.credential_ref;
-          if (!credentialRef) {
-            throw new Error("manual token submit returned no credential_ref");
-          }
-          authTokenSubmitRef.current.credentialRef = credentialRef;
-        }
-
-        if (!submitResponseResumedTurnGate(submitted)) {
-          try {
-            await withAuthTokenTimeout((signal) =>
-              resolveGateRequest({
-                threadId,
-                runId,
-                gateRef,
-                resolution: "credential_provided",
-                credentialRef,
-                signal,
-              }),
-            );
-          } catch (err) {
-            throw credentialStoredGateResolutionError(err);
-          }
-        }
-
-        authTokenSubmitRef.current = {
-          gateKey: null,
-          credentialRef: null,
-          inFlight: false,
-        };
-        setPendingGate(null);
-        setIsProcessing(true);
-      } catch (err) {
-        if (authTokenSubmitRef.current.gateKey === gateKey) {
-          authTokenSubmitRef.current.inFlight = false;
-        }
-        throw err;
-      }
-    },
-    [pendingGate, threadId],
-  );
 
   const cancelRun = React.useCallback(
     async (reason) => {
@@ -906,6 +764,172 @@ export function useChat(threadId) {
     recoveryNotice: null,
   };
 }
+
+// Owns the manual auth-token submission flow: a per-gate ref tracking the
+// stored credential + in-flight guard, the reset when the pending gate
+// changes, and the `submitAuthToken` callback. Returns the callback.
+function useAuthTokenSubmit({
+  pendingGate,
+  pendingAuthGateKey,
+  threadId,
+  setPendingGate,
+  setIsProcessing,
+}) {
+  const authTokenSubmitRef = React.useRef({
+    gateKey: null,
+    credentialRef: null,
+    inFlight: false,
+  });
+
+  React.useEffect(() => {
+    if (authTokenSubmitRef.current.gateKey !== pendingAuthGateKey) {
+      authTokenSubmitRef.current = {
+        gateKey: pendingAuthGateKey,
+        credentialRef: null,
+        inFlight: false,
+      };
+    }
+  }, [pendingAuthGateKey]);
+
+  return React.useCallback(
+    async (token) => {
+      if (!pendingGate) {
+        throw new Error("auth gate is no longer pending");
+      }
+      const { runId, gateRef, provider } = pendingGate;
+      if (!runId || !gateRef || !provider) {
+        throw new Error("auth gate is missing required credential metadata");
+      }
+      // `account_label` is optional on the prompt (gates.js defaults it to
+      // an empty string), so don't gate submission on it — derive a sensible
+      // label when the prompt didn't carry one.
+      const accountLabel = pendingGate.accountLabel || `${provider} credential`;
+      const gateKey = `${runId}\n${gateRef}`;
+      if (authTokenSubmitRef.current.gateKey !== gateKey) {
+        authTokenSubmitRef.current = {
+          gateKey,
+          credentialRef: null,
+          inFlight: false,
+        };
+      }
+      if (authTokenSubmitRef.current.inFlight) {
+        throw new Error("auth token submission already in progress");
+      }
+      authTokenSubmitRef.current.inFlight = true;
+
+      try {
+        let credentialRef = authTokenSubmitRef.current.credentialRef;
+        let submitted = null;
+        if (!credentialRef) {
+          submitted = await withAuthTokenTimeout((signal) =>
+            submitManualToken({
+              provider,
+              accountLabel,
+              token,
+              threadId,
+              runId,
+              gateRef,
+              signal,
+            }),
+          );
+          credentialRef = submitted?.credential_ref;
+          if (!credentialRef) {
+            throw new Error("manual token submit returned no credential_ref");
+          }
+          authTokenSubmitRef.current.credentialRef = credentialRef;
+        }
+
+        if (!submitResponseResumedTurnGate(submitted)) {
+          try {
+            await withAuthTokenTimeout((signal) =>
+              resolveGateRequest({
+                threadId,
+                runId,
+                gateRef,
+                resolution: "credential_provided",
+                credentialRef,
+                signal,
+              }),
+            );
+          } catch (err) {
+            throw credentialStoredGateResolutionError(err);
+          }
+        }
+
+        authTokenSubmitRef.current = {
+          gateKey: null,
+          credentialRef: null,
+          inFlight: false,
+        };
+        setPendingGate(null);
+        setIsProcessing(true);
+      } catch (err) {
+        if (authTokenSubmitRef.current.gateKey === gateKey) {
+          authTokenSubmitRef.current.inFlight = false;
+        }
+        throw err;
+      }
+    },
+    [pendingGate, threadId, setPendingGate, setIsProcessing],
+  );
+}
+
+// Watches for an OAuth popup completion (BroadcastChannel + localStorage
+// fallback) while an oauth_url gate is pending, and resumes the run when the
+// callback for that gate lands. Extracted from the useChat body so the
+// cross-tab completion plumbing stays self-contained.
+function useOAuthCallbackResume({ pendingGate, setPendingGate, setIsProcessing }) {
+  React.useEffect(() => {
+    if (!isPendingOAuthGate(pendingGate)) return;
+    const listeningSince = Date.now();
+
+    const handleCompletion = (payload) => {
+      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
+      setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
+      setIsProcessing(true);
+    };
+
+    let channel = null;
+    if (typeof window.BroadcastChannel === "function") {
+      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+      channel.onmessage = (event) => handleCompletion(event.data);
+    }
+
+    const onStorage = (event) => {
+      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
+      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
+    };
+
+    window.addEventListener("storage", onStorage);
+    handleCompletion(
+      parseOAuthCallbackStoragePayload(
+        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+      ),
+    );
+    const timer = window.setInterval(() => {
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
+    }, 500);
+    return () => {
+      window.clearInterval(timer);
+      if (channel) channel.close();
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [pendingGate]);
+}
+
+// Per-outcome behavior for a busy send response. The UI status itself comes
+// from `uiStatusFromRecordStatus` (shared with the reload path); this table
+// only carries what diverges between the two outcomes.
+const BUSY_OUTCOME = {
+  // Accepted-and-queued behind the active run: keep processing, no notice.
+  [RECORD_STATUS.DEFERRED_BUSY]: { stopProcessing: false, withNotice: false },
+  // Rejected (never queued): free the run and surface the busy notice.
+  [RECORD_STATUS.REJECTED_BUSY]: { stopProcessing: true, withNotice: true },
+};
 
 function isDeclinedGateResolution(resolution) {
   return resolution === "denied" || resolution === "cancelled";

@@ -84,6 +84,19 @@ impl DefaultExecutorPipeline {
                 }
                 InputStep::Exit(exit) => return Ok(exit),
             }
+            if !pending_input_ack.is_empty() {
+                state = CheckpointStage
+                    .process(
+                        ctx,
+                        CheckpointInput {
+                            state,
+                            kind: CheckpointKind::BeforeModel,
+                        },
+                    )
+                    .await?
+                    .state;
+                pending_input_ack.ack(host).await?;
+            }
 
             match self
                 .prompt
@@ -96,7 +109,9 @@ impl DefaultExecutorPipeline {
                 )
                 .await?
             {
-                PromptStep::Exit(exit) => return Ok(exit),
+                PromptStep::Exit(exit) => {
+                    return Ok(exit);
+                }
 
                 PromptStep::Prepared(prompt) => {
                     let prompt = *prompt;

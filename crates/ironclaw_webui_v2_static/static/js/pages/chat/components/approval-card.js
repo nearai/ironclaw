@@ -16,6 +16,7 @@ import { Button } from "../../../design-system/button.js";
 import { Badge } from "../../../design-system/badge.js";
 import { Icon } from "../../../design-system/icons.js";
 import { classifyRisk } from "../lib/approval-risk.js";
+import { GATE_KIND } from "../lib/gate-kinds.js";
 
 const APPROVAL_PAYLOAD_PREVIEW_LIMIT = 480;
 
@@ -37,7 +38,15 @@ function approvalPayloadPreview(value, expanded) {
 
 export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const t = useT();
-  const { toolName, description, parameters, allowAlways, approvalDetails = [] } = gate;
+  const {
+    toolName,
+    description,
+    parameters,
+    allowAlways,
+    approvalDetails = [],
+    gateKind,
+    headline,
+  } = gate;
   const [always, setAlways] = React.useState(false);
   const [expandedPayload, setExpandedPayload] = React.useState(false);
 
@@ -50,6 +59,10 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
     [toolName, description, parameters]
   );
   const toolLabel = toolName || t("approval.thisTool");
+  const title =
+    gateKind && gateKind !== GATE_KIND.APPROVAL && headline
+      ? headline
+      : t("approval.title");
   const longPayload = approvalPayloadIsLong(parameters, approvalDetails);
   const payloadMaxHeight = expandedPayload ? "max-h-72" : "max-h-36";
 
@@ -70,7 +83,7 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
         <span className="grid h-8 w-8 place-items-center rounded-md border border-copper/25 bg-copper/10 text-copper">
           <${Icon} name="lock" className="h-4 w-4" />
         </span>
-        <span className="font-semibold text-white">${t("approval.title")}</span>
+        <span className="font-semibold text-white">${title}</span>
         <${Badge}
           tone=${risk.tone}
           label=${t(risk.key)}

@@ -161,8 +161,48 @@ async fn reply_only_drains_follow_up_before_stop_strategy_completes() {
         vec![
             LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::Final,
         ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
+async fn reply_only_drains_steering_before_stop_strategy_completes() {
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:no-input"),
+        },
+        LoopInputBatch {
+            inputs: vec![LoopInput::Steering {
+                message_ref: message_ref("msg:steering-follow-up"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-steering-follow-up",
+                "input-ack:after-steering-follow-up",
+            )],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-steering-follow-up"),
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.acked_input_tokens(),
+        vec![LoopInputAckToken::new("input-ack:after-steering-follow-up").expect("valid")]
     );
     assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
 }
@@ -1065,6 +1105,10 @@ async fn input_stage_steering_drain_carries_pending_ack() {
                 state.input_cursor,
                 input_cursor(&run_context, "input-cursor:after-user")
             );
+            assert_eq!(
+                state.prompt_context_cursor,
+                Some(LoopInputCursor::origin_for_run(&run_context))
+            );
             assert!(host.acked_input_tokens().is_empty());
             pending_input_ack.ack(&host).await.expect("ack inputs");
             assert_eq!(
@@ -1116,6 +1160,10 @@ async fn input_stage_steering_input_is_drained_like_user_message() {
             assert_eq!(
                 state.input_cursor,
                 input_cursor(&run_context, "input-cursor:after-steering")
+            );
+            assert_eq!(
+                state.prompt_context_cursor,
+                Some(LoopInputCursor::origin_for_run(&run_context))
             );
         }
         InputStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
@@ -1682,6 +1730,44 @@ async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
         }
         other => panic!("expected completed exit with synthesized reply, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn nudge_clears_prompt_context_cursor_in_final_state() {
+    // Regression: the final-answer nudge builds its own prompt bundle from
+    // `plan_context_request`, so it must consume the prompt-context handoff
+    // once — like the main prompt-build path (`BuiltPromptBundle`) — instead of
+    // leaving a lagging `prompt_context_cursor` in the checkpointed final state.
+    let host = MockHost::new(vec![reply_response_with_text("Here is the final answer.")])
+        .with_driver_nudges_enabled();
+    let run_context = host.run_context().clone();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.prompt_context_cursor = Some(LoopInputCursor::origin_for_run(&run_context));
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "nudge with a queued reply should complete the turn"
+    );
+    assert!(
+        final_staged_state(&host).prompt_context_cursor.is_none(),
+        "nudge must clear prompt_context_cursor before the final checkpoint"
+    );
 }
 
 #[tokio::test]

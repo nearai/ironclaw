@@ -205,7 +205,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Sender_id in trusted metadata | ✅ | ❌ | Exposed in system metadata |
 | Per-group `systemPrompt` injection | ✅ | ❌ | Per-group/per-direct system prompts injected via `GroupSystemPrompt` (Telegram, Discord, WhatsApp, BlueBubbles) |
 | Visible reply enforcement | ✅ | ❌ | `messages.visibleReplies` requires output via `message(action=send)`; group-scope override available |
-| Active-run steering queue | ✅ | ❌ | `messages.queue` `steer` mode (default) drains queued messages at next model boundary; `queue` legacy one-at-a-time |
+| Active-run steering queue | ✅ | 🚧 | Reborn queues busy-thread user messages as steering input for the active run and WebUI shows them as queued until the loop consumes them; `queue` legacy one-at-a-time remains follow-up |
 | Tool-progress streaming into previews | ✅ | ❌ | Tool progress shown in live preview edits (Discord/Slack/Telegram/Mattermost/Matrix) |
 | `dmPolicy="open"` semantics | ✅ | 🚧 | Public open-DM only with effective wildcard; pairing-store senders no longer count for DM audits (OpenClaw fixed across all channels) |
 

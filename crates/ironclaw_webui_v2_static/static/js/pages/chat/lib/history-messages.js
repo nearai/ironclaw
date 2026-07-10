@@ -8,6 +8,10 @@
 
 import { attachmentKindFromMime, formatBytes } from "./attachments.js";
 import { attachmentUrl } from "../../../lib/api.js";
+import {
+  isBusyRejectedStatus,
+  uiStatusFromRecordStatus,
+} from "./message-status.js";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
@@ -80,9 +84,12 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
     if (seen.has(id)) continue;
     seen.add(id);
     const role = roleForRecord(record);
-    const isBusyRejected =
-      role === "user" &&
-      (record.status === "rejected_busy" || record.status === "deferred_busy");
+    // Normalize busy outcomes through the same mapper `useChat.send` uses on
+    // the optimistic path, so a message renders identically live and after a
+    // reload. A deferred-busy message was accepted-and-queued (renders
+    // queued); only a rejected-busy message was dropped (renders error and
+    // carries the durable resend copy).
+    const isBusyRejected = role === "user" && isBusyRejectedStatus(record.status);
     messages.push({
       id,
       role,
@@ -90,7 +97,8 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
       attachments: attachmentsFromRecord(record, threadId),
       timestamp: timestampForRecord(record),
       kind: record.kind,
-      status: isBusyRejected ? "error" : record.status,
+      status:
+        role === "user" ? uiStatusFromRecordStatus(record.status) : record.status,
       ...(isBusyRejected && {
         error:
           "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
@@ -178,6 +186,9 @@ export function toolCardFromPreview(preview) {
   const failed = preview.status === "failed" || preview.status === "killed";
   const errorKind = preview.error_kind || null;
   const activityOrder = numericActivityOrder(preview.activity_order);
+  const previewError = failed
+    ? previewToolError(preview, errorKind)
+    : { text: null, key: null };
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
@@ -192,14 +203,9 @@ export function toolCardFromPreview(preview) {
     toolResultPreview: failed
       ? null
       : preview.output_preview || preview.output_summary || null,
-    toolError: failed
-      ? toolErrorText(errorKind) ||
-        preview.output_summary ||
-        preview.output_preview ||
-        preview.result_ref ||
-        null
-      : null,
+    toolError: previewError.text,
     toolErrorKind: errorKind,
+    toolErrorKey: previewError.key,
     toolDurationMs: null,
     updatedAt: preview.updated_at || null,
     resultRef: preview.result_ref || null,
@@ -212,6 +218,30 @@ export function toolCardFromPreview(preview) {
   };
 }
 
+// Resolve a failed preview's error into `{ text, key }`. A sanitized,
+// display-safe `output_preview` is surfaced verbatim so a live activity card
+// and the reloaded preview card show the same text. Backend failures may
+// carry raw/unsafe summary text, so without a preview they fall back to the
+// friendly localized message rather than leaking the summary. Other kinds may
+// surface their summary / result_ref.
+function previewToolError(preview, errorKind) {
+  const previewText = trimmedOrNull(preview.output_preview);
+  if (previewText) return { text: previewText, key: null };
+  const normalizedKind =
+    typeof errorKind === "string" ? errorKind.trim().toLowerCase().replaceAll("-", "_") : "";
+  if (normalizedKind === "backend") return resolveToolError(errorKind);
+  const summary =
+    trimmedOrNull(preview.output_summary) || trimmedOrNull(preview.result_ref);
+  if (summary) return { text: summary, key: null };
+  return resolveToolError(errorKind);
+}
+
+function trimmedOrNull(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 // Map a `CapabilityActivityView` (SSE lifecycle frame) into the same
 // card shape. While the invocation is still running the backend now
 // carries the staged input on the activity frame (`subtitle` =
@@ -221,6 +251,9 @@ export function toolCardFromPreview(preview) {
 export function toolCardFromActivity(activity) {
   const activityOrder = numericActivityOrder(activity.activity_order);
   const errorKind = activity.error_kind || null;
+  const errorSummary =
+    typeof activity.error_summary === "string" ? activity.error_summary.trim() : "";
+  const activityError = resolveToolError(errorKind, errorSummary);
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
@@ -230,8 +263,9 @@ export function toolCardFromActivity(activity) {
     toolDetail: activity.subtitle || null,
     toolParameters: activity.input_summary || null,
     toolResultPreview: null,
-    toolError: toolErrorText(errorKind),
+    toolError: activityError.text,
     toolErrorKind: errorKind,
+    toolErrorKey: activityError.key,
     toolDurationMs: null,
     updatedAt: activity.updated_at || null,
     resultRef: null,
@@ -244,13 +278,74 @@ export function toolCardFromActivity(activity) {
   };
 }
 
-function toolErrorText(errorKind) {
-  if (!errorKind) return null;
-  return errorKind;
+// error_kind -> { i18n key, English fallback }. The fallback string is the
+// source of truth for non-localized contexts (and unit tests); the key lets
+// the rendering surface localize via `t()` when no concrete summary applies.
+const TOOL_ERROR_KIND_I18N = {
+  backend: { key: "tool.errorBackend", text: "The tool backend failed." },
+  security: { key: "tool.errorSecurity", text: "The tool response was blocked by a security check." },
+  security_rejected: { key: "tool.errorSecurity", text: "The tool response was blocked by a security check." },
+  security_rejection: { key: "tool.errorSecurity", text: "The tool response was blocked by a security check." },
+  cancelled: { key: "tool.errorCancelled", text: "The tool call was cancelled." },
+  timeout: { key: "tool.errorTimeout", text: "The tool call timed out." },
+  invalid_request: { key: "tool.errorInvalidRequest", text: "The tool request was invalid." },
+  auth: { key: "tool.errorAuth", text: "The tool needs authentication." },
+  authentication: { key: "tool.errorAuth", text: "The tool needs authentication." },
+  authorization: { key: "tool.errorAuth", text: "The tool needs authentication." },
+  permission: { key: "tool.errorPermission", text: "The tool call was not allowed." },
+  approval_denied: { key: "tool.errorPermission", text: "The tool call was not allowed." },
+  [GATE_DECLINED_ERROR_KIND]: { key: "tool.errorGateDeclined", text: "gate declined" },
+};
+
+// Resolve a failure into `{ text, key }`:
+// - a concrete `errorSummary` wins (raw backend/tool text), with no i18n key
+//   (it is not a fixed phrase);
+// - a known `errorKind` maps to a localizable fallback (text + key);
+// - an unknown `errorKind` is surfaced readably (underscores -> spaces). This
+//   is the one explicit, documented fallback — not a silent catch-all: it
+//   only fires for kinds the backend adds that the UI has not localized yet.
+export function resolveToolError(errorKind, errorSummary = "") {
+  const summary = typeof errorSummary === "string" ? errorSummary.trim() : "";
+  if (summary) return { text: summary, key: null };
+  const value = typeof errorKind === "string" ? errorKind.trim() : "";
+  if (!value) return { text: null, key: null };
+  const normalized = value.toLowerCase().replaceAll("-", "_");
+  const known = TOOL_ERROR_KIND_I18N[normalized];
+  if (known) return { text: known.text, key: known.key };
+  return { text: value.replaceAll("_", " "), key: null };
+}
+
+// Localize a card's stored error: when the builder mapped a known error kind
+// to an i18n key, resolve it via `t()`; otherwise the stored `toolError` is a
+// concrete summary (or an unknown-kind fallback) shown verbatim.
+export function localizedToolError(toolError, toolErrorKey, t) {
+  if (toolErrorKey && typeof t === "function") return t(toolErrorKey);
+  return toolError;
 }
 
 export function isTerminalToolStatus(status) {
   return status === "success" || status === "error" || status === "declined";
+}
+
+// Single emptiness predicate for tool display fields. Treats whitespace-only
+// strings as empty; everything non-string is "present" when non-null.
+export function hasDisplayValue(value) {
+  return typeof value === "string" ? value.trim().length > 0 : value != null;
+}
+
+// Fill empty display fields on `target` from `source` using `hasDisplayValue`.
+// Shared by the live merge (tool-activity-state) and the refresh hydration
+// (useHistory) so both apply identical coalescing rules. Returns `target`
+// unchanged (same reference) when nothing is filled, copying only on change.
+export function coalesceToolFields(target, source, fields) {
+  let result = target;
+  for (const field of fields) {
+    if (!hasDisplayValue(result?.[field]) && hasDisplayValue(source?.[field])) {
+      if (result === target) result = { ...target };
+      result[field] = source[field];
+    }
+  }
+  return result;
 }
 
 export function toolDisplayName(name) {

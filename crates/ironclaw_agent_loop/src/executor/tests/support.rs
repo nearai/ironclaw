@@ -29,7 +29,10 @@ use ironclaw_turns::{
 use crate::{
     default_planner::DefaultPlanner,
     family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId},
-    state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
+    state::{
+        CheckpointKind, GateStrategyState, LoopExecutionState, RecoveryAttemptClass,
+        StopStrategyState,
+    },
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
         ContextStrategy, DefaultBudgetStrategy, DefaultCompactionStrategy, GateHandlingStrategy,
@@ -464,7 +467,9 @@ impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
     ) -> RecoveryOutcome {
         if err.class == CapabilityErrorClass::PolicyDenied {
             return RecoveryOutcome::Retry {
-                recovery: state.recovery_state.clone(),
+                recovery: state
+                    .recovery_state
+                    .with_incremented_attempts_for(RecoveryAttemptClass::CapabilityInternal),
                 scope: RetryScope::Call,
                 alter: None,
             };

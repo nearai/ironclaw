@@ -240,12 +240,45 @@ impl SessionThreadService for InMemorySessionThreadService {
         turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_user_accepted(message, "mark_message_submitted")?;
+        let thread = get_thread_mut(&mut state, scope, thread_id)?;
+        let message_index = thread
+            .messages
+            .iter()
+            .position(|message| message.message_id == message_id)
+            .ok_or(SessionThreadError::UnknownMessage { message_id })?;
+        // Idempotent re-submit: if this exact run already submitted the message,
+        // a redelivered/duplicate ack is a no-op rather than an
+        // `InvalidMessageTransition`. Mirrors the filesystem backend so the
+        // queued-message consumer's at-least-once ack path is tolerant on both
+        // stores. A *different* run, or a `RejectedBusy` row, still fails below.
+        {
+            let message = &thread.messages[message_index];
+            if message.status == MessageStatus::Submitted
+                && message.turn_run_id.as_deref() == Some(turn_run_id.as_str())
+            {
+                return Ok(message.clone());
+            }
+        }
+        let was_queued = {
+            let message = &thread.messages[message_index];
+            ensure_user_accepted(message, "mark_message_submitted")?;
+            message.status == MessageStatus::Queued
+        };
+        if was_queued {
+            let sequence = thread.next_sequence;
+            thread.next_sequence += 1;
+            thread.record.updated_at = Some(Utc::now());
+            thread.messages[message_index].sequence = sequence;
+        }
+        let message = &mut thread.messages[message_index];
         message.status = MessageStatus::Submitted;
         message.turn_id = Some(turn_id);
         message.turn_run_id = Some(turn_run_id);
-        Ok(message.clone())
+        let submitted = message.clone();
+        if was_queued {
+            thread.messages.sort_by_key(|message| message.sequence);
+        }
+        Ok(submitted)
     }
 
     async fn mark_message_rejected_busy(
@@ -263,15 +296,33 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message.clone())
     }
 
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+        ensure_user_accepted(message, "mark_message_queued")?;
+        message.status = MessageStatus::Queued;
+        message.turn_id = None;
+        message.turn_run_id = Some(active_run_id);
+        Ok(message.clone())
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
-        if let Some(existing) = thread.messages.iter().find(|message| {
+        let requested_content = request.content.as_text().to_owned();
+        if let Some(existing) = thread.messages.iter().rev().find(|message| {
             message.kind == MessageKind::Assistant
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                && should_reuse_assistant_run_message(message, &requested_content)
         }) {
             return Ok(existing.clone());
         }
@@ -289,7 +340,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
+            content: Some(requested_content),
             attachments: Vec::new(),
             redaction_ref: None,
         };
@@ -931,7 +982,7 @@ fn ensure_user_accepted(
     if message.kind == MessageKind::User
         && matches!(
             message.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::Queued
         )
     {
         return Ok(());
@@ -1057,6 +1108,17 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     }
 }
 
+fn should_reuse_assistant_run_message(
+    message: &ThreadMessageRecord,
+    requested_content: &str,
+) -> bool {
+    match message.status {
+        MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
+        MessageStatus::Finalized => message.content.as_deref() == Some(requested_content),
+        _ => false,
+    }
+}
+
 /// Returns true when a non-model-context-visible message within the summary
 /// span could later become model-visible (i.e. it is in a resurfaceable pending
 /// state).  Permanently-terminal non-visible messages (RejectedBusy, capability
@@ -1064,7 +1126,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
 /// apply — blocking it would silently drop a legitimate compacted range.
 ///
 /// Resurfaceable statuses (must still block the summary):
-///   Draft | Interrupted | Superseded | DeferredBusy
+///   Draft | Interrupted | Superseded | Queued | DeferredBusy
 /// Permanent non-visible (must NOT block):
 ///   RejectedBusy (terminal, user must explicitly resend)
 ///   CapabilityDisplayPreview kind (never model-visible regardless of status)
@@ -1078,6 +1140,7 @@ fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
         MessageStatus::Draft
             | MessageStatus::Interrupted
             | MessageStatus::Superseded
+            | MessageStatus::Queued
             | MessageStatus::DeferredBusy
     )
 }

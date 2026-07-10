@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+// chat.js now imports the gate-argument join from ./lib/gate-arguments.js; the
+// vm harness strips imports, so the real helper is injected into the context.
+import { enrichApprovalGateWithActivityArguments } from "./gate-arguments.js";
+
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.js", import.meta.url), "utf8");
   const lines = [];
@@ -83,8 +87,19 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     },
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
+    buildScopedLogsPath: (
+      { threadId, runId } = {},
+      { absolute = false } = {},
+    ) => {
+      const params = [];
+      if (threadId) params.push(`thread_id=${encodeURIComponent(threadId)}`);
+      if (runId) params.push(`run_id=${encodeURIComponent(runId)}`);
+      const query = params.length > 0 ? `?${params.join("&")}` : "";
+      return `${absolute ? "/v2" : ""}/logs${query}`;
+    },
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
+    enrichApprovalGateWithActivityArguments,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     setThreadState: () => {},
@@ -164,10 +179,10 @@ test("Chat leaves the composer editable while a run is processing", () => {
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.disabled, false);
-  assert.equal(props.sendDisabled, true);
+  assert.equal(props.sendDisabled, false);
 });
 
-test("Chat refuses composer sends while a run is processing", async () => {
+test("Chat queues composer sends while a run is processing", async () => {
   let sendCalls = 0;
   const { tree, components } = renderChat({
     hookState: {
@@ -201,8 +216,8 @@ test("Chat refuses composer sends while a run is processing", async () => {
   const props = componentProps(chatInput, components.ChatInput);
   const response = await props.onSend("draft while busy");
 
-  assert.equal(response, null);
-  assert.equal(sendCalls, 0);
+  assert.deepEqual(response, {});
+  assert.equal(sendCalls, 1);
 });
 
 test("Chat cancel button ignores active runs from another thread", () => {
@@ -434,4 +449,117 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
   const props = componentProps(approvalCard, components.ApprovalCard);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
+});
+
+test("Chat approval card includes matching tool activity arguments", () => {
+  const pendingGate = {
+    kind: "gate",
+    requestId: "request-1",
+    invocationId: "invocation-search",
+    toolName: "nearai.web_search",
+    description: "Run tool",
+    approvalDetails: [{ label: "Capability", value: "nearai.web_search" }],
+  };
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [
+        {
+          id: "tool-invocation-search",
+          role: "tool_activity",
+          invocationId: "invocation-search",
+          toolName: "web_search",
+          toolStatus: "running",
+          toolParameters: "query: deploy status",
+        },
+      ],
+      isProcessing: false,
+      pendingGate,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "blocked" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const approvalCard = findComponent(tree, components.ApprovalCard);
+  const props = componentProps(approvalCard, components.ApprovalCard);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(props.gate.approvalDetails)), [
+    { label: "Capability", value: "nearai.web_search" },
+    { label: "Arguments", value: "query: deploy status" },
+  ]);
+  assert.equal(props.gate.parameters, "query: deploy status");
+});
+
+test("Chat approval card does not borrow another invocation's arguments (strict join)", () => {
+  // The gated invocation (invocation-http) has no arguments yet; a different
+  // tool in the same run does. The strict invocationId join must NOT attribute
+  // that other tool's arguments to this gate.
+  const pendingGate = {
+    kind: "gate",
+    requestId: "request-1",
+    runId: "run-1",
+    invocationId: "invocation-http",
+    toolName: "builtin.http",
+    description: "Network approval",
+    approvalDetails: [{ label: "Method", value: "GET" }],
+  };
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [
+        {
+          id: "tool-invocation-search",
+          role: "tool_activity",
+          invocationId: "invocation-search",
+          turnRunId: "run-1",
+          toolName: "web_search",
+          toolStatus: "running",
+          toolParameters: "query: deploy status",
+        },
+        {
+          id: "tool-invocation-http",
+          role: "tool_activity",
+          invocationId: "invocation-http",
+          turnRunId: "run-1",
+          toolName: "http",
+          toolStatus: "running",
+        },
+      ],
+      isProcessing: false,
+      pendingGate,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "blocked" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const approvalCard = findComponent(tree, components.ApprovalCard);
+  const props = componentProps(approvalCard, components.ApprovalCard);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(props.gate.approvalDetails)), [
+    { label: "Method", value: "GET" },
+  ]);
 });

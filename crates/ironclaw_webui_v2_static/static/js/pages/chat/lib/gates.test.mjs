@@ -3,15 +3,23 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import { GATE_KIND } from "./gate-kinds.js";
+
 function loadGates() {
+  // Strip ES `import` lines (the vm context has no module loader) and
+  // inject the imported symbols as context globals — gates.js imports
+  // `GATE_KIND` from ./gate-kinds.js.
   const source = readFileSync(new URL("./gates.js", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => !line.startsWith("import "))
+    .join("\n")
     .replace(
-      /export function (gateFromEvent|gateFromProjectionGate)/g,
+      /export function (gateFromEvent|gateFromProjectionGate|gateDisplayParameters)/g,
       "function $1",
     );
-  const context = { globalThis: {} };
+  const context = { globalThis: {}, GATE_KIND };
   vm.runInNewContext(
-    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate };`,
+    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate, gateDisplayParameters };`,
     context,
   );
   return context.globalThis.__testExports;
@@ -40,6 +48,7 @@ test("gateFromEvent maps approval always-allow affordance", () => {
       invocationId: null,
       headline: "Approval required",
       body: "Review the action.",
+      description: "Review the action.",
       allowAlways: true,
     },
   );
@@ -63,10 +72,27 @@ test("gateFromEvent defaults missing always-allow affordance to false", () => {
       invocationId: null,
       headline: "Resource unavailable",
       body: "Try later.",
+      description: "Try later.",
       allowAlways: false,
     },
   );
 });
+
+test("gateFromEvent keeps a readable approval description when context lookup is missing", () => {
+  const { gateFromEvent } = loadGates();
+
+  const gate = plain(gateFromEvent("gate", {
+    turn_run_id: "run-1",
+    gate_ref: "gate:approval-1",
+    headline: "Approval required",
+    body: "capability requires approval",
+    allow_always: true,
+  }));
+
+  assert.equal(gate.description, "capability requires approval");
+  assert.equal(gate.toolName, undefined);
+});
+
 test("gateFromEvent maps approval context into readable approval card props", () => {
   const { gateFromEvent } = loadGates();
 
@@ -108,10 +134,37 @@ test("gateFromEvent maps approval context into readable approval card props", ()
     { label: "Capability", value: "builtin.http" },
     { label: "Estimated network egress", value: "4096 bytes" },
   ]);
-  assert.match(gate.parameters, /Estimated network egress: 4096 bytes/);
+  assert.equal(gate.parameters, null);
 });
 
-test("gateFromProjectionGate ignores approval context from durable projection", () => {
+test("gateFromEvent merges top-level details with approval context details", () => {
+  const { gateFromEvent } = loadGates();
+
+  // The event carries top-level `details` AND an approval_context. Both
+  // sources must reach the approval card; the top-level rows must not be
+  // dropped when an approval context is present.
+  const gate = plain(gateFromEvent("gate", {
+    turn_run_id: "run-1",
+    gate_ref: "gate:approval-1",
+    headline: "Approval required",
+    allow_always: false,
+    details: [{ label: "Estimated cost", value: "$0.02" }],
+    approval_context: {
+      tool_name: "builtin.http",
+      action: { label: "Run tool" },
+      scope: { label: "This request only", reusable: false },
+      reason: "approval required",
+    },
+  }));
+
+  assert.deepEqual(gate.approvalDetails, [
+    { label: "Action", value: "Run tool" },
+    { label: "Scope", value: "This request only" },
+    { label: "Estimated cost", value: "$0.02" },
+  ]);
+});
+
+test("gateFromProjectionGate maps approval context from durable projection", () => {
   const { gateFromProjectionGate } = loadGates();
 
   const gate = plain(gateFromProjectionGate({
@@ -124,21 +177,20 @@ test("gateFromProjectionGate ignores approval context from durable projection", 
     allow_always: true,
     approval_context: {
       tool_name: "builtin.http",
-      reason: "raw path /Users/test/.ssh/id_rsa and token sk-secret",
-      details: [{ label: "Secret", value: "sk-secret" }],
+      action: { label: "Network request" },
+      scope: { label: "This request only", reusable: false },
+      details: [{ label: "Secret", value: "<redacted>" }],
     },
   }));
 
-  assert.deepEqual(gate, {
-    kind: "gate",
-    gateKind: "approval",
-    runId: "run-1",
-    gateRef: "gate:approval-1",
-    invocationId: "invocation-1",
-    headline: "Approval required",
-    body: "capability requires approval",
-    allowAlways: true,
-  });
+  assert.equal(gate.toolName, "builtin.http");
+  assert.equal(gate.description, "capability requires approval");
+  assert.deepEqual(gate.approvalDetails, [
+    { label: "Action", value: "Network request" },
+    { label: "Scope", value: "This request only" },
+    { label: "Secret", value: "<redacted>" },
+  ]);
+  assert.equal(gate.parameters, null);
 });
 
 test("gateFromEvent keeps modern auth prompts without challenge kind off token card", () => {
@@ -208,4 +260,37 @@ test("gateFromEvent preserves legacy auth prompts as manual token prompts", () =
     }).challengeKind,
     "manual_token",
   );
+});
+
+test("gateDisplayParameters joins approval details as label: value lines", () => {
+  const { gateDisplayParameters } = loadGates();
+
+  assert.equal(
+    gateDisplayParameters({
+      approvalDetails: [
+        { label: "Method", value: "GET" },
+        { label: "Destination", value: "https://example.com" },
+      ],
+    }),
+    "Method: GET\nDestination: https://example.com",
+  );
+});
+
+test("gateDisplayParameters prefers an explicit parameters string", () => {
+  const { gateDisplayParameters } = loadGates();
+
+  assert.equal(
+    gateDisplayParameters({
+      parameters: "query: deploy status",
+      approvalDetails: [{ label: "Method", value: "GET" }],
+    }),
+    "query: deploy status",
+  );
+});
+
+test("gateDisplayParameters returns null when there is nothing to show", () => {
+  const { gateDisplayParameters } = loadGates();
+
+  assert.equal(gateDisplayParameters({ approvalDetails: [] }), null);
+  assert.equal(gateDisplayParameters(null), null);
 });

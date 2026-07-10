@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+// useHistory.js imports `coalesceToolFields` from history-messages.js; the vm
+// harness strips imports, so the real helper is injected into each context.
+import { coalesceToolFields } from "./history-messages.js";
+
 function useHistorySourceForTest() {
   const source = readFileSync(
     new URL("../hooks/useHistory.js", import.meta.url),
@@ -90,6 +94,7 @@ test("useHistory records a load error when timeline fetch fails", async () => {
   const setCalls = [];
   const consoleErrors = [];
   const context = {
+    coalesceToolFields,
     console: {
       error: (...args) => consoleErrors.push(args),
     },
@@ -121,6 +126,7 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
   const runId = "run-activity";
   const setCalls = [];
   const context = {
+    coalesceToolFields,
     console,
     fetchTimeline: async () => ({
       messages: [
@@ -179,6 +185,7 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
 test("useHistory can seed a newly-created thread before navigation", async () => {
   const setCalls = [];
   const context = {
+    coalesceToolFields,
     console,
     fetchTimeline: async () => ({ messages: [], next_cursor: null }),
     globalThis: {},
@@ -265,6 +272,7 @@ test("useHistory clears visible messages immediately when switching to an uncach
 
 test("useHistory seedThreadMessages updates an accepted first message by timeline id", async () => {
   const context = {
+    coalesceToolFields,
     console,
     fetchTimeline: async () => new Promise(() => {}),
     globalThis: {},
@@ -300,6 +308,7 @@ test("useHistory seedThreadMessages updates an accepted first message by timelin
 test("useHistory seedThreadMessages updates the mounted target thread", async () => {
   const setCalls = [];
   const context = {
+    coalesceToolFields,
     console,
     fetchTimeline: async () => new Promise(() => {}),
     globalThis: {},
@@ -358,6 +367,7 @@ test("useHistory full refresh preserves unnumbered live gate activity after time
     },
   ];
   const context = {
+    coalesceToolFields,
     console,
     fetchTimeline: async () => ({
       messages: [],
@@ -401,8 +411,8 @@ test("useHistory full refresh preserves unnumbered live gate activity after time
   );
 });
 
-test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline win otherwise", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+test("mergeFullRefresh keeps run errors next to their run and lets the timeline win otherwise", () => {
+  const context = { globalThis: {}, React: createReactStub(), coalesceToolFields };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -461,8 +471,61 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   assert.equal(toolCard.toolResultPreview, "ok");
 });
 
+test("mergeFullRefresh appends client-only run errors without a matching run", () => {
+  const context = { globalThis: {}, React: createReactStub(), coalesceToolFields };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [{ id: "msg-user-1", role: "user", turnRunId: "run-1" }],
+    [{ id: "err-run-unknown", role: "error", content: "run failed" }],
+    { preserveClientOnly: true },
+  );
+
+  assert.equal(merged.map((m) => m.id).join(","), "msg-user-1,err-run-unknown");
+});
+
+test("mergeFullRefresh keeps live tool parameters when refreshed preview is sparse", () => {
+  const context = { globalThis: {}, React: createReactStub(), coalesceToolFields };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "tool-invocation-web",
+        role: "tool_activity",
+        invocationId: "invocation-web",
+        toolName: "web_search",
+        toolStatus: "success",
+        toolParameters: null,
+        toolResultPreview: "2 results",
+        turnRunId: "run-params",
+      },
+    ],
+    [
+      {
+        id: "tool-invocation-web",
+        role: "tool_activity",
+        invocationId: "invocation-web",
+        toolName: "web_search",
+        toolStatus: "running",
+        toolDetail: "deploy status",
+        toolParameters: "query: deploy status",
+        turnRunId: "run-params",
+      },
+    ],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].toolStatus, "success");
+  assert.equal(merged[0].toolDetail, "deploy status");
+  assert.equal(merged[0].toolParameters, "query: deploy status");
+  assert.equal(merged[0].toolResultPreview, "2 results");
+});
+
 test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context = { globalThis: {}, React: createReactStub(), coalesceToolFields };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -492,7 +555,7 @@ test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", (
 });
 
 test("mergeFullRefresh carries live assistant timestamps onto confirmed replies", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context = { globalThis: {}, React: createReactStub(), coalesceToolFields };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
@@ -524,7 +587,7 @@ test("mergeFullRefresh carries live assistant timestamps onto confirmed replies"
 });
 
 test("mergeFullRefresh uses run-settled time for confirmed assistant replies", () => {
-  const context = { globalThis: {}, React: createReactStub() };
+  const context = { globalThis: {}, React: createReactStub(), coalesceToolFields };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 

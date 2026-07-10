@@ -14,8 +14,17 @@ export function classifyRisk(toolName, description, parameters) {
   if (EXEC_RE.test(name)) return { tone: "warning", key: "tool.riskExec" };
   if (NETWORK_RE.test(name)) return { tone: "info", key: "tool.riskNetwork" };
 
-  if (EXEC_RE.test(context)) return { tone: "warning", key: "tool.riskExec" };
+  if (hasExecContext(context)) return { tone: "warning", key: "tool.riskExec" };
   if (NETWORK_RE.test(context)) return { tone: "info", key: "tool.riskNetwork" };
 
   return { tone: "muted", key: "tool.riskRead" };
+}
+
+function hasExecContext(context) {
+  if (!context) return false;
+  const withoutGenericGateCopy = context
+    .replace(/\bcontinue the run\b/g, "")
+    .replace(/\bcontinue this run\b/g, "")
+    .replace(/\bresolve this (approval )?gate\b/g, "");
+  return EXEC_RE.test(withoutGenericGateCopy);
 }

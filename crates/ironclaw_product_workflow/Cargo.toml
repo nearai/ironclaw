@@ -30,6 +30,7 @@ ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_conversations = { path = "../ironclaw_conversations", version = "0.1.0" }
+ironclaw_loop_support = { path = "../ironclaw_loop_support", version = "0.1.0" }
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }

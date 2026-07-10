@@ -20,6 +20,11 @@ import {
   failGateToolActivity,
   resetToolActivityState,
 } from "./tool-activity-state.js";
+import {
+  RECORD_STATUS,
+  uiStatusFromRecordStatus,
+} from "./message-status.js";
+import { buildOptimisticMessage } from "./optimistic-message.js";
 
 function useChatSourceForTest() {
   const source = readFileSync(
@@ -48,6 +53,9 @@ function runUseChatSource(context) {
     failGateToolActivity,
     resetToolActivityState,
     timelineMessageIdFromAcceptedRef,
+    RECORD_STATUS,
+    uiStatusFromRecordStatus,
+    buildOptimisticMessage,
   });
   vm.runInNewContext(useChatSourceForTest(), context);
 }
@@ -351,6 +359,106 @@ test("useChat.send: stamps render attachments on the optimistic message", async 
       preview_url: "data:image/png;base64,cG5n",
     },
   ]);
+});
+
+test("useChat.send: active run follow-up reaches backend and renders queued", async () => {
+  const threadId = "thread-1";
+  let sentBody = null;
+  let renderedMessages = [];
+  const stateUpdates = [];
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-active", threadId, status: "running" }],
+        [4, true],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async (body) => {
+      sentBody = body;
+      return {
+        accepted_message_ref: "msg:queued-follow-up",
+        outcome: "deferred_busy",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const response = await chat.send("one more thing");
+
+  assert.equal(sentBody.threadId, threadId);
+  assert.equal(sentBody.content, "one more thing");
+  assert.deepEqual(Array.from(sentBody.attachments), []);
+  assert.equal(response.outcome, "deferred_busy");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(renderedMessages.map((message) => ({
+      content: message.content,
+      status: message.status,
+      isOptimistic: message.isOptimistic,
+      timelineMessageId: message.timelineMessageId,
+    })))),
+    [
+      {
+        content: "one more thing",
+        status: "queued",
+        isOptimistic: false,
+        timelineMessageId: "queued-follow-up",
+      },
+    ],
+  );
+  assert.equal(
+    stateUpdates.some((update) => update.index === 4 && update.value === false),
+    false,
+    "queuing a follow-up must not clear the active run processing state",
+  );
 });
 
 test("useChat.send: target-thread send does not append into active thread", async () => {
@@ -2182,10 +2290,14 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
   assert.equal(lastIsProcessing?.value, false);
 });
 
-test("useChat.send: active run refuses duplicate submit before network call", async () => {
-  const threadId = "thread-busy-local";
+test("useChat.send: in-flight submit refuses duplicate before network settles", async () => {
+  const threadId = "thread-1";
   let renderedMessages = [];
   let sendCalls = 0;
+  let resolveSend;
+  const firstSendSettled = new Promise((resolve) => {
+    resolveSend = resolve;
+  });
 
   const context = {
     AbortController,
@@ -2193,7 +2305,7 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     Error,
     Map,
     Math,
-    React: createReactStub({ initialByIndex: new Map([[4, true]]) }),
+    React: createReactStub(),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -2204,12 +2316,12 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     },
     globalThis: {},
     listConnectableChannels: async () => {
-      throw new Error("busy prompts should not fetch connectable channels");
+      throw new Error("ordinary prompts should not fetch connectable channels");
     },
     looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
-        throw new Error("busy prompts should not fetch connectable channels");
+        throw new Error("ordinary prompts should not fetch connectable channels");
       },
       invalidateQueries: () => {},
     },
@@ -2217,9 +2329,16 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     removePending,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
-    sendMessage: async () => {
+    sendMessage: async ({ content }) => {
       sendCalls += 1;
-      throw new Error("busy send should not reach API");
+      await firstSendSettled;
+      return {
+        accepted_message_ref: "msg:message-1",
+        run_id: "run-1",
+        status: "queued",
+        thread_id: threadId,
+        content,
+      };
     },
     setInterval,
     setTimeout,
@@ -2242,14 +2361,23 @@ test("useChat.send: active run refuses duplicate submit before network call", as
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  const response = await chat.send("second message while first run is active");
+  const first = chat.send("first message");
+  await Promise.resolve();
+  const second = await chat.send("duplicate click");
 
-  assert.equal(response, null);
-  assert.equal(sendCalls, 0);
-  assert.deepEqual(renderedMessages, []);
+  assert.equal(second, null);
+  assert.equal(sendCalls, 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(renderedMessages.map((message) => message.content))),
+    ["first message"],
+  );
+
+  resolveSend();
+  const response = await first;
+  assert.equal(response.run_id, "run-1");
 });
 
-test("useChat.send: accepted run blocks another submit until settlement", async () => {
+test("useChat.send: accepted run allows follow-up submit before settlement", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
   let sendCalls = 0;
@@ -2322,10 +2450,11 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
   const second = await chat.send("draft while the reply is still running");
 
   assert.equal(first.run_id, "run-1");
-  assert.equal(second, null);
-  assert.equal(sendCalls, 1);
-  assert.equal(renderedMessages.length, 1);
+  assert.equal(second.run_id, "run-2");
+  assert.equal(sendCalls, 2);
+  assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].content, "first message");
+  assert.equal(renderedMessages[1].content, "draft while the reply is still running");
 
   context.chatEventsArgs.setIsProcessing(false);
   context.chatEventsArgs.setActiveRun(null);
@@ -2333,11 +2462,11 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
 
   const third = await chat.send("message after settlement");
 
-  assert.equal(third.run_id, "run-2");
-  assert.equal(sendCalls, 2);
+  assert.equal(third.run_id, "run-3");
+  assert.equal(sendCalls, 3);
 });
 
-test("useChat.send: created thread stays blocked until accepted run settles", async () => {
+test("useChat.send: created-thread follow-up before settle reaches backend to be queued", async () => {
   const createdThreadId = "thread-created";
   let renderedMessages = [];
   let createThreadCalls = 0;
@@ -2425,19 +2554,24 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
   context.chatEventsArgs.setIsProcessing(false);
   context.chatEventsArgs.setActiveRun(null);
 
+  // Queued-messages contract: a follow-up into the still-running created
+  // thread must reach the backend so Reborn can queue it, NOT be dropped by a
+  // local admission guard. The only local guard is the in-flight-POST lock,
+  // which the previous send already released.
   const second = await chat.send("draft while the reply is still running", {
     threadId: createdThreadId,
   });
-  assert.equal(second, null);
-  assert.equal(sendCalls, 1);
+  assert.ok(second, "follow-up must resolve with a backend response, not null");
+  assert.equal(second.run_id, "run-2");
+  assert.equal(sendCalls, 2);
 
   context.chatEventsArgs.onRunSettled("run-1", { success: true });
 
   const third = await chat.send("message after settlement", {
     threadId: createdThreadId,
   });
-  assert.equal(third.run_id, "run-2");
-  assert.equal(sendCalls, 2);
+  assert.equal(third.run_id, "run-3");
+  assert.equal(sendCalls, 3);
 });
 
 test("useChat.send: clears local busy when run settles before send response", async () => {
@@ -3147,10 +3281,10 @@ test("useChat.send: addresses a second thread in parallel while viewing a runnin
   assert.ok(result, "send must resolve with a response, not null");
 });
 
-test("useChat.send: still blocks a duplicate send into the already-running thread", async () => {
-  // The one case the gate must keep blocking: a second send into the SAME
-  // thread that already has a run in flight (both activeRun and isProcessing
-  // set — the real busy state).
+test("useChat.send: queues a follow-up into the already-running thread", async () => {
+  // A second send into the same running thread must reach the backend so Reborn
+  // can queue it. The local guard only blocks duplicate POSTs before the
+  // previous send request settles.
   const { context, sentBody, createThreadCalls } = createParallelSendContext({
     threadId: "thread-a",
     activeRun: { runId: "run-a", threadId: "thread-a", status: "running" },
@@ -3164,17 +3298,17 @@ test("useChat.send: still blocks a duplicate send into the already-running threa
     threadId: "thread-a",
   });
 
-  assert.equal(result, null, "duplicate send into the busy thread is rejected");
-  assert.equal(sentBody(), null, "sendMessage must not be called for a busy thread");
+  assert.ok(result, "follow-up send should resolve with backend response");
+  assert.equal(result.status, "queued");
+  assert.ok(sentBody(), "sendMessage must be called so the backend can queue it");
+  assert.equal(sentBody().threadId, "thread-a");
   assert.equal(createThreadCalls(), 0);
 });
 
-test("useChat.send: blocks a send addressed to a busy thread that is NOT the viewed one", async () => {
-  // The block must key on the *destination* thread, not the viewed one:
-  // viewing thread-a, but the active run is on thread-b, and the send is
-  // addressed to thread-b — that destination is busy, so it must be blocked.
-  // This complements the parallel-send test (viewed busy, different target →
-  // allowed) so the pair pins the block on destination identity alone.
+test("useChat.send: queues a send addressed to a busy thread that is not viewed", async () => {
+  // Destination-thread busy state is enforced by the backend queue, not by a
+  // local UI drop. Viewing thread-a while thread-b is running, a targeted send
+  // to thread-b must still reach sendMessage.
   const { context, sentBody, createThreadCalls } = createParallelSendContext({
     threadId: "thread-a",
     activeRun: { runId: "run-b", threadId: "thread-b", status: "running" },
@@ -3187,7 +3321,9 @@ test("useChat.send: blocks a send addressed to a busy thread that is NOT the vie
     threadId: "thread-b",
   });
 
-  assert.equal(result, null, "send into the busy destination thread is rejected");
-  assert.equal(sentBody(), null, "sendMessage must not be called for the busy destination");
+  assert.ok(result, "send into the busy destination resolves with backend response");
+  assert.equal(result.status, "queued");
+  assert.ok(sentBody(), "sendMessage must be called for the busy destination");
+  assert.equal(sentBody().threadId, "thread-b");
   assert.equal(createThreadCalls(), 0);
 });

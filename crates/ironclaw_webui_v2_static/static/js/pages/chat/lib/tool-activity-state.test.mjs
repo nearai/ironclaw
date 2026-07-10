@@ -285,8 +285,54 @@ test("tool activity cards map gate-declined lifecycle frames to declined status"
   });
 
   assert.equal(card.toolStatus, "declined");
-  assert.equal(card.toolError, "gate_declined");
+  assert.equal(card.toolError, "gate declined");
   assert.equal(card.toolErrorKind, "gate_declined");
+});
+
+test("tool activity cards prefer backend error summary over generic kind", () => {
+  const card = toolCardFromActivity({
+    invocation_id: "invocation-shell",
+    capability_id: "builtin.shell",
+    status: "failed",
+    error_kind: "backend",
+    error_summary: "failed to spawn command: command not found",
+  });
+
+  assert.equal(card.toolStatus, "error");
+  assert.equal(card.toolError, "failed to spawn command: command not found");
+  assert.equal(card.toolErrorKind, "backend");
+});
+
+test("terminal failed live and refresh tool cards render the same visible fields", () => {
+  const live = toolCardFromActivity({
+    invocation_id: "invocation-shell",
+    turn_run_id: "run-shell",
+    capability_id: "builtin.shell",
+    status: "failed",
+    subtitle: "cargo test",
+    input_summary: "command: cargo test",
+    error_kind: "backend",
+    error_summary: "process execution failed: command not found",
+    output_bytes: 0,
+    activity_order: 7,
+  });
+  const refreshed = toolCardFromPreview({
+    invocation_id: "invocation-shell",
+    turn_run_id: "run-shell",
+    capability_id: "builtin.shell",
+    title: "builtin.shell",
+    status: "failed",
+    subtitle: "cargo test",
+    input_summary: "command: cargo test",
+    error_kind: "backend",
+    output_summary: "process execution failed: command not found",
+    output_preview: "process execution failed: command not found",
+    output_kind: "text",
+    output_bytes: 0,
+    activity_order: 7,
+  });
+
+  assert.deepEqual(visibleTerminalToolFields(live), visibleTerminalToolFields(refreshed));
 });
 
 test("tool preview cards preserve gate-declined error kind as declined status", () => {
@@ -303,6 +349,24 @@ test("tool preview cards preserve gate-declined error kind as declined status", 
   assert.equal(card.toolError, "gate_declined");
   assert.equal(card.toolErrorKind, "gate_declined");
 });
+
+function visibleTerminalToolFields(card) {
+  return {
+    invocationId: card.invocationId,
+    capabilityId: card.capabilityId,
+    toolName: card.toolName,
+    toolStatus: card.toolStatus,
+    toolDetail: card.toolDetail,
+    toolParameters: card.toolParameters,
+    toolResultPreview: card.toolResultPreview,
+    toolError: card.toolError,
+    toolErrorKind: card.toolErrorKind,
+    outputBytes: card.outputBytes,
+    turnRunId: card.turnRunId,
+    activityOrder: card.activityOrder,
+    activityOrderSource: card.activityOrderSource,
+  };
+}
 
 test("tool activity state leaves pending gates unnumbered after existing timeline activity", () => {
   const runId = "run-refresh-order";
@@ -420,6 +484,80 @@ test("tool activity state applies durable projection order to live activity", ()
   assert.equal(messages.length, 1);
   assert.equal(messages[0].activityOrder, 42);
   assert.equal(messages[0].activityOrderSource, "projection");
+});
+
+test("tool activity state does not erase parameters from later sparse frames", () => {
+  const runId = "run-params";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-web",
+      turn_run_id: runId,
+      capability_id: "nearai.web_search",
+      status: "running",
+      subtitle: "deploy status",
+      input_summary: "query: deploy status",
+    }),
+    stateRef,
+  );
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromPreview({
+      invocation_id: "invocation-web",
+      turn_run_id: runId,
+      capability_id: "nearai.web_search",
+      title: "nearai.web_search",
+      status: "completed",
+      output_summary: "2 results",
+    }),
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolStatus, "success");
+  assert.equal(messages[0].toolDetail, "deploy status");
+  assert.equal(messages[0].toolParameters, "query: deploy status");
+  assert.equal(messages[0].toolResultPreview, "2 results");
+});
+
+test("tool activity state shows approval gate parameters on synthetic activity", () => {
+  const runId = "run-gate-params";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  ensureGateToolActivity(
+    setMessages,
+    {
+      kind: "gate",
+      runId,
+      gateRef: "gate:http",
+      invocationId: "invocation-http",
+      toolName: "builtin.http",
+      actionLabel: "Network request",
+      approvalDetails: [
+        { label: "Method", value: "GET" },
+        { label: "Destination", value: "https://example.com" },
+      ],
+    },
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolName, "http");
+  assert.equal(messages[0].toolDetail, "Network request");
+  assert.equal(
+    messages[0].toolParameters,
+    "Method: GET\nDestination: https://example.com",
+  );
 });
 
 test("tool activity state applies durable projection order to gate activity", () => {

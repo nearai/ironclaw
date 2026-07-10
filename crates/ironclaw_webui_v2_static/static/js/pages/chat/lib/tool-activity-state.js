@@ -1,7 +1,9 @@
 import {
+  coalesceToolFields,
   isTerminalToolStatus,
   toolDisplayName,
 } from "./history-messages.js";
+import { gateDisplayParameters } from "./gates.js";
 
 export function createToolActivityState() {
   return {
@@ -82,8 +84,8 @@ function toolCardFromGate(gate, overrides = {}) {
     capabilityId: gate.toolName || gate.gateKind || null,
     toolName: toolDisplayName(displaySource) || displaySource,
     toolStatus: overrides.toolStatus || "running",
-    toolDetail: null,
-    toolParameters: null,
+    toolDetail: gate.actionLabel || null,
+    toolParameters: gateDisplayParameters(gate),
     toolResultPreview: null,
     toolError: overrides.toolError || null,
     toolErrorKind: overrides.toolErrorKind || null,
@@ -147,6 +149,9 @@ function mergeToolActivity(current, incoming) {
       ? current.toolName
       : incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
+    // toolDetail / toolParameters / toolResultPreview are coalesced below via
+    // the shared `coalesceToolFields` predicate so a later sparse frame never
+    // erases a populated value.
     toolError: incoming.toolError || current.toolError,
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
     updatedAt: keepCurrentTerminal
@@ -161,11 +166,19 @@ function mergeToolActivity(current, incoming) {
     activityOrder: mergedActivityOrder(current, incoming),
     activityOrderSource: incoming.activityOrderSource || current.activityOrderSource || null,
   };
+  // Prefer the incoming display fields (already spread above), but fall back
+  // to the current value when the incoming frame is sparse — one predicate,
+  // shared with useHistory's refresh hydration.
+  const coalesced = coalesceToolFields(merged, current, [
+    "toolDetail",
+    "toolParameters",
+    "toolResultPreview",
+  ]);
   if (current.gateActivity && !incoming.gateActivity) {
-    merged.id = toolMessageId(incoming);
-    merged.gateActivity = false;
+    coalesced.id = toolMessageId(incoming);
+    coalesced.gateActivity = false;
   }
-  return merged;
+  return coalesced;
 }
 
 function mergedActivityOrder(current, incoming) {
