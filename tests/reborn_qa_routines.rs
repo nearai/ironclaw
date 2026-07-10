@@ -42,7 +42,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
@@ -560,17 +560,36 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
             .any(|message| message.content.contains(QA_ROUTINE_PROMPT)),
         "first fired-turn request should carry the routine prompt"
     );
+    let tool_result = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+        .expect("the fired routine's action must reach the model");
     assert!(
-        requests[1].messages.iter().any(|message| {
-            message.role == HostManagedModelMessageRole::ToolResult
-                && message.content.contains(QA_DM_ACTION_MARKER)
-        }),
-        "the fired routine's action must execute and its tool result must reach the model — messages: {:?}",
-        requests[1]
-            .messages
-            .iter()
-            .map(|message| (&message.role, &message.content))
-            .collect::<Vec<_>>()
+        !tool_result.content.contains(QA_DM_ACTION_MARKER),
+        "raw fired-routine output must stay out of model replay: {}",
+        tool_result.content
+    );
+    let Some(HostManagedToolResultContent::Reference { envelope }) =
+        tool_result.tool_result_content.as_ref()
+    else {
+        panic!(
+            "fired routine replay should carry a result-reference envelope, got {:?}",
+            tool_result.tool_result_content
+        );
+    };
+    assert_eq!(envelope.version, 1);
+    assert!(envelope.result_ref.starts_with("result:"));
+    let observation = envelope
+        .model_observation
+        .as_ref()
+        .expect("fired routine replay should include a model observation");
+    assert_eq!(observation["schema_version"], json!(1));
+    assert_eq!(observation["status"], json!("success"));
+    assert_eq!(observation["detail"]["kind"], json!("result_reference"));
+    assert_eq!(
+        observation["detail"]["result_ref"],
+        json!(envelope.result_ref)
     );
     assert_eq!(
         settled.last_status,

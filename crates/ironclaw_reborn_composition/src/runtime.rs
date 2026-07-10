@@ -5015,10 +5015,10 @@ output_schema_ref = "schemas/write.output.json"
     };
     use ironclaw_loop_support::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-        HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-        HostManagedToolResultContent, HostSkillContextBuildError, HostSkillContextCandidate,
-        HostSkillContextSource, ModelCost, SpawnSubagentMode, SubagentKindId, SubagentThreadKind,
-        SubagentThreadMetadata,
+        HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
+        HostManagedModelResponse, HostManagedToolResultContent, HostSkillContextBuildError,
+        HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
+        SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
@@ -5125,6 +5125,40 @@ output_schema_ref = "schemas/write.output.json"
     struct WorkspaceListingGateway {
         calls: StdMutex<usize>,
         requests: StdMutex<Vec<HostManagedModelRequest>>,
+    }
+
+    // Local-dev model replay is intentionally a bounded reference observation;
+    // the raw result remains available through the result reader.
+    fn assert_local_dev_result_reference(tool_result: &HostManagedModelMessage, raw_marker: &str) {
+        assert!(
+            !tool_result.content.contains(raw_marker),
+            "raw capability output must stay out of model replay: {}",
+            tool_result.content
+        );
+        let Some(HostManagedToolResultContent::Reference { envelope }) =
+            tool_result.tool_result_content.as_ref()
+        else {
+            panic!(
+                "model replay should carry a result-reference envelope, got {:?}",
+                tool_result.tool_result_content
+            );
+        };
+        assert_eq!(envelope.version, 1);
+        assert!(envelope.result_ref.starts_with("result:"));
+        let observation = envelope
+            .model_observation
+            .as_ref()
+            .expect("result-reference replay should include a model observation");
+        assert_eq!(observation["schema_version"], serde_json::json!(1));
+        assert_eq!(observation["status"], serde_json::json!("success"));
+        assert_eq!(
+            observation["detail"]["kind"],
+            serde_json::json!("result_reference")
+        );
+        assert_eq!(
+            observation["detail"]["result_ref"],
+            serde_json::json!(envelope.result_ref)
+        );
     }
 
     struct StaticSkillContextSource {
@@ -5242,11 +5276,7 @@ output_schema_ref = "schemas/write.output.json"
                     .iter()
                     .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                     .expect("second model call should include tool result");
-                assert!(
-                    tool_result.content.contains("hello from tool"),
-                    "tool result should expose hydrated capability output, got {}",
-                    tool_result.content
-                );
+                assert_local_dev_result_reference(tool_result, "hello from tool");
                 let provider_call = tool_result
                     .tool_result_provider_call
                     .as_ref()
@@ -5565,11 +5595,7 @@ output_schema_ref = "schemas/write.output.json"
                     .iter()
                     .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                     .expect("second model call should include tool result");
-                assert!(
-                    tool_result.content.contains("workspace-sentinel.txt"),
-                    "workspace listing should expose configured workspace root, got {}",
-                    tool_result.content
-                );
+                assert_local_dev_result_reference(tool_result, "workspace-sentinel.txt");
                 return Ok(HostManagedModelResponse::assistant_reply("workspace ok"));
             }
 
@@ -8000,7 +8026,7 @@ output_schema_ref = "schemas/write.output.json"
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
 
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         assert_eq!(reply.text.as_deref(), Some("tool ok"));
         assert_eq!(
             *gateway
@@ -8147,7 +8173,7 @@ output_schema_ref = "schemas/write.output.json"
         .await
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         // Shut down before inspecting the recorded callbacks so the std-Mutex
         // guards are never held across an `.await` (clippy::await_holding_lock).
         runtime.shutdown().await.expect("runtime shutdown");
@@ -9040,7 +9066,7 @@ output_schema_ref = "schemas/write.output.json"
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
 
-        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
         assert_eq!(reply.text.as_deref(), Some("workspace ok"));
         let request_count = {
             let requests = gateway
