@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, LoopFamily};
 use crate::planner::AgentLoopPlanner;
-use crate::strategies::DefaultBudgetStrategy;
+use crate::strategies::{DefaultBudgetStrategy, DefaultRecoveryStrategy};
 
 mod subagent;
 
@@ -22,11 +22,11 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "model:DefaultModelStrategy(primary_or_fallback_index),",
     "batch:DefaultBatchPolicyStrategy(exclusive_sequential),",
     "gate:DefaultGateHandlingStrategy(block),",
-    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2),",
+    "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
     "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
-    "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
+    "budget:DefaultBudgetStrategy(iteration_limit=1024,wall_clock_limit=none)"
 )
 .as_bytes();
 
@@ -35,8 +35,8 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x64, 0xda, 0x2c, 0x33, 0x7d, 0x86, 0x96, 0x50, 0x4e, 0xde, 0x0a, 0x9e, 0xf1, 0xed, 0xf6, 0x13,
-    0x27, 0xf0, 0x79, 0xaf, 0xf2, 0x8e, 0xed, 0x57, 0x8f, 0xf7, 0x06, 0x08, 0x39, 0x2d, 0xfa, 0xcf,
+    0x9b, 0x6b, 0x42, 0x36, 0x87, 0xdc, 0xbe, 0xe3, 0x5d, 0x5e, 0x4b, 0x5a, 0x41, 0xb4, 0x14, 0xad,
+    0xe3, 0x65, 0x40, 0xd0, 0x5e, 0x85, 0x64, 0xd5, 0x11, 0xfd, 0xbf, 0xf6, 0xab, 0x28, 0x69, 0xbb,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -51,12 +51,36 @@ pub fn default() -> LoopFamily {
 /// The default loop family with a caller-supplied iteration limit.
 ///
 /// Intended for test and local harnesses that need to exercise the hard budget
-/// path without waiting for the production default of 256 iterations.
+/// path without waiting for the production backstop of 1024 iterations.
 pub fn default_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
-    let planner = DefaultPlanner::compose_default().with_budget(Arc::new(DefaultBudgetStrategy {
-        iteration_limit,
-        wall_clock_limit: None,
-    }));
+    default_with_overrides(Some(iteration_limit), None)
+}
+
+/// The default loop family with optional iteration-limit and model
+/// availability-retry overrides. `None` keeps the production default for that
+/// knob.
+///
+/// The availability override shrinks (or deepens) how long the loop rides out
+/// provider outages before aborting — test harnesses that script provider
+/// failures set it low so a deliberately failed run reaches `Failed` in
+/// seconds instead of retrying for minutes.
+pub fn default_with_overrides(
+    iteration_limit: Option<u32>,
+    model_availability_attempts: Option<u32>,
+) -> LoopFamily {
+    let mut planner = DefaultPlanner::compose_default();
+    if let Some(iteration_limit) = iteration_limit {
+        planner = planner.with_budget(Arc::new(DefaultBudgetStrategy {
+            iteration_limit,
+            wall_clock_limit: None,
+        }));
+    }
+    if let Some(max_model_availability_attempts) = model_availability_attempts {
+        planner = planner.with_recovery(Arc::new(DefaultRecoveryStrategy {
+            max_model_availability_attempts,
+            ..DefaultRecoveryStrategy::default()
+        }));
+    }
     let id = planner.id().clone();
     let version = planner.version().clone();
 

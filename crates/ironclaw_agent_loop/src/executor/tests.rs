@@ -3006,20 +3006,19 @@ async fn explanation_model_error_degrades_to_original_failed_exit() {
     assert!(host.finalized_assistant_messages().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
+    // Availability-class model errors retry on the deep availability budget
+    // before aborting; paused time fast-forwards the backoff sleeps.
+    let abort_call_count = crate::strategies::DefaultRecoveryStrategy::default()
+        .max_model_availability_attempts as usize
+        + 1;
     let script = ScenarioScript {
-        model_responses: VecDeque::from([
-            ScriptedModelResponse::Error {
+        model_responses: (0..abort_call_count)
+            .map(|_| ScriptedModelResponse::Error {
                 kind: AgentLoopHostErrorKind::Internal,
-            },
-            ScriptedModelResponse::Error {
-                kind: AgentLoopHostErrorKind::Internal,
-            },
-            ScriptedModelResponse::Error {
-                kind: AgentLoopHostErrorKind::Internal,
-            },
-        ]),
+            })
+            .collect(),
         capability_outcomes: VecDeque::new(),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),
@@ -3047,7 +3046,7 @@ async fn model_error_abort_skips_explanation_and_carries_partial_refs() {
             .iter()
             .filter(|call| matches!(call, MockHostCall::StreamModel))
             .count(),
-        3
+        abort_call_count
     );
     assert!(host.finalized_assistant_messages().is_empty());
 }

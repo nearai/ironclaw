@@ -35,4 +35,4 @@ tracing = "0.1"
 chrono = "0.4"
 futures = "0.3"
 ironclaw_agent_loop = { path = ".", features = ["test-support"] }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }

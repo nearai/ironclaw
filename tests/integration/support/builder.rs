@@ -1782,6 +1782,11 @@ pub(crate) fn apply_hermetic_env() {
             std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
             std::env::set_var("TZ", "UTC");
             std::env::set_var("LLM_MAX_RETRIES", "0");
+            // Loop-level counterpart of LLM_MAX_RETRIES=0: production rides
+            // out provider outages for minutes (deep availability retries with
+            // long backoff), which would stall any scenario that deliberately
+            // scripts a model failure. One attempt keeps failure paths fast.
+            std::env::set_var("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS", "1");
             std::env::remove_var("NEARAI_CHEAP_MODEL");
             std::env::remove_var("NEARAI_FALLBACK_MODEL");
             std::env::remove_var("LLM_CHEAP_MODEL");

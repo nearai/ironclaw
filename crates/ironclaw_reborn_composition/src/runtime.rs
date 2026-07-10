@@ -3774,6 +3774,9 @@ pub async fn build_reborn_runtime(
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
             )?,
+            planned_model_availability_retry_attempts: optional_nonzero_u32_env(
+                "IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS",
+            )?,
         },
         model_route_resolver: None,
         cancellation_factory: None,

@@ -32,7 +32,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    app_loop_family::build_loop_family_registry_with_default_iteration_limit,
+    app_loop_family::build_loop_family_registry_with_overrides,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
@@ -168,6 +168,11 @@ pub struct DefaultPlannedRuntimeConfig {
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
     pub planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Override for the default family's model availability-retry budget
+    /// (`DefaultRecoveryStrategy::max_model_availability_attempts`). `None`
+    /// keeps the production default; test harnesses set it low so scripted
+    /// provider failures abort in seconds instead of riding out an outage.
+    pub planned_model_availability_retry_attempts: Option<std::num::NonZeroU32>,
 }
 
 impl Default for DefaultPlannedRuntimeConfig {
@@ -182,6 +187,7 @@ impl Default for DefaultPlannedRuntimeConfig {
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
             planned_default_iteration_limit: None,
+            planned_model_availability_retry_attempts: None,
         }
     }
 }
@@ -576,8 +582,9 @@ where
 {
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
-    let family_registry = build_loop_family_registry_with_default_iteration_limit(
+    let family_registry = build_loop_family_registry_with_overrides(
         parts.config.planned_default_iteration_limit,
+        parts.config.planned_model_availability_retry_attempts,
     )
     .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
