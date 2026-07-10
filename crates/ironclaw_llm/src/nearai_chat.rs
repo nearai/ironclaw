@@ -568,7 +568,7 @@ impl NearAiChatProvider {
                 Err(e) => {
                     if stream_completed || can_salvage_incomplete_text_stream(&parsed, &tool_calls)
                     {
-                        tracing::warn!(
+                        tracing::debug!(
                             provider = "nearai_chat",
                             error = %e,
                             stream_completed,
@@ -644,11 +644,16 @@ impl NearAiChatProvider {
             }
         }
 
-        if !stream_completed && !can_salvage_incomplete_text_stream(&parsed, &tool_calls) {
+        let salvaged_incomplete_text_stream =
+            !stream_completed && can_salvage_incomplete_text_stream(&parsed, &tool_calls);
+        if !stream_completed && !salvaged_incomplete_text_stream {
             return Err(LlmError::InvalidResponse {
                 provider: "nearai_chat".to_string(),
                 reason: "stream ended before terminal completion marker".to_string(),
             });
+        }
+        if salvaged_incomplete_text_stream {
+            parsed.finish_reason = FinishReason::Stop;
         }
 
         let mut ordered_tool_calls = tool_calls.into_iter().collect::<Vec<_>>();
@@ -1584,13 +1589,6 @@ struct NearAiStreamingToolCallState {
 }
 
 impl NearAiStreamingToolCallState {
-    fn is_empty(&self) -> bool {
-        self.id.is_empty()
-            && self.name.is_empty()
-            && self.arguments.is_empty()
-            && !self.arguments_delta_seen
-    }
-
     fn into_tool_call(self) -> Result<Option<ToolCall>, LlmError> {
         let Self {
             id,
@@ -1629,10 +1627,8 @@ fn can_salvage_incomplete_text_stream(
     parsed: &NearAiStreamingResponse,
     tool_calls: &HashMap<usize, NearAiStreamingToolCallState>,
 ) -> bool {
-    (!parsed.content.is_empty() || !parsed.reasoning.trim().is_empty())
-        && tool_calls
-            .values()
-            .all(NearAiStreamingToolCallState::is_empty)
+    (!parsed.content.trim().is_empty() || !parsed.reasoning.trim().is_empty())
+        && tool_calls.is_empty()
 }
 
 fn saturate_u32(val: u64) -> u32 {
@@ -2079,7 +2075,7 @@ data: [DONE]
             .expect("stream delta");
         assert_eq!(delta, "partial answer");
         assert_eq!(response.content, "partial answer");
-        assert_eq!(response.finish_reason, FinishReason::Unknown);
+        assert_eq!(response.finish_reason, FinishReason::Stop);
         assert_eq!(response.input_tokens, 0);
         assert_eq!(response.output_tokens, 0);
     }
@@ -2127,7 +2123,110 @@ data: [DONE]
 
         server_task.await.expect("server task");
         assert_eq!(response.content, "usable");
-        assert_eq!(response.finish_reason, FinishReason::Unknown);
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_rejects_whitespace_only_truncated_stream() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let (headers, body) = read_http_request_body(&mut socket).await;
+            assert!(headers.starts_with("POST /v1/chat/completions "));
+            let request_json: serde_json::Value =
+                serde_json::from_str(&body).expect("request json");
+            assert_eq!(request_json["stream"], true);
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write sse headers");
+            socket
+                .write_all(
+                    br#"data: {"choices":[{"delta":{"content":"  \n"},"finish_reason":null}]}
+
+"#,
+                )
+                .await
+                .expect("write whitespace content chunk");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+        let result = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("say something")]),
+                sink,
+            )
+            .await;
+
+        server_task.await.expect("server task");
+        match result {
+            Err(LlmError::InvalidResponse { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(
+                    reason.contains("terminal completion marker"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected invalid whitespace-only stream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_rejects_text_with_index_only_tool_scaffold() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let (headers, body) = read_http_request_body(&mut socket).await;
+            assert!(headers.starts_with("POST /v1/chat/completions "));
+            let request_json: serde_json::Value =
+                serde_json::from_str(&body).expect("request json");
+            assert_eq!(request_json["stream"], true);
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write sse headers");
+            socket
+                .write_all(
+                    br#"data: {"choices":[{"delta":{"content":"partial answer","tool_calls":[{"index":0}]},"finish_reason":null}]}
+
+"#,
+                )
+                .await
+                .expect("write text plus tool scaffold chunk");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let result = complete_search_tool_streaming(provider).await;
+
+        server_task.await.expect("server task");
+        match result {
+            Err(LlmError::InvalidResponse { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(
+                    reason.contains("terminal completion marker"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected invalid stream with tool scaffold, got {other:?}"),
+        }
     }
 
     #[tokio::test]
