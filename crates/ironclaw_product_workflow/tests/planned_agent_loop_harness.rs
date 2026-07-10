@@ -14,10 +14,9 @@ use support::planned_agent_loop::{
 
 #[tokio::test]
 async fn product_live_harness_runs_planned_loop_and_persists_reply() {
-    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
-        assistant_reply: "hello from planned loop".to_string(),
-        ..ProductLiveAgentLoopHarnessConfig::default()
-    })
+    let harness = ProductLiveAgentLoopHarness::new(
+        ProductLiveAgentLoopHarnessConfig::default().set_assistant_reply("hello from planned loop"),
+    )
     .await;
     let envelope = harness.user_message("planned-harness-basic", "hello world");
 
@@ -52,12 +51,12 @@ async fn product_live_harness_runs_planned_loop_and_persists_reply() {
 
 #[tokio::test]
 async fn ported_product_live_fixture_uses_shared_harness_for_no_profile_reply() {
-    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
-        assistant_reply: "planned product reply".to_string(),
-        user_id: "user:product-live".to_string(),
-        thread_id: "thread:product-live".to_string(),
-        ..ProductLiveAgentLoopHarnessConfig::default()
-    })
+    let harness = ProductLiveAgentLoopHarness::new(
+        ProductLiveAgentLoopHarnessConfig::default()
+            .set_assistant_reply("planned product reply")
+            .set_user_id("user:product-live")
+            .set_thread_id("thread:product-live"),
+    )
     .await;
     let envelope = harness.user_message("planned-product-live-ported", "hello world");
 
@@ -91,13 +90,13 @@ async fn ported_product_live_fixture_uses_shared_harness_for_no_profile_reply() 
 
 #[tokio::test]
 async fn ported_product_live_fixture_cancels_through_public_turn_path() {
-    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
-        assistant_reply: "reply after cancel".to_string(),
-        user_id: "user:product-live".to_string(),
-        thread_id: "thread:product-live-cancel-live".to_string(),
-        pause_model_until_released: true,
-        ..ProductLiveAgentLoopHarnessConfig::default()
-    })
+    let harness = ProductLiveAgentLoopHarness::new(
+        ProductLiveAgentLoopHarnessConfig::default()
+            .set_assistant_reply("reply after cancel")
+            .set_user_id("user:product-live")
+            .set_thread_id("thread:product-live-cancel-live")
+            .set_pause_model_until_released(true),
+    )
     .await;
     let envelope = harness.user_message("planned-product-live-cancel-ported", "hello world");
 
@@ -137,20 +136,20 @@ async fn ported_product_live_fixture_cancels_through_public_turn_path() {
 
 #[tokio::test]
 async fn product_live_harness_invokes_capability_then_persists_final_reply() {
-    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
-        assistant_reply: "unused fallback".to_string(),
-        model_responses: vec![
-            capability_call_response("harness.echo", "input:harness-echo-1"),
-            HostManagedModelResponse::assistant_reply("final reply after capability"),
-        ],
-        capability: Some(HarnessCapabilityConfig {
-            capability_id: "harness.echo".to_string(),
-            result_ref: "result:harness-echo-1".to_string(),
-            safe_summary: "echo completed".to_string(),
-            terminate_hint: false,
-        }),
-        ..ProductLiveAgentLoopHarnessConfig::default()
-    })
+    let harness = ProductLiveAgentLoopHarness::new(
+        ProductLiveAgentLoopHarnessConfig::default()
+            .set_assistant_reply("unused fallback")
+            .set_model_responses(vec![
+                capability_call_response("harness.echo", "input:harness-echo-1"),
+                HostManagedModelResponse::assistant_reply("final reply after capability"),
+            ])
+            .set_capability(HarnessCapabilityConfig {
+                capability_id: "harness.echo".to_string(),
+                result_ref: "result:harness-echo-1".to_string(),
+                safe_summary: "echo completed".to_string(),
+                terminate_hint: false,
+            }),
+    )
     .await;
     let envelope = harness.user_message("planned-harness-capability", "use echo");
 
@@ -185,14 +184,14 @@ async fn product_live_harness_invokes_capability_then_persists_final_reply() {
 
 #[tokio::test]
 async fn product_live_harness_invokes_builtin_echo_through_host_runtime() {
-    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
-        assistant_reply: "final reply after builtin echo".to_string(),
-        host_runtime_capability: Some(HostRuntimeCapabilityConfig {
-            capability_id: ironclaw_host_runtime::ECHO_CAPABILITY_ID.to_string(),
-            input: serde_json::json!({ "message": "hello from builtin echo" }),
-        }),
-        ..ProductLiveAgentLoopHarnessConfig::default()
-    })
+    let harness = ProductLiveAgentLoopHarness::new(
+        ProductLiveAgentLoopHarnessConfig::default()
+            .set_assistant_reply("final reply after builtin echo")
+            .set_host_runtime_capability(HostRuntimeCapabilityConfig {
+                capability_id: ironclaw_host_runtime::ECHO_CAPABILITY_ID.to_string(),
+                input: serde_json::json!({ "message": "hello from builtin echo" }),
+            }),
+    )
     .await;
     let envelope = harness.user_message("planned-harness-builtin-echo", "use builtin echo");
 

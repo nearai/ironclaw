@@ -46,6 +46,18 @@ fn scoped_path_class_buckets_known_segments_and_redacts_unknowns() {
         ("/artifacts/run/output.json", PathClass::Artifacts),
         ("/turns/state.json", PathClass::Turns),
         ("/resources/snapshot.json", PathClass::Resources),
+        (
+            "/approvals/capability-permissions/tool.json",
+            PathClass::Approvals,
+        ),
+        ("/authorization/leases/tool.json", PathClass::Authorization),
+        ("/events/runtime/tenant/user/agent", PathClass::Events),
+        ("/processes/leases/run.json", PathClass::Processes),
+        ("/run-state/tenant/user/run.json", PathClass::RunState),
+        ("/secrets/leases/lease.json", PathClass::Secrets),
+        ("/skills/code-review/SKILL.md", PathClass::Skills),
+        ("/system/skills/code-review/SKILL.md", PathClass::System),
+        ("/threads/agents/agent/thread.json", PathClass::Threads),
         ("/users/alice/private.txt", PathClass::Other),
         ("/tenants/acme/users/alice/secrets", PathClass::Other),
     ];
@@ -62,6 +74,29 @@ fn scoped_path_detail_labels_known_snapshots_without_exposing_paths() {
         ("/turns/state.json", "turn_state_snapshot"),
         ("/resources/snapshot.json", "resource_governor_snapshot"),
         ("/resources/budget-gates.json", "budget_gate_snapshot"),
+        (
+            "/approvals/capability-permissions/tool.json",
+            "approval_capability_permissions",
+        ),
+        (
+            "/approvals/auto-approve/setting.json",
+            "approval_auto_approve",
+        ),
+        (
+            "/approvals/persistent/policy.json",
+            "approval_persistent_policy",
+        ),
+        ("/authorization/leases/tool.json", "authorization_leases"),
+        ("/events/runtime/tenant/user/agent", "events"),
+        ("/processes/leases/run.json", "processes"),
+        ("/run-state/tenant/user/run.json", "run_state"),
+        ("/secrets/leases/lease.json", "secrets"),
+        ("/skills/code-review/SKILL.md", "skill_bundles"),
+        (
+            "/system/skills/code-review/SKILL.md",
+            "system_skill_bundles",
+        ),
+        ("/threads/agents/agent/thread.json", "threads"),
         ("/resources/other.json", "unknown"),
     ];
 

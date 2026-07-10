@@ -10,17 +10,22 @@
 // matches how `WorkspaceIdentityContextSource` implements `HostIdentityContextSource`:
 // the struct lives in `src/workspace/` while the trait lives in `ironclaw_loop_support`.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::{HostApiError, TenantId, UserId};
 use ironclaw_memory::{MemoryContext, MemoryDocumentPath, MemoryDocumentScope};
 use ironclaw_memory_native::{
     FilesystemMemoryDocumentRepository, MemoryBackend, RepositoryMemoryBackend,
 };
 use ironclaw_turns::run_profile::{Locale, LoopRunContext, UserProfileContext};
 use serde::Deserialize;
+use tokio::sync::Notify;
 
 /// Relative path of the per-user agent-context profile document.
 pub const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
@@ -30,6 +35,8 @@ pub const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
 /// edit, so we refuse to spend per-turn CPU/heap parsing it and degrade to
 /// no-profile instead.
 const MAX_PROFILE_DOCUMENT_BYTES: usize = 64 * 1024;
+const PROFILE_CACHE_TTL: Duration = Duration::from_secs(5);
+const PROFILE_CACHE_MAX_ENTRIES: usize = 1024;
 
 /// Single home for the profile scope decision: keyed to the human user at
 /// `agent=None, project=None` (spec §10) regardless of run scope. BOTH the
@@ -50,11 +57,29 @@ pub(crate) fn profile_scope_and_path(
 /// loop driver and `ironclaw_reborn` never import it.
 pub struct MemoryBackedUserProfileSource {
     filesystem: Arc<dyn RootFilesystem>,
+    cache: Mutex<UserProfileCache>,
+    inflight: Arc<Mutex<HashMap<UserProfileCacheKey, Arc<Notify>>>>,
+    cache_ttl: Duration,
 }
 
 impl MemoryBackedUserProfileSource {
     pub fn new(filesystem: Arc<dyn RootFilesystem>) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem,
+            cache: Mutex::new(UserProfileCache::default()),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            cache_ttl: PROFILE_CACHE_TTL,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_cache_ttl(filesystem: Arc<dyn RootFilesystem>, cache_ttl: Duration) -> Self {
+        Self {
+            filesystem,
+            cache: Mutex::new(UserProfileCache::default()),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            cache_ttl,
+        }
     }
 
     /// Core resolution logic. Called by `HostUserProfileSource::resolve_user_profile`
@@ -66,9 +91,41 @@ impl MemoryBackedUserProfileSource {
         // Profile is keyed to the human user at agent=None, project=None
         // (spec §10) regardless of the run's agent/project scope.
         let scope = &run_context.scope;
-        let user_id = run_context.actor.as_ref().map(|a| a.user_id.as_str())?;
+        let user_id = run_context.actor.as_ref().map(|a| a.user_id.clone())?;
+        let cache_key = UserProfileCacheKey {
+            tenant_id: scope.tenant_id.clone(),
+            user_id,
+        };
+        loop {
+            if let Some(profile) = self.cached_profile(&cache_key) {
+                return profile;
+            }
+            match self.begin_profile_load(&cache_key) {
+                ProfileLoad::Follower(notify) => {
+                    notify.notified().await;
+                }
+                ProfileLoad::Leader(leader) => {
+                    let profile = self
+                        .resolve_user_profile_uncached(
+                            cache_key.tenant_id.as_str(),
+                            cache_key.user_id.as_str(),
+                        )
+                        .await;
+                    self.store_cached_profile(cache_key.clone(), profile.clone());
+                    leader.finish();
+                    return profile;
+                }
+            }
+        }
+    }
+
+    async fn resolve_user_profile_uncached(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+    ) -> Option<UserProfileContext> {
         // Shared scope helper — same keying as the writer (no duplicated decision).
-        let (doc_scope, path) = match profile_scope_and_path(scope.tenant_id.as_str(), user_id) {
+        let (doc_scope, path) = match profile_scope_and_path(tenant_id, user_id) {
             Ok(pair) => pair,
             Err(error) => {
                 // silent-ok: profile is optional loop-start context; a scope-construction
@@ -136,6 +193,129 @@ impl MemoryBackedUserProfileSource {
             return None;
         }
         Some(profile)
+    }
+
+    fn cached_profile(&self, key: &UserProfileCacheKey) -> Option<Option<UserProfileContext>> {
+        self.cache.lock().ok()?.get(key)
+    }
+
+    fn store_cached_profile(&self, key: UserProfileCacheKey, profile: Option<UserProfileContext>) {
+        if self.cache_ttl.is_zero() || profile.is_none() {
+            return;
+        }
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key, profile, self.cache_ttl);
+        }
+    }
+
+    fn begin_profile_load(&self, key: &UserProfileCacheKey) -> ProfileLoad {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(notify) = inflight.get(key) {
+            return ProfileLoad::Follower(Arc::clone(notify));
+        }
+        let notify = Arc::new(Notify::new());
+        inflight.insert(key.clone(), Arc::clone(&notify));
+        ProfileLoad::Leader(ProfileLoadLeader {
+            inflight: Arc::clone(&self.inflight),
+            key: key.clone(),
+            notify,
+            finished: false,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct UserProfileCacheKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+}
+
+enum ProfileLoad {
+    Leader(ProfileLoadLeader),
+    Follower(Arc<Notify>),
+}
+
+struct ProfileLoadLeader {
+    inflight: Arc<Mutex<HashMap<UserProfileCacheKey, Arc<Notify>>>>,
+    key: UserProfileCacheKey,
+    notify: Arc<Notify>,
+    finished: bool,
+}
+
+impl ProfileLoadLeader {
+    fn finish(mut self) {
+        self.cleanup();
+        self.finished = true;
+    }
+
+    fn cleanup(&self) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+        self.notify.notify_waiters();
+    }
+}
+
+impl Drop for ProfileLoadLeader {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cleanup();
+        }
+    }
+}
+
+struct UserProfileCacheEntry {
+    profile: Option<UserProfileContext>,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct UserProfileCache {
+    entries: HashMap<UserProfileCacheKey, UserProfileCacheEntry>,
+}
+
+impl UserProfileCache {
+    fn get(&mut self, key: &UserProfileCacheKey) -> Option<Option<UserProfileContext>> {
+        let now = Instant::now();
+        if let Some(entry) = self.entries.get(key)
+            && entry.expires_at > now
+        {
+            return Some(entry.profile.clone());
+        }
+        self.entries.remove(key);
+        None
+    }
+
+    fn insert(
+        &mut self,
+        key: UserProfileCacheKey,
+        profile: Option<UserProfileContext>,
+        ttl: Duration,
+    ) {
+        let now = Instant::now();
+        if self.entries.len() >= PROFILE_CACHE_MAX_ENTRIES {
+            self.entries.retain(|_, entry| entry.expires_at > now);
+        }
+        if self.entries.len() >= PROFILE_CACHE_MAX_ENTRIES
+            && let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at)
+                .map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&oldest_key);
+        }
+        self.entries.insert(
+            key,
+            UserProfileCacheEntry {
+                profile,
+                expires_at: now + ttl,
+            },
+        );
     }
 }
 
@@ -279,6 +459,60 @@ mod tests {
             source.resolve_user_profile(&run_ctx).await.is_none(),
             "missing doc must resolve to None"
         );
+    }
+
+    #[tokio::test]
+    async fn profile_cache_serves_hits_until_ttl_expires() {
+        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"ja-JP"}"#).await;
+
+        let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
+            Arc::clone(&fs),
+            Duration::from_secs(60),
+        );
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("ja-JP"));
+
+        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"en-US"}"#).await;
+        let cached = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(
+            cached.locale.as_ref().map(|l| l.as_str()),
+            Some("ja-JP"),
+            "profile cache should serve the already-resolved value inside the TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_cache_does_not_serve_misses_after_profile_is_created() {
+        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
+            Arc::clone(&fs),
+            Duration::from_secs(60),
+        );
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        assert!(source.resolve_user_profile(&run_ctx).await.is_none());
+
+        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"en-US"}"#).await;
+        let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("en-US"));
+    }
+
+    #[tokio::test]
+    async fn profile_cache_refreshes_after_ttl_expires() {
+        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
+            Arc::clone(&fs),
+            Duration::from_millis(1),
+        );
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        assert!(source.resolve_user_profile(&run_ctx).await.is_none());
+
+        write_profile_json(&fs, "tenant-a", "user-1", r#"{"locale":"en-US"}"#).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("en-US"));
     }
 
     #[tokio::test]

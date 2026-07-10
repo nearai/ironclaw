@@ -22,6 +22,7 @@ pub(crate) mod extension_lifecycle_capabilities;
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
 pub(crate) mod gsuite;
+pub(crate) mod host_api_contracts;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;

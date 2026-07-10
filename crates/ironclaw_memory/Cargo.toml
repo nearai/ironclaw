@@ -11,6 +11,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 async-trait = "0.1"
 # Required by `MemoryServiceProfileSetRequest::from_tool_input`, which validates
