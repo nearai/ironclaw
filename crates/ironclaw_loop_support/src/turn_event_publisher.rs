@@ -8,9 +8,10 @@ use ironclaw_turns::{
     events::{TurnBlockedGateKind, TurnBlockedGateMetadata},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort,
     },
 };
 
@@ -108,6 +109,22 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         if let Some(claimed) = &claimed {
             self.publish_state_event_best_effort(
                 &claimed.state,
+                TurnEventKind::RunnerClaimed,
+                None,
+            )
+            .await;
+        }
+        Ok(claimed)
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let claimed = self.inner.claim_next_runs(request).await?;
+        for claimed_run in &claimed {
+            self.publish_state_event_best_effort(
+                &claimed_run.state,
                 TurnEventKind::RunnerClaimed,
                 None,
             )

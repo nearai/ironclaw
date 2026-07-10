@@ -26,6 +26,21 @@ pub struct OrgPolicyConstraints {
     pub admin_approves_dedicated_yolo: bool,
 }
 
+impl OrgPolicyConstraints {
+    pub fn set_max_profile(mut self, max_profile: RuntimeProfile) -> Self {
+        self.max_profile = Some(max_profile);
+        self
+    }
+
+    pub fn set_admin_approves_dedicated_yolo(
+        mut self,
+        admin_approves_dedicated_yolo: bool,
+    ) -> Self {
+        self.admin_approves_dedicated_yolo = admin_approves_dedicated_yolo;
+        self
+    }
+}
+
 /// Caller request for runtime profile resolution.
 ///
 /// `Serialize`/`Deserialize` are derived so the settings/blueprint
@@ -584,10 +599,7 @@ mod tests {
         // With disclosure AND org admin approval: resolves.
         let request = ResolveRequest {
             yolo_disclosure_acknowledged: true,
-            org_policy: OrgPolicyConstraints {
-                admin_approves_dedicated_yolo: true,
-                ..OrgPolicyConstraints::default()
-            },
+            org_policy: OrgPolicyConstraints::default().set_admin_approves_dedicated_yolo(true),
             ..ResolveRequest::new(
                 DeploymentMode::EnterpriseDedicated,
                 RuntimeProfile::EnterpriseYoloDedicated,
@@ -611,10 +623,7 @@ mod tests {
         // the assertion below is the canary.
         let request = ResolveRequest {
             yolo_disclosure_acknowledged: true,
-            org_policy: OrgPolicyConstraints {
-                admin_approves_dedicated_yolo: true,
-                ..OrgPolicyConstraints::default()
-            },
+            org_policy: OrgPolicyConstraints::default().set_admin_approves_dedicated_yolo(true),
             ..ResolveRequest::new(
                 DeploymentMode::EnterpriseDedicated,
                 RuntimeProfile::EnterpriseYoloDedicated,
@@ -727,10 +736,7 @@ mod tests {
     fn org_policy_ceiling_within_family_narrows_resolved_profile() {
         // Tenant ceiling LocalSafe + requested LocalDev → resolved LocalSafe.
         let request = ResolveRequest {
-            org_policy: OrgPolicyConstraints {
-                max_profile: Some(RuntimeProfile::LocalSafe),
-                ..OrgPolicyConstraints::default()
-            },
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalSafe),
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
         };
         let policy = resolve(request).unwrap();
@@ -745,10 +751,7 @@ mod tests {
     fn org_policy_ceiling_at_or_below_request_keeps_request() {
         // Ceiling LocalDev + requested LocalSafe → keeps LocalSafe (already at/below ceiling).
         let request = ResolveRequest {
-            org_policy: OrgPolicyConstraints {
-                max_profile: Some(RuntimeProfile::LocalDev),
-                ..OrgPolicyConstraints::default()
-            },
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalDev),
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe)
         };
         let policy = resolve(request).unwrap();
@@ -763,10 +766,7 @@ mod tests {
         // profile must equal the requested profile, never the ceiling.
         // Ceilings can only reduce authority; they cannot raise it.
         let request = ResolveRequest {
-            org_policy: OrgPolicyConstraints {
-                max_profile: Some(RuntimeProfile::LocalYolo),
-                ..OrgPolicyConstraints::default()
-            },
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalYolo),
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalSafe)
         };
         let policy = resolve(request).unwrap();
@@ -779,10 +779,7 @@ mod tests {
     fn org_policy_ceiling_in_different_family_is_rejected() {
         // Hosted ceiling on a local request → family mismatch.
         let request = ResolveRequest {
-            org_policy: OrgPolicyConstraints {
-                max_profile: Some(RuntimeProfile::HostedSafe),
-                ..OrgPolicyConstraints::default()
-            },
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::HostedSafe),
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
         };
         let r = resolve(request);
@@ -799,10 +796,8 @@ mod tests {
     fn org_policy_ceiling_to_deployment_agnostic_profile_is_rejected_as_family_mismatch() {
         // SecureDefault has no family, so it can't be a ceiling target.
         let request = ResolveRequest {
-            org_policy: OrgPolicyConstraints {
-                max_profile: Some(RuntimeProfile::SecureDefault),
-                ..OrgPolicyConstraints::default()
-            },
+            org_policy: OrgPolicyConstraints::default()
+                .set_max_profile(RuntimeProfile::SecureDefault),
             ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalDev)
         };
         assert!(matches!(

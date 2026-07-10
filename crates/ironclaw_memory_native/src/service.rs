@@ -420,16 +420,16 @@ fn build_native_backend(
     let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(Arc::clone(&repository)));
     let mut backend = RepositoryMemoryBackend::new(Arc::clone(&repository))
         .with_indexer(indexer)
-        .with_capabilities(MemoryBackendCapabilities {
-            file_documents: true,
-            metadata: true,
-            versioning: true,
-            prompt_write_safety: true,
-            full_text_search: true,
-            delete: true,
-            transactions: true,
-            ..MemoryBackendCapabilities::default()
-        });
+        .with_capabilities(
+            MemoryBackendCapabilities::default()
+                .set_file_documents(true)
+                .set_metadata(true)
+                .set_versioning(true)
+                .set_prompt_write_safety(true)
+                .set_full_text_search(true)
+                .set_delete(true)
+                .set_transactions(true),
+        );
     if let Some(prompt_write_safety_event_sink) = prompt_write_safety_event_sink {
         backend = backend.with_prompt_write_safety_event_sink(prompt_write_safety_event_sink);
     }
@@ -485,10 +485,7 @@ fn write_options(metadata_overlay: Option<&DocumentMetadata>) -> MemoryBackendWr
     // Service writes are direct backend callers: leave
     // `prompt_safety_already_enforced` at its fail-closed default (false) so the
     // backend runs prompt-write safety itself.
-    MemoryBackendWriteOptions {
-        metadata_overlay: metadata_overlay.cloned(),
-        ..MemoryBackendWriteOptions::default()
-    }
+    MemoryBackendWriteOptions::with_metadata_overlay(metadata_overlay.cloned())
 }
 
 fn reject_local_or_traversal_path(path: &str) -> Result<(), MemoryServiceError> {

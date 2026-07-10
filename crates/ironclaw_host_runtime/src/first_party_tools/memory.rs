@@ -108,10 +108,7 @@ pub(super) async fn dispatch(
     let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(FirstPartyCapabilityResult::new(
         output,
-        ResourceUsage {
-            wall_clock_ms,
-            ..ResourceUsage::default()
-        },
+        ResourceUsage::default().set_wall_clock_ms(wall_clock_ms),
     ))
 }
 

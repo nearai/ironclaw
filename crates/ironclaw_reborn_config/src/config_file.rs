@@ -118,6 +118,28 @@ pub struct IdentitySection {
     pub default_project: Option<String>,
 }
 
+impl IdentitySection {
+    pub fn set_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    pub fn set_default_agent(mut self, default_agent: impl Into<String>) -> Self {
+        self.default_agent = Some(default_agent.into());
+        self
+    }
+
+    pub fn set_default_owner(mut self, default_owner: impl Into<String>) -> Self {
+        self.default_owner = Some(default_owner.into());
+        self
+    }
+
+    pub fn set_default_project(mut self, default_project: impl Into<String>) -> Self {
+        self.default_project = Some(default_project.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicySection {
@@ -335,6 +357,61 @@ pub struct SlackSection {
     pub bot_token_env: Option<String>,
 }
 
+impl SlackSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn set_installation_id(mut self, installation_id: impl Into<String>) -> Self {
+        self.installation_id = Some(installation_id.into());
+        self
+    }
+
+    pub fn set_team_id(mut self, team_id: impl Into<String>) -> Self {
+        self.team_id = Some(team_id.into());
+        self
+    }
+
+    pub fn set_api_app_id(mut self, api_app_id: impl Into<String>) -> Self {
+        self.api_app_id = Some(api_app_id.into());
+        self
+    }
+
+    pub fn set_slack_user_id(mut self, slack_user_id: impl Into<String>) -> Self {
+        self.slack_user_id = Some(slack_user_id.into());
+        self
+    }
+
+    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    pub fn set_shared_subject_user_id(mut self, shared_subject_user_id: impl Into<String>) -> Self {
+        self.shared_subject_user_id = Some(shared_subject_user_id.into());
+        self
+    }
+
+    pub fn set_channel_routes(
+        mut self,
+        channel_routes: impl IntoIterator<Item = SlackChannelRouteSection>,
+    ) -> Self {
+        self.channel_routes = channel_routes.into_iter().collect();
+        self
+    }
+
+    pub fn set_signing_secret_env(mut self, signing_secret_env: impl Into<String>) -> Self {
+        self.signing_secret_env = Some(signing_secret_env.into());
+        self
+    }
+
+    pub fn set_bot_token_env(mut self, bot_token_env: impl Into<String>) -> Self {
+        self.bot_token_env = Some(bot_token_env.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackChannelRouteSection {
@@ -377,6 +454,78 @@ pub struct BudgetSection {
     pub overestimate_factor: Option<f64>,
 }
 
+impl BudgetSection {
+    pub fn set_user_daily_usd(mut self, user_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.user_daily_usd = user_daily_usd.into();
+        self
+    }
+
+    pub fn set_project_daily_usd(mut self, project_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.project_daily_usd = project_daily_usd.into();
+        self
+    }
+
+    pub fn set_mission_per_tick_usd(
+        mut self,
+        mission_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.mission_per_tick_usd = mission_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_heartbeat_per_tick_usd(
+        mut self,
+        heartbeat_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.heartbeat_per_tick_usd = heartbeat_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_routine_lightweight_usd(
+        mut self,
+        routine_lightweight_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_lightweight_usd = routine_lightweight_usd.into();
+        self
+    }
+
+    pub fn set_routine_standard_usd(
+        mut self,
+        routine_standard_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_standard_usd = routine_standard_usd.into();
+        self
+    }
+
+    pub fn set_background_job_default_usd(
+        mut self,
+        background_job_default_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.background_job_default_usd = background_job_default_usd.into();
+        self
+    }
+
+    pub fn set_default_tz(mut self, default_tz: impl Into<String>) -> Self {
+        self.default_tz = Some(default_tz.into());
+        self
+    }
+
+    pub fn set_warn_at(mut self, warn_at: impl Into<Option<f64>>) -> Self {
+        self.warn_at = warn_at.into();
+        self
+    }
+
+    pub fn set_pause_at(mut self, pause_at: impl Into<Option<f64>>) -> Self {
+        self.pause_at = pause_at.into();
+        self
+    }
+
+    pub fn set_overestimate_factor(mut self, overestimate_factor: impl Into<Option<f64>>) -> Self {
+        self.overestimate_factor = overestimate_factor.into();
+        self
+    }
+}
+
 /// `[trigger_poller]` section. Controls the background trigger-poller worker.
 ///
 /// All fields are optional so a sparse or absent section is valid; the
@@ -408,6 +557,41 @@ pub struct TriggerPollerConfigSection {
     /// Prevents synchronized thundering-herd across instances. Default 0.
     /// Range `0..=3600` is enforced at boot by the CLI settings layer.
     pub tick_jitter_max_secs: Option<u64>,
+}
+
+impl TriggerPollerConfigSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn set_poll_interval_secs(mut self, poll_interval_secs: u64) -> Self {
+        self.poll_interval_secs = Some(poll_interval_secs);
+        self
+    }
+
+    pub fn set_fires_per_tick(mut self, fires_per_tick: u32) -> Self {
+        self.fires_per_tick = Some(fires_per_tick);
+        self
+    }
+
+    pub fn set_max_concurrent_fires_per_trigger(
+        mut self,
+        max_concurrent_fires_per_trigger: u32,
+    ) -> Self {
+        self.max_concurrent_fires_per_trigger = Some(max_concurrent_fires_per_trigger);
+        self
+    }
+
+    pub fn set_startup_jitter_max_secs(mut self, startup_jitter_max_secs: u64) -> Self {
+        self.startup_jitter_max_secs = Some(startup_jitter_max_secs);
+        self
+    }
+
+    pub fn set_tick_jitter_max_secs(mut self, tick_jitter_max_secs: u64) -> Self {
+        self.tick_jitter_max_secs = Some(tick_jitter_max_secs);
+        self
+    }
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or

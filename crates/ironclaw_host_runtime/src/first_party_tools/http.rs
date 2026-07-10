@@ -87,12 +87,10 @@ fn http_manifest(
 
 fn http_resource_profile() -> ResourceProfile {
     ResourceProfile {
-        default_estimate: ResourceEstimate {
-            wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
-            output_bytes: Some(DEFAULT_INLINE_RESPONSE_BODY_LIMIT),
-            network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
-            ..ResourceEstimate::default()
-        },
+        default_estimate: ResourceEstimate::default()
+            .set_wall_clock_ms(DEFAULT_HTTP_TIMEOUT_MS.into())
+            .set_output_bytes(DEFAULT_INLINE_RESPONSE_BODY_LIMIT)
+            .set_network_egress_bytes(DEFAULT_NETWORK_EGRESS_BYTES),
         hard_ceiling: Some(ResourceCeiling {
             max_usd: None,
             max_input_tokens: None,

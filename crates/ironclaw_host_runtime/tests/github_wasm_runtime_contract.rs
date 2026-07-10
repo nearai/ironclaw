@@ -2454,24 +2454,20 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_network_egress_bytes: Some(10_000),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_network_egress_bytes(10_000)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
 }
 
 fn wasm_http_estimate() -> ResourceEstimate {
-    ResourceEstimate {
-        concurrency_slots: Some(1),
-        network_egress_bytes: Some(10),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    }
+    ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_network_egress_bytes(10)
+        .set_output_bytes(10_000)
 }
 
 fn sample_account() -> ResourceAccount {

@@ -1,3 +1,4 @@
+use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -38,6 +39,7 @@ const ALL_EFFECT_KINDS: &[EffectKind] = &[
     EffectKind::ExternalWrite,
     EffectKind::Financial,
 ];
+const VISIBLE_CAPABILITY_AUTHORIZATION_CONCURRENCY: usize = 16;
 
 /// Visibility-only policy applied before authorization estimates are rendered.
 ///
@@ -152,9 +154,10 @@ impl<'a> CapabilityCatalog<'a> {
             HostRuntimeError::invalid_request(format!("invalid execution context: {error}"))
         })?;
 
-        let max_capabilities = request.policy.max_capabilities.unwrap_or(usize::MAX);
+        let Some(max_capabilities) = request.policy.max_capabilities else {
+            return self.visible_capabilities_unbounded(request).await;
+        };
         let mut capabilities = Vec::new();
-        let mut context = request.context.clone();
         for descriptor in self.registry.capabilities() {
             if capabilities.len() >= max_capabilities {
                 break;
@@ -171,30 +174,12 @@ impl<'a> CapabilityCatalog<'a> {
             let Some(trust_decision) = request.provider_trust.get(&descriptor.provider) else {
                 continue;
             };
-            let estimate = descriptor
-                .resource_profile
-                .as_ref()
-                .map(|profile| profile.default_estimate.clone())
-                .unwrap_or_default();
-            context.trust = trust_decision.effective_trust.class();
-
-            let access = match self
-                .authorizer
-                .authorize_dispatch_with_trust(&context, descriptor, &estimate, trust_decision)
-                .await
+            if let Some(capability) = self
+                .authorize_visible_capability(&request, descriptor, trust_decision)
+                .await?
             {
-                Decision::Allow { .. } => VisibleCapabilityAccess::Available,
-                Decision::RequireApproval { .. } if request.policy.include_requires_approval => {
-                    VisibleCapabilityAccess::RequiresApproval
-                }
-                Decision::RequireApproval { .. } | Decision::Deny { .. } => continue,
-            };
-
-            capabilities.push(VisibleCapability {
-                descriptor: self.surface_descriptor(descriptor).await?,
-                access,
-                estimated_resources: estimate,
-            });
+                capabilities.push(capability);
+            }
         }
 
         let version = surface_version(
@@ -207,6 +192,88 @@ impl<'a> CapabilityCatalog<'a> {
             version,
             capabilities,
         })
+    }
+
+    async fn visible_capabilities_unbounded(
+        &self,
+        request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+        let candidates = self
+            .registry
+            .capabilities()
+            .filter(|descriptor| {
+                self.is_model_visible(descriptor)
+                    && request.policy.allows_runtime(descriptor.runtime)
+                    && request.policy.allows_effects(&descriptor.effects)
+                    && plan_capability(descriptor, self.runtime_policy).is_ok()
+                    && request.provider_trust.contains_key(&descriptor.provider)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let results = stream::iter(candidates.into_iter().map(|descriptor| {
+            let request = &request;
+            async move {
+                let Some(trust_decision) = request.provider_trust.get(&descriptor.provider) else {
+                    return Ok(None);
+                };
+                self.authorize_visible_capability(request, &descriptor, trust_decision)
+                    .await
+            }
+        }))
+        .buffered(VISIBLE_CAPABILITY_AUTHORIZATION_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+        let mut capabilities = Vec::new();
+        for result in results {
+            if let Some(capability) = result? {
+                capabilities.push(capability);
+            }
+        }
+        let version = surface_version(
+            self.base_version,
+            &request,
+            self.runtime_policy,
+            &capabilities,
+        )?;
+        Ok(VisibleCapabilitySurface {
+            version,
+            capabilities,
+        })
+    }
+
+    async fn authorize_visible_capability(
+        &self,
+        request: &VisibleCapabilityRequest,
+        descriptor: &CapabilityDescriptor,
+        trust_decision: &TrustDecision,
+    ) -> Result<Option<VisibleCapability>, HostRuntimeError> {
+        let estimate = descriptor
+            .resource_profile
+            .as_ref()
+            .map(|profile| profile.default_estimate.clone())
+            .unwrap_or_default();
+        let mut context = request.context.clone();
+        context.trust = trust_decision.effective_trust.class();
+
+        let access = match self
+            .authorizer
+            .authorize_dispatch_with_trust(&context, descriptor, &estimate, trust_decision)
+            .await
+        {
+            Decision::Allow { .. } => VisibleCapabilityAccess::Available,
+            Decision::RequireApproval { .. } if request.policy.include_requires_approval => {
+                VisibleCapabilityAccess::RequiresApproval
+            }
+            Decision::RequireApproval { .. } | Decision::Deny { .. } => return Ok(None),
+        };
+
+        Ok(Some(VisibleCapability {
+            descriptor: self.surface_descriptor(descriptor).await?,
+            access,
+            estimated_resources: estimate,
+        }))
     }
 
     fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {

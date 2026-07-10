@@ -20,6 +20,14 @@ use crate::{
     PkceVerifierHash, PkceVerifierSecret, ProviderScope, ids::AuthFlowId, validate_public_text,
 };
 
+// Legacy v1 loopback OAuth transport, folded from the former `ironclaw_oauth`
+// crate in W2.1. Reborn product auth must continue to use hosted durable
+// callback routes instead of this fixed-port listener.
+pub use crate::loopback_oauth::{
+    OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
+    is_loopback_host, landing_html, wait_for_callback,
+};
+
 /// Reborn auth provider id for Google OAuth accounts.
 pub const GOOGLE_PROVIDER_ID: &str = "google";
 /// Google OAuth 2.0 authorization endpoint.

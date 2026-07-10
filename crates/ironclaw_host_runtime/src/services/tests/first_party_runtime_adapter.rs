@@ -553,10 +553,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
         SecretMode::ScrubbedEnv,
     );
     // Non-zero estimate so the held reservation is observable in the tally.
-    let estimate = ResourceEstimate {
-        output_bytes: Some(128),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_output_bytes(128);
 
     let dispatch = adapter.dispatch_json(RuntimeAdapterRequest {
         package: &package,
@@ -622,10 +619,7 @@ impl crate::FirstPartyCapabilityHandler for DispatchFailingWithUsageHandler {
         &self,
         _request: crate::FirstPartyCapabilityRequest,
     ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
-        let usage = ironclaw_host_api::ResourceUsage {
-            output_bytes: 64,
-            ..ironclaw_host_api::ResourceUsage::default()
-        };
+        let usage = ironclaw_host_api::ResourceUsage::default().set_output_bytes(64);
         Err(
             crate::FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
                 .with_usage(usage),
