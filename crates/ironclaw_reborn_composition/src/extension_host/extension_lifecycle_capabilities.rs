@@ -349,6 +349,8 @@ mod tests {
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
+    #[cfg(feature = "slack-v2-host-beta")]
+    use ironclaw_extensions::ExtensionInstallationId;
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
         ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
@@ -847,9 +849,48 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn webui_and_tool_extension_remove_skip_personal_cleanup_for_slack_bot() {
+    async fn webui_and_tool_extension_remove_generic_filesystem_channel_without_slack_cleanup() {
+        const GENERIC_CHANNEL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "channel-ext"
+name = "Channel Ext"
+version = "0.1.0"
+description = "A filesystem-discovered external channel extension."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "channel_ext_host"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Channel-Signature"
+timestamp_header_name = "X-Channel-Timestamp"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "channel_ext_token"
+
+[[product_adapter.inbound.egress]]
+host = "example.com"
+credential_handle = "channel_ext_token"
+"#;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
+        let package_path = storage_root.join("system/extensions/channel-ext");
+        std::fs::create_dir_all(&package_path).expect("generic channel package directory");
+        std::fs::write(package_path.join("manifest.toml"), GENERIC_CHANNEL_MANIFEST)
+            .expect("generic channel manifest");
         let authenticated_actor =
             UserId::new("extension-tool-test-alice").expect("valid actor user id");
         let mut remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
@@ -863,7 +904,7 @@ mod tests {
         let runtime = crate::build_reborn_runtime(
             crate::RebornRuntimeInput::from_services(
                 RebornBuildInput::local_dev(
-                    "extension-tools-remove-slack-bot-owner",
+                    "extension-tools-remove-generic-channel-owner",
                     storage_root.clone(),
                 )
                 .with_runtime_policy(
@@ -872,17 +913,16 @@ mod tests {
             )
             .with_identity(crate::RebornRuntimeIdentity {
                 tenant_id: caller.tenant_id.as_str().to_string(),
-                agent_id: "extension-remove-slack-bot-test-agent".to_string(),
-                source_binding_id: "extension-remove-slack-bot-test-source".to_string(),
-                reply_target_binding_id: "extension-remove-slack-bot-test-reply".to_string(),
+                agent_id: "extension-remove-generic-channel-test-agent".to_string(),
+                source_binding_id: "extension-remove-generic-channel-test-source".to_string(),
+                reply_target_binding_id: "extension-remove-generic-channel-test-reply".to_string(),
             }),
         )
         .await
         .expect("local-dev runtime build");
-        let slack_bot_package_path = storage_root.join("system/extensions/slack_bot");
         let channel_connection = Arc::new(
             RecordingChannelConnectionFacade::with_connection("slack", false)
-                .watching_package(slack_bot_package_path.clone()),
+                .watching_package(package_path.clone()),
         );
         let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
         assert!(
@@ -897,46 +937,85 @@ mod tests {
             Vec::new(),
         )
         .expect("WebUI services build");
-        let slack_bot_package_ref =
-            extension_package_ref("slack_bot".to_string()).expect("valid Slack bot package ref");
+        let package_ref =
+            extension_package_ref("channel-ext".to_string()).expect("valid channel package ref");
+        let extension_id = ExtensionId::new("channel-ext").expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new("channel-ext").expect("valid installation id");
+        let installation_store = runtime
+            .services()
+            .extension_installation_store_for_test()
+            .expect("live extension installation store");
 
         webui
             .api
-            .install_extension(caller.clone(), slack_bot_package_ref.clone())
+            .install_extension(caller.clone(), package_ref.clone())
             .await
             .expect("WebUI install succeeds");
         webui
             .api
-            .remove_extension(caller.clone(), slack_bot_package_ref.clone())
+            .remove_extension(caller.clone(), package_ref.clone())
             .await
             .expect("WebUI remove succeeds");
         assert!(
-            !slack_bot_package_path.exists(),
-            "WebUI removal deletes the Slack bot package"
+            !package_path.exists(),
+            "WebUI removal deletes the generic channel package"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup after WebUI removal")
+                .is_none(),
+            "WebUI removal deletes the manifest record"
+        );
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("installation lookup after WebUI removal")
+                .is_none(),
+            "WebUI removal deletes the installation record"
         );
 
         webui
             .api
-            .install_extension(caller, slack_bot_package_ref)
+            .install_extension(caller, package_ref)
             .await
             .expect("WebUI reinstall succeeds");
         let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
             runtime.services(),
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
-            serde_json::json!({"extension_id": "slack_bot"}),
+            serde_json::json!({"extension_id": "channel-ext"}),
             trust_decision(),
         )
         .await
         .expect("tool removal succeeds");
         assert_eq!(remove["payload"]["removed"], true);
         assert!(
-            !slack_bot_package_path.exists(),
-            "tool removal deletes the Slack bot package"
+            !package_path.exists(),
+            "tool removal deletes the generic channel package"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup after tool removal")
+                .is_none(),
+            "tool removal deletes the manifest record"
+        );
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("installation lookup after tool removal")
+                .is_none(),
+            "tool removal deletes the installation record"
         );
         assert!(
             channel_connection.disconnects().is_empty(),
-            "operator-owned slack_bot must not inherit personal Slack cleanup"
+            "generic external channels must not inherit personal Slack cleanup"
         );
         assert_eq!(
             channel_connection.connection_status_calls(),
@@ -947,7 +1026,7 @@ mod tests {
             channel_connection
                 .package_present_during_disconnect()
                 .is_empty(),
-            "no disconnect should be attempted for slack_bot"
+            "no Slack disconnect should be attempted for a generic channel"
         );
         runtime.shutdown().await.expect("runtime shutdown");
     }
