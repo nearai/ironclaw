@@ -3738,6 +3738,40 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             [],
         )
 
+    def test_digest_scan_uses_full_reply_and_redacts_persisted_excerpt(self):
+        import inspect
+
+        source = inspect.getsource(
+            run_live_qa.case_qa_9c_slack_digest_names_not_ids
+        )
+        self.assertIn(
+            "full_reply_text",
+            source,
+            "the raw-id scan must read the full in-memory reply; excerpt "
+            "truncation would blind it to ids early in a long digest",
+        )
+        self.assertIn(
+            "RAW_SLACK_USER_ID_PATTERN.sub",
+            source,
+            "the persisted excerpt must be redacted of raw user ids",
+        )
+        wait_source = inspect.getsource(run_live_qa._wait_for_assistant_reply)
+        self.assertIn("full_text=", wait_source)
+
+    def test_dm_counterpart_scan_paginates_to_exhaustion(self):
+        import inspect
+
+        source = inspect.getsource(
+            run_live_qa._slack_personal_dm_counterpart_names
+        )
+        self.assertIn(
+            "next_cursor",
+            source,
+            "conversations.list ground truth must follow next_cursor; one "
+            "page can flip the verdict",
+        )
+        self.assertIn("checked", source)
+
     def test_routine_confirmation_follow_up_respects_timezone_instruction(self):
         text = "I can create that routine — should I go ahead?"
         default_reply = run_live_qa._routine_confirmation_follow_up_for_text(text)

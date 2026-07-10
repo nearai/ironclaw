@@ -1138,13 +1138,17 @@ class AssistantReplyWaitResult:
     final_reply_wait_ms: int
     final_reply_reason: str
     semantic_judge: dict[str, object] | None = None
+    # Full reply, in-memory only: content checks (raw-id scan, ground-truth
+    # names) must never be blinded by excerpt truncation, while persisted
+    # details keep only the bounded text_excerpt.
+    full_text: str = ""''
 
 
 ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS = 2.0
 ASSISTANT_REPLY_POLL_SECONDS = 0.5
-# Large enough to hold a full DM digest: qa_9c scans the reply for leaked raw
-# user ids, and a truncated excerpt would silently blind that negative arm.
-ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 16000
+# Persisted diagnostic excerpt only — content checks read
+# AssistantReplyWaitResult.full_text, never this truncation.
+ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 2000
 
 
 def _exc_text(exc: BaseException) -> str:
@@ -1233,6 +1237,7 @@ async def _live_chat_case(
     forbidden_text: list[str] | None = None,
     routine_confirmation_follow_up: bool = False,
     routine_follow_up_timezone_instruction: str | None = None,
+    expose_full_reply_text: bool = False,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1273,6 +1278,10 @@ async def _live_chat_case(
             semantic_goal=prompt,
         )
         _record_assistant_reply_wait_result(observed, reply)
+        if expose_full_reply_text:
+            # In-memory hand-off to the calling case; the case pops it before
+            # the details dict is persisted into artifacts.
+            observed["full_reply_text"] = reply.full_text
         if routine_confirmation_follow_up:
             follow_up_kwargs: dict[str, str] = {}
             if routine_follow_up_timezone_instruction:
@@ -1519,6 +1528,7 @@ async def _wait_for_assistant_reply(
                         continue
                 return AssistantReplyWaitResult(
                     text_excerpt=text[-ASSISTANT_REPLY_EXCERPT_MAX_CHARS:],
+                    full_text=text,
                     semantic_judge_used=False,
                     semantic_judge_reason="literal_required_text_matched",
                     final_reply_wait_ms=int((time.monotonic() - started) * 1000),
@@ -1546,6 +1556,7 @@ async def _wait_for_assistant_reply(
         if _semantic_judge_passed(semantic_judge):
             return AssistantReplyWaitResult(
                 text_excerpt=last_text[-ASSISTANT_REPLY_EXCERPT_MAX_CHARS:],
+                full_text=last_text,
                 semantic_judge_used=True,
                 semantic_judge_reason="semantic_judge_completed",
                 final_reply_wait_ms=int((time.monotonic() - started) * 1000),
@@ -2206,7 +2217,7 @@ async def _slack_search_marker_hits(
 
 
 async def _slack_personal_dm_counterpart_names(
-    ctx: LiveQaContext, *, limit: int = 20
+    ctx: LiveQaContext,
 ) -> dict[str, object]:
     """Ground-truth display names of the connected user's HUMAN DM
     counterparts, read directly from the Slack API with the personal token —
@@ -2234,21 +2245,47 @@ async def _slack_personal_dm_counterpart_names(
                 if auth_payload.get("ok")
                 else ""
             )
-            response = await client.get(
-                "https://slack.com/api/conversations.list",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"types": "im", "limit": str(limit)},
-            )
-            payload = response.json()
-            if not payload.get("ok"):
+            channels: list[dict[str, object]] = []
+            cursor = ""
+            # Ground truth must cover EVERY im: a single unpaginated page can
+            # flip the verdict, so follow next_cursor to exhaustion and report
+            # checked=False when the scan is incomplete.
+            for _ in range(10):
+                params: dict[str, str] = {"types": "im", "limit": "200"}
+                if cursor:
+                    params["cursor"] = cursor
+                response = await client.get(
+                    "https://slack.com/api/conversations.list",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params=params,
+                )
+                payload = response.json()
+                if not payload.get("ok"):
+                    return {
+                        "checked": False,
+                        "names": [],
+                        "error": payload.get("error")
+                        or "slack_conversations_list_failed",
+                    }
+                channels.extend(
+                    channel
+                    for channel in payload.get("channels") or []
+                    if isinstance(channel, dict)
+                )
+                cursor = str(
+                    (payload.get("response_metadata") or {}).get("next_cursor") or ""
+                ).strip()
+                if not cursor:
+                    break
+            else:
                 return {
                     "checked": False,
                     "names": [],
-                    "error": payload.get("error") or "slack_conversations_list_failed",
+                    "error": "conversations.list pagination exceeded the page cap",
                 }
             names: list[str] = []
             skipped: list[str] = []
-            for channel in payload.get("channels") or []:
+            for channel in channels:
                 counterpart = (
                     channel.get("user") if isinstance(channel, dict) else None
                 )
@@ -4720,10 +4757,24 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
         marker=marker,
         required_text=[],
         timeout=240.0,
+        expose_full_reply_text=True,
     )
     if not result.success:
+        result.details.pop("full_reply_text", None)
         return result
-    reply_text = str(result.details.get("text_excerpt") or "")
+    # Scan the FULL reply (a raw id early in a long digest must not escape
+    # via excerpt truncation), then drop it from persisted details and keep
+    # the bounded excerpt redacted of raw ids.
+    reply_text = str(
+        result.details.pop("full_reply_text", None)
+        or result.details.get("text_excerpt")
+        or ""
+    )
+    excerpt = str(result.details.get("text_excerpt") or "")
+    if excerpt:
+        result.details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
+            "U_REDACTED", excerpt
+        )
     leaked_ids = _raw_slack_user_ids_in_text(reply_text)
     if leaked_ids:
         return _result(
@@ -4755,7 +4806,7 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
             name
             for name in known_names
             if any(
-                token in reply_lower
+                re.search(rf"\b{re.escape(token)}\b", reply_lower)
                 for token in re.split(r"[^a-z0-9]+", name.lower())
                 if len(token) >= 3
             )
