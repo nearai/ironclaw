@@ -266,9 +266,7 @@ fn model_visible_capability_success_observation(
     call: &CapabilityCallCandidate,
     result: &CapabilityResultMessage,
 ) -> Option<ModelVisibleToolObservation> {
-    if call.provider_replay.is_none() {
-        return None;
-    }
+    call.provider_replay.as_ref()?;
     // "none" is the static sentinel for successful capability observations and
     // satisfies CapabilityFailureKind's validation invariants.
     let failure_kind = CapabilityFailureKind::unknown("none")
