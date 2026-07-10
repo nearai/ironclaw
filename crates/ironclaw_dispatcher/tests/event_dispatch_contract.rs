@@ -31,11 +31,9 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello wasm"}),
@@ -48,12 +46,10 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script"}),
@@ -107,11 +103,9 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "event sink fails"}),
@@ -135,11 +129,9 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "missing backend"}),
@@ -165,11 +157,9 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
     let reservation = ResourceReservation {
         id: ResourceReservationId::new(),
         scope: scope.clone(),
-        estimate: ResourceEstimate {
-            concurrency_slots: Some(1),
-            process_count: Some(1),
-            ..ResourceEstimate::default()
-        },
+        estimate: ResourceEstimate::default()
+            .set_concurrency_slots(1)
+            .set_process_count(1),
     };
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
 
@@ -178,11 +168,9 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: Some(reservation.clone()),
             input: json!({"message": "missing backend"}),
@@ -222,11 +210,9 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "adapter fails"}),
@@ -266,12 +252,10 @@ async fn dispatcher_emits_events_for_mcp_success() {
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "ironclaw"}),
@@ -307,11 +291,9 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -434,11 +416,12 @@ fn adapter_result(
     estimate: ResourceEstimate,
     output: Value,
 ) -> Result<RuntimeAdapterResult, DispatchError> {
-    let usage = ResourceUsage {
-        output_bytes: serde_json::to_vec(&output).unwrap().len() as u64,
-        process_count: u32::from(matches!(runtime, RuntimeKind::Script | RuntimeKind::Mcp)),
-        ..ResourceUsage::default()
-    };
+    let usage = ResourceUsage::default()
+        .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64)
+        .set_process_count(u32::from(matches!(
+            runtime,
+            RuntimeKind::Script | RuntimeKind::Mcp
+        )));
     let reservation = governor
         .reserve(scope, estimate)
         .map_err(|_| dispatch_error_for_runtime(runtime, RuntimeDispatchErrorKind::Resource))?;

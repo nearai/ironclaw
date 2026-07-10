@@ -786,11 +786,9 @@ fn trigger_error_kind(error: &TriggerError) -> &'static str {
 }
 
 fn elapsed_usage_with_bytes(started: Instant, output_bytes: u64) -> ResourceUsage {
-    ResourceUsage {
-        wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        output_bytes,
-        ..ResourceUsage::default()
-    }
+    ResourceUsage::default()
+        .set_wall_clock_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+        .set_output_bytes(output_bytes)
 }
 
 #[cfg(test)]

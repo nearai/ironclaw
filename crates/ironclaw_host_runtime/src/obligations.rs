@@ -2367,10 +2367,7 @@ mod tests {
         let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
         let capability_id = capability_id();
         let handle = SecretHandle::new("api_token").unwrap();
-        let estimate = ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        };
+        let estimate = ResourceEstimate::default().set_concurrency_slots(1);
         secret_store
             .put(
                 context.resource_scope.clone(),

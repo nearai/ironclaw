@@ -37,8 +37,7 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
-// Durable filesystem-backed idempotency ledger (folded in from the former
-// `ironclaw_product_workflow_storage` crate). Gated behind `storage` so the
+// Durable filesystem-backed idempotency ledger. Gated behind `storage` so the
 // facade surface stays free of the `ironclaw_filesystem` dependency unless a
 // consumer opts into a durable backend.
 #[cfg(feature = "storage")]

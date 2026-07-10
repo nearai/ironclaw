@@ -61,6 +61,10 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
+  const finalReplyState =
+    role === "assistant" && typeof message.isFinalReply === "boolean"
+      ? String(message.isFinalReply)
+      : undefined;
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] = React.useState(null);
@@ -130,6 +134,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   return (
     <div
       data-testid={`msg-${role}`}
+      data-final-reply={finalReplyState}
       className={["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
       <div className={["flex min-w-0 flex-col", bubbleWidthClass].join(" ")}>

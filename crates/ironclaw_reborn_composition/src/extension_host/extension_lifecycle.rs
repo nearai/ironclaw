@@ -32,6 +32,7 @@ use ironclaw_product_workflow::{
 use tokio::sync::Mutex;
 
 use crate::RebornProductAuthServices;
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 /// Narrow lifecycle-cleanup port over product-auth so extension removal can
 /// revoke the removed extension's exclusively-owned reusable credential without
@@ -1449,12 +1450,11 @@ fn prepare_install(
             reason: format!("host port catalog rejected extension install: {error}"),
         }
     })?;
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("host API contract registry rejected extension install: {error}"),
-            }
-        })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host API contract registry rejected extension install: {error}"),
+        }
+    })?;
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
         ManifestSource::HostBundled,
@@ -1493,12 +1493,11 @@ fn prepare_manifest_migration(
             reason: format!("host port catalog rejected manifest migration: {error}"),
         }
     })?;
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("host API contract registry rejected manifest migration: {error}"),
-            }
-        })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host API contract registry rejected manifest migration: {error}"),
+        }
+    })?;
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
         ManifestSource::HostBundled,
@@ -5686,8 +5685,7 @@ output_schema_ref = "schemas/search.output.json"
     ) -> ExtensionManifestRecord {
         let host_ports =
             ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
-        let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
-            .expect("host API contracts");
+        let contracts = product_extension_host_api_contract_registry().expect("host API contracts");
         ExtensionManifestRecord::from_toml_with_contracts(
             manifest_toml,
             source,

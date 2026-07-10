@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Outbound egress and projection subscription policy storage for IronClaw Reborn"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [features]
 default = []
 libsql = ["dep:libsql"]

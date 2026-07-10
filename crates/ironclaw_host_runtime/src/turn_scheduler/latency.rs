@@ -119,27 +119,45 @@ pub(super) fn notify_queued_run_result<E>(
     }
 }
 
-pub(super) fn claim_next_run_result<E>(
+pub(super) fn claim_next_runs_result(
     scope_filter: Option<&ScopeFields>,
     started_at: Option<Instant>,
-    claim: &Result<Option<ClaimedTurnRun>, E>,
+    claimed_runs: &[ClaimedTurnRun],
 ) {
-    match claim {
-        Ok(Some(claimed)) => trace_ok(
-            "claim_next_run",
-            Some(&ScopeFields::from_scope(&claimed.state.scope)),
-            Some(claimed.state.run_id),
-            started_at,
-        ),
-        Ok(None) => trace_ok("claim_next_run_empty", scope_filter, None, started_at),
-        Err(_) => trace_error(
-            "claim_next_run",
-            scope_filter,
-            None,
-            started_at,
-            "claim_error",
-        ),
-    }
+    let Some(first) = claimed_runs.first() else {
+        trace_ok("claim_next_runs_empty", scope_filter, None, started_at);
+        return;
+    };
+    let run_id = first.state.run_id;
+    let scope = ScopeFields::from_scope(&first.state.scope);
+    let claimed_count = claimed_runs.len();
+    let run_id = run_id.to_string();
+    ironclaw_observability::live_latency_trace_ok!(
+        "turn_scheduler",
+        "claim_next_runs",
+        started_at,
+        tenant_id = scope.tenant_id.as_str(),
+        agent_id = scope.agent_id.as_str(),
+        project_id = scope.project_id.as_str(),
+        thread_id = scope.thread_id.as_str(),
+        owner_user_id = scope.owner_user_id.as_str(),
+        run_id = run_id.as_str(),
+        claimed_count,
+        "turn scheduler batch claim completed",
+    );
+}
+
+pub(super) fn claim_next_runs_error(
+    scope_filter: Option<&ScopeFields>,
+    started_at: Option<Instant>,
+) {
+    trace_error(
+        "claim_next_runs",
+        scope_filter,
+        None,
+        started_at,
+        "claim_error",
+    );
 }
 
 fn trace_ok(

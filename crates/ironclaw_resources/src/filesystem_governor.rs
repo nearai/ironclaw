@@ -92,6 +92,13 @@ where
         self
     }
 
+    /// Load and replay the durable governor state before hot-path
+    /// reservations arrive.
+    pub fn warm_authority(&self) -> Result<(), ResourceError> {
+        self.authority()?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn with_compaction_interval(mut self, interval: usize) -> Self {
         self.compaction_interval = interval.max(1);
@@ -649,6 +656,7 @@ mod tests {
         }
 
         let reloaded = FilesystemResourceGovernor::new(scoped);
+        reloaded.warm_authority().unwrap();
         let snapshot = reloaded.account_snapshot(&account).unwrap().unwrap();
         assert_eq!(snapshot.ledger.spent.usd, dec!(0.25));
         assert_eq!(snapshot.ledger.reserved.usd, dec!(0));

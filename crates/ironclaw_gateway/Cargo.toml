@@ -7,6 +7,9 @@ description = "Gateway frontend assets, layout configuration, and widget extensi
 license = "MIT OR Apache-2.0"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "legacy"
+
 [package.metadata.dist]
 dist = false
 

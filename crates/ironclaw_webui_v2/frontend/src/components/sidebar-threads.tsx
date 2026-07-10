@@ -18,6 +18,7 @@ import {
   formatThreadActivityTooltip,
   threadActivityIso,
 } from "../lib/thread-meta";
+import { displaySidebarTitle } from "../lib/thread-title";
 import { cn } from "../utils/cn";
 
 /* Single source of truth for how a thread state renders in the sidebar.
@@ -74,6 +75,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
   const timeLabel = formatThreadActivityLabel(activityIso);
   const timeTitle = formatThreadActivityTooltip(activityIso);
   const presentationLabel = presentation ? t(presentation.labelKey) : "";
+  const title = displaySidebarTitle(thread, t("notifications.approval.untitled"));
 
   const handleDelete = React.useCallback(
     (event) => {
@@ -117,7 +119,7 @@ function ThreadItem({ thread, isActive, isPinned, presentation, onSelect, onDele
       >
         <div className="flex w-full items-center gap-1.5">
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug">
-            {thread.title || t("thread.fallback", { id: thread.id.slice(0, 8) })}
+            {title}
           </span>
           {presentation &&
           (<span
@@ -224,7 +226,7 @@ export function SidebarThreads({
     const q = query.trim().toLowerCase();
     const filtered = q
       ? threads.filter((thread) =>
-          (thread.title || thread.id || "").toLowerCase().includes(q)
+          displaySidebarTitle(thread, "").toLowerCase().includes(q)
         )
       : threads;
 

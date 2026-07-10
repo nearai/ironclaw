@@ -21,7 +21,7 @@ use chrono::Utc;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
     FilesystemOperation, Filter, InMemoryBackend, LocalFilesystem, Page, RecordVersion,
-    RootFilesystem, ScopedFilesystem, StorageTxn, TxnCapability, VersionedEntry,
+    RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn, TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -160,6 +160,99 @@ async fn filesystem_delete_thread_invalidates_thread_index_cache() {
         .collect();
     assert!(ids.contains(&&keep.thread_id));
     assert!(!ids.contains(&&delete.thread_id));
+}
+
+#[tokio::test]
+async fn filesystem_first_context_window_uses_one_shot_accepted_message_cache() {
+    let backend = Arc::new(QueryCountingBackend::new());
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-first-context-window-cache",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("first-context-window-cache");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-first-context-window-cache").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-first-context-window-cache".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-first-context-window-cache".into()),
+            content: MessageContent::text("first prompt should be hot"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(accepted.sequence, 1);
+
+    service
+        .mark_message_submitted(
+            &request_scope,
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-first-context-window-cache".into(),
+            "run-first-context-window-cache".into(),
+        )
+        .await
+        .unwrap();
+    let query_count_after_submit = backend.query_count();
+    let get_count_after_submit = backend.get_count();
+
+    let first_window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first_window.messages.len(), 1);
+    assert_eq!(
+        first_window.messages[0].content,
+        "first prompt should be hot"
+    );
+    assert_eq!(
+        backend.query_count(),
+        query_count_after_submit,
+        "the immediate first-turn context load should consume the submitted message cache"
+    );
+    assert_eq!(
+        backend.get_count(),
+        get_count_after_submit,
+        "the immediate first-turn context load should not re-read the thread record"
+    );
+
+    let second_window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(second_window.messages.len(), 1);
+    assert!(
+        backend.query_count() > query_count_after_submit,
+        "the submitted-message context cache must be one-shot, not a transcript source of truth"
+    );
+    assert!(
+        backend.get_count() > get_count_after_submit,
+        "the submitted-message context cache must be one-shot, not a thread existence shortcut"
+    );
 }
 
 #[tokio::test]
@@ -2839,6 +2932,30 @@ impl LookupIndexReadFailureBackend {
     }
 }
 
+struct QueryCountingBackend {
+    inner: InMemoryBackend,
+    query_count: AtomicUsize,
+    get_count: AtomicUsize,
+}
+
+impl QueryCountingBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            query_count: AtomicUsize::new(0),
+            get_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn query_count(&self) -> usize {
+        self.query_count.load(Ordering::SeqCst)
+    }
+
+    fn get_count(&self) -> usize {
+        self.get_count.load(Ordering::SeqCst)
+    }
+}
+
 struct FailOnceThreadRecordReadBackend {
     inner: InMemoryBackend,
     thread_id: String,
@@ -3038,6 +3155,57 @@ impl RootFilesystem for LookupIndexReadFailureBackend {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for QueryCountingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.get_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.query_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
     }
 }
 
