@@ -280,7 +280,11 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
             "Slack own-status readback: agent reports the user's current "
             "status text (pins dropped status fields + self-identity)"
         ),
-        "gate": "requires live Slack personal OAuth with users.profile:write",
+        "gate": (
+            "requires live Slack personal OAuth and the manually-set OOO "
+            "canary status fixture on the QA account (read-verify; the "
+            "probe never writes a status)"
+        ),
     },
     "qa_10c_slack_thread_replies": {
         "rows": ["10C"],

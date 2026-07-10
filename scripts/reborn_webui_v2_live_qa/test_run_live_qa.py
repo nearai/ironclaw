@@ -3978,43 +3978,50 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(run_live_qa._slack_non_member_public_channels({}), [])
 
-    def test_slack_status_profile_shapes_set_and_clear(self):
+    def test_status_code_tokens_match_hyphenated_codes_only(self):
         self.assertEqual(
-            run_live_qa._slack_status_profile("OOO_123 back July 20", ":palm_tree:"),
-            {
-                "status_text": "OOO_123 back July 20",
-                "status_emoji": ":palm_tree:",
-                "status_expiration": 0,
-            },
+            run_live_qa._status_code_tokens(
+                "OOO-CANARY-FIXTURE — back July 20"
+            ),
+            ["OOO-CANARY-FIXTURE"],
         )
-        # The restore path must CLEAR the status (empty text/emoji, no
-        # expiration), not merely rewrite it.
+        # Prose hyphens, lowercase echoes, and un-hyphenated caps never count
+        # as code tokens — only ALL-CAPS/digit segments joined by hyphens.
         self.assertEqual(
-            run_live_qa._slack_status_profile("", "", 0),
-            {"status_text": "", "status_emoji": "", "status_expiration": 0},
+            run_live_qa._status_code_tokens(
+                "out-of-office until JULY ooo-canary-fixture"
+            ),
+            [],
         )
+        self.assertEqual(run_live_qa._status_code_tokens(""), [])
 
-    def test_qa_10b_fails_when_status_restore_fails(self):
-        # A failed users.profile.set restore leaves the canary status live on
-        # the real account: the case must go red even when the readback arm
-        # itself passed — a green must never mask an un-restored status.
-        def drive(restore_ok: bool) -> run_live_qa.ProbeResult:
-            calls: list[tuple[str, str]] = []
+    def test_qa_10b_reads_manually_set_status_fixture(self):
+        # Read-verify mode: the QA account carries a manually-set permanent
+        # OOO status. The probe reads ground truth via users.info (it never
+        # writes), fails the precondition when no status is set, and the
+        # reply must quote the hyphenated code token verbatim — a paraphrase
+        # that drops the code is a red even when other words match.
+        fixture = "OOO-CANARY-FIXTURE — back July 20"
 
-            async def fake_set_own_status(_token, text, emoji, expiration=0):
-                calls.append((text, emoji))
-                if text:
-                    return {"ok": True}
-                if restore_ok:
-                    return {"ok": True}
-                return {"ok": False, "error": "ratelimited"}
+        def drive(
+            status_text: str, reply_form: str
+        ) -> tuple[run_live_qa.ProbeResult, int]:
+            async def fake_auth_identity(_token):
+                return {"ok": True, "user_id": "U0QAUSER01"}
+
+            async def fake_api_get(_token, method, params=None):
+                self.assertEqual(method, "users.info")
+                self.assertEqual((params or {}).get("user"), "U0QAUSER01")
+                return {
+                    "ok": True,
+                    "user": {"profile": {"status_text": status_text}},
+                }
+
+            chat_calls: list[dict[str, object]] = []
 
             async def fake_chat_reply(_ctx, **kwargs):
-                extra_details = kwargs["extra_details"]
-                reply = (
-                    f"Your status says: {extra_details['status_text']} "
-                    f"{kwargs['answer_marker']}"
-                )
+                chat_calls.append(kwargs)
+                reply = f"{reply_form} {kwargs['answer_marker']}"
                 return (
                     run_live_qa.ProbeResult(
                         provider="test",
@@ -4031,8 +4038,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             with (
                 patch.object(
                     run_live_qa,
-                    "_slack_set_own_status",
-                    side_effect=fake_set_own_status,
+                    "_slack_auth_identity",
+                    side_effect=fake_auth_identity,
+                ),
+                patch.object(
+                    run_live_qa, "_slack_api_get", side_effect=fake_api_get
                 ),
                 patch.object(
                     run_live_qa,
@@ -4043,20 +4053,39 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 result = asyncio.run(
                     run_live_qa.case_qa_10b_slack_ooo_status(ctx)
                 )
-            # The finally block always attempts the clear form last.
-            self.assertEqual(calls[-1], ("", ""))
-            return result
+            return result, len(chat_calls)
 
-        green = drive(restore_ok=True)
-        self.assertTrue(green.success)
-        self.assertTrue(green.details["status_restored"])
-
-        red = drive(restore_ok=False)
-        self.assertFalse(red.success)
-        self.assertFalse(red.details["status_restored"])
-        self.assertEqual(red.details["status_restore_error"], "ratelimited")
+        # No status set: the distinct precondition fires BEFORE any chat
+        # turn is burned.
+        empty, chat_turns = drive("", "irrelevant")
+        self.assertFalse(empty.success)
         self.assertIn(
-            "canary status restore failed", str(red.details["error"])
+            "probe precondition failed: no status is set on the QA account "
+            "— restore the OOO canary status fixture",
+            str(empty.details.get("error")),
+        )
+        self.assertEqual(chat_turns, 0)
+
+        # Reply quotes the fixture (code token verbatim): green, with the
+        # ground truth recorded in details.
+        green, _ = drive(fixture, f"Your status says: {fixture}")
+        self.assertTrue(green.success)
+        self.assertEqual(green.details["status_text"], fixture)
+        self.assertEqual(
+            green.details["status_code_tokens"], ["OOO-CANARY-FIXTURE"]
+        )
+        self.assertTrue(green.details["status_token_matched"])
+
+        # Paraphrase that drops the code token: red even though word tokens
+        # ("back", "july") match.
+        red, _ = drive(fixture, "You are OOO and back July 20")
+        self.assertFalse(red.success)
+        self.assertEqual(
+            red.details["missing_status_code_tokens"], ["OOO-CANARY-FIXTURE"]
+        )
+        self.assertIn(
+            "reply lacked the exact status code token(s)",
+            str(red.details.get("error")),
         )
 
     def test_slack_second_user_token_reads_optional_env_and_asserts_loudly(self):
@@ -4138,11 +4167,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "no-self-identity gap",
             ),
             run_live_qa.case_qa_10b_slack_ooo_status: (
-                "OOO_",
-                "missing_scope",
-                "users.profile:write",
-                "finally:",
-                '_slack_set_own_status(personal_token, "", "")',
+                # Read-verify mode: ground truth comes from users.info on the
+                # manually-set fixture — the probe must never write a status.
+                "_slack_user_status_text",
+                "users.info",
+                "no status is set on the QA account ",
+                "restore the OOO canary status fixture",
+                "_status_code_tokens",
+                "_name_token_in_text",
             ),
             run_live_qa.case_qa_10c_slack_thread_replies: (
                 "THREADROOT_",
@@ -4210,7 +4242,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             blank_env[name] = ""
             blank_env[f"{name}_PATH"] = ""
-        results: dict[str, run_live_qa.ProbeResult] = {}
         for case_fn in (
             run_live_qa.case_qa_10a_slack_self_attribution,
             run_live_qa.case_qa_10b_slack_ooo_status,
@@ -4231,12 +4262,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     str(result.details.get("error")),
                     case_fn.__name__,
                 )
-                results[case_fn.__name__] = result
-        # The status probe must not report a restore it never attempted.
-        self.assertNotIn(
-            "status_restored",
-            results["case_qa_10b_slack_ooo_status"].details,
-        )
 
     def test_qa_10_seeding_and_api_helpers_are_guarded(self):
         import inspect
