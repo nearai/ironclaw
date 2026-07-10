@@ -12,7 +12,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_conversations::InMemoryConversationServices;
+#[cfg(feature = "test-support")]
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
+#[cfg(feature = "test-support")]
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
@@ -447,6 +451,54 @@ impl SlackHostBetaMounts {
                 ),
             );
         }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl SlackPersonalOAuthBindingConfig {
+    /// Build the same binding/lifecycle ports used by production around an
+    /// in-memory host-state store for caller-level OAuth route tests.
+    pub fn in_memory_for_tests(
+        tenant_id: TenantId,
+        installation_id: AdapterInstallationId,
+    ) -> Result<Self, String> {
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/tenant-shared").map_err(|error| error.to_string())?,
+            VirtualPath::new("/tenants/test/shared").map_err(|error| error.to_string())?,
+            MountPermissions::read_write_list_delete(),
+        )])
+        .map_err(|error| error.to_string())?;
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::default()),
+            view,
+        ));
+        let state = Arc::new(FilesystemSlackHostState::new(
+            filesystem,
+            tenant_id.clone(),
+            UserId::new("user:test-host").map_err(|error| error.to_string())?,
+            AgentId::new("agent:test-host").map_err(|error| error.to_string())?,
+            None,
+        ));
+        let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
+        let binding_service: Arc<dyn SlackPersonalUserBinder> =
+            Arc::new(SlackPersonalUserBindingService::new(
+                [SlackPersonalBindingInstallation {
+                    tenant_id,
+                    installation_id: installation_id.clone(),
+                    selector: SlackInstallationSelector::app_team("A-test", "T-test"),
+                }],
+                binding_store,
+            ));
+        let connection_scope = SlackPersonalConnectionScope { installation_id };
+
+        Ok(Self::new(
+            binding_service,
+            Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                connection_scope,
+            ))),
+            state.clone(),
+            state,
+        ))
     }
 }
 

@@ -14,6 +14,7 @@ mod oauth;
 #[cfg(test)]
 mod oauth_start_tests;
 
+#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) use oauth::{
     CallbackScopeResolution, OAuthCallbackDescriptor, OAuthCallbackTerminalHookFuture,
     oauth_provider_callback_handler,
@@ -212,6 +213,7 @@ impl ProductAuthRouteState {
         self
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn product_auth_services(&self) -> &RebornProductAuthServices {
         &self.product_auth
     }

@@ -381,8 +381,7 @@ mod tests {
     fn legacy_process_record_without_authenticated_actor_deserializes() {
         let invocation_id = InvocationId::new();
         let scope =
-            ResourceScope::local_default(UserId::new("subject").unwrap(), invocation_id.clone())
-                .unwrap();
+            ResourceScope::local_default(UserId::new("subject").unwrap(), invocation_id).unwrap();
         let record = ProcessRecord {
             process_id: ProcessId::new(),
             parent_process_id: None,
