@@ -5433,6 +5433,58 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "matched_product_rate",
             )
 
+    def test_case_inference_usage_charges_cache_reads_at_cache_rate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            (output_dir / "ironclaw-reborn-serve.stderr.log").write_text(
+                "--- ironclaw-reborn serve start 2026-07-10T12:00:00Z ---\n"
+                "INFO REBORN_INFERENCE_USAGE operation=provider_complete_with_tools "
+                "model=deepseek-ai/DeepSeek-V4-Flash input_tokens=100 "
+                "output_tokens=20 cache_read_input_tokens=40 "
+                "cache_creation_input_tokens=0 input_usd_per_token=0.00000014 "
+                "cache_read_input_usd_per_token=0.0000000028 "
+                "output_usd_per_token=0.00000028 estimated_usd=0.000014112\n",
+                encoding="utf-8",
+            )
+            result = run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:test",
+                success=True,
+                latency_ms=1,
+                details={
+                    "semantic_judge": {
+                        "inference_usage": {
+                            "source": "semantic_judge",
+                            "model": "deepseek-ai/DeepSeek-V4-Flash",
+                            "input_tokens": 50,
+                            "output_tokens": 10,
+                            "cache_read_input_tokens": 20,
+                            "cache_creation_input_tokens": 0,
+                        }
+                    }
+                },
+            )
+
+            summary = run_live_qa._case_inference_usage(output_dir, result)
+
+            self.assertEqual(summary["call_count"], 2)
+            self.assertEqual(summary["input_tokens"], 150)
+            self.assertEqual(summary["cache_read_input_tokens"], 60)
+            self.assertEqual(summary["output_tokens"], 30)
+            self.assertEqual(summary["estimated_usd"], "0.0000211680")
+            self.assertEqual(
+                summary["events"][0]["cache_read_input_usd_per_token"],
+                "2.8E-9",
+            )
+            self.assertEqual(
+                summary["events"][1]["cache_read_input_usd_per_token"],
+                "2.8E-9",
+            )
+            self.assertEqual(
+                summary["events"][1]["pricing_source"],
+                "matched_product_rate",
+            )
+
     def test_case_inference_usage_preserves_multiple_semantic_judge_calls(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)

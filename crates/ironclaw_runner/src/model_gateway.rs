@@ -75,6 +75,7 @@ const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or di
 struct ModelUsageContext {
     model: String,
     input_usd_per_token: Decimal,
+    cache_read_input_usd_per_token: Option<Decimal>,
     output_usd_per_token: Decimal,
 }
 
@@ -99,6 +100,19 @@ fn is_explicit_free_model(model: &str) -> bool {
     model.ends_with(":free") || model == "openrouter/free" || model == "free"
 }
 
+fn cache_read_input_rate_for_model(model: &str) -> Option<Decimal> {
+    let id = model.rsplit('/').next().unwrap_or(model);
+    if id.eq_ignore_ascii_case("deepseek-v4-flash") {
+        Some(Decimal::new(28, 10))
+    } else {
+        None
+    }
+}
+
+fn locked_usage_rates_for_model(model: &str) -> Option<(Decimal, Decimal)> {
+    cache_read_input_rate_for_model(model).and_then(|_| model_cost(model))
+}
+
 fn model_usage_context<P: LlmProvider + ?Sized>(
     provider: &P,
     model_override: Option<&str>,
@@ -107,16 +121,37 @@ fn model_usage_context<P: LlmProvider + ?Sized>(
     let effective_model = normalized_request_model_override(model_override)
         .map(str::to_string)
         .unwrap_or_else(|| active_model.clone());
-    let (input_usd_per_token, output_usd_per_token) = if effective_model == active_model {
-        provider.cost_per_token()
-    } else {
-        fallback_usage_rates_for_model(&effective_model)
-    };
+    let (input_usd_per_token, output_usd_per_token) =
+        if let Some(rates) = locked_usage_rates_for_model(&effective_model) {
+            rates
+        } else if effective_model == active_model {
+            provider.cost_per_token()
+        } else {
+            fallback_usage_rates_for_model(&effective_model)
+        };
+    let cache_read_input_usd_per_token = cache_read_input_rate_for_model(&effective_model);
     ModelUsageContext {
         model: effective_model,
         input_usd_per_token,
+        cache_read_input_usd_per_token,
         output_usd_per_token,
     }
+}
+
+fn estimate_model_usage_usd(
+    usage: &ModelUsageContext,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+) -> Decimal {
+    let cached_input_tokens = cache_read_input_tokens.min(input_tokens);
+    let uncached_input_tokens = input_tokens.saturating_sub(cached_input_tokens);
+    let cache_read_input_rate = usage
+        .cache_read_input_usd_per_token
+        .unwrap_or(usage.input_usd_per_token);
+    usage.input_usd_per_token * Decimal::from(uncached_input_tokens)
+        + cache_read_input_rate * Decimal::from(cached_input_tokens)
+        + usage.output_usd_per_token * Decimal::from(output_tokens)
 }
 
 fn trace_model_usage(
@@ -130,11 +165,14 @@ fn trace_model_usage(
     if !tracing::enabled!(target: MODEL_USAGE_TARGET, tracing::Level::DEBUG) {
         return;
     }
-    let estimated_usd = usage.input_usd_per_token * Decimal::from(input_tokens)
-        + usage.output_usd_per_token * Decimal::from(output_tokens);
+    let cache_read_input_usd_per_token = usage
+        .cache_read_input_usd_per_token
+        .unwrap_or(usage.input_usd_per_token);
+    let estimated_usd =
+        estimate_model_usage_usd(usage, input_tokens, output_tokens, cache_read_input_tokens);
     debug!(
         target: MODEL_USAGE_TARGET,
-        "REBORN_INFERENCE_USAGE operation={} model={} usage_available=true input_tokens={} output_tokens={} cache_read_input_tokens={} cache_creation_input_tokens={} input_usd_per_token={} output_usd_per_token={} estimated_usd={}",
+        "REBORN_INFERENCE_USAGE operation={} model={} usage_available=true input_tokens={} output_tokens={} cache_read_input_tokens={} cache_creation_input_tokens={} input_usd_per_token={} cache_read_input_usd_per_token={} output_usd_per_token={} estimated_usd={}",
         operation,
         usage.model,
         input_tokens,
@@ -142,6 +180,7 @@ fn trace_model_usage(
         cache_read_input_tokens,
         cache_creation_input_tokens,
         usage.input_usd_per_token,
+        cache_read_input_usd_per_token,
         usage.output_usd_per_token,
         estimated_usd,
     );
@@ -2547,6 +2586,34 @@ mod tests {
             description: String::new(),
             parameters: serde_json::json!({}),
         }
+    }
+
+    #[test]
+    fn estimate_model_usage_charges_cache_reads_at_cache_rate() {
+        let usage = ModelUsageContext {
+            model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+            input_usd_per_token: Decimal::new(14, 8),
+            cache_read_input_usd_per_token: Some(Decimal::new(28, 10)),
+            output_usd_per_token: Decimal::new(28, 8),
+        };
+
+        let cost = estimate_model_usage_usd(&usage, 100, 20, 40);
+
+        assert_eq!(cost, Decimal::new(14112, 9));
+    }
+
+    #[test]
+    fn estimate_model_usage_clamps_cache_reads_to_input_tokens() {
+        let usage = ModelUsageContext {
+            model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+            input_usd_per_token: Decimal::new(14, 8),
+            cache_read_input_usd_per_token: Some(Decimal::new(28, 10)),
+            output_usd_per_token: Decimal::new(28, 8),
+        };
+
+        let cost = estimate_model_usage_usd(&usage, 10, 0, 40);
+
+        assert_eq!(cost, Decimal::new(28, 9));
     }
 
     #[test]

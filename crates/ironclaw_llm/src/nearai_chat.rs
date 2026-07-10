@@ -2928,14 +2928,14 @@ data: [DONE]
         let provider = NearAiChatProvider::new(cfg, test_session()).expect("provider");
 
         let (input, output) = provider.cost_per_token();
-        let (default_in, default_out) = costs::default_cost();
-        assert_eq!(input, default_in);
-        assert_eq!(output, default_out);
+        assert_eq!(input, dec!(0.00000014));
+        assert_eq!(output, dec!(0.00000028));
 
         provider
             .set_model("Qwen/Qwen3-32B")
             .expect("set active model");
         let (input, output) = provider.cost_per_token();
+        let (default_in, default_out) = costs::default_cost();
         assert_eq!(input, default_in);
         assert_eq!(output, default_out);
     }

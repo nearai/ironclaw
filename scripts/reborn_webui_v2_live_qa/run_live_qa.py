@@ -6979,29 +6979,31 @@ def _product_inference_usage(output_dir: Path) -> list[dict[str, object]]:
                 )
                 continue
             input_rate = _decimal(fields.get("input_usd_per_token"))
+            cache_read_input_rate = _decimal(fields.get("cache_read_input_usd_per_token"))
             output_rate = _decimal(fields.get("output_usd_per_token"))
             estimated_usd = _decimal(fields.get("estimated_usd"))
             if input_rate is None or output_rate is None or estimated_usd is None:
                 continue
-            events.append(
-                {
-                    "source": "product",
-                    "operation": str(fields.get("operation") or "unknown"),
-                    "model": str(fields.get("model") or "unknown"),
-                    "input_tokens": _non_negative_int(fields.get("input_tokens")),
-                    "output_tokens": _non_negative_int(fields.get("output_tokens")),
-                    "cache_read_input_tokens": _non_negative_int(
-                        fields.get("cache_read_input_tokens")
-                    ),
-                    "cache_creation_input_tokens": _non_negative_int(
-                        fields.get("cache_creation_input_tokens")
-                    ),
-                    "input_usd_per_token": str(input_rate),
-                    "output_usd_per_token": str(output_rate),
-                    "estimated_usd": str(estimated_usd),
-                    "pricing_source": "provider_active_rate",
-                }
-            )
+            event = {
+                "source": "product",
+                "operation": str(fields.get("operation") or "unknown"),
+                "model": str(fields.get("model") or "unknown"),
+                "input_tokens": _non_negative_int(fields.get("input_tokens")),
+                "output_tokens": _non_negative_int(fields.get("output_tokens")),
+                "cache_read_input_tokens": _non_negative_int(
+                    fields.get("cache_read_input_tokens")
+                ),
+                "cache_creation_input_tokens": _non_negative_int(
+                    fields.get("cache_creation_input_tokens")
+                ),
+                "input_usd_per_token": str(input_rate),
+                "output_usd_per_token": str(output_rate),
+                "estimated_usd": str(estimated_usd),
+                "pricing_source": "provider_active_rate",
+            }
+            if cache_read_input_rate is not None:
+                event["cache_read_input_usd_per_token"] = str(cache_read_input_rate)
+            events.append(event)
     return events
 
 
@@ -7020,12 +7022,17 @@ def _semantic_judge_usage(value: object) -> list[dict[str, object]]:
 
 
 def _summarize_inference_usage(events: list[dict[str, object]]) -> dict[str, object]:
-    rates_by_model: dict[str, tuple[Decimal, Decimal]] = {}
+    rates_by_model: dict[str, tuple[Decimal, Decimal, Decimal | None]] = {}
     for event in events:
         input_rate = _decimal(event.get("input_usd_per_token"))
+        cache_read_input_rate = _decimal(event.get("cache_read_input_usd_per_token"))
         output_rate = _decimal(event.get("output_usd_per_token"))
         if event.get("source") == "product" and input_rate is not None and output_rate is not None:
-            rates_by_model[str(event.get("model") or "unknown")] = (input_rate, output_rate)
+            rates_by_model[str(event.get("model") or "unknown")] = (
+                input_rate,
+                output_rate,
+                cache_read_input_rate,
+            )
 
     priced_events: list[dict[str, object]] = []
     unpriced_calls = 0
@@ -7040,11 +7047,21 @@ def _summarize_inference_usage(events: list[dict[str, object]]) -> dict[str, obj
         ):
             rates = rates_by_model.get(str(event.get("model") or "unknown"))
             if rates is not None:
+                input_tokens = _non_negative_int(event.get("input_tokens"))
+                cache_read_input_tokens = min(
+                    _non_negative_int(event.get("cache_read_input_tokens")),
+                    input_tokens,
+                )
+                uncached_input_tokens = max(input_tokens - cache_read_input_tokens, 0)
+                cache_read_input_rate = rates[2] or rates[0]
                 cost = (
-                    Decimal(_non_negative_int(event.get("input_tokens"))) * rates[0]
+                    Decimal(uncached_input_tokens) * rates[0]
+                    + Decimal(cache_read_input_tokens) * cache_read_input_rate
                     + Decimal(_non_negative_int(event.get("output_tokens"))) * rates[1]
                 )
                 event["input_usd_per_token"] = str(rates[0])
+                if rates[2] is not None:
+                    event["cache_read_input_usd_per_token"] = str(rates[2])
                 event["output_usd_per_token"] = str(rates[1])
                 event["estimated_usd"] = str(cost)
                 event["pricing_source"] = "matched_product_rate"

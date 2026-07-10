@@ -74,6 +74,9 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
+        // DeepSeek
+        "DeepSeek-V4-Flash" | "deepseek-v4-flash" => Some((dec!(0.00000014), dec!(0.00000028))),
+
         // Ollama / local models -- free
         _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 
@@ -162,6 +165,18 @@ mod tests {
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
+    }
+
+    #[test]
+    fn test_deepseek_v4_flash_uses_remote_pricing_before_local_heuristic() {
+        assert_eq!(
+            model_cost("deepseek-ai/DeepSeek-V4-Flash"),
+            Some((dec!(0.00000014), dec!(0.00000028)))
+        );
+        assert_eq!(
+            model_cost("deepseek-ai/deepseek-v4-flash"),
+            Some((dec!(0.00000014), dec!(0.00000028)))
+        );
     }
 
     #[test]
