@@ -99,7 +99,9 @@ pub enum SlackUserAction {
         /// Channel ID or name (e.g., "#general" or "C1234567890"), or a
         /// DM conversation ID.
         channel: String,
-        /// Message text (supports Slack mrkdwn formatting).
+        /// Message text (supports Slack mrkdwn formatting). To notify
+        /// someone, mention them as `<@U…>` with their real user id —
+        /// a plain `@name` does not notify.
         text: String,
         /// Optional thread timestamp to reply in a thread.
         #[serde(default)]
@@ -258,8 +260,6 @@ pub struct UserInfo {
     pub real_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
     pub is_bot: bool,
     /// IANA timezone (e.g. "America/New_York"). Absent when Slack omits it.
     #[serde(skip_serializing_if = "Option::is_none")]

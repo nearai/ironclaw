@@ -492,7 +492,8 @@ pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
             name: user["name"].as_str().unwrap_or("").to_string(),
             real_name: profile["real_name"].as_str().map(|s| s.to_string()),
             display_name: profile["display_name"].as_str().map(|s| s.to_string()),
-            email: profile["email"].as_str().map(|s| s.to_string()),
+            // No email field: the slack_personal OAuth grant has no
+            // users:read.email scope, so Slack never returns one.
             is_bot: user["is_bot"].as_bool().unwrap_or(false),
             tz: non_empty(&user["tz"]),
             tz_label: non_empty(&user["tz_label"]),

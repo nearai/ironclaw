@@ -74,7 +74,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.get_user_info"
-description = "Get information about a Slack user (name, real name, email when visible); includes presence-relevant profile fields: status text/emoji, timezone, and title. History and DM-list outputs already carry resolved display names; use this for extra fields on a specific user, e.g. before answering whether someone is away or what time it is for them."
+description = "Get information about a Slack user (name, real name); includes presence-relevant profile fields: status text/emoji, timezone, and title. History and DM-list outputs already carry resolved display names; use this for extra fields on a specific user, e.g. before answering whether someone is away or what time it is for them."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -102,7 +102,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "slack.send_message"
-description = "Send a message as you to a channel or DM; it appears to come from your account and requires the chat:write user scope. Use it when messaging someone or posting somewhere is the task the user asked for. The run's final reply (including routine/trigger results) is delivered automatically to the requesting user. Do not use this to deliver your reply or a routine/trigger result back to them — it would arrive twice."
+description = "Send a message as you to a channel or DM; it appears to come from your account and requires the chat:write user scope. Use it when messaging someone or posting somewhere is the task the user asked for. The run's final reply (including routine/trigger results) is delivered automatically to the configured outbound delivery target. Do not use this to deliver your reply or a routine/trigger result — it would arrive twice. To notify someone in the text, use the mention encoding <@U…> with their real user id (e.g. <@U0123ABCD>); a plain @name does not notify anyone."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },

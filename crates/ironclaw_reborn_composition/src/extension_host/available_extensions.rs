@@ -2366,6 +2366,62 @@ mod tests {
             "send_message description must forbid self-delivery of the run's own answer: {}",
             send_message.description
         );
+        // Honesty: a per-trigger delivery_target_id can route the final reply
+        // elsewhere, so the description must name the configured outbound
+        // delivery target, not promise "the requesting user".
+        assert!(
+            send_message
+                .description
+                .contains("configured outbound delivery target"),
+            "send_message description must not promise delivery to the requesting user: {}",
+            send_message.description
+        );
+        assert!(
+            !send_message
+                .description
+                .contains("delivered automatically to the requesting user"),
+            "send_message description must not claim requester-directed delivery: {}",
+            send_message.description
+        );
+        // Mentions: plain @name does not notify anyone on Slack; the model
+        // must be told the <@U…> encoding or pings silently do nothing.
+        assert!(
+            send_message.description.contains("<@U"),
+            "send_message description must document the <@U…> mention encoding: {}",
+            send_message.description
+        );
+    }
+
+    /// Honesty pin: the slack_personal OAuth grant does not include
+    /// users:read.email, so `get_user_info` can never return an email —
+    /// the model-visible description must not promise one.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_get_user_info_description_matches_grantable_scopes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let get_user_info = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_user_info")
+            .expect("slack manifest declares slack.get_user_info");
+        assert!(
+            !get_user_info
+                .description
+                .to_ascii_lowercase()
+                .contains("email"),
+            "get_user_info description must not promise email fields the OAuth grant (no users:read.email) can never return: {}",
+            get_user_info.description
+        );
+        assert!(
+            get_user_info.description.contains("status"),
+            "get_user_info description must keep advertising presence fields: {}",
+            get_user_info.description
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
