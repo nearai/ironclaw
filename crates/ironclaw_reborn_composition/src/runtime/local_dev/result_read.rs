@@ -104,11 +104,7 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
             Ok(available) => available,
             Err(SessionThreadError::UnknownThread { .. }) => false,
             Err(error) => {
-                tracing::debug!(error = %error, "result reader history lookup failed");
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "result reader storage is unavailable",
-                ));
+                return Err(storage_unavailable_error(error, "history lookup"));
             }
         };
         if !reference_is_available {
@@ -131,11 +127,7 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
                 return Ok(unavailable_result_reference());
             }
             Err(error) => {
-                tracing::debug!(error = %error, "result reader storage lookup failed");
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "result reader storage is unavailable",
-                ));
+                return Err(storage_unavailable_error(error, "record lookup"));
             }
         };
         let ironclaw_threads::ToolResultRecordChunk {
@@ -227,6 +219,17 @@ fn non_text_result_content() -> CapabilityOutcome {
     })
 }
 
+fn storage_unavailable_error(
+    error: SessionThreadError,
+    operation: &'static str,
+) -> AgentLoopHostError {
+    tracing::debug!(error = %error, operation, "result reader storage lookup failed");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "result reader storage is unavailable",
+    )
+}
+
 struct ResultReadInput {
     result_ref: String,
     offset: u64,
@@ -261,7 +264,8 @@ fn parse_result_read_input(
             )
         })?
         .to_string();
-    ToolResultReferenceEnvelope::validate_result_ref(&result_ref).map_err(|_| {
+    ToolResultReferenceEnvelope::validate_result_ref(&result_ref).map_err(|error| {
+        tracing::debug!(validation_error = %error, "result reader result reference validation failed");
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "result_read result_ref is invalid",
@@ -304,4 +308,21 @@ fn result_read_input_schema() -> serde_json::Value {
             "max_bytes": {"type": "integer", "minimum": RESULT_READ_MIN_BYTES, "maximum": RESULT_READ_MAX_BYTES}
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_failures_remain_terminal_and_model_safe() {
+        let error = storage_unavailable_error(
+            SessionThreadError::Backend("result reader storage test failure".to_string()),
+            "record lookup",
+        );
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(error.safe_summary, "result reader storage is unavailable");
+        assert!(error.detail.is_none());
+    }
 }

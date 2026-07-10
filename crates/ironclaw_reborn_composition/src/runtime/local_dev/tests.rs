@@ -1902,6 +1902,31 @@ mod tests {
                 if failure.error_kind == CapabilityFailureKind::InvalidInput
         ));
 
+        let invalid_reference_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": "not-a-result-reference",
+                        "offset": 0,
+                        "max_bytes": 8,
+                    }),
+                ),
+            ))
+            .await
+            .expect("invalid result reference still stages for model recovery");
+        let invalid_reference = port
+            .invoke_capability(invocation_for_candidate(&invalid_reference_candidate))
+            .await
+            .expect("invalid result reference remains model-recoverable");
+        assert!(matches!(
+            invalid_reference,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::InvalidInput
+                    && failure.safe_summary == "result_read result_ref is invalid"
+                    && failure.detail.is_none()
+        ));
+
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
@@ -1948,6 +1973,107 @@ mod tests {
         assert_eq!(output["offset"], 10);
         assert_eq!(output["next_offset"], 18);
         assert_eq!(output["total_bytes"], 36);
+        let next_offset = output["next_offset"]
+            .as_u64()
+            .expect("first chunk provides a continuation offset");
+
+        let adjacent_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": original_result_ref.clone(),
+                        "offset": next_offset,
+                        "max_bytes": 8,
+                    }),
+                ),
+            ))
+            .await
+            .expect("adjacent result_read provider call stages");
+        let adjacent = port
+            .invoke_capability(invocation_for_candidate(&adjacent_candidate))
+            .await
+            .expect("adjacent result_read invokes");
+        let adjacent = match adjacent {
+            CapabilityOutcome::Completed(message) => message,
+            outcome => panic!("adjacent result_read should complete, got {outcome:?}"),
+        };
+        let adjacent_output = capability_io
+            .result_output(adjacent.result_ref.as_str())
+            .expect("adjacent result output lookup succeeds")
+            .expect("adjacent result_read output exists");
+        assert_eq!(adjacent_output["content"], "ijklmnop");
+        assert_eq!(adjacent_output["offset"], 18);
+        assert_eq!(adjacent_output["next_offset"], 26);
+        let next_offset = adjacent_output["next_offset"]
+            .as_u64()
+            .expect("adjacent chunk provides a continuation offset");
+
+        let final_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": original_result_ref.clone(),
+                        "offset": next_offset,
+                        "max_bytes": 16,
+                    }),
+                ),
+            ))
+            .await
+            .expect("final result_read provider call stages");
+        let final_chunk = port
+            .invoke_capability(invocation_for_candidate(&final_candidate))
+            .await
+            .expect("final result_read invokes");
+        let final_chunk = match final_chunk {
+            CapabilityOutcome::Completed(message) => message,
+            outcome => panic!("final result_read should complete, got {outcome:?}"),
+        };
+        let final_output = capability_io
+            .result_output(final_chunk.result_ref.as_str())
+            .expect("final result output lookup succeeds")
+            .expect("final result_read output exists");
+        assert_eq!(final_output["content"], "qrstuvwxyz");
+        assert_eq!(final_output["offset"], 26);
+        assert_eq!(final_output["next_offset"], serde_json::Value::Null);
+
+        let missing_result_ref = "result:raw-record-missing".to_string();
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                result_ref: missing_result_ref.clone(),
+                safe_summary: ToolResultSafeSummary::new("missing raw record").expect("summary"),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .expect("finalized reference exists without raw record");
+        let missing_record_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": missing_result_ref,
+                        "offset": 0,
+                        "max_bytes": 8,
+                    }),
+                ),
+            ))
+            .await
+            .expect("missing raw record call stages");
+        let missing_record = port
+            .invoke_capability(invocation_for_candidate(&missing_record_candidate))
+            .await
+            .expect("missing raw record remains model-recoverable");
+        assert!(matches!(
+            missing_record,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::InvalidInput
+                    && failure.safe_summary == "result reference is unavailable in this thread"
+        ));
 
         let binary_result_ref = "result:binary-tool-result".to_string();
         thread_service
