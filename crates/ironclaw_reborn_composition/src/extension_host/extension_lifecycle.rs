@@ -88,6 +88,9 @@ use crate::extension_host::lifecycle::response_with_payload;
 use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
+use crate::extension_host::registered_extension_store::{
+    is_owner_registered, migrate_legacy_owner_layout, resolve_any_owner_for_restore,
+};
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
@@ -200,6 +203,10 @@ pub(crate) async fn restore_extension_lifecycle_state(
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
 ) -> Result<(), ProductWorkflowError> {
+    // Pre-tenant descriptor trees must move under the local default tenant
+    // before the tenant-scoped walkers below run, or those registrations
+    // silently vanish from restore and listing.
+    migrate_legacy_owner_layout(filesystem.as_ref()).await?;
     for installation in installation_store
         .list_installations()
         .await
@@ -212,30 +219,29 @@ pub(crate) async fn restore_extension_lifecycle_state(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
         )?;
-        // A row whose extension id the catalog does not (yet) materialize a
-        // package for — e.g. a placeholder row written by the standalone
-        // v1->Reborn migration tool ahead of catalog package materialization
-        // — must not abort restore for every other installation (#5499
-        // review). `resolve`'s only realistic failure here is "not found";
-        // skip and keep the row (never delete/rewrite persisted state) so it
-        // restores once the catalog gains the package.
-        // A row whose extension id the catalog does not (yet) materialize a
-        // package for — e.g. a placeholder row written by the standalone
-        // v1->Reborn migration tool ahead of catalog package materialization
-        // — must not abort restore for every other installation (#5499
-        // review). `resolve`'s only realistic failure here is "not found";
-        // skip and keep the row (never delete/rewrite persisted state) so it
-        // restores once the catalog gains the package.
+        // The shared catalog never contains `UserRegistered` packages
+        // (boot-leak invariant), so a miss falls back to an any-owner
+        // registered-store lookup. A row neither holds — e.g. a placeholder
+        // row written by the standalone v1->Reborn migration tool ahead of
+        // catalog package materialization, or a registered manifest deleted
+        // on disk — must not abort restore for every other installation
+        // (#5499 review); skip and keep the row (never delete/rewrite
+        // persisted state) so it restores once the package reappears.
         let available = match catalog.resolve(&package_ref) {
             Ok(available) => available,
-            Err(error) => {
-                tracing::warn!(
-                    extension_id = installation.extension_id().as_str(),
-                    installation_id = installation.installation_id().as_str(),
-                    %error,
-                    "skipping extension installation restore: not available in the catalog"
-                );
-                continue;
+            Err(_) => {
+                match resolve_any_owner_for_restore(filesystem.as_ref(), &package_ref).await {
+                    Ok(available) => Arc::new(available),
+                    Err(error) => {
+                        tracing::warn!(
+                            extension_id = installation.extension_id().as_str(),
+                            installation_id = installation.installation_id().as_str(),
+                            %error,
+                            "skipping extension installation restore: not available in the catalog or any registered store"
+                        );
+                        continue;
+                    }
+                }
             }
         };
         if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
@@ -247,7 +253,13 @@ pub(crate) async fn restore_extension_lifecycle_state(
             )
             .await?;
         }
-        materialize_available_extension(filesystem.as_ref(), &available).await?;
+        // Owner-registered manifests already live at their owner-scoped path;
+        // materializing them under `/system/extensions/<id>/` would let the
+        // next boot's catalog scan re-adopt them as first-party (see
+        // `is_owner_registered`).
+        if !is_owner_registered(&available.package.manifest.source) {
+            materialize_available_extension(filesystem.as_ref(), &available).await?;
+        }
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
@@ -799,9 +811,15 @@ impl RebornLocalExtensionManagementPort {
         let plan = prepare_install(available, owner)?;
         self.register_lifecycle_package(&available.package).await?;
 
-        if let Err(error) =
+        // Owner-registered manifests are never materialized under the shared
+        // `/system/extensions/<id>/` directory (mirrors the guard in
+        // `restore_extension_lifecycle_state` — see `is_owner_registered`).
+        let materialize_result = if is_owner_registered(&available.package.manifest.source) {
+            Ok(())
+        } else {
             materialize_available_extension(self.filesystem.as_ref(), available).await
-        {
+        };
+        if let Err(error) = materialize_result {
             if let Err(rollback_error) =
                 self.rollback_lifecycle_install(&available.package.id).await
             {

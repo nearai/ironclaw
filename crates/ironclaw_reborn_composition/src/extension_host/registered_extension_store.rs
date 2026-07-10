@@ -25,8 +25,8 @@ use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId, VirtualPa
 use ironclaw_product_workflow::{LifecyclePackageRef, ProductWorkflowError};
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
-    load_filesystem_packages, package_matches_search,
+    AvailableExtensionPackage, is_internal_extension_package_ref, load_filesystem_packages,
+    package_matches_search,
 };
 
 const REGISTERED_ROOT: &str = "/system/extensions/registered";
@@ -340,21 +340,18 @@ fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
 }
 
 /// The additional (owner-registered) search matches to overlay on top of the
-/// shared catalog's own `catalog.search(query)` results. `scope: None` (no
-/// caller identity — e.g. a boot-time/system caller) contributes no overlay:
-/// registered packages are visible only to their own tenant-owner, never to
-/// an unscoped caller.
+/// shared catalog's own `catalog.search(query)` results. Registered packages
+/// are visible only to their own tenant-owner (`scope`), never to an unscoped
+/// caller — path sharding in [`RegisteredExtensionStore::list_for_scope`] is
+/// the filter.
 pub(crate) async fn search_with_owner_overlay_for_scope<F>(
     fs: &F,
-    scope: Option<&ResourceScope>,
+    scope: &ResourceScope,
     query: &str,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
 {
-    let Some(scope) = scope else {
-        return Ok(Vec::new());
-    };
     let normalized_query = query.trim().to_ascii_lowercase();
     let packages = RegisteredExtensionStore::list_for_scope(fs, scope).await?;
     Ok(packages
@@ -364,25 +361,19 @@ where
         .collect())
 }
 
-/// Resolve one package by ref: shared first-party catalog first, then
-/// `scope`'s registered set. `scope: None` is a caller with no tenant-owner
-/// scope (the boot-time NEAR AI bootstrap installer) and can reach
-/// first-party packages only.
-pub(crate) async fn resolve_with_owner_overlay_for_scope<F>(
-    catalog: &AvailableExtensionCatalog,
+/// Resolve one package by ref from `scope`'s registered set only. Callers try
+/// the shared first-party catalog first (holding its lock only for that
+/// synchronous lookup — never across this function's filesystem awaits) and
+/// fall back here on a miss, since registered packages never enter the shared
+/// catalog (boot-leak invariant).
+pub(crate) async fn resolve_registered_for_scope<F>(
     fs: &F,
-    scope: Option<&ResourceScope>,
+    scope: &ResourceScope,
     package_ref: &LifecyclePackageRef,
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
 {
-    if let Ok(available) = catalog.resolve(package_ref) {
-        return Ok((*available).clone());
-    }
-    let Some(scope) = scope else {
-        return Err(not_found());
-    };
     RegisteredExtensionStore::list_for_scope(fs, scope)
         .await?
         .into_iter()
@@ -392,9 +383,9 @@ where
 
 /// Boot-only restore fallback, reached on a `catalog.resolve()` miss during
 /// `restore_extension_lifecycle_state`. Deliberately any-tenant-owner because
-/// installations carry no owner field yet; never call it from a live
+/// restore walks every tenant's installations; never call it from a live
 /// search/install path, which must stay scoped via
-/// [`resolve_with_owner_overlay_for_scope`].
+/// [`resolve_registered_for_scope`].
 pub(crate) async fn resolve_any_owner_for_restore<F>(
     fs: &F,
     package_ref: &LifecyclePackageRef,
