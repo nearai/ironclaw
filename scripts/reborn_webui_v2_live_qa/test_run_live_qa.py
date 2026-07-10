@@ -1305,9 +1305,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         assert raised_error is not None
         self.assertIn("semantic_judge=", str(raised_error))
         self.assertNotIn("response_excerpt", str(raised_error))
-        self.assertNotIn("The response does not complete the task.", str(raised_error))
+        self.assertIn("The response does not complete the task.", str(raised_error))
         self.assertEqual(raised_error.semantic_judge["completed"], False)
-        self.assertNotIn("reason", raised_error.semantic_judge)
+        self.assertEqual(
+            raised_error.semantic_judge["reason"],
+            "The response does not complete the task.",
+        )
         self.assertNotIn("response_excerpt", raised_error.semantic_judge)
 
     def test_semantic_judge_passed_respects_confidence_threshold(self):

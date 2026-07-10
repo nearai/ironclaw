@@ -1241,6 +1241,9 @@ def _safe_semantic_judge_payload(value: dict[str, object]) -> dict[str, object]:
         safe["completed"] = value["completed"]
     if isinstance(value.get("confidence"), (int, float)):
         safe["confidence"] = value["confidence"]
+    reason = value.get("reason")
+    if isinstance(reason, str):
+        safe["reason"] = reason
     usage = _safe_semantic_judge_usage(value.get("inference_usage"))
     if usage is not None:
         safe["inference_usage"] = usage
