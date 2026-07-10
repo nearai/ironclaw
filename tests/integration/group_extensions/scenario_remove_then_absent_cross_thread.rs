@@ -6,7 +6,7 @@
 //!
 //! `installation_phase` is entirely absent from `extension_search` for a
 //! not-installed extension (confirmed in `extension_lifecycle_capabilities.rs`'s
-//! unit tests). Three threads, different conversation IDs, same
+//! unit tests). Four threads, different conversation IDs, same
 //! `Arc<HostRuntimeCapabilityHarness>`, prove cross-thread removal persistence.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -54,7 +54,27 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_result_contains("\"removed\":true")
         .await?;
 
-    // ── Phase 3: cross-thread search — "notion" must NOT be installed ───────
+    // ── Phase 3: retry removal after it is absent (another conversation) ────
+    let retry_remover = g
+        .thread("ext-remove-phase-retry")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_remove",
+                json!({"extension_id": "notion"}),
+            ),
+            RebornScriptedReply::text("already removed"),
+        ])
+        .build()
+        .await?;
+    retry_remover.submit_turn("remove notion again").await?;
+    retry_remover
+        .assert_tool_invoked("builtin.extension_remove")
+        .await?;
+    retry_remover
+        .assert_tool_result_contains("\"removed\":false")
+        .await?;
+
+    // ── Phase 4: cross-thread search — "notion" must NOT be installed ───────
     let viewer = g
         .thread("ext-remove-phase-viewer")
         .script([

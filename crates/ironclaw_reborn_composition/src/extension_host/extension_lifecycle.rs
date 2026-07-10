@@ -1171,14 +1171,14 @@ impl RebornLocalExtensionManagementPort {
         scope: &ResourceScope,
         authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        // Capture the removed extension's credential providers and id BEFORE
-        // taking the operation lock: `activation_credential_requirements` takes
-        // the same lock, and the manifest is gone once removal succeeds.
+        // Resolve removal metadata from the managed catalog rather than the
+        // installation. Cleanup must still converge when the package is already
+        // absent, while unknown package refs must remain rejected.
+        let available = self.catalog.resolve(&package_ref)?;
+        let removal_summary = available.summary();
         let removed_extension_id = package_ref.id.as_str().to_string();
         let caller = authenticated_actor_user_id.unwrap_or(&scope.user_id);
-        let removed_providers = self
-            .removed_extension_providers(&package_ref, caller)
-            .await?;
+        let removed_providers = Self::removed_extension_providers(available)?;
         if !removed_providers.is_empty() && authenticated_actor_user_id.is_none() {
             return Err(ProductWorkflowError::InvalidBindingRequest {
                 reason: "extension credential cleanup requires an authenticated actor".to_string(),
@@ -1191,13 +1191,26 @@ impl RebornLocalExtensionManagementPort {
         let response = {
             let _operation_guard = self.operation_lock.lock().await;
             self.cleanup_channel_before_remove(
-                &package_ref,
+                &removal_summary,
                 &removal_scope,
                 authenticated_actor_user_id,
-                caller,
             )
             .await?;
-            self.remove_locked(package_ref, caller).await
+            let (extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
+            if self.search_installation(&extension_id).await?.is_some() {
+                self.remove_locked(package_ref, caller).await
+            } else {
+                let mut response = response_with_payload(
+                    Some(package_ref),
+                    LifecyclePhase::Removed,
+                    LifecycleProductPayload::ExtensionRemove { removed: false },
+                );
+                response.message = Some(
+                    "Extension was already absent; connection and credential cleanup completed."
+                        .to_string(),
+                );
+                Ok(response)
+            }
         };
         if response.is_ok() {
             self.revoke_exclusive_credentials(
@@ -1213,17 +1226,11 @@ impl RebornLocalExtensionManagementPort {
 
     async fn cleanup_channel_before_remove(
         &self,
-        package_ref: &LifecyclePackageRef,
+        summary: &LifecycleExtensionSummary,
         scope: &ResourceScope,
         authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
-        caller: &UserId,
     ) -> Result<(), ProductWorkflowError> {
-        let cleanup = self
-            .installed_summaries(caller)
-            .await?
-            .into_iter()
-            .find(|installed| installed.summary.package_ref == *package_ref)
-            .and_then(|installed| removable_channel_cleanup_for_summary(&installed.summary));
+        let cleanup = removable_channel_cleanup_for_summary(summary);
         let Some(cleanup) = cleanup else {
             return Ok(());
         };
@@ -1260,14 +1267,10 @@ impl RebornLocalExtensionManagementPort {
     /// manifest is gone afterward). Discovery fails closed because an empty
     /// result would otherwise bypass authenticated-actor validation and personal
     /// credential cleanup.
-    async fn removed_extension_providers(
-        &self,
-        package_ref: &LifecyclePackageRef,
-        caller: &UserId,
+    fn removed_extension_providers(
+        available: &AvailableExtensionPackage,
     ) -> Result<Vec<AuthProviderId>, ProductWorkflowError> {
-        let requirements = self
-            .activation_credential_requirements(package_ref, caller)
-            .await?;
+        let requirements = package_runtime_credential_auth_requirements(&available.package);
         let mut providers = Vec::new();
         for requirement in requirements {
             let provider = AuthProviderId::new(requirement.provider.as_str()).map_err(|_| {
@@ -4979,9 +4982,10 @@ output_schema_ref = "schemas/run.output.json"
     async fn extension_remove_rejects_uninstalled_ref_without_deleting_files() {
         let (_dir, storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
-            .expect("valid ref");
-        let manifest_path = storage_root.join("system/extensions/fixture/manifest.toml");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "unmanaged-fixture")
+                .expect("valid ref");
+        let manifest_path = storage_root.join("system/extensions/unmanaged-fixture/manifest.toml");
         std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
             .expect("extension directory");
         std::fs::write(&manifest_path, b"unmanaged manifest").expect("write unmanaged file");
@@ -5398,27 +5402,40 @@ output_schema_ref = "schemas/run.output.json"
         let remove = facade
             .execute(
                 lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionRemove { package_ref },
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
             )
             .await
             .expect("remove github via the WebUI facade");
         assert_eq!(remove.phase, LifecyclePhase::Removed);
+        let retry = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("retry removal after github is absent");
+        assert_eq!(retry.phase, LifecyclePhase::Removed);
+        assert!(matches!(
+            retry.payload,
+            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+        ));
 
         let requests = cleanup.requests.lock().expect("cleanup lock");
         assert_eq!(
             requests.len(),
-            1,
-            "the UI-facade removal door must revoke exactly the exclusive github credential"
+            2,
+            "initial removal and an already-absent retry must both revoke the exclusive github credential"
         );
-        assert_eq!(
-            requests[0]
-                .provider
-                .as_ref()
-                .map(|provider| provider.as_str()),
-            Some("github")
-        );
-        assert_eq!(requests[0].extension_id.as_str(), "github");
-        assert_eq!(requests[0].action, SecretCleanupAction::Uninstall);
+        for request in requests.iter() {
+            assert_eq!(
+                request.provider.as_ref().map(|provider| provider.as_str()),
+                Some("github")
+            );
+            assert_eq!(request.extension_id.as_str(), "github");
+            assert_eq!(request.action, SecretCleanupAction::Uninstall);
+        }
     }
 
     #[tokio::test]

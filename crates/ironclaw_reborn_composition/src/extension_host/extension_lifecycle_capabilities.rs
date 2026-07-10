@@ -808,6 +808,9 @@ mod tests {
             .install_extension(expected_caller.clone(), slack_package_ref)
             .await
             .expect("WebUI reinstall succeeds");
+        let mut retry_remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
+        retry_remove_context.authenticated_actor_user_id =
+            remove_context.authenticated_actor_user_id.clone();
         let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
             runtime.services(),
             EXTENSION_REMOVE_CAPABILITY_ID,
@@ -822,19 +825,31 @@ mod tests {
             !slack_package_path.exists(),
             "tool removal deletes the package"
         );
+        let retry_remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
+            runtime.services(),
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            retry_remove_context,
+            serde_json::json!({"extension_id": "slack"}),
+            trust_decision(),
+        )
+        .await
+        .expect("retrying removal after the package is absent succeeds");
+        assert_eq!(retry_remove["payload"]["removed"], false);
+        assert_eq!(retry_remove["phase"], "removed");
 
         assert_eq!(
             channel_connection.disconnects(),
             vec![
                 (expected_caller.clone(), "slack".to_string()),
+                (expected_caller.clone(), "slack".to_string()),
                 (expected_caller, "slack".to_string())
             ],
-            "WebUI and tool removal must run the same actor-scoped Slack cleanup even when status projection is stale"
+            "WebUI, tool removal, and an absent-package retry must run the same actor-scoped Slack cleanup"
         );
         assert_eq!(
             channel_connection.package_present_during_disconnect(),
-            vec![true, true],
-            "both callers must clean up before package removal"
+            vec![true, true, false],
+            "cleanup must also run after the package is already absent"
         );
         runtime.shutdown().await.expect("runtime shutdown");
     }
