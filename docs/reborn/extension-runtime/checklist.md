@@ -220,17 +220,30 @@ Rules — kept short on purpose:
   the engine completes (caller-level test).
 - [ ] TOOL-6 WASM and MCP lanes invoke through `ToolAdapter` with existing
   result/event semantics.
-- [ ] TOOL-7 The five real Slack tools activate and invoke through the generic
-  dispatcher (integration, recorded egress).
+- [x] TOOL-7 The five real Slack tools activate and invoke through the generic
+  dispatcher (integration, recorded egress). —
+  `slack_tools_invoke_through_the_generic_dispatcher_with_recorded_egress`
+  (`tests/integration/extension_runtime.rs`): the real Slack package
+  activates through the facade and all five `slack.*` capabilities dispatch
+  snapshot-first (the registry lane is builtin-restricted) through the WASM
+  lane with staged policy + token injection; every recorded transport
+  request targets `slack.com` and carries the injected bearer token.
 - [ ] TOOL-8 `slack.send_message` remains an explicit side-effect tool; final
   replies never route through it.
 - [ ] TOOL-9 MCP discovery is loader-owned (`ToolAdapter` has no discovery
   method); validated tool surfaces publish atomically; a refresh replaces the
   set completely or not at all; discovered tools run the same dispatcher
   pipeline as static ones.
-- [ ] TOOL-10 Host built-in capabilities resolve through the same dispatcher
+- [x] TOOL-10 Host built-in capabilities resolve through the same dispatcher
   pipeline; an extension capability id colliding with a built-in fails
-  activation.
+  activation. — built-ins resolve through the registry-lane resolver in the
+  same chain (`registry_resolver_allowlist_restricts_to_builtin_provider`,
+  `crates/ironclaw_host_runtime/src/services/tests/extension_tool_binder.rs`);
+  the collision conflict is pinned at the activation caller by
+  `extension_capability_colliding_with_a_host_builtin_fails_activation`
+  (`crates/ironclaw_extension_host/tests/lifecycle_contract.rs`), with the
+  builtin id set injected by composition
+  (`build_local_runtime` → `reserved_capability_ids`).
 
 ## 5. Auth engine (AUTH)
 
@@ -354,7 +367,11 @@ Rules — kept short on purpose:
 - [ ] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
 - [ ] DEL-5 The old `ProductAdapter` metadata getters and the unused registry
-  runtime projection are deleted.
+  runtime projection are deleted. (P2 deleted the projection —
+  `ProductAdapterRuntimeEntry` / `list_enabled_product_adapter_entries` and
+  their read-path validation are gone from
+  `crates/ironclaw_product_adapter_registry`; the retiring `ProductAdapter`
+  metadata getters go when their P4/P5 callers cut over.)
 - [ ] DEL-6 Composition constructs no concrete extension and mounts no
   concrete route (architecture gate).
 - [ ] DEL-7 Only `ironclaw_reborn_cli` and tests depend on concrete extension
@@ -408,11 +425,18 @@ Rules — kept short on purpose:
 - [ ] TEST-1 The channel-adapter conformance suite exists and runs against
   Slack, Telegram, and acme.
 - [ ] TEST-2 The tool-adapter conformance checks run against static, WASM,
-  and MCP lanes.
+  and MCP lanes. (P2 landed the WASM-lane proof — the five Slack tools
+  through the binder — and the native/static proof via the acme fixture;
+  a discovered-MCP tool invoke through the binder remains.)
 - [ ] TEST-3 The auth engine suite is table-driven over recipes; adding a
   vendor adds a row + fixtures, not a suite (checked by suite structure).
 - [ ] TEST-4 The acme fixture drives the full generic path end-to-end in the
-  integration harness.
+  integration harness. (P2 landed the tool leg:
+  `acme_fixture_lifecycle_dispatches_from_the_active_snapshot` drives
+  install → activate → snapshot dispatch → remove through model tool calls,
+  with the fixture's native factory assembled through the production
+  `RebornBuildInput` seam. The inbound/outbound/connect legs land with
+  P3–P5.)
 - [ ] TEST-5 Slack and Telegram each have exactly one inbound and one outbound
   integration proof; protocol details are unit-tested inside their crates.
 - [x] TEST-6 The specificity scanner derives forbidden names from the package

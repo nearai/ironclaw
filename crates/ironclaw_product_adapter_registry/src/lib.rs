@@ -1,26 +1,21 @@
-//! ProductAdapter host-api projection over generic extension installation state.
+//! ProductAdapter host-api section contract and projection types.
 //!
-//! ```text
-//! ironclaw_extensions::ExtensionInstallationStore
-//!   manifests/installations for any extension
-//!
-//! list_enabled_product_adapter_entries(store)
-//!   → filter enabled installations whose manifest carries ironclaw.product_adapter/v1
-//!   → project ProductAdapterHostApiSection from that section
-//!   → return Vec<ProductAdapterRuntimeEntry>
-//! ```
+//! Validates and projects `ironclaw.product_adapter/v1` manifest sections.
+//! The old registry runtime projection (`ProductAdapterRuntimeEntry` and its
+//! store scan) was never the production path and was deleted by the
+//! extension-runtime P2 dispatch cutover; the active snapshot is the
+//! dispatch-time source of truth.
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
-    HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
-    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, ManifestSectionPath, ManifestSource,
-    ManifestV2Error,
+    ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
+    HostApiContractRegistry, HostApiId, HostApiManifestContext, HostApiManifestContract,
+    HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2, HostApiSectionError,
+    ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
     CapabilitySurfaceKind, ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor,
@@ -280,78 +275,6 @@ impl ProductAdapterHostApiSection {
     }
 }
 
-/// Enabled extension installation paired with its projected ProductAdapter section.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProductAdapterRuntimeEntry {
-    installation: ExtensionInstallation,
-    adapter: ProductAdapterHostApiSection,
-}
-
-impl ProductAdapterRuntimeEntry {
-    fn new(installation: ExtensionInstallation, adapter: ProductAdapterHostApiSection) -> Self {
-        Self {
-            installation,
-            adapter,
-        }
-    }
-
-    pub fn installation(&self) -> &ExtensionInstallation {
-        &self.installation
-    }
-    pub fn adapter(&self) -> &ProductAdapterHostApiSection {
-        &self.adapter
-    }
-}
-
-/// Project enabled ProductAdapter runtime entries from any `ExtensionInstallationStore`.
-///
-/// Filters to enabled installations whose manifest carries an
-/// `ironclaw.product_adapter/v1` host-api section, then pairs each with its
-/// projected ProductAdapter section. Enabled extensions without ProductAdapter
-/// sections are intentionally ignored by this projection, not reported as
-/// unknown manifests. Results follow the installation store's enabled ordering:
-/// updated_at descending with installation_id as a deterministic tie-breaker.
-///
-/// ProductAdapter sections are projected from generic manifest records on read.
-/// If profiling shows this path is hot, add a ProductAdapter read model or
-/// targeted projection cache in the owning composition layer.
-pub async fn list_enabled_product_adapter_entries(
-    store: &dyn ExtensionInstallationStore,
-) -> Result<Vec<ProductAdapterRuntimeEntry>, RegistryError> {
-    let manifests = store.list_manifests().await?;
-    let manifest_map: HashMap<_, _> = manifests
-        .iter()
-        .map(|m| (m.extension_id().clone(), m))
-        .collect();
-    let mut entries = Vec::new();
-    let mut adapter_cache: HashMap<ExtensionId, Vec<ProductAdapterHostApiSection>> = HashMap::new();
-    for installation in store.list_enabled_installations().await? {
-        let manifest = manifest_map
-            .get(installation.extension_id())
-            .ok_or_else(|| RegistryError::UnknownManifest {
-                extension_id: installation.extension_id().clone(),
-            })?;
-        let adapters = if let Some(adapters) = adapter_cache.get(installation.extension_id()) {
-            adapters.clone()
-        } else {
-            let adapters = product_adapter_sections(manifest)?;
-            adapter_cache.insert(installation.extension_id().clone(), adapters.clone());
-            adapters
-        };
-        validate_installation_against_one_manifest(manifest, &installation, &adapters)?;
-        if adapters.is_empty() {
-            continue;
-        }
-        for adapter in &adapters {
-            entries.push(ProductAdapterRuntimeEntry::new(
-                installation.clone(),
-                adapter.clone(),
-            ));
-        }
-    }
-    Ok(entries)
-}
-
 // ---------------------------------------------------------------------------
 // ProductAdapter host-api contract validator
 // ---------------------------------------------------------------------------
@@ -507,60 +430,6 @@ pub enum RegistryError {
 // ---------------------------------------------------------------------------
 // Internal validation helpers
 // ---------------------------------------------------------------------------
-
-fn validate_installation_against_one_manifest(
-    manifest: &ExtensionManifestRecord,
-    installation: &ExtensionInstallation,
-    product_adapters: &[ProductAdapterHostApiSection],
-) -> Result<(), RegistryError> {
-    if manifest.extension_id() != installation.manifest_ref().extension_id() {
-        return Err(RegistryError::ManifestExtensionMismatch {
-            extension_id: installation.extension_id().clone(),
-            manifest_extension_id: installation.manifest_ref().extension_id().clone(),
-        });
-    }
-    match (
-        manifest.manifest_hash(),
-        installation.manifest_ref().manifest_hash(),
-    ) {
-        (Some(registered), Some(referenced)) if registered != referenced => {
-            return Err(RegistryError::ManifestHashMismatch {
-                extension_id: installation.extension_id().clone(),
-            });
-        }
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(RegistryError::ManifestHashMismatch {
-                extension_id: installation.extension_id().clone(),
-            });
-        }
-        _ => {}
-    }
-
-    // ProductAdapter credential scope is intentionally enforced at projection
-    // time. The generic extension store only knows extension ids and manifest
-    // hashes; domain-specific handle validation belongs in this crate.
-    let declared: BTreeSet<_> = product_adapters
-        .iter()
-        .flat_map(|pa| {
-            pa.required_credentials()
-                .iter()
-                .map(EgressCredentialHandle::as_str)
-        })
-        .collect();
-    for binding in installation.credential_bindings() {
-        if !declared.contains(binding.credential_handle().as_str()) {
-            return Err(RegistryError::UndeclaredCredentialHandle {
-                handle: EgressCredentialHandle::new(binding.credential_handle().as_str()).map_err(
-                    |reason| RegistryError::InvalidValue {
-                        field: "credential_handle",
-                        reason: reason.to_string(),
-                    },
-                )?,
-            });
-        }
-    }
-    Ok(())
-}
 
 fn validate_auth_requirement(requirement: &AuthRequirement) -> Result<(), RegistryError> {
     match requirement {
