@@ -410,7 +410,7 @@ impl WebuiRuntimeProjectionStream {
         let mut turn_wakes = self.turn_event_wake_source.subscribe();
         if !is_resuming_runtime_payloads {
             let mut batch = WebuiProjectionBatch::new(cursor.clone());
-            if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+            if let Err(error) = self.append_turn_events(&mut batch, None, &request).await {
                 send_projection_subscription_error(&sender, error).await;
                 return;
             }
@@ -456,7 +456,7 @@ impl WebuiRuntimeProjectionStream {
                             return;
                         }
                     };
-                    if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+                    if let Err(error) = self.append_turn_events(&mut batch, None, &request).await {
                         send_projection_subscription_error(&sender, error).await;
                         return;
                     }
