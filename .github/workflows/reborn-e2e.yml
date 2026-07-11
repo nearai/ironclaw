@@ -286,8 +286,18 @@ jobs:
       - gateway-smoke
       - webui-v2-smoke
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Check Reborn E2E jobs
         run: |
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes (scope detection) failed: ${{ needs.changes.result }}"
             exit 1
@@ -296,15 +306,15 @@ jobs:
             echo "No Reborn E2E scope in this merge group — roll-up passes"
             exit 0
           fi
-          if [[ "${{ needs.rust-reborn.result }}" != "success" ]]; then
+          if ! job_result_ok "rust-reborn" "${{ needs.rust-reborn.result }}" false "allow"; then
             echo "Rust Reborn E2E failed"
             exit 1
           fi
-          if [[ "${{ needs.gateway-smoke.result }}" != "success" ]]; then
+          if ! job_result_ok "gateway-smoke" "${{ needs.gateway-smoke.result }}" false "allow"; then
             echo "Reborn gateway smoke failed"
             exit 1
           fi
-          if [[ "${{ needs.webui-v2-smoke.result }}" != "success" ]]; then
+          if ! job_result_ok "webui-v2-smoke" "${{ needs.webui-v2-smoke.result }}" false "allow"; then
             echo "Reborn WebUI v2 smoke failed"
             exit 1
           fi
