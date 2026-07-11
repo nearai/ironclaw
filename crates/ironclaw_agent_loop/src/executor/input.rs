@@ -200,6 +200,9 @@ pub(super) fn consume_drainable_inputs(
         });
     }
     let last_ack = &batch.input_acks[consumed_len - 1];
+    if drained && state.prompt_context_cursor.is_none() {
+        state.prompt_context_cursor = Some(state.input_cursor.clone());
+    }
     state.input_cursor = last_ack.cursor.clone();
     let ack_tokens = batch
         .input_acks
@@ -221,7 +224,9 @@ fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInput
         UserFacingInputDrainMode::FollowUp => {
             matches!(
                 input,
-                LoopInput::FollowUp { .. } | LoopInput::UserMessage { .. }
+                LoopInput::FollowUp { .. }
+                    | LoopInput::UserMessage { .. }
+                    | LoopInput::Steering { .. }
             )
         }
     }

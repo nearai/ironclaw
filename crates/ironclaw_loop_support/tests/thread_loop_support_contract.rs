@@ -3071,6 +3071,63 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
 }
 
 #[tokio::test]
+async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
+    let fixture = ThreadFixture::new_with_user_content("first follow-up").await;
+    fixture
+        .accept_user_message("event-2", "second follow-up")
+        .await;
+    fixture
+        .accept_user_message("event-3", "third follow-up")
+        .await;
+
+    let gateway = Arc::new(RecordingGateway::reply("merged"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    issue_prompt_grant(&fixture.run_context, &[]);
+
+    port.stream_model(LoopModelRequest {
+        messages: Vec::new(),
+        surface_version: None,
+        model_preference: None,
+        capability_view: None,
+    })
+    .await
+    .unwrap();
+
+    let messages = {
+        let calls = gateway.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        calls[0].messages.clone()
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, HostManagedModelMessageRole::User);
+    assert_eq!(
+        messages[0].content,
+        "first follow-up\nsecond follow-up\nthird follow-up"
+    );
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let user_rows = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::User)
+        .count();
+    assert_eq!(user_rows, 3, "durable transcript rows stay separate");
+}
+
+#[tokio::test]
 async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
     let fixture = ThreadFixture::new().await;
     let snapshot = LoopModelRouteSnapshot::new("anthropic", "claude-opus-4", "cfg-1", "auth-1");

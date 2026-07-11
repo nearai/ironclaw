@@ -53,8 +53,10 @@ pub use signed_session_login::{
 pub use session::InMemorySessionStore;
 
 use std::convert::Infallible;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::{
@@ -102,6 +104,8 @@ pub struct RebornWebuiServeOptions {
     pub shutdown: tokio::sync::oneshot::Receiver<()>,
     pub bound_addr_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 }
+
+const WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Handle used by host startup code to publish the real WebUI router
 /// after runtime assembly finishes.
@@ -209,7 +213,8 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         let _ = tx.send(bound);
     }
 
-    axum::serve(
+    let (shutdown_observed_tx, mut shutdown_observed_rx) = watch::channel(false);
+    let serve = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
@@ -222,9 +227,27 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
             target = "ironclaw::reborn::webui_ingress",
             "WebChat v2 graceful shutdown signal received",
         );
+        let _ = shutdown_observed_tx.send(true);
     })
-    .await
-    .map_err(RebornWebuiServeError::Serve)
+    .into_future();
+    tokio::pin!(serve);
+
+    tokio::select! {
+        result = &mut serve => result.map_err(RebornWebuiServeError::Serve),
+        () = async {
+            if !*shutdown_observed_rx.borrow() {
+                let _ = shutdown_observed_rx.changed().await;
+            }
+            tokio::time::sleep(WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT).await;
+        } => {
+            tracing::debug!(
+                target = "ironclaw::reborn::webui_ingress",
+                timeout_ms = WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT.as_millis() as u64,
+                "WebChat v2 graceful shutdown drain timed out; closing listener with active connections",
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Authenticator that compares the bearer token from the request
