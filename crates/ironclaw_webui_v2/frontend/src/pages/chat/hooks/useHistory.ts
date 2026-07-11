@@ -525,7 +525,9 @@ function mergeTimelineMessagesBySequence(fresh, preserved) {
   return [...fresh, ...preserved].sort((left, right) => {
     const leftSequence = timelineSequence(left);
     const rightSequence = timelineSequence(right);
-    if (leftSequence === null || rightSequence === null) return 0;
+    if (leftSequence === null && rightSequence === null) return 0;
+    if (leftSequence === null) return 1;
+    if (rightSequence === null) return -1;
     return leftSequence - rightSequence;
   });
 }

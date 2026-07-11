@@ -647,6 +647,29 @@ test("mergeFullRefresh preserves paginated older timeline messages", () => {
   );
 });
 
+test("mergeFullRefresh sorts preserved older timeline messages before pending rows", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+      { id: "pending-1", role: "user", isOptimistic: true },
+    ],
+    [
+      { id: "msg-older-user", role: "user", sequence: 10 },
+      { id: "msg-newer-user", role: "user", sequence: 50 },
+      { id: "pending-1", role: "user", isOptimistic: true },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-older-user,msg-newer-user,pending-1",
+  );
+});
+
 test("mergeFullRefresh drops older timeline messages when the fresh page skipped ahead", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
