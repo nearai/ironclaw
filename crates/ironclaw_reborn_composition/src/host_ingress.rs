@@ -89,10 +89,8 @@ pub(crate) fn bundled_channel_ingress_descriptor(
         body_limit: BodyLimitPolicy::Limited { max_bytes },
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::Global,
-            max_requests: NonZeroU32::new(PUBLIC_WEBHOOK_MAX_REQUESTS)
-                .expect("non-zero rate limit"),
-            window_seconds: NonZeroU32::new(PUBLIC_WEBHOOK_WINDOW_SECONDS)
-                .expect("non-zero rate window"),
+            max_requests: PUBLIC_WEBHOOK_MAX_REQUESTS,
+            window_seconds: PUBLIC_WEBHOOK_WINDOW_SECONDS,
         },
         cors: CorsPolicy::NotApplicable,
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
@@ -105,9 +103,16 @@ pub(crate) fn bundled_channel_ingress_descriptor(
 }
 
 /// Host policy floor for public webhook ingress (previously carried as data
-/// in v2 channel manifests' host_ingress sections).
-const PUBLIC_WEBHOOK_MAX_REQUESTS: u32 = 12_000;
-const PUBLIC_WEBHOOK_WINDOW_SECONDS: u32 = 60;
+/// in v2 channel manifests' host_ingress sections). Compile-time non-zero:
+/// the const `unwrap` is evaluated by the compiler, never at runtime.
+const PUBLIC_WEBHOOK_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(12_000) {
+    Some(value) => value,
+    None => unreachable!(),
+};
+const PUBLIC_WEBHOOK_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
+    Some(value) => value,
+    None => unreachable!(),
+};
 
 fn projection(error: impl std::fmt::Display) -> HostIngressProjectionError {
     HostIngressProjectionError::Projection {
