@@ -42,16 +42,16 @@ test("only rejected-busy needs the resend error copy", () => {
 });
 
 test("live (send outcome) and reload (record status) agree for busy outcomes", () => {
-  // The same wire value must produce the same UI status whether it arrives
-  // as a send-response `outcome` or a persisted record `status`.
-  for (const status of [
-    RECORD_STATUS.DEFERRED_BUSY,
-    RECORD_STATUS.REJECTED_BUSY,
-    RECORD_STATUS.QUEUED,
-  ]) {
-    assert.equal(
-      uiStatusFromRecordStatus(status),
-      uiStatusFromRecordStatus(status),
-    );
+  // The same wire value must map to its intended UI status whether it arrives
+  // as a send-response `outcome` or a persisted record `status` — both paths
+  // route through `uiStatusFromRecordStatus`, so pin the expected mapping for
+  // each busy outcome rather than comparing the function to itself.
+  const expected = new Map([
+    [RECORD_STATUS.DEFERRED_BUSY, UI_MESSAGE_STATUS.QUEUED],
+    [RECORD_STATUS.REJECTED_BUSY, UI_MESSAGE_STATUS.ERROR],
+    [RECORD_STATUS.QUEUED, UI_MESSAGE_STATUS.QUEUED],
+  ]);
+  for (const [status, ui] of expected) {
+    assert.equal(uiStatusFromRecordStatus(status), ui);
   }
 });
