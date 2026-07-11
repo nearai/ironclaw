@@ -1148,8 +1148,18 @@ mod tests {
         assert!(!active.iter().any(|id| id == "github.search_issues"));
     }
 
+    /// Runtime-dispatched hosted-MCP activation: the discovery attempt is
+    /// routed through runtime egress, but nothing on this path stages the
+    /// template capability's network policy/credential obligations, so
+    /// `tools/list` fails as transient and activation falls back — Active
+    /// with the host-internal connection template and zero model-visible
+    /// tools. (Under manifest v2 this test passed vacuously: the fallback
+    /// republished placeholder static tools while the scripted MCP server
+    /// captured zero requests.) The extension-runtime P2 MCP loader owns
+    /// staging the discovery plan and proving live discovery end-to-end
+    /// (checklist TOOL-9, MAN-6).
     #[tokio::test]
-    async fn local_dev_extension_activate_routes_hosted_mcp_discovery_through_runtime_egress() {
+    async fn local_dev_extension_activate_hosted_mcp_without_staged_discovery_falls_back() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let services = build_reborn_services(RebornBuildInput::local_dev(
@@ -1186,8 +1196,15 @@ mod tests {
         .expect("hosted MCP activation succeeds");
         assert_eq!(activate["payload"]["activated"], true);
 
+        // The model-visible surface is empty: no tools exist before discovery
+        // succeeds (the host-internal `notion.mcp_server` template is
+        // published but never model-visible — pinned in
+        // `extension_lifecycle::tests::hosted_mcp_activation_falls_back_*`).
         let active = active_extension_capability_ids(&extension_management).await;
-        assert!(active.iter().any(|id| id == "notion.notion-get-self"));
+        assert!(
+            active.iter().all(|id| !id.starts_with("notion.")),
+            "no model-visible notion capability exists before discovery succeeds; got {active:?}"
+        );
         assert!(
             storage_root
                 .join("system/extensions/notion/manifest.toml")

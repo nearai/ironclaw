@@ -23,11 +23,17 @@ Rules — kept short on purpose:
   `v2_and_v3_rewrites_resolve_identically`
   (`crates/ironclaw_extensions/tests/manifest_v3_contract.rs`); both schemas
   dispatch through `ExtensionManifestRecord::from_toml`.
-- [ ] MAN-3 A v2 manifest and its v3 rewrite resolve to identical surfaces,
+- [x] MAN-3 A v2 manifest and its v3 rewrite resolve to identical surfaces,
   capability ids, scopes, and credentials (projection-equality test over all
   11 first-party packages; the two hosted-MCP packages instead assert their
   `[mcp]` ceiling plus the discovered set, since their placeholder static
-  tools intentionally become discovery).
+  tools intentionally become discovery). —
+  `crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs`
+  (9 static-parity tests against the pre-rewrite v2 snapshots under
+  `tests/fixtures/first_party_v2/`, plus `notion_mcp_v3_declares_the_ceiling`
+  and `nearai_mcp_v3_declares_the_ceiling`). Effects compare modulo the
+  normalizer-added dispatch effect (v2 declared it inconsistently; it gates
+  nothing).
 - [x] MAN-4 Unknown manifest fields fail closed with a path-qualified error.
   — `unknown_top_level_fields_fail_closed_with_path_context`
   (`manifest_v3_contract.rs`); `unknown_recipe_fields_fail_closed`,

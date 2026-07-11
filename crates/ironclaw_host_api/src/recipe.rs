@@ -257,8 +257,9 @@ pub struct OAuth2CodeRecipe {
     pub display_name: String,
     pub authorization_endpoint: HttpsEndpoint,
     pub token_endpoint: HttpsEndpoint,
-    /// Authorize/scope parameter name; defaults to `scope` (Slack reserves
-    /// `scope=` for bot tokens and uses `user_scope`).
+    /// Authorize/scope parameter name; defaults to `scope` (some vendors
+    /// reserve `scope=` for another grant type and name a dedicated
+    /// user-scope parameter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_param: Option<String>,
     /// Scope list separator; defaults to a space.
@@ -273,7 +274,11 @@ pub struct OAuth2CodeRecipe {
     /// parameters are rejected by [`OAuth2CodeRecipe::validate`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_authorize_params: BTreeMap<String, String>,
-    pub client_credentials: RecipeClientCredentials,
+    /// Deployment-level client-credential handles. Absent means the vendor
+    /// requires dynamic client registration (RFC 7591 — generic hosted-MCP
+    /// behavior, implemented once by the host auth engine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_credentials: Option<RecipeClientCredentials>,
     /// How client credentials are presented during token exchange.
     #[serde(default)]
     pub exchange_auth: TokenExchangeAuth,

@@ -1303,6 +1303,7 @@ mod tests {
     use crate::slack::slack_host_beta::{
         SlackPersonalConnectionScope, StaticSlackPersonalConnectionScopeResolver,
     };
+    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_personal_binding::{
         SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
     };

@@ -4868,6 +4868,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
+    use crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use crate::local_dev_capability_policy::{
         LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
     };
@@ -5907,6 +5908,11 @@ mod tests {
         let catalog = AvailableExtensionCatalog::from_first_party_assets()
             .expect("first-party extensions load");
         let notion_package = catalog.resolve(&notion_ref).expect("Notion MCP is bundled");
+        // v3 hosted-MCP manifests declare one [mcp] block instead of placeholder
+        // static tools: the only bundled capability is the synthesized
+        // host-internal connection template. Model-visible Notion tools exist
+        // only after live tools/list discovery, so this test scripts discovery
+        // below to reach the auth gate.
         let capability_ids = notion_package
             .package
             .manifest
@@ -5914,11 +5920,11 @@ mod tests {
             .iter()
             .map(|capability| capability.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(capability_ids.len(), 18);
-        assert!(capability_ids.contains(&"notion.notion-create-pages"));
-        assert!(capability_ids.contains(&"notion.notion-query-data-sources"));
-        assert!(capability_ids.contains(&"notion.notion-create-comment"));
-        assert!(capability_ids.contains(&"notion.notion-get-self"));
+        assert_eq!(capability_ids, vec!["notion.mcp_server"]);
+        assert_eq!(
+            notion_package.package.manifest.capabilities[0].visibility,
+            ironclaw_extensions::CapabilityVisibility::HostInternal
+        );
 
         extension_management
             .install(notion_ref.clone())
@@ -5927,10 +5933,19 @@ mod tests {
         extension_management
             .activate_with_prechecked_credentials_for_test(
                 notion_ref,
-                ExtensionActivationMode::Static,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: ResourceScope::local_default(
+                        UserId::new("local-dev-notion-mcp-owner").expect("valid user"),
+                        InvocationId::new(),
+                    )
+                    .expect("valid scope"),
+                    runtime_http_egress: Arc::new(
+                        HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
+                    ),
+                },
             )
             .await
-            .expect("activate Notion MCP");
+            .expect("activate Notion MCP with scripted discovery");
 
         let context = notion_mcp_context("notion.notion-search");
         enable_global_auto_approve_for_context(local_runtime, &context).await;
@@ -6409,10 +6424,55 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
         let projection = extension_management
-            .project(nearai_ref)
+            .project(nearai_ref.clone())
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
+
+        // v3 hosted-MCP surface: boot-time bootstrap activates the package
+        // statically, which publishes only the host-internal MCP connection
+        // template — no model-visible tools exist before live discovery.
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .all(|capability| capability.provider.as_str() != "nearai"),
+            "activated hosted-MCP package must expose no model-visible tools before discovery"
+        );
+        let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
+        let registry = extension_management.active_extensions_for_test().snapshot();
+        assert!(
+            registry.get_capability(&template_id).is_some(),
+            "host-internal MCP connection template should be published"
+        );
+        assert_eq!(
+            registry.capability_visibility(&template_id),
+            Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
+        );
+
+        // Script live tools/list discovery through the hosted-MCP seam so the
+        // discovered web_search tool surfaces with the connection template's
+        // credential wiring (the injected endpoint override patches
+        // [mcp].server only; the audience derives from that server host).
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                nearai_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: ResourceScope::local_default(
+                        UserId::new(owner).unwrap(),
+                        InvocationId::new(),
+                    )
+                    .expect("valid scope"),
+                    runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                        "web_search",
+                    )),
+                },
+            )
+            .await
+            .expect("scripted NEAR AI discovery activation");
 
         let capabilities = extension_management
             .active_model_visible_capabilities()
@@ -6441,7 +6501,9 @@ mod tests {
             search.runtime_credentials[0].audience.host_pattern,
             "nearai-db.example.test"
         );
-        assert_eq!(search.runtime_credentials[0].audience.port, Some(9443));
+        // v3 derives the credential audience from the [mcp].server host; the
+        // audience pattern carries the host only (port unconstrained).
+        assert_eq!(search.runtime_credentials[0].audience.port, None);
 
         let auth_scope = AuthProductScope::new(
             local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
@@ -6694,6 +6756,10 @@ mod tests {
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
 
+        // v3 hosted-MCP surface: reinstall-and-activate publishes only the
+        // host-internal MCP connection template; model-visible tools appear
+        // only via live tools/list discovery, which this bootstrap-focused
+        // test does not run.
         let capabilities = extension_management
             .active_model_visible_capabilities()
             .await
@@ -6701,7 +6767,18 @@ mod tests {
         assert!(
             capabilities
                 .iter()
-                .any(|capability| capability.id.as_str() == "nearai.web_search")
+                .all(|capability| capability.provider.as_str() != "nearai"),
+            "reinstalled hosted-MCP package must expose no model-visible tools before discovery"
+        );
+        let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
+        let registry = extension_management.active_extensions_for_test().snapshot();
+        assert!(
+            registry.get_capability(&template_id).is_some(),
+            "host-internal MCP connection template should be published"
+        );
+        assert_eq!(
+            registry.capability_visibility(&template_id),
+            Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
         );
     }
 

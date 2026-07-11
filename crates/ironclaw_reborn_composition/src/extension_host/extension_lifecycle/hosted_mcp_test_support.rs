@@ -4,21 +4,53 @@ use ironclaw_host_api::{
     RuntimeHttpEgressResponse,
 };
 
-#[derive(Default)]
-pub(super) struct HostedMcpDiscoveryEgress {
+/// Scripted hosted-MCP discovery egress: answers the `initialize` →
+/// `notifications/initialized` → `tools/list` handshake with a single
+/// discoverable tool. v3 hosted-MCP packages publish NO model-visible tools
+/// until live discovery runs, so tests that need an active hosted-MCP tool
+/// (auth gates, dispatch, capability visibility) script discovery through
+/// this seam instead of relying on retired v2 placeholder tools.
+pub(crate) struct HostedMcpDiscoveryEgress {
+    tool_name: String,
+    read_only: bool,
     methods: std::sync::Mutex<Vec<String>>,
     credential_counts: std::sync::Mutex<Vec<usize>>,
 }
 
+impl Default for HostedMcpDiscoveryEgress {
+    fn default() -> Self {
+        Self::with_tool_name("live-search")
+    }
+}
+
 impl HostedMcpDiscoveryEgress {
-    pub(super) fn methods(&self) -> Vec<String> {
+    /// Script discovery to return one tool with the given MCP tool name; the
+    /// published capability id becomes `{extension_id}.{tool_name}`.
+    pub(crate) fn with_tool_name(tool_name: &str) -> Self {
+        Self {
+            tool_name: tool_name.to_string(),
+            read_only: false,
+            methods: std::sync::Mutex::new(Vec::new()),
+            credential_counts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Annotate the scripted tool `readOnlyHint: true` so the discovered
+    /// capability does not inherit the provider's package-level
+    /// `external_write` effect (unannotated tools stay conservative).
+    pub(crate) fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
+    pub(crate) fn methods(&self) -> Vec<String> {
         self.methods
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    pub(super) fn credential_counts(&self) -> Vec<usize> {
+    pub(crate) fn credential_counts(&self) -> Vec<usize> {
         self.credential_counts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -67,30 +99,32 @@ impl RuntimeHttpEgress for HostedMcpDiscoveryEgress {
                 serde_json::json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "notion-test", "version": "1.0.0"}
+                    "serverInfo": {"name": "hosted-mcp-test", "version": "1.0.0"}
                 }),
                 vec![("Mcp-Session-Id".to_string(), "session-1".to_string())],
             ),
             "notifications/initialized" => {
                 runtime_json_response(None, serde_json::json!({}), Vec::new())
             }
-            "tools/list" => runtime_json_response(
-                body["id"].as_u64(),
-                serde_json::json!({
-                    "tools": [
-                        {
-                            "name": "live-search",
-                            "description": "Search live Notion content",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {"query": {"type": "string"}},
-                                "required": ["query"]
-                            }
-                        }
-                    ]
-                }),
-                Vec::new(),
-            ),
+            "tools/list" => {
+                let mut tool = serde_json::json!({
+                    "name": self.tool_name,
+                    "description": format!("Scripted hosted MCP tool {}", self.tool_name),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                });
+                if self.read_only {
+                    tool["annotations"] = serde_json::json!({"readOnlyHint": true});
+                }
+                runtime_json_response(
+                    body["id"].as_u64(),
+                    serde_json::json!({ "tools": [tool] }),
+                    Vec::new(),
+                )
+            }
             _ => Err(RuntimeHttpEgressError::Request {
                 reason: "unexpected_method".to_string(),
                 request_bytes: request.body.len() as u64,

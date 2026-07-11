@@ -7581,13 +7581,25 @@ output_schema_ref = "schemas/write.output.json"
             .install(notion_ref.clone())
             .await
             .expect("install Notion MCP");
+        // v3 hosted-MCP packages publish no model-visible tools on static
+        // activation; script tools/list discovery so the notion-search tool
+        // the auth-gate gateway calls exists as a model-visible capability.
         extension_management
             .activate_with_prechecked_credentials_for_test(
                 notion_ref,
-                ExtensionActivationMode::Static,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: ResourceScope::local_default(
+                        UserId::new("runtime-auth-gate-owner").expect("valid user"),
+                        InvocationId::new(),
+                    )
+                    .expect("valid scope"),
+                    runtime_http_egress: Arc::new(
+                        crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
+                    ),
+                },
             )
             .await
-            .expect("activate Notion MCP");
+            .expect("activate Notion MCP with scripted discovery");
 
         let conversation = runtime.new_conversation().await.expect("conversation");
         runtime

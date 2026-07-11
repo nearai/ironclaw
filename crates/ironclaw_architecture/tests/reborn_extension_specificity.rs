@@ -115,6 +115,16 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          nearai-mcp extension endpoint",
     ),
     (
+        "crates/ironclaw_llm/src/",
+        "accounts.google.com",
+        "Gemini OAuth endpoints inside the multi-provider LLM crate",
+    ),
+    (
+        "crates/ironclaw_llm/src/",
+        "oauth2.googleapis.com",
+        "Gemini OAuth endpoints inside the multi-provider LLM crate",
+    ),
+    (
         "crates/ironclaw_reborn_webui_ingress/src/auth/",
         "google",
         "WebUI browser-login SSO provider (OIDC), not the extensions vendor",
@@ -133,6 +143,16 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "crates/ironclaw_reborn_webui_ingress/src/lib.rs",
         "github",
         "re-export of the SSO login providers",
+    ),
+    (
+        "crates/ironclaw_reborn_webui_ingress/src/auth/",
+        "accounts.google.com",
+        "WebUI browser-login SSO (OIDC) endpoints, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_reborn_webui_ingress/src/auth/",
+        "oauth2.googleapis.com",
+        "WebUI browser-login SSO (OIDC) endpoints, not the extensions vendor",
     ),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_url_install",
@@ -675,6 +695,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_auth/src/lib.rs", "google"),
     ("crates/ironclaw_auth/src/lib.rs", "google_calendar"),
     ("crates/ironclaw_auth/src/lib.rs", "slack"),
+    ("crates/ironclaw_auth/src/oauth.rs", "accounts.google.com"),
     ("crates/ironclaw_auth/src/oauth.rs", "gmail"),
     ("crates/ironclaw_auth/src/oauth.rs", "google"),
     ("crates/ironclaw_auth/src/oauth.rs", "google_calendar"),
@@ -683,6 +704,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_auth/src/oauth.rs", "google_sheets"),
     ("crates/ironclaw_auth/src/oauth.rs", "google_slides"),
     ("crates/ironclaw_auth/src/oauth.rs", "notion"),
+    ("crates/ironclaw_auth/src/oauth.rs", "oauth2.googleapis.com"),
     ("crates/ironclaw_auth/src/oauth.rs", "slack"),
     ("crates/ironclaw_auth/src/oauth.rs", "slack.com"),
     ("crates/ironclaw_auth/src/oauth.rs", "www.googleapis.com"),
@@ -903,10 +925,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs",
         "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle/hosted_mcp_test_support.rs",
-        "notion",
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/gsuite.rs",
@@ -1253,6 +1271,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/test_support/oauth_product_auth.rs",
         "google",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/test_support/oauth_product_auth.rs",
+        "oauth2.googleapis.com",
     ),
     (
         "crates/ironclaw_reborn_composition/src/web_access.rs",
@@ -1787,7 +1809,9 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
             "github",
             "slack",
             "api.github.com",
-            "private.near.ai"
+            "private.near.ai",
+            "accounts.google.com",
+            "oauth2.googleapis.com",
         ]),
         "path-scoped carve-outs are reserved for the four documented collision domains \
          (LLM providers, SSO login, GitHub-as-skill-source, credential-format detection); \

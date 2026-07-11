@@ -139,13 +139,17 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     assert!(github_asset_root.join("wasm-src/Cargo.toml").is_file());
 
     let (_storage, fs) = mounted_github_package_fs();
-    let manifest = ExtensionManifest::parse(
-        &std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
+    // Parse through the single record entry point (the github asset is a
+    // manifest v3 document).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
+        None,
         &default_host_api_contract_registry().unwrap(),
     )
     .unwrap();
+    let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/github").unwrap(),
@@ -244,7 +248,13 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     for (capability_id, expected_effects, expected_permission, expects_github_api_access) in [
         (
             "github.get_repo",
-            vec![EffectKind::Network, EffectKind::UseSecret],
+            // The v3 normalizer adds the dispatch effect uniformly (v2
+            // declared it inconsistently across the github tools).
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
             PermissionMode::Allow,
             true,
         ),
@@ -341,14 +351,9 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         search.descriptor.parameters_schema["properties"]["query"]["type"],
         json!("string")
     );
-    assert_eq!(
-        search.output_schema["title"],
-        json!("GitHub raw API output")
-    );
-    assert_eq!(
-        search.output_schema["type"],
-        json!(["object", "array", "string", "null"])
-    );
+    // Manifest v3 declares no output schema; the hot catalog treats the
+    // output as unconstrained.
+    assert_eq!(search.output_schema, json!({}));
     assert!(
         search
             .prompt_doc
@@ -372,10 +377,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         get_issue.descriptor.parameters_schema["properties"]["owner"]["not"]["pattern"],
         json!("\\.\\.")
     );
-    assert_eq!(
-        get_issue.output_schema["title"],
-        json!("GitHub raw API output")
-    );
+    assert_eq!(get_issue.output_schema, json!({}));
     assert!(
         get_issue
             .prompt_doc
@@ -401,10 +403,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             EffectKind::ExternalWrite,
         ]
     );
-    assert_eq!(
-        comment_issue.output_schema["title"],
-        json!("GitHub raw API output")
-    );
+    assert_eq!(comment_issue.output_schema, json!({}));
     assert!(comment_issue.prompt_doc.as_deref().is_some_and(|doc| {
         doc.contains("github.comment_issue")
             && doc.contains("external write")
@@ -425,11 +424,15 @@ async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required
     .await
     .unwrap_err();
 
+    // The capability-provider contract preserves typed manifest errors
+    // (`HostApiSectionError::Manifest` unwraps back to the precise variant),
+    // so the unknown port surfaces as `UnknownHostPort`, still fail-closed
+    // before install.
     assert!(
         matches!(
             err,
-            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                if reason.contains("unknown host port 'host.runtime.not_supported'")
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostPort { ref port, .. })
+                if port.as_str() == "host.runtime.not_supported"
         ),
         "unexpected error: {err:?}"
     );

@@ -17,9 +17,16 @@
 //! route names a verifying credential declared in `required_credentials`);
 //! this module only projects the descriptors and selects one by id.
 
+use std::num::{NonZeroU32, NonZeroU64};
+
 use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource};
-use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_product_adapter_registry::product_adapter_sections;
+use ironclaw_host_api::ingress::{
+    AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+    IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
+    IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
+    WebSocketOriginPolicy,
+};
+use ironclaw_host_api::{ChannelIngressMethod, NetworkMethod};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -30,18 +37,21 @@ pub(crate) enum HostIngressProjectionError {
     RouteNotDeclared { route_id: String },
 }
 
-/// Project every [`IngressRouteDescriptor`] a bundled (host-compiled)
-/// extension manifest declares, in one parse.
+/// Build the host-ingress descriptor for a bundled extension's declared
+/// channel (manifest v3 `[channel.ingress]`).
 ///
-/// Each descriptor is validated by `ironclaw_host_api` on deserialize (dotted
-/// route id, absolute path, and every policy invariant including the
-/// fail-closed floor that a `public_webhook` listener must require
-/// `webhook_signature`), and by the registry for ingress credential coherence.
-/// Intended for compile-time bundled manifests, so callers may treat a failure
-/// as a startup invariant violation.
-pub(crate) fn bundled_host_ingress_descriptors(
+/// The manifest carries the route method and body limit as channel data; the
+/// listener policy floors (public webhook, signature auth, host-resolved
+/// scope, the global rate limit, public-callback audit) are host-owned
+/// constants here until the generic ingress router (extension-runtime P4)
+/// owns route mounting. The mounted `route_pattern` is likewise the caller's
+/// (each legacy channel mount path stays until the canonical
+/// `/webhooks/extensions/{id}/{suffix}` cutover).
+pub(crate) fn bundled_channel_ingress_descriptor(
     manifest_toml: &str,
-) -> Result<Vec<IngressRouteDescriptor>, HostIngressProjectionError> {
+    route_id: &str,
+    route_pattern: &str,
+) -> Result<IngressRouteDescriptor, HostIngressProjectionError> {
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(projection)?;
     let contracts =
         ironclaw_host_runtime::default_host_api_contract_registry().map_err(projection)?;
@@ -53,27 +63,51 @@ pub(crate) fn bundled_host_ingress_descriptors(
         &contracts,
     )
     .map_err(projection)?;
-    let sections = product_adapter_sections(&record).map_err(projection)?;
-    Ok(sections
-        .iter()
-        .flat_map(|section| section.host_ingress())
-        .map(|route| route.descriptor().clone())
-        .collect())
+    let channel = record.resolved().channel.as_ref().ok_or_else(|| {
+        HostIngressProjectionError::RouteNotDeclared {
+            route_id: route_id.to_string(),
+        }
+    })?;
+    let ingress =
+        channel
+            .ingress
+            .as_ref()
+            .ok_or_else(|| HostIngressProjectionError::RouteNotDeclared {
+                route_id: route_id.to_string(),
+            })?;
+    let method = match ingress.method {
+        ChannelIngressMethod::Post => NetworkMethod::Post,
+    };
+    let max_bytes = NonZeroU64::new(ingress.body_limit_bytes)
+        .ok_or_else(|| projection("channel ingress body limit must be non-zero"))?;
+    let policy = IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::PublicWebhook,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::WebhookSignature],
+        },
+        scope_source: IngressScopeSource::HostResolved,
+        body_limit: BodyLimitPolicy::Limited { max_bytes },
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::Global,
+            max_requests: NonZeroU32::new(PUBLIC_WEBHOOK_MAX_REQUESTS)
+                .expect("non-zero rate limit"),
+            window_seconds: NonZeroU32::new(PUBLIC_WEBHOOK_WINDOW_SECONDS)
+                .expect("non-zero rate window"),
+        },
+        cors: CorsPolicy::NotApplicable,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::PublicCallback,
+        effect_path: AllowedEffectPath::ProductWorkflow,
+    })
+    .map_err(projection)?;
+    IngressRouteDescriptor::new(route_id, method, route_pattern, policy).map_err(projection)
 }
 
-/// Select the descriptor for `route_id` from an already-projected set.
-pub(crate) fn descriptor_for_route(
-    descriptors: &[IngressRouteDescriptor],
-    route_id: &str,
-) -> Result<IngressRouteDescriptor, HostIngressProjectionError> {
-    descriptors
-        .iter()
-        .find(|descriptor| descriptor.route_id().as_str() == route_id)
-        .cloned()
-        .ok_or_else(|| HostIngressProjectionError::RouteNotDeclared {
-            route_id: route_id.to_string(),
-        })
-}
+/// Host policy floor for public webhook ingress (previously carried as data
+/// in v2 channel manifests' host_ingress sections).
+const PUBLIC_WEBHOOK_MAX_REQUESTS: u32 = 12_000;
+const PUBLIC_WEBHOOK_WINDOW_SECONDS: u32 = 60;
 
 fn projection(error: impl std::fmt::Display) -> HostIngressProjectionError {
     HostIngressProjectionError::Projection {
@@ -86,7 +120,7 @@ mod tests {
     use super::*;
 
     const VALID_MANIFEST: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "testext"
 name = "Test Extension"
 version = "0.1.0"
@@ -97,69 +131,63 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "test_service"
 
-[[host_api]]
-id = "ironclaw.product_adapter/v1"
-section = "product_adapter.inbound"
+[channel]
+id = "messages"
+display_name = "Test messages"
+inbound = true
+outbound = false
+conversation_model = "continuous"
 
-[product_adapter.inbound]
-surface_kind = "external_channel"
-
-[product_adapter.inbound.auth]
-kind = "request_signature"
-header_name = "X-Test-Signature"
-timestamp_header_name = "X-Test-Timestamp"
-
-[product_adapter.inbound.capabilities]
-flags = ["inbound_messages"]
-
-[[product_adapter.inbound.required_credentials]]
-handle = "test_signing_secret"
-
-[[product_adapter.inbound.host_ingress]]
-credential_handles = ["test_signing_secret"]
-
-[product_adapter.inbound.host_ingress.descriptor]
-route_id = "testext.events"
+[channel.ingress]
+route_suffix = "events"
 method = "post"
-route_pattern = "/webhooks/testext/events"
+body_limit_bytes = 1024
 
-[product_adapter.inbound.host_ingress.descriptor.policy]
-listener_class = "public_webhook"
-auth = { type = "required", schemes = ["webhook_signature"] }
-scope_source = "host_resolved"
-body_limit = { type = "limited", max_bytes = 1024 }
-rate_limit = { type = "limited", scope = "global", max_requests = 60, window_seconds = 60 }
-cors = "not_applicable"
-websocket_origin = "not_applicable"
-streaming = "none"
-audit = "public_callback"
-effect_path = { type = "product_workflow" }
+[channel.ingress.verification]
+kind = "hmac_sha256"
+secret_handle = "test_signing_secret"
+signature_header = "X-Test-Signature"
+timestamp_header = "X-Test-Timestamp"
+max_age_seconds = 300
+signed_payload = [ { body = true } ]
+
+[channel.config]
+fields = [ { handle = "test_signing_secret", label = "Signing secret", secret = true } ]
 "#;
 
     #[test]
-    fn bundled_host_ingress_descriptors_project_declared_routes() {
-        let descriptors =
-            bundled_host_ingress_descriptors(VALID_MANIFEST).expect("valid manifest projects");
-        let descriptor =
-            descriptor_for_route(&descriptors, "testext.events").expect("declared route resolves");
+    fn bundled_channel_ingress_descriptor_projects_the_declared_channel() {
+        let descriptor = bundled_channel_ingress_descriptor(
+            VALID_MANIFEST,
+            "testext.events",
+            "/webhooks/testext/events",
+        )
+        .expect("valid manifest projects");
         assert_eq!(descriptor.route_id().as_str(), "testext.events");
         assert_eq!(
             descriptor.route_pattern().as_str(),
             "/webhooks/testext/events"
         );
+        assert_eq!(descriptor.method(), NetworkMethod::Post);
     }
 
     #[test]
-    fn bundled_host_ingress_descriptor_rejects_missing_route_id() {
-        let descriptors =
-            bundled_host_ingress_descriptors(VALID_MANIFEST).expect("valid manifest projects");
-        let error = descriptor_for_route(&descriptors, "testext.absent")
-            .expect_err("absent route id must be rejected");
+    fn bundled_channel_ingress_descriptor_rejects_manifests_without_a_channel() {
+        let manifest = VALID_MANIFEST
+            .split("[channel]")
+            .next()
+            .expect("fixture has a channel section");
+        let error = bundled_channel_ingress_descriptor(
+            manifest,
+            "testext.events",
+            "/webhooks/testext/events",
+        )
+        .expect_err("channel-less manifest must be rejected");
         assert!(
             matches!(
                 &error,
                 HostIngressProjectionError::RouteNotDeclared { route_id }
-                    if route_id == "testext.absent"
+                    if route_id == "testext.events"
             ),
             "expected RouteNotDeclared, got: {error}"
         );

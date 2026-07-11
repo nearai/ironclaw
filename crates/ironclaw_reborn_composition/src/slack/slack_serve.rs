@@ -17,7 +17,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_product_adapters::ProtocolAuthEvidence;
 use ironclaw_wasm_product_adapters::{
@@ -221,57 +220,37 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
     vec![SLACK_INGRESS_DESCRIPTORS.events.clone()]
 }
 
-/// The Slack host-ingress route descriptor, projected from the bundled Slack
-/// **bot** channel manifest in a single parse on first use (the manifest is a
-/// compile-time constant, so the projection is deterministic and cached for
-/// the process lifetime).
+/// The Slack host-ingress route descriptor, built from the bundled Slack
+/// manifest's `[channel.ingress]` declaration in a single parse on first use
+/// (the manifest is a compile-time constant, so the projection is
+/// deterministic and cached for the process lifetime).
 ///
-/// The route's path/method/policy are declared as data in
-/// `assets/slack/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
-/// and validated by `ironclaw_host_api` (incl. the fail-closed floor that a
-/// `public_webhook` listener must require `webhook_signature`) plus
-/// `ironclaw_product_adapter_registry` (ingress credential coherence). Only the
-/// declarative descriptors live in the manifest — the axum handlers and the
-/// HMAC verifier stay in this module, and the mount functions build their
-/// routes from these descriptors so what axum mounts cannot drift from what
-/// the manifest declares. Panics if the bundled manifest does not declare a
-/// route or declares it with a non-POST method: `SLACK_BOT_MANIFEST` is a
-/// compile-time constant, so either is a build-time invariant violation,
+/// The channel's method and body limit are manifest data; the public-webhook
+/// listener policy floors and the legacy `/webhooks/slack/events` mount path
+/// are host-owned in `crate::host_ingress` until the generic extension
+/// ingress router (extension-runtime P4) takes over route mounting. Panics
+/// if the bundled manifest stops declaring an inbound channel: it is a
+/// compile-time constant, so that is a build-time invariant violation,
 /// surfaced at startup.
 static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
-    let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
+    let events = crate::host_ingress::bundled_channel_ingress_descriptor(
         crate::extension_host::available_extensions::slack_manifest_toml(),
+        SLACK_EVENTS_ROUTE_ID,
+        SLACK_EVENTS_ROUTE_PATTERN,
     )
     .unwrap_or_else(|error| {
-        panic!("bundled Slack manifest must project host-ingress routes: {error}")
+        panic!("bundled Slack manifest must declare its channel ingress: {error}")
     });
-    SlackIngressDescriptors {
-        events: bundled_slack_post_descriptor(&descriptors, SLACK_EVENTS_ROUTE_ID),
-    }
+    SlackIngressDescriptors { events }
 });
+
+/// Legacy mount path; becomes a one-release forwarding alias once the
+/// canonical `/webhooks/extensions/slack/events` route exists (migration
+/// H.6).
+const SLACK_EVENTS_ROUTE_PATTERN: &str = "/webhooks/slack/events";
 
 struct SlackIngressDescriptors {
     events: IngressRouteDescriptor,
-}
-
-fn bundled_slack_post_descriptor(
-    descriptors: &[IngressRouteDescriptor],
-    route_id: &str,
-) -> IngressRouteDescriptor {
-    let descriptor = crate::host_ingress::descriptor_for_route(descriptors, route_id)
-        .unwrap_or_else(|error| {
-            panic!("bundled Slack manifest must declare host-ingress route {route_id}: {error}")
-        });
-    // The mount functions wire their handlers with `post(...)`; fail closed at
-    // projection time if the manifest ever declares another method.
-    if descriptor.method() != NetworkMethod::Post {
-        panic!(
-            "bundled Slack manifest declares host-ingress route {route_id} with method {}, \
-             but the serve layer mounts POST handlers",
-            descriptor.method()
-        );
-    }
-    descriptor
 }
 
 async fn slack_events_handler(

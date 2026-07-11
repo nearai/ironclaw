@@ -70,6 +70,7 @@ use crate::product_auth::api::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuth
 use crate::provider_identity::RebornUserIdentityBindingDeleteStore;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_personal_binding::SlackPersonalUserBinder;
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,

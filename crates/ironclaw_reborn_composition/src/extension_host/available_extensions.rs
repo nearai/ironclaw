@@ -668,51 +668,14 @@ fn nearai_mcp_manifest_toml_for_endpoint(
     let mut manifest = toml::from_str::<Value>(NEARAI_MCP_MANIFEST).map_err(|error| {
         map_binding_error(format!("bundled NEAR AI manifest TOML is invalid: {error}"))
     })?;
-    let runtime = manifest
-        .get_mut("runtime")
+    // The v3 manifest declares the proxied server once ([mcp].server); the
+    // connection credential's audience derives from the server host, so the
+    // endpoint override patches exactly one field.
+    let mcp = manifest
+        .get_mut("mcp")
         .and_then(Value::as_table_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime table"))?;
-    runtime.insert("url".to_string(), Value::String(endpoint.url.clone()));
-
-    let capabilities = manifest
-        .get_mut("capability_provider")
-        .and_then(Value::as_table_mut)
-        .and_then(|section| section.get_mut("tools"))
-        .and_then(Value::as_table_mut)
-        .and_then(|tools| tools.get_mut("capabilities"))
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| {
-            map_binding_error(
-                "bundled NEAR AI manifest lacks capability_provider.tools capabilities array",
-            )
-        })?;
-    let search = capabilities
-        .first_mut()
-        .and_then(Value::as_table_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks search capability"))?;
-    let runtime_credentials = search
-        .get_mut("runtime_credentials")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credentials"))?;
-    let credential = runtime_credentials
-        .first_mut()
-        .and_then(Value::as_table_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credential"))?;
-    let audience = credential
-        .get_mut("audience")
-        .and_then(Value::as_table_mut)
-        .ok_or_else(|| {
-            map_binding_error("bundled NEAR AI manifest lacks runtime credential audience")
-        })?;
-    audience.insert(
-        "host_pattern".to_string(),
-        Value::String(endpoint.host_pattern.clone()),
-    );
-    if let Some(port) = endpoint.port {
-        audience.insert("port".to_string(), Value::Integer(i64::from(port)));
-    } else {
-        audience.remove("port");
-    }
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks [mcp] declaration"))?;
+    mcp.insert("server".to_string(), Value::String(endpoint.url.clone()));
 
     toml::to_string(&manifest).map_err(|error| {
         map_binding_error(format!(
@@ -797,6 +760,14 @@ fn channel_directions_from_manifest_record(
     record: &ExtensionManifestRecord,
     label: &str,
 ) -> Result<Option<LifecycleChannelDirections>, ProductWorkflowError> {
+    // Manifest v3: the resolved channel descriptor declares its directions.
+    if let Some(channel) = &record.resolved().channel {
+        return Ok(Some(LifecycleChannelDirections {
+            inbound: channel.inbound,
+            outbound: channel.outbound,
+        }));
+    }
+    // Manifest v2: derive from the product-adapter section capability flags.
     let sections =
         ironclaw_product_adapter_registry::product_adapter_sections(record).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
@@ -1877,16 +1848,24 @@ mod tests {
                 .map(|asset| asset.path.as_str())
                 .collect::<HashSet<_>>();
 
+            // Synthetic inline-dynamic refs ("schemas/{id}/dynamic/…", e.g. the
+            // hosted-MCP connection template's input schema) ship NO package
+            // asset on purpose: discovered/dynamic schemas are inlined at
+            // discovery time, not packaged files.
+            let is_dynamic_ref = |schema_ref: &str| schema_ref.contains("/dynamic/");
+
             for capability in &package.package.manifest.capabilities {
                 assert!(
-                    assets.contains(capability.input_schema_ref.as_str()),
+                    is_dynamic_ref(capability.input_schema_ref.as_str())
+                        || assets.contains(capability.input_schema_ref.as_str()),
                     "{extension_id} capability {} missing input schema asset {}",
                     capability.id,
                     capability.input_schema_ref.as_str()
                 );
                 if let Some(output_schema_ref) = &capability.output_schema_ref {
                     assert!(
-                        assets.contains(output_schema_ref.as_str()),
+                        is_dynamic_ref(output_schema_ref.as_str())
+                            || assets.contains(output_schema_ref.as_str()),
                         "{extension_id} capability {} missing output schema asset {}",
                         capability.id,
                         output_schema_ref.as_str()
@@ -1894,7 +1873,8 @@ mod tests {
                 }
                 if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
                     assert!(
-                        assets.contains(prompt_doc_ref.as_str()),
+                        is_dynamic_ref(prompt_doc_ref.as_str())
+                            || assets.contains(prompt_doc_ref.as_str()),
                         "{extension_id} capability {} missing prompt doc asset {}",
                         capability.id,
                         prompt_doc_ref.as_str()
@@ -1958,13 +1938,25 @@ mod tests {
         let github = catalog.resolve(&package_ref).unwrap();
         let mut allowed_read_only = BTreeSet::new();
         let mut ask_required = BTreeSet::new();
-        let sensitive_token_backed_reads = BTreeSet::from(["github.search_code"]);
+        // Manifest v3 effects uniformly carry the normalizer-added
+        // dispatch_capability marker (every capability is dispatchable; it is
+        // not a write and not an approval signal), so it can no longer mark a
+        // capability as effectful. The non-write capabilities that still
+        // require approval are pinned by id instead: search_code (broad
+        // token-backed read) and handle_webhook (synthesizes system event
+        // intents).
+        let sensitive_non_write_asks =
+            BTreeSet::from(["github.search_code", "github.handle_webhook"]);
 
         for capability in &github.package.manifest.capabilities {
-            let requires_explicit_approval = capability.effects.iter().any(|effect| {
-                effect.is_write() || matches!(effect, EffectKind::DispatchCapability)
-            }) || sensitive_token_backed_reads
-                .contains(capability.id.as_str());
+            assert!(
+                capability.effects.contains(&EffectKind::DispatchCapability),
+                "{} should carry the normalizer-added dispatch_capability effect",
+                capability.id
+            );
+            let requires_explicit_approval =
+                capability.effects.iter().any(|effect| effect.is_write())
+                    || sensitive_non_write_asks.contains(capability.id.as_str());
             if requires_explicit_approval {
                 assert_eq!(
                     capability.default_permission,
@@ -2205,16 +2197,25 @@ mod tests {
              when the root NEAR AI provider owns the credential"
         );
 
-        let search = package
+        // Manifest v3: hosted-MCP nearai declares one [mcp] block instead of
+        // placeholder static tools. Before live tools/list discovery the only
+        // capability is the host-internal connection template — never
+        // model-visible — so the browser summary carries zero visible tools.
+        assert!(
+            summary.visible_capability_ids.is_empty(),
+            "hosted-MCP nearai has no model-visible tools before discovery"
+        );
+        let template = package
             .package
             .manifest
             .capabilities
             .iter()
-            .find(|capability| capability.id.as_str() == "nearai.web_search")
-            .expect("nearai web search capability");
-        assert_eq!(search.runtime_credentials.len(), 1);
+            .find(|capability| capability.id.as_str() == "nearai.mcp_server")
+            .expect("nearai hosted-MCP connection template");
+        assert_eq!(template.visibility, CapabilityVisibility::HostInternal);
+        assert_eq!(template.runtime_credentials.len(), 1);
         assert_eq!(
-            search.runtime_credentials[0].handle,
+            template.runtime_credentials[0].handle,
             ironclaw_host_api::SecretHandle::new("llm_nearai_api_key").unwrap()
         );
     }
@@ -2311,8 +2312,13 @@ mod tests {
                 .filter(|requirement| requirement.provider == "google")
                 .collect::<Vec<_>>();
 
+            // Manifest v3: per-tool least privilege lives in provider_scopes;
+            // the OAuth account setup scopes come from the [auth.google]
+            // recipe CEILING, uniform across every credential of the vendor
+            // and equal to the package's provider-scope union.
             let mut credential_count = 0;
-            let mut expected_setup_scopes = BTreeSet::new();
+            let mut provider_scope_union = BTreeSet::new();
+            let mut setup_scope_sets = Vec::new();
             for capability in &package.package.manifest.capabilities {
                 for credential in &capability.runtime_credentials {
                     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
@@ -2331,15 +2337,33 @@ mod tests {
                             capability.id
                         );
                     };
-                    assert_eq!(
-                        scopes, &credential.provider_scopes,
-                        "{extension_id} capability {} OAuth setup scopes should match requested provider scopes",
+                    let setup_scopes = scopes.iter().cloned().collect::<BTreeSet<_>>();
+                    assert!(
+                        credential
+                            .provider_scopes
+                            .iter()
+                            .all(|scope| setup_scopes.contains(scope)),
+                        "{extension_id} capability {} provider scopes must fit inside the recipe ceiling",
                         capability.id
                     );
-                    expected_setup_scopes.extend(scopes.iter().cloned());
+                    provider_scope_union.extend(credential.provider_scopes.iter().cloned());
+                    setup_scope_sets.push(setup_scopes);
                     credential_count += 1;
                 }
             }
+
+            assert!(
+                credential_count > 0,
+                "{extension_id} should declare runtime credentials"
+            );
+            assert!(
+                setup_scope_sets.windows(2).all(|pair| pair[0] == pair[1]),
+                "{extension_id} OAuth setup scopes (the vendor ceiling) must be uniform across credentials"
+            );
+            assert_eq!(
+                setup_scope_sets[0], provider_scope_union,
+                "{extension_id} recipe ceiling should equal the union of the tools' provider scopes"
+            );
 
             assert_eq!(
                 google_requirements.len(),
@@ -2352,12 +2376,8 @@ mod tests {
             };
             assert_eq!(
                 scopes.iter().cloned().collect::<BTreeSet<_>>(),
-                expected_setup_scopes,
+                provider_scope_union,
                 "{extension_id} lifecycle setup should include every capability OAuth scope"
-            );
-            assert!(
-                credential_count > 0,
-                "{extension_id} should declare runtime credentials"
             );
         }
     }
@@ -2370,7 +2390,17 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let package = catalog.resolve(&package_ref).unwrap();
 
-        let mut union_scopes = BTreeSet::new();
+        let ceiling = slack_personal_oauth_setup_scopes()
+            .iter()
+            .map(|scope| scope.to_string())
+            .collect::<BTreeSet<_>>();
+
+        // Manifest v3: per-tool least privilege lives in provider_scopes
+        // (read-only tools exclude chat:write; send_message includes it). The
+        // OAuth account setup scopes are the [auth.slack] recipe CEILING —
+        // identical for every slack credential and chat:write-bearing — which
+        // is the same surface-level union users saw at connect time under v2.
+        let mut provider_scope_union = BTreeSet::new();
         for capability in &package.package.manifest.capabilities {
             let is_write_tool = capability.effects.iter().any(|effect| effect.is_write());
             for credential in &capability.runtime_credentials {
@@ -2389,24 +2419,28 @@ mod tests {
                         capability.id
                     );
                 };
-                assert_eq!(scopes, &credential.provider_scopes);
-                let requests_write = scopes.iter().any(|scope| scope.as_str() == "chat:write");
                 assert_eq!(
-                    requests_write, is_write_tool,
-                    "only write-effect capabilities may request chat:write; capability {} requests_write={requests_write}",
+                    scopes.iter().cloned().collect::<BTreeSet<_>>(),
+                    ceiling,
+                    "slack capability {} setup scopes must be the uniform recipe ceiling",
                     capability.id
                 );
-                union_scopes.extend(scopes.iter().cloned());
+                let requests_write = credential
+                    .provider_scopes
+                    .iter()
+                    .any(|scope| scope.as_str() == "chat:write");
+                assert_eq!(
+                    requests_write, is_write_tool,
+                    "only write-effect capabilities may request chat:write in provider_scopes; capability {} requests_write={requests_write}",
+                    capability.id
+                );
+                provider_scope_union.extend(credential.provider_scopes.iter().cloned());
             }
         }
 
         assert_eq!(
-            union_scopes,
-            slack_personal_oauth_setup_scopes()
-                .iter()
-                .map(|scope| scope.to_string())
-                .collect::<BTreeSet<_>>(),
-            "SLACK_OAUTH_SETUP_SCOPES must equal the union of the manifest capabilities' scopes"
+            provider_scope_union, ceiling,
+            "SLACK_OAUTH_SETUP_SCOPES must equal the union of the manifest capabilities' provider scopes"
         );
     }
 
@@ -2473,10 +2507,26 @@ mod tests {
             !package.package.manifest.capabilities.is_empty(),
             "unified slack declares the user-scoped tool capabilities"
         );
-        assert!(package.package.manifest.host_apis.iter().any(|host_api| {
-            host_api.id.as_str() == "ironclaw.product_adapter/v1"
-                && host_api.section.as_str() == "product_adapter.inbound"
-        }));
+        // Manifest v3 declares the channel surface directly ([channel]); the
+        // [[host_api]] product-adapter contract indirection is gone, so
+        // host_apis is empty and the channel arrives as a projected
+        // CapabilitySurfaceDeclV2::Channel surface.
+        assert!(
+            package.package.manifest.host_apis.is_empty(),
+            "v3 manifests carry no host_api contract refs"
+        );
+        assert!(
+            package
+                .package
+                .manifest
+                .host_api_surfaces
+                .iter()
+                .any(|surface| matches!(
+                    surface,
+                    ironclaw_extensions::CapabilitySurfaceDeclV2::Channel { .. }
+                )),
+            "unified slack declares a channel surface"
+        );
 
         let summary = package.summary();
         assert_eq!(
@@ -2612,14 +2662,31 @@ handle = "web_token"
         let manifest: Value = toml::from_str(&manifest_toml).unwrap();
 
         assert_eq!(manifest["trust"].as_str(), Some("first_party_requested"));
+        // Manifest v3: the endpoint override patches exactly one field —
+        // [mcp].server. The URL-encoded injection attempt stays inert data in
+        // that one string; trust is untouched.
         assert_eq!(
-            manifest["runtime"]["url"].as_str(),
+            manifest["mcp"]["server"].as_str(),
             Some("https://10.0.0.12:8443/%22%0Atrust=%22system/mcp")
         );
-        let audience = &manifest["capability_provider"]["tools"]["capabilities"][0]["runtime_credentials"]
-            [0]["audience"];
-        assert_eq!(audience["host_pattern"].as_str(), Some("10.0.0.12"));
-        assert_eq!(audience["port"].as_integer(), Some(8443));
+
+        // The connection credential's audience is not rendered into the TOML;
+        // it derives from the [mcp].server host automatically when the
+        // manifest is parsed.
+        let package =
+            bundled_extension_package(NEARAI_EXTENSION_ID, "NEAR AI", &manifest_toml, Vec::new())
+                .expect("patched NEAR AI manifest parses");
+        let template = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "nearai.mcp_server")
+            .expect("nearai hosted-MCP connection template");
+        assert_eq!(
+            template.runtime_credentials[0].audience.host_pattern,
+            "10.0.0.12"
+        );
     }
 
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]

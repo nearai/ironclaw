@@ -285,6 +285,10 @@ pub(crate) fn parse_v3(
             reason: "first_party runtime requires a host-bundled manifest source".to_string(),
         });
     }
+    let sandboxed_runtime = matches!(
+        runtime,
+        ExtensionRuntimeV2::Wasm { .. } | ExtensionRuntimeV2::Mcp { .. }
+    );
 
     // Validate recipes.
     let mut recipes: BTreeMap<VendorId, VendorAuthRecipe> = BTreeMap::new();
@@ -323,7 +327,7 @@ pub(crate) fn parse_v3(
             input_schema_ref: format!("schemas/{id}/dynamic/mcp_server.input.v1.json"),
             output_schema_ref: None,
             prompt_doc_ref: None,
-            required_host_ports: derived_host_ports(&mcp.effects),
+            required_host_ports: derived_host_ports(&mcp.effects, true),
             runtime_credentials: mcp
                 .credentials
                 .iter()
@@ -363,7 +367,7 @@ pub(crate) fn parse_v3(
             input_schema_ref: tool.input_schema_ref,
             output_schema_ref: None,
             prompt_doc_ref: tool.prompt_doc_ref,
-            required_host_ports: derived_host_ports(&tool.effects),
+            required_host_ports: derived_host_ports(&tool.effects, sandboxed_runtime),
             runtime_credentials: tool
                 .credentials
                 .into_iter()
@@ -491,10 +495,13 @@ fn with_dispatch_effect(mut effects: Vec<EffectKind>) -> Vec<EffectKind> {
     effects
 }
 
-/// A network effect implies the host HTTP egress port; v3 authors never name
-/// host ports directly.
-fn derived_host_ports(effects: &[EffectKind]) -> Vec<String> {
-    if effects.contains(&EffectKind::Network) {
+/// A network effect implies the host HTTP egress port for sandboxed
+/// runtimes (WASM modules and proxied MCP servers); v3 authors never name
+/// host ports directly. First-party services receive host services through
+/// invocation wiring, not declared ports — their v2 manifests never
+/// declared any.
+fn derived_host_ports(effects: &[EffectKind], sandboxed_runtime: bool) -> Vec<String> {
+    if sandboxed_runtime && effects.contains(&EffectKind::Network) {
         vec![HOST_RUNTIME_HTTP_EGRESS_PORT_ID.to_string()]
     } else {
         Vec::new()

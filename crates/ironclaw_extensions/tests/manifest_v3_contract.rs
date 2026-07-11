@@ -85,11 +85,10 @@ fn acme_fixture_parses_through_the_single_entry_point() {
             EffectKind::ExternalWrite,
         ]
     );
-    // A network effect implies the host HTTP egress port.
-    assert_eq!(
-        tool.required_host_ports,
-        vec![HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID).unwrap()]
-    );
+    // First-party services receive host services through invocation wiring;
+    // only sandboxed runtimes (wasm/mcp) derive the egress port from the
+    // network effect.
+    assert!(tool.required_host_ports.is_empty());
     // v3 drops output_schema_ref (schemas remain package assets).
     assert!(tool.output_schema_ref.is_none());
 

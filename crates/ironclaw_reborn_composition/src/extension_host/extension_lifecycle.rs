@@ -67,7 +67,7 @@ impl ExtensionCredentialCleanup for RebornProductAuthServices {
 
 mod active_publication;
 #[cfg(test)]
-mod hosted_mcp_test_support;
+pub(crate) mod hosted_mcp_test_support;
 
 use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
@@ -2529,15 +2529,40 @@ mod tests {
                 },
             )
             .await
-            .expect("transient discovery failure should fall back to bundled manifest");
+            .expect("transient discovery failure must not fail activation");
 
         assert_eq!(activate.phase, LifecyclePhase::Active);
+        // v3 hosted-MCP manifests declare no placeholder static tools, so the
+        // bundled-manifest fallback publishes only the host-internal MCP
+        // connection template; model-visible tools appear solely via live
+        // tools/list discovery.
+        let snapshot = active_registry.snapshot();
         assert!(
-            active_registry
-                .snapshot()
+            snapshot
                 .get_capability(&CapabilityId::new("notion.notion-search").unwrap())
-                .is_some(),
-            "fallback activation must publish bundled Notion capabilities"
+                .is_none(),
+            "v2 placeholder tools must not reappear on fallback"
+        );
+        let template_id = CapabilityId::new("notion.mcp_server").unwrap();
+        assert!(
+            snapshot.get_capability(&template_id).is_some(),
+            "fallback activation must publish the host-internal MCP connection template"
+        );
+        assert_eq!(
+            snapshot.capability_visibility(&template_id),
+            Some(CapabilityVisibility::HostInternal),
+            "MCP connection template must never be model-visible"
+        );
+        let model_visible_notion_tools = snapshot
+            .capabilities()
+            .filter(|descriptor| descriptor.provider.as_str() == "notion")
+            .filter(|descriptor| {
+                snapshot.capability_visibility(&descriptor.id) == Some(CapabilityVisibility::Model)
+            })
+            .count();
+        assert_eq!(
+            model_visible_notion_tools, 0,
+            "fallback activation must expose zero model-visible tools"
         );
     }
 
