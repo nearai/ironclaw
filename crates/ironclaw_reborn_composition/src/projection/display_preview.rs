@@ -185,7 +185,7 @@ impl CapabilityDisplayPreviewStore {
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
             title: bounded_display_text(
-                capability_display_title(tool_name),
+                capability_input_title(tool_name),
                 CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
             )
             .text,
@@ -246,7 +246,7 @@ impl CapabilityDisplayPreviewStore {
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
-            .unwrap_or_else(|| capability_display_title(result.capability_id.as_str()).to_string());
+            .unwrap_or_else(|| capability_result_title(result.capability_id.as_str()).to_string());
         let output = display_preview
             .map(output_preview_from_display)
             .unwrap_or_else(|| {
@@ -886,7 +886,14 @@ fn safe_capability_title(capability_id: &str) -> &str {
         .unwrap_or(capability_id)
 }
 
-fn capability_display_title(capability_id: &str) -> &str {
+fn capability_input_title(capability_id: &str) -> &str {
+    if capability_matches(capability_id, "trigger_create") {
+        return "Routine";
+    }
+    capability_id
+}
+
+fn capability_result_title(capability_id: &str) -> &str {
     if capability_matches(capability_id, "trigger_create") {
         return "Routine";
     }
