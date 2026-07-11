@@ -61,6 +61,8 @@ export function useHistory(threadId, options = {}) {
     // thread-change effect below swaps it in.
     messagesThreadId: threadId || null,
     nextCursor: cached?.nextCursor || null,
+    sequenceWindow:
+      cached?.sequenceWindow || timelineSequenceWindow(cached?.messages || []),
     isLoading: false,
     // Non-null when an initial or cursor-load failed. Reset to null on a
     // successful load or when the threadId changes. The chat page renders
@@ -76,6 +78,8 @@ export function useHistory(threadId, options = {}) {
       messages: entry?.messages || [],
       messagesThreadId: threadId || null,
       nextCursor: entry?.nextCursor || null,
+      sequenceWindow:
+        entry?.sequenceWindow || timelineSequenceWindow(entry?.messages || []),
       isLoading: Boolean(threadId) && !entry,
       loadError: null,
     });
@@ -109,6 +113,7 @@ export function useHistory(threadId, options = {}) {
           messages: [],
           messagesThreadId: null,
           nextCursor: null,
+          sequenceWindow: null,
           isLoading: false,
           loadError: null,
         });
@@ -135,7 +140,13 @@ export function useHistory(threadId, options = {}) {
         if (authScope() !== issuingScope) return;
 
         const pendingMessages = cursor ? [] : getPendingMessages?.() || [];
-        const renderable = messagesFromTimeline(data.messages || [], pendingMessages, threadId);
+        const timelineRecords = data.messages || [];
+        const fetchedSequenceWindow = timelineSequenceWindow(timelineRecords);
+        const renderable = messagesFromTimeline(
+          timelineRecords,
+          pendingMessages,
+          threadId,
+        );
         const nextCursor = data.next_cursor || null;
 
         // RebornTimelineResponse.next_cursor === null means we reached
@@ -151,9 +162,14 @@ export function useHistory(threadId, options = {}) {
         if (!cursor) {
           const cachedEntry = historyCache.get(key);
           const cachedMessages = cachedEntry?.messages || [];
+          const cachedSequenceWindow =
+            cachedEntry?.sequenceWindow ||
+            timelineSequenceWindow(cachedMessages);
           const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
             preserveClientOnly,
             finalReplyTimestampByRun,
+            freshSequenceWindow: fetchedSequenceWindow,
+            currentSequenceWindow: cachedSequenceWindow,
           });
           putCache(key, {
             messages: cacheMerged,
@@ -162,6 +178,14 @@ export function useHistory(threadId, options = {}) {
               cachedMessages,
               nextCursor,
               cachedEntry?.nextCursor || null,
+              {
+                freshSequenceWindow: fetchedSequenceWindow,
+                currentSequenceWindow: cachedSequenceWindow,
+              },
+            ),
+            sequenceWindow: sequenceWindowAfterFullRefresh(
+              fetchedSequenceWindow,
+              cachedSequenceWindow,
             ),
           });
         }
@@ -171,6 +195,9 @@ export function useHistory(threadId, options = {}) {
           // live view alone (the cache above already captured the result).
           if (threadIdRef.current !== threadId) return prev;
           let merged;
+          let mergedSequenceWindow;
+          const prevSequenceWindow =
+            prev.sequenceWindow || timelineSequenceWindow(prev.messages);
           if (cursor) {
             if (
               !cursorPageCanMerge(
@@ -178,6 +205,10 @@ export function useHistory(threadId, options = {}) {
                 renderable,
                 prev.messages,
                 prev.nextCursor || null,
+                {
+                  pageSequenceWindow: fetchedSequenceWindow,
+                  currentSequenceWindow: prevSequenceWindow,
+                },
               )
             ) {
               return {
@@ -190,11 +221,21 @@ export function useHistory(threadId, options = {}) {
               };
             }
             merged = mergePage(renderable, prev.messages);
+            mergedSequenceWindow = mergeSequenceWindows(
+              fetchedSequenceWindow,
+              prevSequenceWindow,
+            );
           } else {
             merged = mergeFullRefresh(renderable, prev.messages, {
               preserveClientOnly,
               finalReplyTimestampByRun,
+              freshSequenceWindow: fetchedSequenceWindow,
+              currentSequenceWindow: prevSequenceWindow,
             });
+            mergedSequenceWindow = sequenceWindowAfterFullRefresh(
+              fetchedSequenceWindow,
+              prevSequenceWindow,
+            );
           }
           const mergedNextCursor = cursor
             ? nextCursor
@@ -203,12 +244,21 @@ export function useHistory(threadId, options = {}) {
                 prev.messages,
                 nextCursor,
                 prev.nextCursor || null,
+                {
+                  freshSequenceWindow: fetchedSequenceWindow,
+                  currentSequenceWindow: prevSequenceWindow,
+                },
               );
-          putCache(key, { messages: merged, nextCursor: mergedNextCursor });
+          putCache(key, {
+            messages: merged,
+            nextCursor: mergedNextCursor,
+            sequenceWindow: mergedSequenceWindow,
+          });
           return {
             messages: merged,
             messagesThreadId: threadId,
             nextCursor: mergedNextCursor,
+            sequenceWindow: mergedSequenceWindow,
             isLoading: hasOtherActiveLoadsForThread(
               loadingRef.current,
               threadId,
@@ -250,6 +300,8 @@ export function useHistory(threadId, options = {}) {
       messages: entry?.messages || [],
       messagesThreadId: threadId || null,
       nextCursor: entry?.nextCursor || null,
+      sequenceWindow:
+        entry?.sequenceWindow || timelineSequenceWindow(entry?.messages || []),
       // Only show the loading state when nothing is cached to show;
       // otherwise render the cached thread immediately and refresh in
       // the background so the content area doesn't flash empty.
@@ -268,15 +320,35 @@ export function useHistory(threadId, options = {}) {
     if (threadIdRef.current === targetThreadId) {
       setState((s) => {
         const messages = apply(s.messages || []);
-        putCache(key, { messages, nextCursor: s.nextCursor || null });
-        return { ...s, messages, messagesThreadId: targetThreadId };
+        const sequenceWindow = mergeSequenceWindows(
+          s.sequenceWindow || null,
+          timelineSequenceWindow(messages),
+        );
+        putCache(key, {
+          messages,
+          nextCursor: s.nextCursor || null,
+          sequenceWindow,
+        });
+        return {
+          ...s,
+          messages,
+          sequenceWindow,
+          messagesThreadId: targetThreadId,
+        };
       });
       return;
     }
 
     const entry = historyCache.get(key) || { messages: [], nextCursor: null };
     const messages = apply(entry.messages || []);
-    putCache(key, { messages, nextCursor: entry.nextCursor || null });
+    putCache(key, {
+      messages,
+      nextCursor: entry.nextCursor || null,
+      sequenceWindow: mergeSequenceWindows(
+        entry.sequenceWindow || null,
+        timelineSequenceWindow(messages),
+      ),
+    });
   }, []);
 
   return {
@@ -292,14 +364,23 @@ export function useHistory(threadId, options = {}) {
       setState((s) => {
         const messages =
           typeof updater === "function" ? updater(s.messages) : updater;
+        const sequenceWindow = mergeSequenceWindows(
+          s.sequenceWindow || null,
+          timelineSequenceWindow(messages),
+        );
         // Keep the cache in step with optimistic sends and SSE-driven
         // updates so returning to the thread shows the latest messages.
         if (threadId) {
-          putCache(cacheKey(threadId), { messages, nextCursor: s.nextCursor });
+          putCache(cacheKey(threadId), {
+            messages,
+            nextCursor: s.nextCursor,
+            sequenceWindow,
+          });
         }
         return {
           ...s,
           messages,
+          sequenceWindow,
           messagesThreadId: threadId || s.messagesThreadId,
         };
       }),
@@ -316,16 +397,23 @@ function cursorPageCanMerge(
   pageMessages,
   currentMessages,
   currentNextCursor,
+  options = {},
 ) {
   return (
     requestedCursor === currentNextCursor ||
-    cursorPageConnectsToCurrentOldest(pageMessages, currentMessages)
+    cursorPageConnectsToCurrentOldest(pageMessages, currentMessages, options)
   );
 }
 
-function cursorPageConnectsToCurrentOldest(pageMessages, currentMessages) {
-  const pageWindow = timelineSequenceWindow(pageMessages);
-  const currentWindow = timelineSequenceWindow(currentMessages);
+function cursorPageConnectsToCurrentOldest(
+  pageMessages,
+  currentMessages,
+  options = {},
+) {
+  const pageWindow =
+    options.pageSequenceWindow || timelineSequenceWindow(pageMessages);
+  const currentWindow =
+    options.currentSequenceWindow || timelineSequenceWindow(currentMessages);
   if (!pageWindow || !currentWindow) return false;
   return (
     pageWindow.oldest <= currentWindow.oldest &&
@@ -350,17 +438,30 @@ function nextCursorAfterFullRefresh(
   current,
   freshNextCursor,
   currentNextCursor,
+  options = {},
 ) {
   if (!freshNextCursor) return null;
-  const freshSequenceWindow = timelineSequenceWindow(fresh);
+  const freshSequenceWindow =
+    options.freshSequenceWindow || timelineSequenceWindow(fresh);
   if (!freshSequenceWindow) return freshNextCursor;
-  return hasConnectedLoadedOlderTimelineMessage(current, freshSequenceWindow)
+  const currentSequenceWindow =
+    options.currentSequenceWindow || timelineSequenceWindow(current);
+  return hasConnectedLoadedOlderTimelineRecords(
+    current,
+    freshSequenceWindow,
+    currentSequenceWindow,
+  )
     ? currentNextCursor || null
     : freshNextCursor;
 }
 
 function mergeFullRefresh(fresh, current, options = {}) {
-  const { preserveClientOnly = false, finalReplyTimestampByRun = null } = options;
+  const {
+    preserveClientOnly = false,
+    finalReplyTimestampByRun = null,
+    freshSequenceWindow: rawFreshSequenceWindow = null,
+    currentSequenceWindow: rawCurrentSequenceWindow = null,
+  } = options;
   const hydratedFresh = carryFinalAssistantOrderFlags(
     hydrateFreshMessages(fresh, current, {
       finalReplyTimestampByRun,
@@ -368,10 +469,17 @@ function mergeFullRefresh(fresh, current, options = {}) {
     current,
   );
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
-  const freshSequenceWindow = timelineSequenceWindow(hydratedFresh);
+  const freshSequenceWindow =
+    rawFreshSequenceWindow || timelineSequenceWindow(hydratedFresh);
+  const currentSequenceWindow =
+    rawCurrentSequenceWindow || timelineSequenceWindow(current);
   const preserveLoadedOlderTimelineMessages =
     freshSequenceWindow &&
-    currentTimelineWindowConnectsToFresh(current, freshSequenceWindow);
+    currentTimelineWindowConnectsToFresh(
+      current,
+      freshSequenceWindow,
+      currentSequenceWindow,
+    );
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
@@ -414,16 +522,42 @@ function isLoadedOlderTimelineMessage(message, oldestFreshSequence) {
   return sequence !== null && sequence < oldestFreshSequence;
 }
 
-function hasConnectedLoadedOlderTimelineMessage(messages, freshSequenceWindow) {
-  if (!currentTimelineWindowConnectsToFresh(messages, freshSequenceWindow)) {
+function hasConnectedLoadedOlderTimelineRecords(
+  messages,
+  freshSequenceWindow,
+  currentSequenceWindow,
+) {
+  if (
+    !currentTimelineWindowConnectsToFresh(
+      messages,
+      freshSequenceWindow,
+      currentSequenceWindow,
+    )
+  ) {
     return false;
+  }
+  if (
+    currentSequenceWindow &&
+    currentSequenceWindow.oldest < freshSequenceWindow.oldest
+  ) {
+    return true;
   }
   return (messages || []).some((message) =>
     isLoadedOlderTimelineMessage(message, freshSequenceWindow.oldest),
   );
 }
 
-function currentTimelineWindowConnectsToFresh(messages, freshSequenceWindow) {
+function currentTimelineWindowConnectsToFresh(
+  messages,
+  freshSequenceWindow,
+  currentSequenceWindow = null,
+) {
+  if (
+    currentSequenceWindow &&
+    sequenceWindowsOverlapOrTouch(currentSequenceWindow, freshSequenceWindow)
+  ) {
+    return true;
+  }
   let newestBeforeFresh = null;
   for (const message of messages || []) {
     const sequence = timelineSequence(message);
@@ -445,6 +579,31 @@ function currentTimelineWindowConnectsToFresh(messages, freshSequenceWindow) {
     newestBeforeFresh !== null &&
     newestBeforeFresh + 1 === freshSequenceWindow.oldest
   );
+}
+
+function sequenceWindowAfterFullRefresh(freshSequenceWindow, currentSequenceWindow) {
+  if (!freshSequenceWindow) return freshSequenceWindow;
+  if (
+    currentSequenceWindow &&
+    sequenceWindowsOverlapOrTouch(currentSequenceWindow, freshSequenceWindow)
+  ) {
+    return mergeSequenceWindows(freshSequenceWindow, currentSequenceWindow);
+  }
+  return freshSequenceWindow;
+}
+
+function mergeSequenceWindows(left, right) {
+  if (!left) return right || null;
+  if (!right) return left || null;
+  return {
+    oldest: Math.min(left.oldest, right.oldest),
+    newest: Math.max(left.newest, right.newest),
+  };
+}
+
+function sequenceWindowsOverlapOrTouch(left, right) {
+  if (!left || !right) return false;
+  return left.oldest <= right.newest + 1 && right.oldest <= left.newest + 1;
 }
 
 function timelineSequenceWindow(messages) {

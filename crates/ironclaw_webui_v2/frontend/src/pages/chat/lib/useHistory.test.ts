@@ -272,6 +272,73 @@ test("useHistory discards stale cursor pages after a refresh changes cursor wind
   assert.equal(setCalls.at(-1).isLoading, false);
 });
 
+test("useHistory merges cursor pages connected by raw filtered boundary records", async () => {
+  const setCalls = [];
+  const fetchCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      if (!cursor) {
+        return {
+          messages: [
+            {
+              id: "hidden-current-boundary",
+              kind: "tool_result_reference",
+              sequence: 151,
+            },
+            { id: "current-visible", sequence: 152 },
+          ],
+          next_cursor: "cursor-before-151-new",
+        };
+      }
+      assert.equal(cursor, "cursor-before-151-old");
+      return {
+        messages: [
+          { id: "older-visible", sequence: 149 },
+          {
+            id: "hidden-older-boundary",
+            kind: "tool_result_reference",
+            sequence: 150,
+          },
+        ],
+        next_cursor: "cursor-before-101",
+      };
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records
+        .filter((record) => record.kind !== "tool_result_reference")
+        .map((record) => ({
+          id: record.id,
+          role: "user",
+          sequence: record.sequence,
+        })),
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(
+    "thread-filtered-cursor",
+    {},
+  );
+  await flushMicrotasks();
+
+  await history.loadHistory("cursor-before-151-old");
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, [null, "cursor-before-151-old"]);
+  assert.equal(setCalls.at(-1).nextCursor, "cursor-before-101");
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(setCalls.at(-1).messages.map((message) => message.id)),
+    ),
+    ["older-visible", "current-visible"],
+  );
+});
+
 test("cursor page merge guard requires the current cursor or a connected page", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
@@ -306,6 +373,88 @@ test("cursor page merge guard requires the current cursor or a connected page", 
       "cursor-before-101",
     ),
     true,
+  );
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151-old",
+      [{ id: "msg-149", sequence: 149 }],
+      [{ id: "msg-152", sequence: 152 }],
+      "cursor-before-151-new",
+      {
+        pageSequenceWindow: { oldest: 101, newest: 150 },
+        currentSequenceWindow: { oldest: 151, newest: 200 },
+      },
+    ),
+    true,
+  );
+});
+
+test("useHistory full refresh preserves older rows and cursor across raw filtered boundaries", async () => {
+  const setCalls = [];
+  const fetchCalls = [];
+  let latestCalls = 0;
+  const context = {
+    console,
+    fetchTimeline: async ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      assert.equal(cursor || null, null);
+      latestCalls += 1;
+      if (latestCalls === 1) {
+        return {
+          messages: [
+            { id: "current-visible", sequence: 99 },
+            {
+              id: "hidden-current-boundary",
+              kind: "tool_result_reference",
+              sequence: 100,
+            },
+          ],
+          next_cursor: "cursor-before-99",
+        };
+      }
+      return {
+        messages: [
+          {
+            id: "hidden-fresh-boundary",
+            kind: "tool_result_reference",
+            sequence: 101,
+          },
+          { id: "fresh-visible", sequence: 102 },
+        ],
+        next_cursor: "cursor-before-101",
+      };
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records
+        .filter((record) => record.kind !== "tool_result_reference")
+        .map((record) => ({
+          id: record.id,
+          role: "user",
+          sequence: record.sequence,
+        })),
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(
+    "thread-filtered-refresh",
+    {},
+  );
+  await flushMicrotasks();
+
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, [null, null]);
+  assert.equal(setCalls.at(-1).nextCursor, "cursor-before-99");
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(setCalls.at(-1).messages.map((message) => message.id)),
+    ),
+    ["current-visible", "fresh-visible"],
   );
 });
 
