@@ -1403,31 +1403,6 @@ impl RebornRuntime {
         &self.services
     }
 
-    /// Seed a bare `secret_handle` secret for an owner scope so keyed
-    /// capabilities (network + `use_secret`) can resolve their
-    /// `InjectSecretOnce` obligation. `serve` uses this to write the value of
-    /// an `IRONCLAW_REBORN_DEV_SECRET__<handle>` env var into the tenant-shared
-    /// admin-managed scope, so one operator-provisioned key serves every user of
-    /// the tenant (SSO users included) without per-user provisioning. The secret
-    /// store is composition-private, so this is the single narrow write seam.
-    pub async fn seed_local_dev_secret(
-        &self,
-        owner: ResourceScope,
-        handle: ironclaw_host_api::SecretHandle,
-        secret_value: String,
-    ) -> Result<(), ironclaw_secrets::SecretStoreError> {
-        self.services
-            .secret_store()
-            .put(
-                owner,
-                handle,
-                ironclaw_secrets::SecretMaterial::from(secret_value),
-                None,
-            )
-            .await
-            .map(|_| ())
-    }
-
     pub(crate) fn webui_tenant_id(&self) -> &TenantId {
         &self.thread_scope.tenant_id
     }
@@ -3451,9 +3426,7 @@ pub async fn build_reborn_runtime(
     if let Some(local_runtime) = local_runtime {
         projection_services = projection_services
             .with_approval_requests(Arc::clone(&local_runtime.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>)
-            .with_budget_gates(Arc::clone(&local_runtime.budget_gate_store))
-            .with_budget_governor(Arc::clone(&local_runtime.resource_governor));
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>);
     }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());
@@ -6062,10 +6035,7 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(
-                nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
-            )
+            .project(nearai_ref)
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6170,10 +6140,7 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(
-                nearai_ref,
-                extension_management.tenant_operator_user_id_for_test(),
-            )
+            .project(nearai_ref)
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -7702,10 +7669,7 @@ output_schema_ref = "schemas/write.output.json"
         let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
             .expect("valid notion ref");
         extension_management
-            .install(
-                notion_ref.clone(),
-                extension_management.tenant_operator_user_id_for_test(),
-            )
+            .install(notion_ref.clone())
             .await
             .expect("install Notion MCP");
         extension_management
@@ -10233,26 +10197,17 @@ output_schema_ref = "schemas/write.output.json"
             )
             .await
             .expect("approval gate event stream");
-        let prompt = streamed
-            .events
-            .iter()
-            .find_map(|event| match event.payload() {
-                ProductOutboundPayload::GatePrompt(prompt)
-                    if prompt.turn_run_id == run_id && prompt.gate_ref == gate_ref.as_str() =>
-                {
-                    Some(prompt)
-                }
-                _ => None,
-            })
-            .expect("blocked approval run should be visible as a gate prompt on the product event stream");
-        assert_eq!(prompt.headline, "Approval required");
-        assert_eq!(
-            prompt
-                .approval_context
-                .as_ref()
-                .expect("approval gate prompt should include tool context")
-                .tool_name,
-            "demo.echo"
+        assert!(
+            streamed.events.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    ProductOutboundPayload::GatePrompt(prompt)
+                        if prompt.turn_run_id == run_id
+                            && prompt.gate_ref == gate_ref.as_str()
+                            && prompt.headline == "Approval required"
+                )
+            }),
+            "blocked approval run should be visible as a gate prompt on the product event stream"
         );
 
         bundle
@@ -10530,12 +10485,9 @@ output_schema_ref = "schemas/write.output.json"
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                         .expect("valid github ref");
-                // #5459 P1: act as the runtime owner (the tenant operator) so
-                // the install is tenant-shared and visible to the run's
-                // surface user — a non-operator install would now be private.
                 let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
-                    user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
+                    user_id: UserId::new("user-multi-tool-surface").expect("user id"),
                     agent_id: None,
                     project_id: None,
                 });
@@ -10651,16 +10603,16 @@ output_schema_ref = "schemas/write.output.json"
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
-    /// Regression guard: a WebUI message that arrives while the thread is busy is queued
-    /// into the active run and must NOT be submitted as a separate run when the blocking
-    /// run reaches a terminal state.
+    /// Regression guard: a message that arrives while the thread is busy is stored with
+    /// `RejectedBusy` status and must NOT be auto-resubmitted when the blocking run
+    /// reaches a terminal state.
     ///
     /// Scenario:
     ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
     ///      Queued and holds the active-lock.
     ///  B – submitted via `bundle.api.submit_turn` (WebUI path); thread is busy → stored
-    ///      as `Queued`; response is `DeferredBusy`.
-    ///  Cancel A → B stays queued/consumed by A and is not submitted as a separate run.
+    ///      as `RejectedBusy`; response carries a non-empty `notice`.
+    ///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
     ///  C – submitted after A is cancelled; thread is free → `Submitted`.
     ///
     /// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
@@ -10668,7 +10620,7 @@ output_schema_ref = "schemas/write.output.json"
     /// harness provides; moving it would require duplicating that harness. Decomposition of
     /// runtime.rs is tracked in plan #4471.
     #[tokio::test]
-    async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
+    async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(RecordingGateway {
             reply: "busy-drain ok".to_string(),
@@ -10744,7 +10696,7 @@ output_schema_ref = "schemas/write.output.json"
             run_id: run_id_a, ..
         } = submitted_a;
 
-        // Submit message B through the WebUI path — thread is busy, must get queued.
+        // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
         let response_b = bundle
             .api
             .submit_turn(
@@ -10759,30 +10711,25 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("message B submit should not error");
 
-        let RebornSubmitTurnResponse::DeferredBusy {
+        let RebornSubmitTurnResponse::RejectedBusy {
             notice: notice_b,
             active_run_id: busy_run_id,
-            status: status_b,
             ..
         } = response_b
         else {
-            panic!("expected DeferredBusy for message B, got {response_b:?}");
+            panic!("expected RejectedBusy for message B, got {response_b:?}");
         };
         assert_eq!(
-            busy_run_id, run_id_a,
-            "DeferredBusy should report run A as the active run"
-        );
-        assert_eq!(
-            status_b,
-            TurnStatus::Queued,
-            "message B should be queued into run A"
+            busy_run_id,
+            Some(run_id_a),
+            "RejectedBusy should report run A as the active run"
         );
         assert!(
             !notice_b.is_empty(),
-            "DeferredBusy response must carry a non-empty notice"
+            "RejectedBusy response must carry a non-empty notice"
         );
 
-        // Verify message B is stored with queued status.
+        // Verify message B is stored with RejectedBusy status.
         let history = runtime
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -10791,23 +10738,23 @@ output_schema_ref = "schemas/write.output.json"
             })
             .await
             .expect("thread history after B");
-        let queued_messages: Vec<_> = history
+        let rejected_messages: Vec<_> = history
             .messages
             .iter()
-            .filter(|m| matches!(m.status, MessageStatus::Queued))
+            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
             .collect();
         assert_eq!(
-            queued_messages.len(),
+            rejected_messages.len(),
             1,
-            "exactly one message should be stored as queued after thread-busy submit"
+            "exactly one message should be stored as RejectedBusy after thread-busy submit"
         );
         assert_eq!(
-            queued_messages[0].kind,
+            rejected_messages[0].kind,
             MessageKind::User,
-            "the queued message must be of kind User"
+            "the RejectedBusy message must be of kind User"
         );
 
-        // Cancel run A — this is the terminal event that must not submit B as a separate run.
+        // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
         runtime
             .cancel_run(
                 &scope,
@@ -10818,7 +10765,7 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("run A cancellation succeeds");
 
-        // B must remain the same row and no auto-resubmission should have fired.
+        // B must remain RejectedBusy — no auto-resubmission should have fired.
         let history_after_cancel = runtime
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -10828,10 +10775,10 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("thread history after cancel");
         // Identify message B by the message_id we captured from the pre-cancel history.
-        // Using the stable message_id (rather than a simple queued count) ensures
-        // a regression that leaves the queued row AND adds a Submitted row for the
-        // same message cannot slip past as "still one queued message".
-        let msg_b_id = queued_messages[0].message_id;
+        // Using the stable message_id (rather than a simple RejectedBusy count) ensures
+        // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
+        // same message cannot slip past as "still one RejectedBusy".
+        let msg_b_id = rejected_messages[0].message_id;
 
         let msg_b_after_cancel: Vec<_> = history_after_cancel
             .messages
@@ -10845,8 +10792,8 @@ output_schema_ref = "schemas/write.output.json"
         );
         assert_eq!(
             msg_b_after_cancel[0].status,
-            MessageStatus::Queued,
-            "message B must still be queued after run A is cancelled — no auto-resubmission"
+            MessageStatus::RejectedBusy,
+            "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
         );
         // Guard: no additional Submitted row must have been created for message B's message_id.
         let submitted_for_b: Vec<_> = history_after_cancel
