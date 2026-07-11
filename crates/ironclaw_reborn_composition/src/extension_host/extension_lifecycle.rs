@@ -1223,6 +1223,18 @@ impl RebornLocalExtensionManagementPort {
                 authenticated_actor_user_id,
             )
             .await?;
+            // Finish actor-scoped credential cleanup while an installed row
+            // still proves who may remove it. This prevents a different user
+            // from taking over a retry through the manifest-only tombstone.
+            // The cleanup operation is idempotent, so a later package-removal
+            // failure can safely retry the complete sequence.
+            self.revoke_exclusive_credentials(
+                &removal_scope,
+                &removed_extension_id,
+                &removed_providers,
+                caller,
+            )
+            .await?;
             let response = if installation.is_some() {
                 self.remove_locked(package_ref.clone(), caller).await
             } else {
@@ -1238,13 +1250,6 @@ impl RebornLocalExtensionManagementPort {
             // a durable cleanup tombstone. Only erase it after every external
             // cleanup converges; retryable failures can then recover the exact
             // providers/surfaces without trusting a changed catalog.
-            self.revoke_exclusive_credentials(
-                &removal_scope,
-                &removed_extension_id,
-                &removed_providers,
-                caller,
-            )
-            .await?;
             // A membership-only removal leaves the shared installation in
             // place, so its installed manifest must remain too.
             if self.search_installation(&extension_id).await?.is_none() {
@@ -5623,8 +5628,8 @@ output_schema_ref = "schemas/run.output.json"
         };
         assert!(reason.contains("retry removal"));
         assert!(
-            !storage_root.join("system/extensions/github").exists(),
-            "the package is removed before post-removal cleanup; only the durable manifest tombstone remains"
+            storage_root.join("system/extensions/github").exists(),
+            "the owned installation remains authoritative until actor-scoped cleanup converges"
         );
 
         let quarantined_error = facade
@@ -5647,15 +5652,13 @@ output_schema_ref = "schemas/run.output.json"
                 LifecycleProductAction::ExtensionRemove { package_ref },
             )
             .await
-            .expect("already-absent retry completes quarantined cleanup");
+            .expect("owner retry completes quarantined cleanup and removal");
         assert!(matches!(
             retry.payload,
-            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+            Some(LifecycleProductPayload::ExtensionRemove { removed: true })
         ));
-        assert_eq!(
-            retry.message.as_deref(),
-            Some("Extension was already absent; connection and credential cleanup completed.")
-        );
+        assert!(retry.message.is_none());
+        assert!(!storage_root.join("system/extensions/github").exists());
         assert_eq!(cleanup.calls.load(Ordering::SeqCst), 3);
     }
 
@@ -5774,7 +5777,7 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn extension_remove_retries_from_manifest_tombstone_without_catalog_entry() {
+    async fn extension_remove_retries_actor_scoped_cleanup_without_catalog_entry() {
         let cleanup = Arc::new(FailThenQuarantineExtensionCredentialCleanup::default());
         let (_dir, storage_root, installed_port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
@@ -5783,8 +5786,9 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        let removal_scope = hosted_mcp_scope("alice");
         installed_port
-            .install(package_ref.clone())
+            .install(package_ref.clone(), &removal_scope.user_id)
             .await
             .expect("install github");
         let port = RebornLocalExtensionManagementPort::new(
@@ -5795,41 +5799,72 @@ output_schema_ref = "schemas/run.output.json"
             installed_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
         );
-        let removal_scope = hosted_mcp_scope("extension-remove-tombstone-retry");
+        let error = port
+            .remove(
+                package_ref.clone(),
+                &removal_scope,
+                Some(&removal_scope.user_id),
+            )
+            .await
+            .expect_err("backend failure keeps the owned installation authoritative");
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
 
-        for expected in ["backend failure", "quarantined cleanup"] {
-            let error = port
-                .remove(
-                    package_ref.clone(),
-                    &removal_scope,
-                    Some(&removal_scope.user_id),
-                )
-                .await
-                .expect_err(expected);
-            assert!(matches!(error, ProductWorkflowError::Transient { .. }));
-        }
+        let foreign_scope = hosted_mcp_scope("bob");
+        let foreign_error = port
+            .remove(
+                package_ref.clone(),
+                &foreign_scope,
+                Some(&foreign_scope.user_id),
+            )
+            .await
+            .expect_err("another user cannot take over the cleanup retry");
+        assert!(matches!(
+            foreign_error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+
+        let error = port
+            .remove(
+                package_ref.clone(),
+                &removal_scope,
+                Some(&removal_scope.user_id),
+            )
+            .await
+            .expect_err("quarantined cleanup remains retryable by the owner");
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
         assert!(
-            !storage_root.join("system/extensions/github").exists(),
-            "package files remain absent while cleanup retries"
+            storage_root.join("system/extensions/github").exists(),
+            "package state remains owned until actor-scoped cleanup converges"
         );
         let extension_id = ExtensionId::new("github").expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new("github").expect("valid installation id");
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("installation lookup")
+                .is_some(),
+            "the owner row prevents a foreign user from finalizing cleanup"
+        );
         assert!(
             installation_store
                 .get_manifest(&extension_id)
                 .await
                 .expect("manifest lookup")
                 .is_some(),
-            "persisted manifest is the cleanup tombstone"
+            "persisted manifest remains authoritative while cleanup retries"
         );
 
         let response = port
             .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
             .await
-            .expect("tombstone retry converges without catalog metadata");
+            .expect("owner retry converges without catalog metadata");
         assert!(matches!(
             response.payload,
-            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+            Some(LifecycleProductPayload::ExtensionRemove { removed: true })
         ));
+        assert!(!storage_root.join("system/extensions/github").exists());
         assert!(
             installation_store
                 .get_manifest(&extension_id)
