@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
 };
@@ -8,6 +9,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use super::CodingCapabilityRequest;
 
 pub(crate) type SharedCodingEditLocks = Arc<CodingEditLocks>;
+pub(crate) type SharedCodingReadStates = Arc<CodingReadStates>;
 
 /// Striped per-path async locks that serialize the read+write critical
 /// section of `write_file` / `apply_patch` against concurrent edits to the
@@ -41,6 +43,58 @@ impl CodingEditLocks {
         let idx = (hasher.finish() as usize) % self.stripes.len();
         self.stripes[idx].clone().lock_owned().await
     }
+}
+
+/// Content fingerprints recorded by full `read_file` calls, keyed by
+/// scope + resolved virtual path. `write_file` and `apply_patch` on an
+/// existing file require a recorded entry (read-before-edit) whose
+/// fingerprint still matches the file's current bytes (mid-air collision
+/// detection); a successful edit refreshes the entry so chained edits keep
+/// working. The registry is bounded; eviction and process restarts fail
+/// safe — a missing entry only forces a fresh `read_file` before editing.
+const MAX_READ_STATE_ENTRIES: usize = 8192;
+
+type ReadStateKey = (CodingReadScopeKey, String);
+
+#[derive(Debug, Default)]
+pub(crate) struct CodingReadStates {
+    entries: std::sync::Mutex<HashMap<ReadStateKey, u64>>,
+}
+
+impl CodingReadStates {
+    pub(super) fn record(&self, scope: &CodingReadScopeKey, path: &str, fingerprint: u64) {
+        let mut entries = self.lock_entries();
+        let key = (scope.clone(), path.to_string());
+        if entries.len() >= MAX_READ_STATE_ENTRIES && !entries.contains_key(&key) {
+            // Evict an arbitrary entry to keep memory bounded; the evicted
+            // path just requires a fresh read_file before its next edit.
+            if let Some(evicted) = entries.keys().next().cloned() {
+                entries.remove(&evicted);
+            }
+        }
+        entries.insert(key, fingerprint);
+    }
+
+    pub(super) fn recorded(&self, scope: &CodingReadScopeKey, path: &str) -> Option<u64> {
+        self.lock_entries()
+            .get(&(scope.clone(), path.to_string()))
+            .copied()
+    }
+
+    fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<ReadStateKey, u64>> {
+        // A poisoned lock means another thread panicked mid-update; the map
+        // itself stays coherent (single insert/remove ops), so keep serving.
+        match self.entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+pub(super) fn content_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

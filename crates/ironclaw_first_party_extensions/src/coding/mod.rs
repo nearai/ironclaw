@@ -30,7 +30,7 @@ use crate::latency::{
     trace_tool_error, trace_tool_ok,
 };
 
-use state::SharedCodingEditLocks;
+use state::{SharedCodingEditLocks, SharedCodingReadStates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodingCapabilityKind {
@@ -147,6 +147,7 @@ impl CodingCapabilityError {
 #[derive(Debug, Default)]
 pub struct CodingCapabilityState {
     edit_locks: SharedCodingEditLocks,
+    read_states: SharedCodingReadStates,
 }
 
 impl CodingCapabilityState {
@@ -154,13 +155,14 @@ impl CodingCapabilityState {
         &self,
         request: &CodingCapabilityRequest<'_>,
     ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
-        dispatch(request, &self.edit_locks).await
+        dispatch(request, &self.edit_locks, &self.read_states).await
     }
 }
 
 async fn dispatch(
     request: &CodingCapabilityRequest<'_>,
     edit_locks: &SharedCodingEditLocks,
+    read_states: &SharedCodingReadStates,
 ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     let started_at = started_at();
     let latency_fields = FirstPartyToolLatencyFields::from_input(
@@ -169,10 +171,10 @@ async fn dispatch(
         request.input,
     );
     let result = match request.kind {
-        CodingCapabilityKind::ReadFile => file::read_file(request)
+        CodingCapabilityKind::ReadFile => file::read_file(request, read_states)
             .await
             .map(CodingCapabilityOutput::new),
-        CodingCapabilityKind::WriteFile => file::write_file(request, edit_locks).await,
+        CodingCapabilityKind::WriteFile => file::write_file(request, edit_locks, read_states).await,
         CodingCapabilityKind::ListDir => file::list_dir(request)
             .await
             .map(CodingCapabilityOutput::new),
@@ -182,7 +184,9 @@ async fn dispatch(
         CodingCapabilityKind::Grep => grep_tool::grep(request)
             .await
             .map(CodingCapabilityOutput::new),
-        CodingCapabilityKind::ApplyPatch => file::apply_patch(request, edit_locks).await,
+        CodingCapabilityKind::ApplyPatch => {
+            file::apply_patch(request, edit_locks, read_states).await
+        }
     };
     trace_coding_latency(request, latency_fields.as_ref(), started_at, &result);
     result
@@ -441,6 +445,205 @@ mod tests {
             MountPermissions::read_write(),
         )])
         .expect("mount view")
+    }
+
+    struct CodingFixture {
+        _temp_root: tempfile::TempDir,
+        workspace_dir: std::path::PathBuf,
+        filesystem: Arc<dyn RootFilesystem>,
+        mounts: MountView,
+        scope: ResourceScope,
+        state: super::CodingCapabilityState,
+    }
+
+    impl CodingFixture {
+        fn new(user: &str) -> Self {
+            let temp_root = tempfile::TempDir::new().expect("temp root");
+            let workspace_dir = temp_root.path().join("workspace");
+            std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+            let mut local_filesystem = LocalFilesystem::new();
+            local_filesystem
+                .mount_local(
+                    VirtualPath::new("/projects").expect("virtual path"),
+                    HostPath::from_path_buf(temp_root.path().to_path_buf()),
+                )
+                .expect("projects mount");
+            let scope = ResourceScope::local_default(
+                UserId::new(user).expect("user id"),
+                InvocationId::new(),
+            )
+            .expect("resource scope");
+            Self {
+                _temp_root: temp_root,
+                workspace_dir,
+                filesystem: Arc::new(local_filesystem),
+                mounts: workspace_mounts(),
+                scope,
+                state: super::CodingCapabilityState::default(),
+            }
+        }
+
+        async fn dispatch(
+            &self,
+            kind: super::CodingCapabilityKind,
+            input: serde_json::Value,
+        ) -> Result<super::CodingCapabilityOutput, super::CodingCapabilityError> {
+            let capability_id =
+                CapabilityId::new(format!("builtin.{}", kind.as_str())).expect("capability id");
+            let request = super::CodingCapabilityRequest::new(
+                &capability_id,
+                kind,
+                &self.scope,
+                Some(&self.mounts),
+                Arc::clone(&self.filesystem),
+                &input,
+            );
+            self.state.dispatch(&request).await
+        }
+    }
+
+    fn assert_read_before_edit_rejection(err: &super::CodingCapabilityError, file_hint: &str) {
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OperationFailed);
+        let summary = err
+            .safe_summary()
+            .expect("read-before-edit rejection must carry a model-visible reason");
+        assert!(
+            summary.contains(file_hint),
+            "summary should name the file, got: {summary}"
+        );
+        assert!(
+            summary.contains("read_file"),
+            "summary should tell the model to use read_file, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_requires_reading_existing_files_first() {
+        let fixture = CodingFixture::new("read-before-write-user");
+        std::fs::write(fixture.workspace_dir.join("existing.txt"), "original").expect("seed file");
+
+        // An existing file that was never read must not be blindly overwritten.
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/existing.txt", "content": "blind overwrite"}),
+            )
+            .await
+            .expect_err("write to unread existing file must be rejected");
+        assert_read_before_edit_rejection(&err, "existing.txt");
+        assert_eq!(
+            std::fs::read_to_string(fixture.workspace_dir.join("existing.txt"))
+                .expect("existing file"),
+            "original",
+            "rejected write must not touch the file"
+        );
+
+        // A brand-new file needs no prior read.
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/new.txt", "content": "fresh"}),
+            )
+            .await
+            .expect("write to a new file succeeds without a prior read");
+
+        // Reading the existing file unlocks the write.
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/existing.txt"}),
+            )
+            .await
+            .expect("read file");
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/existing.txt", "content": "informed overwrite"}),
+            )
+            .await
+            .expect("write after read succeeds");
+        assert_eq!(
+            std::fs::read_to_string(fixture.workspace_dir.join("existing.txt"))
+                .expect("existing file"),
+            "informed overwrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_requires_fresh_read_and_tracks_chained_edits() {
+        let fixture = CodingFixture::new("stale-read-user");
+        let file = fixture.workspace_dir.join("main.txt");
+        std::fs::write(&file, "alpha beta\n").expect("seed file");
+
+        // Unread file: rejected with the read-first recovery message.
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ApplyPatch,
+                json!({"path": "/workspace/main.txt", "old_string": "alpha", "new_string": "gamma"}),
+            )
+            .await
+            .expect_err("patch on an unread file must be rejected");
+        assert_read_before_edit_rejection(&err, "main.txt");
+
+        // read_file → apply_patch succeeds.
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/main.txt"}),
+            )
+            .await
+            .expect("read file");
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ApplyPatch,
+                json!({"path": "/workspace/main.txt", "old_string": "alpha", "new_string": "gamma"}),
+            )
+            .await
+            .expect("patch after read succeeds");
+
+        // A successful edit refreshes the read state, so chained edits keep working.
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ApplyPatch,
+                json!({"path": "/workspace/main.txt", "old_string": "beta", "new_string": "delta"}),
+            )
+            .await
+            .expect("chained patch succeeds without an intervening read");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("patched file"),
+            "gamma delta\n"
+        );
+
+        // Out-of-band modification invalidates the recorded read.
+        std::fs::write(&file, "rewritten by someone else\n").expect("out-of-band write");
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ApplyPatch,
+                json!({"path": "/workspace/main.txt", "old_string": "gamma", "new_string": "x"}),
+            )
+            .await
+            .expect_err("patch on an out-of-band-modified file must be rejected");
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OperationFailed);
+        let summary = err
+            .safe_summary()
+            .expect("stale-read rejection must carry a model-visible reason");
+        assert!(
+            summary.contains("main.txt"),
+            "summary should name the file, got: {summary}"
+        );
+        assert!(
+            summary.contains("changed since"),
+            "summary should say the file changed since the last read, got: {summary}"
+        );
+        assert!(
+            summary.contains("read it again"),
+            "summary should tell the model to re-read, got: {summary}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("file after rejected patch"),
+            "rewritten by someone else\n",
+            "rejected patch must not touch the file"
+        );
     }
 
     #[tokio::test]

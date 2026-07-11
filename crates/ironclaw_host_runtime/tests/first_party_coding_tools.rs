@@ -264,6 +264,7 @@ async fn builtin_write_file_returns_unified_diff_display_preview() {
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.rs", context.clone()).await;
 
     let completed = invoke_completed_with_context(
         &runtime,
@@ -380,6 +381,7 @@ async fn builtin_write_file_maps_filesystem_provider_write_failure_to_backend() 
         fail_suffix: "/main.rs",
     });
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.rs", context.clone()).await;
 
     let error = invoke_with_context(
         &runtime,
@@ -450,6 +452,7 @@ async fn builtin_apply_patch_maps_filesystem_provider_write_failure_to_backend()
         fail_suffix: "/main.rs",
     });
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.rs", context.clone()).await;
 
     let error = invoke_with_context(
         &runtime,
@@ -516,6 +519,7 @@ async fn builtin_apply_patch_accepts_multi_edit_with_fuzzy_unicode_matching() {
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
 
     let patched = invoke_with_context(
         &runtime,
@@ -553,6 +557,7 @@ async fn builtin_apply_patch_fuzzy_match_preserves_unrelated_original_content() 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
 
     let patched = invoke_with_context(
         &runtime,
@@ -589,6 +594,12 @@ async fn builtin_apply_patch_ignores_null_edits_placeholder_for_single_edit() {
         ("null.txt", Value::Null),
         ("string-null.txt", Value::String("null".to_string())),
     ] {
+        seed_read_state(
+            &runtime,
+            &format!("/workspace/{file_name}"),
+            context.clone(),
+        )
+        .await;
         let patched = invoke_with_context(
             &runtime,
             APPLY_PATCH_CAPABILITY_ID,
@@ -619,6 +630,7 @@ async fn builtin_apply_patch_ignores_top_level_null_placeholders_for_multi_edit(
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
 
     let patched = invoke_with_context(
         &runtime,
@@ -689,6 +701,7 @@ async fn builtin_apply_patch_replace_all_replaces_fuzzy_matches_when_exact_text_
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
 
     let patched = invoke_with_context(
         &runtime,
@@ -725,6 +738,7 @@ async fn builtin_apply_patch_replace_all_replaces_mixed_exact_and_fuzzy_matches(
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
 
     let patched = invoke_with_context(
         &runtime,
@@ -761,6 +775,7 @@ async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+    seed_read_state(&runtime, "/workspace/main.txt", context.clone()).await;
 
     let failure = invoke_failure_with_context(
         &runtime,
@@ -985,6 +1000,24 @@ fn assert_aggregate_scan_limit(output: &Value) {
 
 fn max_read_size() -> usize {
     10 * 1024 * 1024
+}
+
+/// Editing an existing file requires a prior full `read_file` (read-before-edit
+/// guard). Tests that exercise unrelated write/patch behavior seed that state
+/// through the public read path.
+async fn seed_read_state<R: HostRuntime + ?Sized>(
+    runtime: &R,
+    path: &str,
+    context: ExecutionContext,
+) {
+    invoke_with_context(
+        runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": path}),
+        context,
+    )
+    .await
+    .expect("read_file seeds read-before-edit state");
 }
 
 async fn invoke_with_context<R: HostRuntime + ?Sized>(

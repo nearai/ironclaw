@@ -25,7 +25,10 @@ use super::{
         resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
         virtual_to_relative,
     },
-    state::{SharedCodingEditLocks, read_scope_key},
+    state::{
+        CodingReadScopeKey, SharedCodingEditLocks, SharedCodingReadStates, content_fingerprint,
+        read_scope_key,
+    },
     text::{
         TextEdit, decode_text, decode_text_lossy, encode_text, previous_char_boundary,
         reject_binary_probe, reject_binary_probe_lenient, replace_content,
@@ -35,6 +38,7 @@ use super::{
 
 pub(super) async fn read_file(
     request: &CodingCapabilityRequest<'_>,
+    read_states: &SharedCodingReadStates,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_required_path(request, "path", FilesystemOperation::ReadFile)?;
     let offset = optional_usize(request.input, "offset")?.unwrap_or(0);
@@ -86,6 +90,16 @@ pub(super) async fn read_file(
             }
         }
     };
+
+    // Only a full read (no offset/limit window) proves the model has seen the
+    // whole file, which is what unlocks write_file/apply_patch on it.
+    if !has_explicit_range {
+        read_states.record(
+            &read_scope_key(request),
+            resolved.virtual_path.as_str(),
+            content_fingerprint(&bytes),
+        );
+    }
 
     Ok(read_file_text_output(
         &content,
@@ -319,6 +333,7 @@ fn extract_document_text_for_read_file(
 pub(super) async fn write_file(
     request: &CodingCapabilityRequest<'_>,
     edit_locks: &SharedCodingEditLocks,
+    read_states: &SharedCodingReadStates,
 ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
@@ -341,23 +356,43 @@ pub(super) async fn write_file(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    // Skip reading the old file when the write-only permission is absent or when
-    // new content alone would trigger the large-diff fast path in file_diff_preview
-    // (the old file read would be wasted).
-    let old_content =
-        if !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile)
-            || will_use_large_diff_path(content)
-        {
-            None
-        } else {
-            existing_text_for_preview(request, &resolved, existing_stat.as_ref()).await
-        };
+    let can_read = operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile);
+    // Overwriting an existing regular file requires a prior full read_file
+    // whose fingerprint still matches the file's current bytes (blind
+    // overwrites and mid-air collisions are the two bench-trace failure
+    // modes). Write-only mounts are exempt: the model cannot read there, so
+    // a blind overwrite is the only possible mode. New files need no read.
+    let existing_bytes = match &existing_stat {
+        Some(stat) if can_read && stat.file_type == FileType::File => Some(
+            verify_read_before_edit(request, &resolved, read_states, &scope, "write_file", stat)
+                .await?,
+        ),
+        _ => None,
+    };
+    // Skip decoding the old file when the read permission is absent or when
+    // new content alone would trigger the large-diff fast path in
+    // file_diff_preview (the decoded old content would be wasted).
+    let old_content = if !can_read || will_use_large_diff_path(content) {
+        None
+    } else {
+        match (&existing_stat, &existing_bytes) {
+            (None, _) => Some(String::new()),
+            (Some(stat), Some(bytes)) => existing_text_for_preview(stat, bytes),
+            // Existing path that is not a regular file (e.g. a directory).
+            (Some(_), None) => None,
+        }
+    };
     create_parent_dir_unless_sensitive(request, &resolved.virtual_path).await?;
     request
         .filesystem
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
         .map_err(filesystem_error)?;
+    read_states.record(
+        &scope,
+        resolved.virtual_path.as_str(),
+        content_fingerprint(content.as_bytes()),
+    );
     let output = json!({
         "path": resolved.scoped_path.as_str(),
         "bytes_written": content.len(),
@@ -368,6 +403,55 @@ pub(super) async fn write_file(
     Ok(CodingCapabilityOutput::with_display_preview(
         output,
         display_preview,
+    ))
+}
+
+/// Enforce read-before-edit on an existing file: a full `read_file` must have
+/// recorded a fingerprint for this scope+path, and the file's current bytes
+/// must still match it. Returns the verified bytes so callers can reuse them.
+async fn verify_read_before_edit(
+    request: &CodingCapabilityRequest<'_>,
+    resolved: &ResolvedPath,
+    read_states: &SharedCodingReadStates,
+    scope: &CodingReadScopeKey,
+    operation: &str,
+    stat: &ironclaw_filesystem::FileStat,
+) -> Result<Vec<u8>, CodingCapabilityError> {
+    let Some(recorded) = read_states.recorded(scope, resolved.virtual_path.as_str()) else {
+        return Err(read_before_edit_error(
+            operation,
+            resolved.scoped_path.as_str(),
+        ));
+    };
+    // A file grown past what read_file can return cannot match any recorded
+    // read; report it as changed instead of fingerprinting unbounded bytes.
+    if stat.len > MAX_READ_SIZE {
+        return Err(stale_read_error(operation, resolved.scoped_path.as_str()));
+    }
+    let bytes = request
+        .filesystem
+        .read_file(&resolved.virtual_path)
+        .await
+        .map_err(|error| {
+            filesystem_error_with_summary(operation, resolved.scoped_path.as_str(), error)
+        })?;
+    if content_fingerprint(&bytes) != recorded {
+        return Err(stale_read_error(operation, resolved.scoped_path.as_str()));
+    }
+    Ok(bytes)
+}
+
+fn read_before_edit_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
+    operation_error_with_summary(format!(
+        "{operation} failed for {}: read it with read_file before editing it",
+        safe_summary_path(scoped_path)
+    ))
+}
+
+fn stale_read_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
+    operation_error_with_summary(format!(
+        "{operation} failed for {}: the file changed since it was last read; read it again with read_file before editing it",
+        safe_summary_path(scoped_path)
     ))
 }
 
@@ -485,6 +569,7 @@ fn format_size(bytes: u64) -> String {
 pub(super) async fn apply_patch(
     request: &CodingCapabilityRequest<'_>,
     edit_locks: &SharedCodingEditLocks,
+    read_states: &SharedCodingReadStates,
 ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
@@ -522,6 +607,15 @@ pub(super) async fn apply_patch(
             ),
         ));
     }
+    // Read-before-edit guard: patching requires a prior full read_file, and
+    // the file must be unchanged since — a stale in-context view produces
+    // wrong-anchor edits (mid-air collision).
+    let Some(recorded) = read_states.recorded(&scope, resolved.virtual_path.as_str()) else {
+        return Err(read_before_edit_error(
+            "apply_patch",
+            resolved.scoped_path.as_str(),
+        ));
+    };
     let bytes = request
         .filesystem
         .read_file(&resolved.virtual_path)
@@ -529,6 +623,12 @@ pub(super) async fn apply_patch(
         .map_err(|error| {
             filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
         })?;
+    if content_fingerprint(&bytes) != recorded {
+        return Err(stale_read_error(
+            "apply_patch",
+            resolved.scoped_path.as_str(),
+        ));
+    }
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
     let text_edits = patch_input
@@ -555,6 +655,11 @@ pub(super) async fn apply_patch(
         .map_err(|error| {
             filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
         })?;
+    read_states.record(
+        &scope,
+        resolved.virtual_path.as_str(),
+        content_fingerprint(&output),
+    );
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),
         "replacements": replacement.replacements,
@@ -614,24 +719,12 @@ fn safe_summary_path(scoped_path: &str) -> String {
     format!("path {path_hint}")
 }
 
-async fn existing_text_for_preview(
-    request: &CodingCapabilityRequest<'_>,
-    resolved: &ResolvedPath,
-    stat: Option<&ironclaw_filesystem::FileStat>,
-) -> Option<String> {
-    let Some(stat) = stat else {
-        return Some(String::new());
-    };
-    if stat.file_type != FileType::File || stat.len > MAX_WRITE_SIZE as u64 {
+fn existing_text_for_preview(stat: &ironclaw_filesystem::FileStat, bytes: &[u8]) -> Option<String> {
+    if stat.len > MAX_WRITE_SIZE as u64 {
         return None;
     }
-    let bytes = request
-        .filesystem
-        .read_file(&resolved.virtual_path)
-        .await
-        // silent-ok: write_file display preview is best-effort; the write result is canonical.
-        .ok()?;
-    reject_binary_probe(&bytes).ok()?;
-    let (content, _encoding, _line_ending) = decode_text(&bytes).ok()?;
+    // silent-ok: write_file display preview is best-effort; the write result is canonical.
+    reject_binary_probe(bytes).ok()?;
+    let (content, _encoding, _line_ending) = decode_text(bytes).ok()?;
     Some(content)
 }
