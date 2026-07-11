@@ -8723,10 +8723,9 @@ url = "http://127.0.0.1:9/mcp"
             "acme-mcp-registered"
         );
 
-        let error = port
-            .project(package_ref, &other_scope)
-            .await
-            .expect_err("a foreign caller's project of another owner's registered package must fail");
+        let error = port.project(package_ref, &other_scope).await.expect_err(
+            "a foreign caller's project of another owner's registered package must fail",
+        );
         assert!(matches!(
             error,
             ProductWorkflowError::InvalidBindingRequest { .. }
