@@ -1606,147 +1606,80 @@ def _find_named_tool_results(messages: list[dict], name: str) -> list[dict]:
     return [result for result in _find_tool_results(messages) if result.get("name") == name]
 
 
-def match_reborn_external_tool_response(
+REBORN_SCRIPTED_TOOL_SCENARIOS = (
+    {
+        "trigger": REBORN_EXTERNAL_TOOL_LOOP_TRIGGER,
+        "batches": (
+            (("lookup_weather", {"city": "Boston"}),),
+            (("lookup_time", {"city": "Boston"}),),
+            (("lookup_fact", {"topic": "Boston"}),),
+        ),
+        "missing_text": "Reborn external tool loop missing tool definitions.",
+        "complete_prefix": "Reborn external tool loop complete: ",
+        "summary_order": ("lookup_weather", "lookup_time", "lookup_fact"),
+    },
+    {
+        "trigger": REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER,
+        "batches": ((("lookup_weather", {"city": "Boston"}),),),
+        "missing_text": "Reborn external tool failure missing tool definitions.",
+        "complete_prefix": "Reborn external tool failure observed: ",
+        "summary_order": ("lookup_weather",),
+    },
+    {
+        "trigger": REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER,
+        "batches": (
+            (
+                ("builtin__echo", {"message": "mixed-internal-echo"}),
+                ("lookup_weather", {"city": "Boston"}),
+            ),
+        ),
+        "missing_text": "Reborn mixed tool run missing tool definitions.",
+        "complete_prefix": "Reborn mixed tool run complete: ",
+        "summary_order": ("builtin__echo", "lookup_weather"),
+    },
+)
+
+
+def match_reborn_scripted_tool_response(
     messages: list[dict],
     has_tools: bool,
 ) -> dict | None:
-    """Script a repeated caller-supplied Responses API tool loop."""
-    if not _conversation_has_user_trigger(messages, REBORN_EXTERNAL_TOOL_LOOP_TRIGGER):
+    """Run the matching table-driven Responses API tool scenario."""
+    scenario = next(
+        (
+            candidate
+            for candidate in REBORN_SCRIPTED_TOOL_SCENARIOS
+            if _conversation_has_user_trigger(messages, candidate["trigger"])
+        ),
+        None,
+    )
+    if scenario is None:
         return None
 
     result_by_name = {
         result["name"]: result["content"] for result in _find_tool_results(messages)
     }
-    if "lookup_weather" not in result_by_name:
-        if not has_tools:
-            return {
-                "type": "text",
-                "text": "Reborn external tool loop missing tool definitions.",
-            }
+    for batch in scenario["batches"]:
+        missing_calls = [
+            {"tool_name": name, "arguments": arguments}
+            for name, arguments in batch
+            if name not in result_by_name
+        ]
+        if not missing_calls:
+            continue
+        if not result_by_name and not has_tools:
+            return {"type": "text", "text": scenario["missing_text"]}
         return {
             "type": "tool_call",
-            "tool_call": {
-                "tool_name": "lookup_weather",
-                "arguments": {"city": "Boston"},
-            },
-        }
-    if "lookup_time" not in result_by_name:
-        return {
-            "type": "tool_call",
-            "tool_call": {
-                "tool_name": "lookup_time",
-                "arguments": {"city": "Boston"},
-            },
-        }
-    if "lookup_fact" not in result_by_name:
-        return {
-            "type": "tool_call",
-            "tool_call": {
-                "tool_name": "lookup_fact",
-                "arguments": {"topic": "Boston"},
-            },
+            "tool_call": missing_calls[0] if len(missing_calls) == 1 else missing_calls,
         }
 
     summary = "; ".join(
-        f"{name}={result_by_name[name]}"
-        for name in ("lookup_weather", "lookup_time", "lookup_fact")
+        f"{name}={result_by_name[name]}" for name in scenario["summary_order"]
     )
     return {
         "type": "text",
-        "text": f"Reborn external tool loop complete: {summary}",
-    }
-
-
-def match_reborn_external_tool_failure_response(
-    messages: list[dict],
-    has_tools: bool,
-) -> dict | None:
-    """Script an external tool call whose supplied output is an error."""
-    if not _conversation_has_user_trigger(
-        messages, REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER
-    ):
-        return None
-
-    result_by_name = {
-        result["name"]: result["content"] for result in _find_tool_results(messages)
-    }
-    if "lookup_weather" not in result_by_name:
-        if not has_tools:
-            return {
-                "type": "text",
-                "text": "Reborn external tool failure missing tool definitions.",
-            }
-        return {
-            "type": "tool_call",
-            "tool_call": {
-                "tool_name": "lookup_weather",
-                "arguments": {"city": "Boston"},
-            },
-        }
-    return {
-        "type": "text",
-        "text": (
-            "Reborn external tool failure observed: "
-            f"lookup_weather={result_by_name['lookup_weather']}"
-        ),
-    }
-
-
-def match_reborn_mixed_internal_external_response(
-    messages: list[dict],
-    has_tools: bool,
-) -> dict | None:
-    """Emit an internal and caller-supplied external tool in one response."""
-    if not _conversation_has_user_trigger(
-        messages, REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER
-    ):
-        return None
-
-    result_by_name = {
-        result["name"]: result["content"] for result in _find_tool_results(messages)
-    }
-    if "builtin__echo" not in result_by_name and "lookup_weather" not in result_by_name:
-        if not has_tools:
-            return {
-                "type": "text",
-                "text": "Reborn mixed tool run missing tool definitions.",
-            }
-        return {
-            "type": "tool_call",
-            "tool_call": [
-                {
-                    "tool_name": "builtin__echo",
-                    "arguments": {"message": "mixed-internal-echo"},
-                },
-                {
-                    "tool_name": "lookup_weather",
-                    "arguments": {"city": "Boston"},
-                },
-            ],
-        }
-    if "lookup_weather" not in result_by_name:
-        return {
-            "type": "tool_call",
-            "tool_call": {
-                "tool_name": "lookup_weather",
-                "arguments": {"city": "Boston"},
-            },
-        }
-    if "builtin__echo" not in result_by_name:
-        return {
-            "type": "tool_call",
-            "tool_call": {
-                "tool_name": "builtin__echo",
-                "arguments": {"message": "mixed-internal-echo"},
-            },
-        }
-    return {
-        "type": "text",
-        "text": (
-            "Reborn mixed tool run complete: "
-            f"builtin__echo={result_by_name['builtin__echo']}; "
-            f"lookup_weather={result_by_name['lookup_weather']}"
-        ),
+        "text": f"{scenario['complete_prefix']}{summary}",
     }
 
 
@@ -2367,27 +2300,10 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
                 return _tool_call_response(cid, followup)
             return await _stream_tool_call(request, cid, followup)
 
-    reborn_external_tool = match_reborn_external_tool_response(messages, has_tools)
-    if reborn_external_tool:
+    reborn_scripted_tool = match_reborn_scripted_tool_response(messages, has_tools)
+    if reborn_scripted_tool:
         return await _dispatch_special_response(
-            request, cid, stream, reborn_external_tool
-        )
-    reborn_external_tool_failure = match_reborn_external_tool_failure_response(
-        messages, has_tools
-    )
-    if reborn_external_tool_failure:
-        return await _dispatch_special_response(
-            request,
-            cid,
-            stream,
-            reborn_external_tool_failure,
-        )
-    reborn_mixed_tool = match_reborn_mixed_internal_external_response(
-        messages, has_tools
-    )
-    if reborn_mixed_tool:
-        return await _dispatch_special_response(
-            request, cid, stream, reborn_mixed_tool
+            request, cid, stream, reborn_scripted_tool
         )
     if (
         not tool_results

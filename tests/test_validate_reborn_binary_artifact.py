@@ -90,6 +90,33 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
                 "webui-v2-beta,slack-v2-host-beta",
             )
 
+    def test_rejects_empty_feature_entries(self) -> None:
+        for features in ("webui-v2-beta,", ["webui-v2-beta", ""]):
+            with self.subTest(features=features):
+                self.write_manifest(features)
+
+                with self.assertRaisesRegex(ValueError, "empty feature"):
+                    VALIDATOR.validate_artifact(
+                        self.artifact_dir,
+                        "a" * 40,
+                        "webui-v2-beta,slack-v2-host-beta",
+                    )
+
+    def test_rejects_duplicate_features(self) -> None:
+        for features in (
+            "webui-v2-beta,webui-v2-beta",
+            ["webui-v2-beta", "webui-v2-beta"],
+        ):
+            with self.subTest(features=features):
+                self.write_manifest(features)
+
+                with self.assertRaisesRegex(ValueError, "duplicate features"):
+                    VALIDATOR.validate_artifact(
+                        self.artifact_dir,
+                        "a" * 40,
+                        "webui-v2-beta,slack-v2-host-beta",
+                    )
+
     def test_rejects_corrupt_archive(self) -> None:
         self.archive.write_bytes(b"corrupt")
 
