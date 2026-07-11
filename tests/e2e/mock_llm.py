@@ -113,6 +113,7 @@ CANNED_RESPONSES = [
 ]
 DEFAULT_RESPONSE = "I understand your request."
 EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
+EMULATE_SLACK_BEARER = "emulate-slack-token"
 
 TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)
 TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
@@ -138,6 +139,31 @@ GCAL_LIFECYCLE_TRIGGER = re.compile(
 )
 GDRIVE_UPLOAD_LIFECYCLE_TRIGGER = re.compile(
     r"upload a google drive file titled",
+    re.IGNORECASE,
+)
+SLACK_DELIVERY_LIFECYCLE_TRIGGER = re.compile(
+    r"send slack canary (?P<marker>\S+) to (?P<channel>[A-Z0-9]+)",
+    re.IGNORECASE,
+)
+GITHUB_RELEASE_SLACK_TRIGGER = re.compile(
+    r"notify slack channel (?P<channel>[A-Z0-9]+) about the latest release in "
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+) with marker "
+    r"(?P<marker>\S+)",
+    re.IGNORECASE,
+)
+CALENDAR_DRIVE_SLACK_TRIGGER = re.compile(
+    r"prepare meeting and notify slack channel (?P<channel>[A-Z0-9]+) with marker "
+    r"(?P<marker>\S+)",
+    re.IGNORECASE,
+)
+GMAIL_SLACK_TRIGGER = re.compile(
+    r"check unread gmail and notify slack channel (?P<channel>[A-Z0-9]+) with "
+    r"marker (?P<marker>\S+)",
+    re.IGNORECASE,
+)
+SLACK_DRIVE_SLACK_TRIGGER = re.compile(
+    r"read slack channel (?P<source>[A-Z0-9]+), look up drive, and notify "
+    r"(?P<target>[A-Z0-9]+) with marker (?P<marker>\S+)",
     re.IGNORECASE,
 )
 NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
@@ -177,6 +203,33 @@ TOOL_CALL_PATTERNS = [
         lambda _: {"operation": "now"},
     ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    # Private tool installs (#5459 P1) — the three test-tools/ fixture bundles
+    # (test-tools/README.md). The provider-visible tool name sanitizes the
+    # dotted capability id's "." to "__" (`encode_provider_tool_name` in
+    # ironclaw_reborn::tool_disclosure); the model gateway's provider_tool_name
+    # validator rejects a raw "." outright ("only ASCII letters, digits, '_',
+    # and '-' are allowed"), so the mock LLM must emit the encoded form, not
+    # the dotted capability id.
+    # The combined pattern is checked first so it doesn't get shadowed by the
+    # single-tool "ascii renderer to draw a" pattern below.
+    (
+        re.compile(r"ascii renderer and market data", re.IGNORECASE),
+        "ascii-renderer__draw",
+        lambda _: [
+            {"tool_name": "ascii-renderer__draw", "arguments": {"subject": "robot"}},
+            {"tool_name": "market-data__snp500", "arguments": {}},
+        ],
+    ),
+    (
+        re.compile(r"ascii renderer to draw a (?P<subject>cat|dog|robot)", re.IGNORECASE),
+        "ascii-renderer__draw",
+        lambda m: {"subject": m.group("subject").lower()},
+    ),
+    (
+        re.compile(r"hacker news tool", re.IGNORECASE),
+        "hacker-news__top_stories",
+        lambda _: {},
+    ),
     # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
     # the project workspace. Reborn exposes this first-party tool by capability
     # id; the provider-facing tool name sanitizes dots as "__". After both
@@ -2061,6 +2114,176 @@ def match_special_response(
             "text": "google_drive lifecycle complete. File uploaded and downloaded.",
         }
 
+    # ── Lifecycle canary: Slack send through the real extension ─────────
+    m = SLACK_DELIVERY_LIFECYCLE_TRIGGER.search(last_user)
+    if m and has_tools:
+        tool_results = _find_named_tool_results(messages, "slack_tool")
+        if not tool_results:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "slack_tool",
+                    "arguments": {
+                        "action": "send_message",
+                        "channel": m.group("channel"),
+                        "text": m.group("marker"),
+                    },
+                },
+            }
+        return {
+            "type": "text",
+            "text": "slack delivery lifecycle complete. Message sent exactly once.",
+        }
+
+    # ── Cross-provider canary: GitHub release → Slack ───────────────────
+    m = GITHUB_RELEASE_SLACK_TRIGGER.search(last_user)
+    if m and has_tools:
+        github_results = _find_named_tool_results(messages, "github")
+        slack_results = _find_named_tool_results(messages, "slack_tool")
+        if not github_results:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "github",
+                    "arguments": {
+                        "action": "list_releases",
+                        "owner": m.group("owner"),
+                        "repo": m.group("repo"),
+                        "limit": 1,
+                    },
+                },
+            }
+        if not slack_results:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "slack_tool",
+                    "arguments": {
+                        "action": "send_message",
+                        "channel": m.group("channel"),
+                        "text": m.group("marker"),
+                    },
+                },
+            }
+        return {
+            "type": "text",
+            "text": "github release to slack lifecycle complete.",
+        }
+
+    # ── Cross-provider canary: Calendar + Drive → Slack ─────────────────
+    m = CALENDAR_DRIVE_SLACK_TRIGGER.search(last_user)
+    if m and has_tools:
+        if not _find_named_tool_results(messages, "google_calendar"):
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_calendar",
+                    "arguments": {
+                        "action": "list_events",
+                        "calendar_id": "primary",
+                        "time_min": "2026-01-01T00:00:00Z",
+                        "max_results": 5,
+                        "query": "PepsiCo",
+                    },
+                },
+            }
+        if not _find_named_tool_results(messages, "google_drive"):
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_drive",
+                    "arguments": {
+                        "action": "list_files",
+                        "query": "name contains 'PepsiCo'",
+                        "page_size": 5,
+                    },
+                },
+            }
+        if not _find_named_tool_results(messages, "slack_tool"):
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "slack_tool",
+                    "arguments": {
+                        "action": "send_message",
+                        "channel": m.group("channel"),
+                        "text": m.group("marker"),
+                    },
+                },
+            }
+        return {"type": "text", "text": "calendar drive to slack complete."}
+
+    # ── Cross-provider canary: Gmail → Slack ────────────────────────────
+    m = GMAIL_SLACK_TRIGGER.search(last_user)
+    if m and has_tools:
+        if not _find_named_tool_results(messages, "gmail"):
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "gmail",
+                    "arguments": {
+                        "action": "list_messages",
+                        "query": "is:unread",
+                        "max_results": 5,
+                    },
+                },
+            }
+        if not _find_named_tool_results(messages, "slack_tool"):
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "slack_tool",
+                    "arguments": {
+                        "action": "send_message",
+                        "channel": m.group("channel"),
+                        "text": m.group("marker"),
+                    },
+                },
+            }
+        return {"type": "text", "text": "gmail to slack complete."}
+
+    # ── Cross-provider canary: Slack → Drive → Slack ────────────────────
+    m = SLACK_DRIVE_SLACK_TRIGGER.search(last_user)
+    if m and has_tools:
+        slack_results = _find_named_tool_results(messages, "slack_tool")
+        if not slack_results:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "slack_tool",
+                    "arguments": {
+                        "action": "get_channel_history",
+                        "channel": m.group("source"),
+                        "limit": 10,
+                    },
+                },
+            }
+        if not _find_named_tool_results(messages, "google_drive"):
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_drive",
+                    "arguments": {
+                        "action": "list_files",
+                        "query": "name contains 'Reborn QA Brief'",
+                        "page_size": 5,
+                    },
+                },
+            }
+        if len(slack_results) == 1:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "slack_tool",
+                    "arguments": {
+                        "action": "send_message",
+                        "channel": m.group("target"),
+                        "text": m.group("marker"),
+                    },
+                },
+            }
+        return {"type": "text", "text": "slack drive to slack complete."}
+
     # ── Lifecycle canary: Notion search → search again ────────────────────
     if NOTION_SEARCH_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
         tool_results = _find_tool_results(messages)
@@ -2164,6 +2387,11 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         GMAIL_ROUNDTRIP_TRIGGER,
         GCAL_LIFECYCLE_TRIGGER,
         GDRIVE_UPLOAD_LIFECYCLE_TRIGGER,
+        SLACK_DELIVERY_LIFECYCLE_TRIGGER,
+        GITHUB_RELEASE_SLACK_TRIGGER,
+        CALENDAR_DRIVE_SLACK_TRIGGER,
+        GMAIL_SLACK_TRIGGER,
+        SLACK_DRIVE_SLACK_TRIGGER,
         NOTION_SEARCH_LIFECYCLE_TRIGGER,
     ):
         if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
@@ -2492,6 +2720,13 @@ def _is_github_token_url(url: str) -> bool:
     return "github.com/login/oauth/access_token" in url.lower()
 
 
+def _is_slack_token_url(url: str) -> bool:
+    if not url:
+        return False
+    lowered = url.lower()
+    return "slack.com/api/oauth.v2.access" in lowered
+
+
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
@@ -2539,6 +2774,14 @@ async def oauth_exchange(request: web.Request) -> web.Response:
             access_token_field: EMULATE_GITHUB_BEARER,
             "refresh_token": "mock-github-refresh-token",
             "expires_in": 3600,
+        })
+
+    if _is_slack_token_url(data.get("token_url", "")):
+        return web.json_response({
+            access_token_field: EMULATE_SLACK_BEARER,
+            "token_type": "bot",
+            "scope": "chat:write,channels:read,channels:history,users:read",
+            "bot_user_id": "B_EMULATE_REBORN_BOT",
         })
 
     return web.json_response({

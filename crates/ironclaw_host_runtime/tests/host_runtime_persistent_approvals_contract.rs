@@ -145,6 +145,7 @@ async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
             invocation_id,
             capability_id: capability_id(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .expect("seed running invocation");
@@ -858,6 +859,7 @@ impl ProcessManager for RecordingProcessManager {
             parent_process_id: start.parent_process_id,
             invocation_id: start.invocation_id,
             scope: start.scope,
+            authenticated_actor_user_id: start.authenticated_actor_user_id,
             extension_id: start.extension_id,
             capability_id: start.capability_id,
             runtime: start.runtime,

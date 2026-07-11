@@ -293,7 +293,7 @@ pub trait LoopHostMilestoneSink: Send + Sync {
 /// that does not own a `LoopRunContext`. It therefore cannot construct a full
 /// [`LoopHostMilestone`] on its own. Instead, the dispatcher emits the
 /// hook-specific *kind* into a [`HookMilestoneSink`], and host composition in
-/// `ironclaw_reborn` wraps the real [`LoopHostMilestoneSink`] in an adapter
+/// `ironclaw_runner` wraps the real [`LoopHostMilestoneSink`] in an adapter
 /// that injects the active run's context before forwarding.
 ///
 /// The kinds emitted through this sink are always one of:

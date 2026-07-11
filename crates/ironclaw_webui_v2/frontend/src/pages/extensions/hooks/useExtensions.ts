@@ -25,6 +25,7 @@ import {
   fetchOauthFlowStatus,
   fetchPairingRequests,
   approvePairingCode,
+  importExtension,
 } from "../lib/extensions-api";
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
@@ -297,8 +298,26 @@ export function useExtensions() {
       !e.installed
   );
 
+  const importMutation = useMutation({
+    mutationFn: ({ file }) => importExtension(file),
+    onSuccess: (res) => {
+      if (res.success) {
+        setActionResult({
+          type: "success",
+          message: res.message || t("ext.registry.importSuccess"),
+        });
+      } else {
+        setActionResult({ type: "error", message: res.message || t("ext.registry.importFailed") });
+      }
+      invalidate();
+    },
+    onError: (err) => {
+      setActionResult({ type: "error", message: err.message });
+    },
+  });
+
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
-  const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending;
+  const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
   const remove = React.useCallback(
     (extension) => {
       const name = extension?.displayName || extension?.packageRef?.id || "this extension";
@@ -327,6 +346,8 @@ export function useExtensions() {
     install: installMutation.mutate,
     activate: activateMutation.mutate,
     remove,
+    importTool: importMutation.mutate,
+    isImporting: importMutation.isPending,
     invalidate,
   };
 }

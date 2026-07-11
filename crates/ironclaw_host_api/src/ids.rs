@@ -47,8 +47,22 @@ fn validate_scope_id(kind: &'static str, value: &str) -> Result<(), HostApiError
             "NUL/control characters are not allowed",
         ));
     }
+    if value.starts_with(RESERVED_SENTINEL_PREFIX) {
+        return Err(HostApiError::invalid_id(
+            kind,
+            value,
+            "the `__ironclaw_` prefix is reserved for host sentinel identities",
+        ));
+    }
     Ok(())
 }
+
+/// Scope-id namespace reserved for host-minted sentinel identities (e.g.
+/// [`crate::TENANT_SHARED_MANAGED_USER_ID`]). Rejected by [`validate_scope_id`]
+/// so no caller-supplied identifier — env bearer, SSO directory, OIDC claims,
+/// request payloads — can ever collide with a sentinel; sentinels are minted
+/// exclusively via `from_trusted`.
+const RESERVED_SENTINEL_PREFIX: &str = "__ironclaw_";
 
 fn is_name_char(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'

@@ -15,7 +15,7 @@
   `LoopXxxPort` traits, run-profile descriptors, refs, prompt bundle contracts,
   checkpoint load/stage contracts, progress events, and cancellation signals.
 - Implementations of those contracts live elsewhere: host adapters in
-  `ironclaw_loop_support`, driver-side integration in `ironclaw_reborn`, and
+  `ironclaw_loop_support`, driver-side integration in `ironclaw_runner`, and
   reusable loop mechanics in `ironclaw_agent_loop`.
 - Add a new `.rs` file before widening an existing contract file with an
   unrelated responsibility. Do not create broad `common`, `misc`, or `helpers`

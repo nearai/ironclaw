@@ -12,7 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use tokio::sync::mpsc;
 
 use crate::{
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
+    LifecycleInstallScope, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+    LifecycleReadinessBlocker,
 };
 
 const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
@@ -1274,6 +1275,10 @@ pub struct RebornExtensionInfo {
     pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
+    /// Whether this install is tenant-shared or private to the caller
+    /// (#5459 P1); `None` on pre-#5459 payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_scope: Option<LifecycleInstallScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

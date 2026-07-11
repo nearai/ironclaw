@@ -11,7 +11,7 @@ use ironclaw_agent_loop::{
     },
 };
 use ironclaw_turns::{
-    LoopBlockedKind, LoopExit, LoopFailureKind, TurnRunId,
+    LoopBlockedKind, LoopExit, TurnRunId,
     run_profile::{
         CompactionInitiator, ConcurrencyHint, LoopCompactionResponse, LoopContextCompactionKind,
         LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
@@ -41,7 +41,7 @@ async fn reply_only_completes() {
 }
 
 #[tokio::test]
-async fn compaction_failure_returns_failed_exit() {
+async fn compaction_failure_continues_with_existing_prompt() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
         .prompt_compaction_index(active_task_preserving_compaction_index())
@@ -52,15 +52,18 @@ async fn compaction_failure_returns_failed_exit() {
     let exit = CanonicalAgentLoopExecutor
         .execute_family(&families::default(), &host, state)
         .await
-        .expect("loop execution should produce failed exit");
+        .expect("loop execution should continue after compaction failure");
 
-    match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::CompactionUnavailable);
-            assert!(failed.checkpoint_id.is_some());
-        }
-        other => panic!("expected failed exit, got {other:?}"),
-    }
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(
+        host.progress_events()
+            .iter()
+            .any(|event| matches!(event, LoopProgressEvent::CompactionFailed { .. }))
+    );
+    assert!(
+        host.call_log()
+            .contains(&MockHostCall::FinalizeAssistantMessage)
+    );
 }
 
 #[tokio::test]

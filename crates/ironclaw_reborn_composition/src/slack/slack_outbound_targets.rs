@@ -3,6 +3,8 @@
 //! Core outbound preferences only see opaque target ids and validated reply
 //! target bindings. Slack-specific channel and DM authority stays here.
 
+// arch-exempt: large_file, Slack outbound and personal DM authority tests, plan #5905
+
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -32,6 +34,7 @@ use crate::slack::slack_channel_routes::{
 use crate::slack::slack_dm_open::{
     SlackDmOpenError, open_slack_dm_channel, validate_slack_dm_channel_id,
 };
+use crate::slack::slack_personal_binding::SlackConnectionEpoch;
 use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
 
 pub(crate) const SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE: usize = 500;
@@ -128,22 +131,36 @@ pub(crate) trait SlackPersonalDmTargetStore: Send + Sync + std::fmt::Debug {
         key: &SlackPersonalDmTargetKey,
     ) -> Result<Option<SlackPersonalDmTarget>, SlackPersonalDmTargetError>;
 
+    #[cfg(test)]
     async fn upsert_personal_dm_target(
         &self,
+        _target: SlackPersonalDmTarget,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        Err(SlackPersonalDmTargetError::StoreUnavailable)
+    }
+
+    async fn upsert_personal_dm_target_for_epoch(
+        &self,
         target: SlackPersonalDmTarget,
+        epoch: SlackConnectionEpoch,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
 
-    async fn delete_personal_dm_target(
+    /// Finds installations retained only in legacy DM state so disconnect can
+    /// fence and clean them even after setup and identity projections drift.
+    async fn personal_dm_target_installations_for_owner(
         &self,
-        key: &SlackPersonalDmTargetKey,
-    ) -> Result<bool, SlackPersonalDmTargetError>;
+        _tenant_id: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdapterInstallationId>, SlackPersonalDmTargetError> {
+        Err(SlackPersonalDmTargetError::StoreUnavailable)
+    }
 
-    async fn delete_personal_dm_targets_for_user(
+    async fn delete_personal_dm_targets_for_owner(
         &self,
         tenant_id: &TenantId,
         user_id: &UserId,
         installation_id: &AdapterInstallationId,
-        team_id: &SlackTeamId,
+        expected_epoch: Option<SlackConnectionEpoch>,
     ) -> Result<usize, SlackPersonalDmTargetError>;
 }
 
@@ -186,24 +203,46 @@ impl SlackPersonalDmTargetStore for InMemorySlackPersonalDmTargetStore {
         Ok(target)
     }
 
-    async fn delete_personal_dm_target(
+    async fn upsert_personal_dm_target_for_epoch(
         &self,
-        key: &SlackPersonalDmTargetKey,
-    ) -> Result<bool, SlackPersonalDmTargetError> {
-        Ok(self
-            .targets
+        target: SlackPersonalDmTarget,
+        _epoch: SlackConnectionEpoch,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        // Test-only store has no lifecycle authority; callers that exercise
+        // epoch fencing use FilesystemSlackHostState.
+        self.targets
             .write()
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
-            .remove(key)
-            .is_some())
+            .insert(target.key.clone(), target.clone());
+        Ok(target)
     }
 
-    async fn delete_personal_dm_targets_for_user(
+    async fn personal_dm_target_installations_for_owner(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Vec<AdapterInstallationId>, SlackPersonalDmTargetError> {
+        let targets = self
+            .targets
+            .read()
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
+        let mut installations = targets
+            .keys()
+            .filter(|key| &key.tenant_id == tenant_id && &key.user_id == user_id)
+            .map(|key| key.installation_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        installations.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(installations)
+    }
+
+    async fn delete_personal_dm_targets_for_owner(
         &self,
         tenant_id: &TenantId,
         user_id: &UserId,
         installation_id: &AdapterInstallationId,
-        team_id: &SlackTeamId,
+        _expected_epoch: Option<SlackConnectionEpoch>,
     ) -> Result<usize, SlackPersonalDmTargetError> {
         let mut targets = self
             .targets
@@ -213,8 +252,7 @@ impl SlackPersonalDmTargetStore for InMemorySlackPersonalDmTargetStore {
         targets.retain(|key, _| {
             !(&key.tenant_id == tenant_id
                 && &key.user_id == user_id
-                && &key.installation_id == installation_id
-                && &key.team_id == team_id)
+                && &key.installation_id == installation_id)
         });
         Ok(before - targets.len())
     }
@@ -262,6 +300,7 @@ impl SlackPersonalDmTargetProvisioner {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn provision_for_user(
         &self,
         user_id: UserId,
@@ -276,6 +315,25 @@ impl SlackPersonalDmTargetProvisioner {
         let dm_channel_id = self.open_dm_channel(slack_user_id.as_str()).await?;
         let target = SlackPersonalDmTarget::new(key, slack_user_id, dm_channel_id)?;
         self.store.upsert_personal_dm_target(target).await
+    }
+
+    pub(crate) async fn provision_for_user_for_epoch(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+        epoch: SlackConnectionEpoch,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        let key = SlackPersonalDmTargetKey::new(
+            self.tenant_id.clone(),
+            self.installation_id.clone(),
+            self.team_id.clone(),
+            user_id,
+        )?;
+        let dm_channel_id = self.open_dm_channel(slack_user_id.as_str()).await?;
+        let target = SlackPersonalDmTarget::new(key, slack_user_id, dm_channel_id)?;
+        self.store
+            .upsert_personal_dm_target_for_epoch(target, epoch)
+            .await
     }
 
     async fn open_dm_channel(
@@ -1129,7 +1187,10 @@ mod tests {
             SlackPersonalDmTarget::new(key, SlackUserId::new(SLACK_USER), "D0HOST".to_string())
                 .expect("target");
         store
-            .upsert_personal_dm_target(target)
+            .upsert_personal_dm_target_for_epoch(
+                target,
+                SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new()),
+            )
             .await
             .expect("stores");
         let store_dyn: Arc<dyn SlackPersonalDmTargetStore> = Arc::clone(&store) as _;

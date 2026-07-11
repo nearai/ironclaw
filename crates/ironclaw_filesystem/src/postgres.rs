@@ -165,13 +165,18 @@ fn quote_postgres_identifier(identifier: &str) -> String {
 async fn postgres_root_filesystem_migration_key(
     client: &deadpool_postgres::Object,
 ) -> Result<String, FilesystemError> {
+    // `inet_server_addr()` / `inet_server_port()` can collapse to the same
+    // value across isolated Docker testcontainers. The postmaster start time
+    // distinguishes those server instances while still letting a live process
+    // skip repeat migrations against the same running database.
     let row = client
         .query_one(
             "SELECT \
                 current_database(), \
                 current_schema(), \
                 COALESCE(inet_server_addr()::text, 'local'), \
-                COALESCE(inet_server_port()::text, 'local')",
+                COALESCE(inet_server_port()::text, 'local'), \
+                pg_postmaster_start_time()::text",
             &[],
         )
         .await
@@ -180,7 +185,10 @@ async fn postgres_root_filesystem_migration_key(
     let schema: String = row.get(1);
     let host: String = row.get(2);
     let port: String = row.get(3);
-    Ok(format!("{host}:{port}/{database}/{schema}"))
+    let postmaster_started_at: String = row.get(4);
+    Ok(format!(
+        "{host}:{port}/{database}/{schema}@{postmaster_started_at}"
+    ))
 }
 
 #[cfg(feature = "postgres")]
@@ -1631,35 +1639,86 @@ async fn postgres_delete_with_client(
 /// unlike blind delete's `path = $1 OR (path >= $2 ...)`.
 ///
 /// Review fix (PR #5749): the conditional DELETE and the zero-rows
-/// diagnosis now run as ONE statement (one round trip), not two. Two
-/// separate statements left a window between them in which an external
-/// transaction could commit a full delete-then-recreate on the same path;
-/// the second statement (a fresh READ COMMITTED snapshot) would then
-/// observe the *new* incarnation and misclassify the outcome. Folding both
-/// into a single `WITH` query closes that window: `locked` takes a
-/// `FOR UPDATE` row lock up front, and `deleted` is made to depend on it
-/// (`path IN (SELECT path FROM locked)`) so Postgres must evaluate `locked`
-/// first — the lock is held for the rest of the statement, so no
-/// concurrent delete/recreate on this path can commit until ours does.
+/// diagnosis run as ONE statement (one round trip), not two. Two separate
+/// statements left a window between them in which an external transaction
+/// could commit a full delete-then-recreate on the same path; the second
+/// statement (a fresh READ COMMITTED snapshot) would then observe the *new*
+/// incarnation and misclassify the outcome.
+///
+/// The `candidate` and `candidate_state` CTEs are deliberately
+/// `MATERIALIZED`: they record the row/version visible at statement start
+/// before `locked` waits on a contended tuple. Under READ COMMITTED,
+/// `SELECT ... FOR UPDATE` can follow a concurrent delete+recreate to the
+/// new path row after waiting. Comparing the current row's `created_at` with
+/// the initial candidate prevents the DELETE from removing that replacement,
+/// even when its per-incarnation version restarted at the expected value. The
+/// Rust classifier then treats "expected row was deleted and a later
+/// incarnation now exists" as NotFound, while still reporting
+/// VersionMismatch for ordinary updates that preserve `created_at`. This
+/// relies on `created_at` being immutable after row creation; if a future
+/// writer mutates it on update, replacement detection would classify that
+/// update as a new incarnation.
 #[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
-    WITH locked AS (
-        SELECT path, version
+    WITH candidate AS MATERIALIZED (
+        SELECT version, created_at
         FROM root_filesystem_entries
-        WHERE path = $1 AND is_dir = FALSE
-        FOR UPDATE
+        WHERE path = $1
+          AND is_dir = FALSE
+    ),
+    candidate_state AS MATERIALIZED (
+        SELECT
+            MAX(version) AS candidate_version,
+            MAX(created_at) AS candidate_created_at,
+            COUNT(*) AS candidate_rows
+        FROM candidate
+    ),
+    locked AS (
+        SELECT
+            locked_row.path,
+            locked_row.version,
+            locked_row.created_at,
+            candidate_state.candidate_version,
+            candidate_state.candidate_created_at
+        FROM candidate_state
+        -- `candidate_state` is materialized and always one row, so this
+        -- carries the statement-start snapshot alongside the post-lock row
+        -- without multiplying rows. The lateral dependency forces that state
+        -- to be available before the lock wait begins.
+        LEFT JOIN LATERAL (
+            SELECT path, version, created_at
+            FROM root_filesystem_entries AS entry
+            WHERE path = $1
+              AND is_dir = FALSE
+              -- Intentional tautology: keep the LATERAL subquery correlated
+              -- to `candidate_state` so it cannot run before that state is
+              -- materialized.
+              AND candidate_state.candidate_rows >= 0
+            FOR UPDATE OF entry
+        ) AS locked_row ON TRUE
     ),
     deleted AS (
         DELETE FROM root_filesystem_entries
         WHERE path = $1
           AND is_dir = FALSE
           AND version = $2
-          AND path IN (SELECT path FROM locked)
+          AND path IN (
+              SELECT path
+              FROM locked
+              WHERE candidate_version = $2
+                AND candidate_created_at IS NOT DISTINCT FROM created_at
+          )
         RETURNING TRUE AS ok
     )
     SELECT
         EXISTS (SELECT 1 FROM deleted) AS was_deleted,
-        (SELECT version FROM locked) AS locked_version
+        (SELECT version FROM locked) AS locked_version,
+        EXISTS (
+            SELECT 1
+            FROM locked
+            WHERE candidate_version = $2
+              AND candidate_created_at IS DISTINCT FROM created_at
+        ) AS expected_incarnation_was_replaced
     "#;
 
 /// CAS delete for the Postgres backend: one statement, one round trip,
@@ -1686,6 +1745,10 @@ async fn postgres_delete_if_version_with_client(
     let was_deleted: bool = row.get("was_deleted");
     if was_deleted {
         return Ok(());
+    }
+    let expected_incarnation_was_replaced: bool = row.get("expected_incarnation_was_replaced");
+    if expected_incarnation_was_replaced {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
     }
     let locked_version: Option<i64> = row.get("locked_version");
     if let Some(raw) = locked_version {
@@ -2157,10 +2220,27 @@ mod tests {
              classification: {sql}"
         );
         assert!(
-            sql.contains("path IN (SELECT path FROM locked)"),
+            sql.contains("candidate AS MATERIALIZED"),
+            "delete_if_version must materialize the statement-start \
+             candidate before FOR UPDATE waits, or a concurrent \
+             delete+recreate can be mistaken for the new incarnation: {sql}"
+        );
+        assert!(
+            sql.contains("expected_incarnation_was_replaced"),
+            "delete_if_version must classify a replaced expected \
+             incarnation as NotFound rather than VersionMismatch against \
+             the replacement row: {sql}"
+        );
+        assert!(
+            sql.contains("candidate_created_at IS NOT DISTINCT FROM created_at"),
+            "delete_if_version must not delete a replacement incarnation \
+             whose version happens to equal the expected version: {sql}"
+        );
+        assert!(
+            sql.contains("FROM locked\n              WHERE candidate_version = $2"),
             "the delete CTE must depend on the locked CTE so Postgres \
-             sequences lock-then-delete instead of running them \
-             independently: {sql}"
+             sequences lock-then-incarnation-check-then-delete instead of \
+             running them independently: {sql}"
         );
         // Round-C review: a bare `contains("FOR UPDATE")` / `contains("version
         // = $2")` check is fooled by two concrete, semantically-broken

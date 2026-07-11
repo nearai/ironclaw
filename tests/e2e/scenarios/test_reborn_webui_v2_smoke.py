@@ -201,6 +201,162 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
         assert renamed["automation_id"] == automation_id
 
 
+async def test_reborn_v2_automation_failed_run_actions_are_clickable(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Failed automation runs expose working Open run and scoped Logs actions."""
+    automation_id = "11111111-2222-3333-4444-555555555555"
+    thread_id = "thread-failed-automation"
+    run_id = "22222222-3333-4444-5555-666666666666"
+    requested_log_queries: list[dict[str, list[str]]] = []
+    logs_requested = asyncio.Event()
+
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    async def fulfill_json(route, body, status=200) -> None:
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_automations(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "scheduler_enabled": True,
+                "automations": [
+                    {
+                        "automation_id": automation_id,
+                        "name": "Failed run action regression",
+                        "source": {
+                            "type": "schedule",
+                            "cron": "0 9 * * *",
+                            "timezone": "UTC",
+                        },
+                        "state": "active",
+                        "next_run_at": "2026-07-10T09:00:00Z",
+                        "recent_runs": [
+                            {
+                                "status": "error",
+                                "fire_slot": "2026-07-09T09:00:00Z",
+                                "submitted_at": "2026-07-09T09:00:01Z",
+                                "completed_at": "2026-07-09T09:00:42Z",
+                                "thread_id": thread_id,
+                                "run_id": run_id,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    async def handle_threads(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "Failed automation thread",
+                        "created_at": "2026-07-09T09:00:01Z",
+                        "updated_at": "2026-07-09T09:00:42Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route) -> None:
+        await fulfill_json(route, {"messages": [], "next_cursor": None})
+
+    async def handle_logs(route) -> None:
+        parsed = urlparse(route.request.url)
+        requested_log_queries.append(parse_qs(parsed.query))
+        logs_requested.set()
+        await fulfill_json(
+            route,
+            {
+                "logs": {
+                    "source": "in_memory_tracing",
+                    "entries": [
+                        {
+                            "id": "automation-failed-log",
+                            "timestamp": "2026-07-09T09:00:42Z",
+                            "level": "error",
+                            "target": "ironclaw::automation",
+                            "message": "failed automation run log",
+                            "thread_id": thread_id,
+                            "run_id": run_id,
+                        }
+                    ],
+                    "next_cursor": None,
+                    "tail_supported": True,
+                    "follow_supported": False,
+                },
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
+    await page.route("**/api/webchat/v2/logs**", handle_logs)
+    row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
+
+    async def select_automation() -> None:
+        row = page.locator(row_selector)
+        await expect(row).to_be_visible(timeout=15000)
+        await row.locator(
+            SEL_V2["automation_name_button_for"].format(id=automation_id)
+        ).click()
+        await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
+            timeout=15000
+        )
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await select_automation()
+
+        open_run = page.locator(SEL_V2["automation_run_open"]).first
+        logs = page.locator(SEL_V2["automation_run_logs"]).first
+        await expect(open_run).to_be_enabled()
+        await expect(logs).to_be_enabled()
+
+        await open_run.click()
+        await page.wait_for_url(f"**/v2/chat/{thread_id}", timeout=10000)
+
+        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await select_automation()
+        await page.locator(SEL_V2["automation_run_logs"]).first.click()
+        await asyncio.wait_for(logs_requested.wait(), timeout=10)
+
+        assert "/v2/logs" in page.url
+        first_query = requested_log_queries[0]
+        assert first_query.get("thread_id") == [thread_id], first_query
+        assert first_query.get("run_id") == [run_id], first_query
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v2_page):
     """The composer stays editable while the current assistant run is still active."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])

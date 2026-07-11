@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_reborn::loop_exit_applier::ResourceGateEvidenceStore;
+use ironclaw_runner::loop_exit_applier::ResourceGateEvidenceStore;
 use ironclaw_turns::{LoopGateRef, TurnError, TurnScope};
 
 pub(crate) fn local_dev_resource_gate_evidence(
