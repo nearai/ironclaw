@@ -308,11 +308,16 @@ Rules — kept short on purpose:
   integration harness.
 - [ ] TEST-5 Slack and Telegram each have exactly one inbound and one outbound
   integration proof; protocol details are unit-tested inside their crates.
-- [ ] TEST-6 The specificity scanner derives forbidden names from the package
+- [x] TEST-6 The specificity scanner derives forbidden names from the package
   inventory (an invented product id in a fixture is caught without editing the
-  scanner).
-- [ ] TEST-7 Allowlist shrinkage is enforced: stale entries fail, new
-  violations fail.
+  scanner). — `scanner_derives_terms_from_an_invented_inventory_package`
+  (`crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`); the
+  acme fixture itself is derivation input.
+- [x] TEST-7 Allowlist shrinkage is enforced: stale entries fail, new
+  violations fail. — `scanner_allowlist_is_shrink_only` plus the stale-entry
+  and stale-carve-out assertions inside
+  `reborn_generic_code_names_no_concrete_extension`; same discipline on the
+  dependency gate (`concrete_extension_crates_link_only_from_the_binary_and_tests`).
 
 ## 12. Release (REL)
 
