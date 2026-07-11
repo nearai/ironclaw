@@ -7,8 +7,8 @@ use chrono::Utc;
 use ironclaw_agent_loop::{
     state::CheckpointKind,
     test_support::{
-        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedModelResponse,
-        test_run_context,
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
+        ScriptedCapabilityOutcome, ScriptedModelResponse, test_run_context,
     },
 };
 use ironclaw_runner::app_loop_family::build_loop_family_registry;
@@ -280,6 +280,94 @@ async fn planned_driver_consumes_steering_message_before_model_call() {
     assert!(
         ack_inputs < model_call,
         "input ack should happen before model IO"
+    );
+}
+
+#[tokio::test]
+async fn planned_driver_includes_post_tool_steering_before_reply_model_call() {
+    let registry = build_loop_family_registry().expect("registry should build");
+    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "done".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::completed(
+            "result:done",
+        )]]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::from([
+            Vec::new(),
+            vec![LoopInput::Steering {
+                message_ref: LoopMessageRef::new("msg:download-csv").unwrap(),
+            }],
+            Vec::new(),
+        ]),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+
+    let exit = driver
+        .run(run_request(&driver, &host), &host)
+        .await
+        .expect("planned driver run should succeed");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_call_count(), 2);
+
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 2);
+    let reply_prompt_cursor = prompt_requests[1]
+        .context_cursor
+        .as_ref()
+        .expect("reply prompt must be scoped to the pre-drain steering cursor");
+    assert_eq!(
+        reply_prompt_cursor,
+        &LoopInputCursor::origin_for_run(host.run_context()),
+        "reply prompt must use the pre-drain cursor so the drained steering input remains visible"
+    );
+
+    let calls = host.call_log();
+    let poll_inputs = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| matches!(call, MockHostCall::PollInputs).then_some(index))
+        .collect::<Vec<_>>();
+    let prompt_builds = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            matches!(call, MockHostCall::BuildPromptBundle).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let model_calls = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| matches!(call, MockHostCall::StreamModel).then_some(index))
+        .collect::<Vec<_>>();
+    let ack_inputs = calls
+        .iter()
+        .position(|call| matches!(call, MockHostCall::AckInputs))
+        .expect("drained post-tool steering should be acknowledged");
+
+    let second_poll = poll_inputs[1];
+    let second_prompt = prompt_builds[1];
+    let second_model = model_calls[1];
+    assert!(
+        calls.iter().enumerate().any(|(index, call)| {
+            second_poll < index
+                && index < ack_inputs
+                && matches!(
+                    call,
+                    MockHostCall::SaveCheckpoint(CheckpointKind::BeforeModel)
+                )
+        }),
+        "post-tool steering cursor must be checkpointed before ack"
+    );
+    assert!(
+        second_poll < ack_inputs && ack_inputs < second_prompt && second_prompt < second_model,
+        "post-tool steering must be picked up before building the reply prompt"
     );
 }
 

@@ -3092,6 +3092,7 @@ async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
 
     port.stream_model(LoopModelRequest {
         messages: Vec::new(),
+        inline_messages: Vec::new(),
         surface_version: None,
         model_preference: None,
         capability_view: None,
