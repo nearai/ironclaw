@@ -795,8 +795,12 @@ jobs:
     name: Reborn WebUI v2 Live QA (${{ matrix.shard_name }})
     needs: prepare-reborn-webui-v2-live-qa
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      always() &&
+      needs.prepare-reborn-webui-v2-live-qa.result == 'success' &&
+      (
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -836,6 +840,22 @@ jobs:
           - shard_id: qa-8-delivery
             shard_name: QA 8D
             cases: qa_8d_hn_keyword_slack_delivery
+          # Automation delivery probes, in the 3-hourly cron rotation (the
+          # delivery-routing fixes from #5898 are merged and live-verified
+          # green). Guards regressions in: wrong-channel routine delivery,
+          # duplicate DM delivery, raw Slack user ids leaking into digests,
+          # and per-trigger delivery-target routing.
+          - shard_id: qa-9
+            shard_name: QA 9
+            cases: qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target
+          # Slack tool-correctness probes, in the 3-hourly cron rotation (the
+          # tool-surface fixes from #5898 are merged and live-verified green).
+          # Guards regressions in: self-attribution, status readback, thread
+          # replies, membership honesty, error honesty, mention encoding,
+          # last-sent recall, email hallucination, and raw-entity hygiene.
+          - shard_id: qa-10
+            shard_name: QA 10
+            cases: qa_10a_slack_self_attribution,qa_10b_slack_ooo_status,qa_10c_slack_thread_replies,qa_10d_slack_channel_membership,qa_10e_slack_error_honesty,qa_10f_slack_mention_encoding,qa_10g_slack_last_message_sent,qa_10h_slack_email_hallucination_guard,qa_10i_slack_raw_entity_hygiene
     env:
       REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
       REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
@@ -859,6 +879,7 @@ jobs:
         shell: bash
         env:
           REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all' }}
+          DISPATCH_ONLY_SHARD: ${{ matrix.dispatch_only || false }}
           SHARD_CASES: ${{ matrix.cases }}
           ALL_SHARD_CASES: >-
             qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
@@ -867,11 +888,31 @@ jobs:
             qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
             qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
             qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery,
-            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery,
+            qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target,
+            qa_10a_slack_self_attribution,qa_10b_slack_ooo_status,qa_10c_slack_thread_replies,qa_10d_slack_channel_membership,qa_10e_slack_error_honesty,qa_10f_slack_mention_encoding,qa_10g_slack_last_message_sent,qa_10h_slack_email_hallucination_guard,qa_10i_slack_raw_entity_hygiene
         run: |
           set -euo pipefail
+          if [[ "${DISPATCH_ONLY_SHARD}" == "true" && "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=dispatch-only-shard" >> "${GITHUB_ENV}"
+            echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+            echo "Shard is dispatch_only; skipping on schedule."
+            exit 0
+          fi
           cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
           if [[ -z "${cases}" || "${cases}" == "all" || "${cases}" == "ALL" || "${cases}" == "*" ]]; then
+            if [[ "${DISPATCH_ONLY_SHARD}" == "true" ]]; then
+              # dispatch_only shards run ONLY when one of their cases is
+              # explicitly requested — a bare /canary or default dispatch
+              # (cases=all) must not run an expected-red shard on an
+              # unrelated PR.
+              echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+              echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=dispatch-only-shard-default-cases" >> "${GITHUB_ENV}"
+              echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+              echo "Shard is dispatch_only and no shard case was explicitly requested; skipping."
+              exit 0
+            fi
             echo "CASES=${SHARD_CASES}" >> "${GITHUB_ENV}"
             echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=matrix-shard" >> "${GITHUB_ENV}"
             echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
@@ -997,6 +1038,10 @@ jobs:
           IRONCLAW_REBORN_SLACK_BOT_TOKEN: ${{ secrets.IRONCLAW_REBORN_SLACK_BOT_TOKEN }}
           REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET: ${{ secrets.REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET }}
           AUTH_LIVE_SLACK_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_SLACK_ACCESS_TOKEN || secrets.AUTH_LIVE_SLACK_USER_TOKEN || secrets.REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN }}
+          # Optional second HUMAN Slack identity for the QA 10 shard (future
+          # dedicated canary user). Arms that strictly need it assert and go
+          # red with a distinct precondition message when it is absent.
+          AUTH_LIVE_SLACK_SECOND_USER_TOKEN: ${{ secrets.AUTH_LIVE_SLACK_SECOND_USER_TOKEN || '' }}
           IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET || secrets.GOOGLE_CLIENT_SECRET || secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           AUTH_LIVE_GOOGLE_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_ACCESS_TOKEN }}
           AUTH_LIVE_GOOGLE_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_REFRESH_TOKEN }}
@@ -1026,6 +1071,7 @@ jobs:
           write_secret "IRONCLAW_REBORN_SLACK_BOT_TOKEN" "${IRONCLAW_REBORN_SLACK_BOT_TOKEN:-}"
           write_secret "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET" "${REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET:-}"
           write_secret "AUTH_LIVE_SLACK_ACCESS_TOKEN" "${AUTH_LIVE_SLACK_ACCESS_TOKEN:-}"
+          write_secret "AUTH_LIVE_SLACK_SECOND_USER_TOKEN" "${AUTH_LIVE_SLACK_SECOND_USER_TOKEN:-}"
           write_secret "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET" "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}"
           write_secret "AUTH_LIVE_GOOGLE_ACCESS_TOKEN" "${AUTH_LIVE_GOOGLE_ACCESS_TOKEN:-}"
           write_secret "AUTH_LIVE_GOOGLE_REFRESH_TOKEN" "${AUTH_LIVE_GOOGLE_REFRESH_TOKEN:-}"

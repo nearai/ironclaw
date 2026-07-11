@@ -452,6 +452,7 @@ mod tests {
                 onboarding: None,
             },
             phase: LifecyclePhase::Active,
+            install_scope: None,
         }
     }
 
@@ -472,6 +473,7 @@ mod tests {
                 onboarding: None,
             },
             phase: LifecyclePhase::Active,
+            install_scope: None,
         }
     }
 

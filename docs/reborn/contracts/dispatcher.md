@@ -43,6 +43,7 @@ The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub estimate: ResourceEstimate,
     pub input: serde_json::Value,
 }
@@ -79,7 +80,7 @@ V1 `dispatch_json` performs only routing and consistency checks:
 2. lookup provider package in ExtensionRegistry
 3. verify descriptor.runtime == package.manifest.runtime_kind()
 4. select the registered `RuntimeAdapter` for `RuntimeKind`
-5. call the configured adapter for that lane
+5. call the configured adapter for that lane, forwarding the authenticated actor unchanged
 6. return normalized result or typed failure with a stable redacted `RuntimeDispatchErrorKind`
 ```
 
@@ -100,6 +101,8 @@ where
 ```
 
 Each runtime adapter owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol and does not import concrete runtime crates.
+
+`RuntimeAdapterRequest.authenticated_actor_user_id` is copied directly from the already-authorized dispatch request. It is not recomputed from `ResourceScope.user_id`; a shared subject may be acted on by a separately authenticated human actor.
 
 ---
 

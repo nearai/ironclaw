@@ -557,6 +557,7 @@ mod tests {
         FirstPartyCapabilityRequest {
             capability_id: CapabilityId::new(capability_id).unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ironclaw_host_api::ResourceEstimate::default(),
             mounts: Some(memory_mount()),
             services: InvocationServices {

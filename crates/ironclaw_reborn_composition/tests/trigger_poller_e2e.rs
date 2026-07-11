@@ -610,6 +610,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         schedule: TriggerSchedule::once(Utc::now() - chrono::Duration::seconds(120), "UTC")
             .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
         last_run_at: None,
@@ -1007,6 +1008,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() + chrono::Duration::seconds(3600),
         last_run_at: None,
@@ -1114,6 +1116,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: fire_at,
         last_run_at: None,
@@ -1235,6 +1238,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         // Every minute — recurring cron stays Scheduled after each fire.
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: original_next_run_at,
         last_run_at: None,
