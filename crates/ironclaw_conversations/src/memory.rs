@@ -1260,6 +1260,21 @@ impl InMemoryState {
             external_actor_ref,
         );
         if let Some(existing) = self.pairings.get(&actor_key).cloned() {
+            if let Some(trusted_owner_user_id) = trusted_owner_user_id
+                && can_trusted_owner_self_pair_actor(
+                    adapter_kind,
+                    adapter_installation_id,
+                    external_actor_ref,
+                    route_kind,
+                    trusted_owner_user_id,
+                )
+                && &existing != trusted_owner_user_id
+            {
+                return Err(InboundTurnError::BindingRequired {
+                    adapter_kind: adapter_kind.as_str().to_string(),
+                    external_actor_id: external_actor_ref.id().to_string(),
+                });
+            }
             return Ok((existing, None));
         }
         let Some(trusted_owner_user_id) = trusted_owner_user_id.cloned() else {
