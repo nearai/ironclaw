@@ -54,7 +54,10 @@ pub enum ExtensionRemovalCleanupBinding {
 The adapter registry is keyed by the typed adapter id. A cleanup adapter:
 
 - accepts only its binding type;
-- derives tenant/user/agent/project scope from the authenticated caller;
+- receives trusted `ResourceScope` separately from the authenticated actor,
+  replaces only the scope's user with that actor, and preserves tenant, agent,
+  and project values from the trusted scope rather than reconstructing them
+  from actor identity;
 - is idempotent;
 - returns success only after its owned state is clean; and
 - returns sanitized failures.
@@ -122,3 +125,11 @@ TDD must begin with tests that fail on the current implementation and cover:
 
 Tests must assert filesystem and installation-store effects, not only response
 payloads.
+
+Adapter acceptance coverage must also prove retry convergence. For Slack,
+`slack_channel_connection_facade_disconnects_identity_and_personal_dm_target`
+invokes the same caller cleanup twice and verifies the repeated call succeeds
+with the owned connection state still clean, while
+`slack_channel_connection_facade_retries_after_identity_delete_failure`
+simulates partial progress, retries, and verifies the remaining identity state
+is removed without duplicate destructive effects.
