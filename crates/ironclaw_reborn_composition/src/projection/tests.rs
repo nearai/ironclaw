@@ -21,6 +21,11 @@ use ironclaw_product_adapters::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
 };
+use ironclaw_resources::{
+    BudgetApprovalGate, BudgetGateStatus, BudgetGateStore, BudgetPeriod, BudgetThresholds,
+    InMemoryBudgetGateStore, InMemoryResourceGovernor, ResourceAccount, ResourceApprovalNeeded,
+    ResourceDimension, ResourceGovernor, ResourceLimits, ResourceValue,
+};
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, RunStateError,
 };

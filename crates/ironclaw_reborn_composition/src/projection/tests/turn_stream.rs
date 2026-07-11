@@ -301,10 +301,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     let context = prompt.approval_context.as_ref().expect("approval context");
     assert_eq!(context.tool_name, "builtin.http");
     assert_eq!(context.action.label, "Run tool");
-    assert_eq!(
-        context.reason.as_deref(),
-        Some("raw path /Users/firatsertgoz/.ssh/id_rsa and token sk-secret")
-    );
+    assert!(context.reason.is_none());
     assert_eq!(context.scope.label, "This request only");
     assert!(context.details.iter().any(|detail| {
         detail.label == "Estimated network egress" && detail.value == "4096 bytes"
@@ -320,12 +317,199 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                     gate_ref: projected_gate_ref,
                     invocation_id,
                     body,
+                    approval_context,
                     ..
                 } if *run_id == turn_run
                     && *gate_kind == ProductGateKind::Approval
                     && projected_gate_ref == gate_ref.as_str()
                     && *invocation_id == Some(blocked_invocation)
                     && body.as_deref() == Some("capability requires approval")
+                    && approval_context.as_ref().is_some_and(|context| {
+                        context.tool_name == "builtin.http"
+                            && context.reason.is_none()
+                            && context.details.iter().any(|detail| {
+                                detail.label == "Estimated network egress"
+                                    && detail.value == "4096 bytes"
+                            })
+                    })
+            ))
+    )));
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_budget_resource_gate_prompt() {
+    let tenant_id = TenantId::new("webui-events-budget-gate-tenant").unwrap();
+    let user_id = UserId::new("webui-events-budget-gate-user").unwrap();
+    let agent_id = AgentId::new("webui-events-budget-gate-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-budget-gate-thread").unwrap();
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let turn_run = TurnRunId::new();
+    let budget_gate_id = ironclaw_resources::BudgetGateId::new();
+    let gate_ref = GateRef::new(format!("gate:budget-{budget_gate_id}")).unwrap();
+    let budget_gates = Arc::new(InMemoryBudgetGateStore::new());
+    let budget_governor = Arc::new(InMemoryResourceGovernor::new());
+    let budget_account = ResourceAccount::user(scope.tenant_id.clone(), user_id.clone());
+    budget_governor
+        .set_limit(
+            budget_account.clone(),
+            ResourceLimits {
+                max_usd: Some(rust_decimal_macros::dec!(5.00)),
+                period: BudgetPeriod::Rolling24h,
+                thresholds: BudgetThresholds {
+                    warn_at: 0.75,
+                    pause_at: 0.90,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let period_end = chrono::Utc::now() + chrono::Duration::hours(12);
+    budget_gates
+        .open(
+            &scope.to_resource_scope(),
+            BudgetApprovalGate {
+                id: budget_gate_id,
+                needed: ResourceApprovalNeeded {
+                    account: budget_account,
+                    dimension: ResourceDimension::Usd,
+                    limit: ResourceValue::Decimal(rust_decimal_macros::dec!(5.00)),
+                    current_usage: ResourceValue::Decimal(rust_decimal_macros::dec!(4.45249)),
+                    active_reserved: ResourceValue::Decimal(rust_decimal_macros::dec!(0)),
+                    requested: ResourceValue::Decimal(rust_decimal_macros::dec!(0.098514)),
+                    utilization: 0.9102008,
+                    period_end: Some(period_end),
+                },
+                opened_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+                status: BudgetGateStatus::Pending,
+            },
+        )
+        .unwrap();
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-budget-gate-reply").unwrap(),
+    )
+    .with_budget_gates(budget_gates)
+    .with_budget_governor(budget_governor)
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedResource,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: gate_ref.clone(),
+                    gate_kind: TurnBlockedGateKind::Resource,
+                    activity_id: None,
+                    credential_requirements: Vec::new(),
+                }),
+                sanitized_reason: None,
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                status: TurnStatus::BlockedResource,
+                gate_ref: Some(gate_ref.clone()),
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
+            },
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let prompt = events
+        .iter()
+        .find_map(|event| match event.payload() {
+            ProductOutboundPayload::GatePrompt(prompt) => Some(prompt),
+            _ => None,
+        })
+        .expect("budget resource gate prompt");
+
+    assert_eq!(prompt.turn_run_id, turn_run);
+    assert_eq!(prompt.gate_kind, ProductGateKind::Resource);
+    assert_eq!(prompt.gate_ref, gate_ref.as_str());
+    assert_eq!(prompt.headline, "Budget approval required");
+    assert_eq!(
+        prompt.body,
+        "Approve additional model budget to continue this run."
+    );
+    assert!(!prompt.allow_always);
+    assert!(prompt.approval_context.is_none());
+    assert!(
+        prompt
+            .details
+            .iter()
+            .any(|detail| { detail.label == "Current usage" && detail.value == "$4.4525" })
+    );
+    assert!(
+        prompt
+            .details
+            .iter()
+            .any(|detail| { detail.label == "Current limit" && detail.value == "$5" })
+    );
+    assert!(
+        prompt
+            .details
+            .iter()
+            .any(|detail| { detail.label == "Limit after approval" && detail.value == "$6" })
+    );
+    assert!(
+        prompt
+            .details
+            .iter()
+            .any(|detail| { detail.label == "Limit increase" && detail.value == "$1" })
+    );
+    assert!(
+        prompt.details.iter().any(|detail| {
+            detail.label == "Estimated for this step" && detail.value == "$0.0985"
+        })
+    );
+    assert!(prompt.details.iter().any(|detail| {
+        detail.label == "Approval means"
+            && detail
+                .value
+                .contains("raise this account limit enough for this estimated $0.0985 step")
+    }));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref: projected_gate_ref,
+                    headline,
+                    body,
+                    allow_always,
+                    details,
+                    approval_context,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Resource
+                    && projected_gate_ref == gate_ref.as_str()
+                    && headline == "Budget approval required"
+                    && body.as_deref()
+                        == Some("Approve additional model budget to continue this run.")
+                    && !*allow_always
+                    && details.iter().any(|detail| {
+                        detail.label == "Estimated for this step" && detail.value == "$0.0985"
+                    })
+                    && approval_context.is_none()
             ))
     )));
 }
