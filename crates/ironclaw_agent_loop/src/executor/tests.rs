@@ -1908,6 +1908,93 @@ async fn nudge_respects_one_shot_cap() {
 }
 
 #[tokio::test]
+async fn completion_nudge_continues_loop_with_tools_on_trailed_off_reply() {
+    // Gate ON + a first reply that trails off (ends with ':'): instead of a
+    // graceful stop, the loop issues ONE more *tools-capable* iteration carrying
+    // the completion-nudge directive, then completes on the follow-through reply.
+    let host = MockHost::new(vec![
+        reply_response_with_text("Let me write the summary file:"),
+        reply_response_with_text("Done. Here is the final answer."),
+    ])
+    .with_driver_nudges_enabled();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "expected completed exit, got {exit:?}"
+    );
+
+    // Two prompt-driven model calls: the original turn and the nudged retry. The
+    // nudged retry appears in `prompt_requests` (the normal, full-tool-surface
+    // prompt path) — NOT as a tool-free exit nudge.
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(
+        prompt_requests.len(),
+        2,
+        "trailed-off reply must trigger exactly one nudged retry"
+    );
+    assert!(
+        prompt_requests[0].inline_messages.is_empty(),
+        "the first turn carries no injected directive"
+    );
+    assert_eq!(
+        prompt_requests[1].inline_messages.len(),
+        1,
+        "the nudged retry injects exactly the completion-nudge directive"
+    );
+    assert!(
+        prompt_requests[1].inline_messages[0]
+            .safe_body
+            .as_str()
+            .contains("Finish the task now"),
+        "nudged retry must carry the completion-nudge directive text"
+    );
+
+    // The counter is spent exactly once.
+    assert_eq!(
+        final_staged_state(&host).completion_nudges_used,
+        1,
+        "one completion nudge issued"
+    );
+}
+
+#[tokio::test]
+async fn completion_nudge_skipped_on_clean_reply() {
+    // Gate ON but the first reply is a clean, complete answer (does not trail
+    // off): no nudge fires, a single prompt-driven model call, graceful
+    // completion. Guards against regressing correct short answers.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "Here is the complete answer.",
+    )])
+    .with_driver_nudges_enabled();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.prompt_requests().len(),
+        1,
+        "a clean, complete reply must not trigger a completion nudge"
+    );
+    assert_eq!(
+        final_staged_state(&host).completion_nudges_used,
+        0,
+        "no completion nudge issued for a clean reply"
+    );
+}
+
+#[tokio::test]
 async fn no_progress_nudge_model_failure_falls_back_to_failed_exit() {
     // Gate ON but the nudge's OWN model call fails (non-cancel host error). The
     // nudge is best-effort: it must NOT bork the run — the no-progress exit

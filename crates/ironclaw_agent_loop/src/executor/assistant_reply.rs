@@ -31,6 +31,10 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
             .usage
             .map(|usage| usage.output_tokens)
             .unwrap_or_else(|| estimate_output_tokens(&input.reply));
+        // Record whether this reply trailed off without a real closing answer so
+        // the stop handling can decide a graceful stop warrants a tools-capable
+        // completion nudge. Captured before `reply` is moved into the transcript.
+        state.last_reply_trailed_off = super::reply_trailed_off(&input.reply.content);
         let reply_ref = ctx
             .host
             .finalize_assistant_message(FinalizeAssistantMessage { reply: input.reply })
