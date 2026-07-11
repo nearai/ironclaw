@@ -338,34 +338,11 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
             "capability_internal",
             "The run failed because a tool returned an internal error. Retry the run, and check the tool integration if it keeps happening.",
         ),
-        (
-            "compaction_invalid_cut_point",
-            "The run failed because context compaction selected an invalid cut point. Retry the run, and contact support if it keeps happening.",
-        ),
-        (
-            "compaction_unsupported_mode",
-            "The run failed because the requested context compaction mode is unsupported. Retry with a shorter request or start a new thread.",
-        ),
-        (
-            "compaction_input_too_large",
-            "The run failed because context compaction input was too large. Retry with a shorter request or start a new thread.",
-        ),
-        (
-            "compaction_security_rejected",
-            "The run failed because context compaction was rejected by a safety check. Change the request and try again.",
-        ),
-        (
-            "compaction_inference_failed",
-            "The run failed because context compaction could not complete. Retry with a shorter request or start a new thread.",
-        ),
-        (
-            "compaction_cancelled",
-            "The run stopped while context compaction was being cancelled. Retry the run if you still need a response.",
-        ),
-        (
-            "compaction_persistence_failed",
-            "The run failed while saving compacted context. Retry the run, and contact support if saving still fails.",
-        ),
+        // The granular `compaction_*` categories are deliberately absent: the
+        // agent loop no longer mints them since non-cancellation compaction
+        // failures became a deferred-continue path instead of a terminal exit
+        // (#5838). `crate::failure_summary` keeps display support so
+        // historical records still render.
     ];
 
     // Parity guard: the hardcoded table above must stay exhaustive against the

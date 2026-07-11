@@ -123,8 +123,8 @@ export function App() {
           <Route path="routines" element={(<RoutinesPage />)} />
           <Route path="routines/:routineId" element={(<RoutinesPage />)} />
           <Route path="automations" element={(<AutomationsPage />)} />
-          <Route path="extensions" element={(<ExtensionsPage />)} />
-          <Route path="extensions/:tab" element={(<ExtensionsPage />)} />
+          <Route path="extensions" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
+          <Route path="extensions/:tab" element={(<ExtensionsPage isAdmin={auth.isAdmin} />)} />
           <Route path="logs" element={(<LogsPage />)} />
           <Route path="settings" element={(<SettingsPage />)} />
           <Route path="settings/:tab" element={(<SettingsPage />)} />
