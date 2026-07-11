@@ -130,6 +130,29 @@ pub(super) fn decide_remove(
     }
 }
 
+/// Row-takeover guard for a registered install (#5459 P1 follow-up, review
+/// item 1): rows are keyed by bare `ExtensionId` while registered
+/// descriptors are owner-scoped, so until owner-unique id minting lands, a
+/// second owner registering a descriptor with the same id must not silently
+/// re-stamp another owner's existing row. `new_owner` is always a singleton
+/// member set here (`registration_owner`'s only `Some` shape); anything the
+/// existing row disagrees with — a different singleton, a wider member set,
+/// or `Tenant` — is a takeover attempt and is masked identically to
+/// `ensure_caller_may_operate`'s "is not installed" denial so a non-owner
+/// cannot enumerate who holds the id.
+pub(super) fn ensure_registered_row_owner_match(
+    extension_id: &ironclaw_host_api::ExtensionId,
+    existing_owner: &InstallationOwner,
+    new_owner: &InstallationOwner,
+) -> Result<(), ProductWorkflowError> {
+    if existing_owner == new_owner {
+        return Ok(());
+    }
+    Err(ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("extension {} is not installed", extension_id.as_str()),
+    })
+}
+
 /// Settings/list projection of an installation owner (#5459 P1). Rows are
 /// caller-filtered before projection, so a member-held row shown to a
 /// viewer is by construction one they hold — "mine".
@@ -169,6 +192,29 @@ mod tests {
             owner,
         )
         .expect("installation")
+    }
+
+    #[test]
+    fn ensure_registered_row_owner_match_rejects_takeover_and_allows_same_owner() {
+        let ext_id = ExtensionId::new("acme-mcp-registered").expect("extension id");
+        let a_row = members(&["owner-a"]);
+
+        ensure_registered_row_owner_match(&ext_id, &a_row, &members(&["owner-a"]))
+            .expect("same owner re-registering must be allowed");
+
+        let takeover_by_b =
+            ensure_registered_row_owner_match(&ext_id, &a_row, &members(&["owner-b"]))
+                .expect_err("a different owner must not take over the row");
+        let takeover_by_tenant =
+            ensure_registered_row_owner_match(&ext_id, &InstallationOwner::Tenant, &a_row)
+                .expect_err("a tenant-held row must not be re-stamped by a registered install");
+        for error in [takeover_by_b, takeover_by_tenant] {
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("is not installed") && !rendered.contains("owner-a"),
+                "denial must mask the existing owner: {rendered}"
+            );
+        }
     }
 
     #[test]

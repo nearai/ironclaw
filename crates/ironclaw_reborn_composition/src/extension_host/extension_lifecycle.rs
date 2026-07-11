@@ -98,7 +98,7 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 use active_publication::extension_trust_policy_input;
 use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
-    ensure_caller_may_operate, install_scope_for_owner,
+    ensure_caller_may_operate, ensure_registered_row_owner_match, install_scope_for_owner,
 };
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
@@ -793,7 +793,14 @@ impl RebornLocalExtensionManagementPort {
                 // the operator (design point 5: no membership for registered
                 // packages).
                 let new_owner = match registration_owner(&available.package.manifest.source) {
-                    Some(owner) => owner,
+                    Some(owner) => {
+                        ensure_registered_row_owner_match(
+                            &available.package.id,
+                            existing.owner(),
+                            &owner,
+                        )?;
+                        owner
+                    }
                     None => decide_install_on_existing(
                         &available.package.id,
                         existing.owner(),
@@ -8799,6 +8806,57 @@ url = "http://127.0.0.1:9/mcp"
                 "{pass}: registered row must be the singleton manifest owner, never Tenant"
             );
         }
+    }
+
+    /// Review item 1 (row-takeover guard): rows are keyed by bare
+    /// `ExtensionId` while registered descriptors are owner-scoped, so
+    /// before owner-unique id minting a second owner can write their own
+    /// registered descriptor under the SAME id. Installing it as owner B
+    /// must not re-stamp owner A's existing row to B — it must be masked
+    /// exactly like a foreign non-member install, and A's row must survive
+    /// untouched.
+    #[tokio::test]
+    async fn install_of_same_id_by_different_registered_owner_does_not_take_over_row() {
+        let owner_a = resource_scope_for("default", "owner-a");
+        let owner_b = resource_scope_for("default", "owner-b");
+        let (dir, port, package_ref, _active_registry, installation_store) =
+            user_registered_isolation_fixture(&owner_a, true).await;
+
+        // Owner B registers their own descriptor under the same bare id.
+        let descriptor_dir = dir
+            .path()
+            .join("local-dev/system/extensions/registered")
+            .join(owner_b.tenant_id.as_str())
+            .join(owner_b.user_id.as_str())
+            .join("acme-mcp-registered");
+        std::fs::create_dir_all(&descriptor_dir).expect("registered descriptor dir for owner b");
+        std::fs::write(
+            descriptor_dir.join("manifest.toml"),
+            REGISTERED_ISOLATION_MANIFEST_TOML,
+        )
+        .expect("write owner b registered descriptor");
+
+        let error = port
+            .install(package_ref, &owner_b)
+            .await
+            .expect_err("owner B must not take over owner A's registered row");
+        assert!(
+            matches!(error, ProductWorkflowError::InvalidBindingRequest { .. })
+                && error.to_string().contains("is not installed"),
+            "takeover attempt must be masked like a foreign install: {error}"
+        );
+
+        let row = installation_store
+            .get_installation(
+                &ExtensionInstallationId::new("acme-mcp-registered").expect("valid id"),
+            )
+            .await
+            .expect("store read")
+            .expect("registered row present");
+        assert!(
+            row.owner().visible_to(&owner_a.user_id) && !row.owner().visible_to(&owner_b.user_id),
+            "owner A's row must be unchanged after the rejected takeover"
+        );
     }
 
     /// Design point 4c: the owner removing their registered install is the
