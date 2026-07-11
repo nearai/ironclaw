@@ -836,10 +836,14 @@ async def test_emulate_slack_covers_qa9_and_qa10_provider_shapes(
             {"types": "public_channel"},
         )
         alerts = next(
-            item
-            for item in channels.get("channels", [])
-            if item["name"] == "reborn-alerts"
+            (
+                item
+                for item in channels.get("channels", [])
+                if item["name"] == "reborn-alerts"
+            ),
+            None,
         )
+        assert alerts is not None, "reborn-alerts channel not found"
 
         missing_scope = await slack_post(
             client,
@@ -1025,7 +1029,9 @@ async def test_emulate_google_drive_update_roundtrips(emulate_google_server):
             content=multipart_body,
         )
         created.raise_for_status()
-        file_id = created.json()["id"]
+        created_data = created.json()
+        file_id = created_data.get("id")
+        assert file_id, f"Created file response missing 'id': {created_data}"
 
         renamed = await client.patch(
             f"{base_url}/drive/v3/files/{file_id}",
