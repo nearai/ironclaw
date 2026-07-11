@@ -1160,7 +1160,13 @@ impl RebornLocalExtensionManagementPort {
         scope: &ResourceScope,
         authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let removed_extension_id = package_ref.id.as_str().to_string();
+        let (removed_extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
+        // Match install/import lock ordering: never await the catalog while
+        // holding the global lifecycle operation lock.
+        let available_catalog_fallback = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref)
+        };
         let caller = authenticated_actor_user_id.unwrap_or(&scope.user_id);
         let mut removal_scope = scope.clone();
         if let Some(actor_user_id) = authenticated_actor_user_id {
@@ -1168,8 +1174,17 @@ impl RebornLocalExtensionManagementPort {
         }
         let mut response = {
             let _operation_guard = self.operation_lock.lock().await;
-            let (extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
+            let extension_id = removed_extension_id.clone();
             let installation = self.search_installation(&extension_id).await?;
+            if let Some(installation) = installation.as_ref() {
+                ensure_caller_may_operate(installation, caller)?;
+                ensure_caller_may_mutate_tenant_installation(
+                    installation,
+                    caller,
+                    &self.tenant_operator_user_id,
+                    "remove",
+                )?;
+            }
             let installed_manifest = self
                 .installation_store
                 .get_manifest(&extension_id)
@@ -1193,8 +1208,12 @@ impl RebornLocalExtensionManagementPort {
                 // Seed the same durable tombstone before an already-absent
                 // catalog repair. A later catalog deployment cannot otherwise
                 // change or remove the only metadata needed by a retry.
-                let available = self.catalog.resolve(&package_ref)?;
-                prepare_install(available)?.manifest_record
+                let available = available_catalog_fallback?;
+                prepare_install(
+                    &available,
+                    derive_owner(caller, &self.tenant_operator_user_id),
+                )?
+                .manifest_record
             };
             let removed_providers =
                 Self::removed_extension_providers_from_manifest(&removal_manifest)?;
@@ -1346,12 +1365,12 @@ impl RebornLocalExtensionManagementPort {
     /// After a successful removal, revoke the removed extension's reusable
     /// personal credentials for providers now exclusive to it (no other
     /// installed extension still declares them). Cleanup failures leave the
-    /// package absent but return a retryable error; an already-absent retry runs
-    /// this same path again until cleanup converges.
+    /// actor-owned installation authoritative and return a retryable error, so
+    /// another user cannot take over the cleanup retry.
     async fn revoke_exclusive_credentials(
         &self,
         scope: &ResourceScope,
-        removed_extension_id: &str,
+        removed_extension_id: &ExtensionId,
         removed_providers: &[AuthProviderId],
         caller: &UserId,
     ) -> Result<(), ProductWorkflowError> {
@@ -1368,12 +1387,6 @@ impl RebornLocalExtensionManagementPort {
                     reason: "extension credential cleanup could not determine whether credentials are shared; retry removal"
                         .to_string(),
                 })?;
-        let extension_id = ExtensionId::new(removed_extension_id).map_err(|error| {
-            tracing::debug!(%error, "removed extension id invalid for credential cleanup");
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: "removed extension id is invalid for credential cleanup".to_string(),
-            }
-        })?;
         for provider in removed_providers {
             if providers_still_in_use.contains(provider) {
                 // Shared with another installed extension; preserve the account.
@@ -1381,12 +1394,12 @@ impl RebornLocalExtensionManagementPort {
             }
             let request = SecretCleanupRequest {
                 scope: AuthProductScope::credential_owner(scope, AuthSurface::Callback),
-                extension_id: extension_id.clone(),
+                extension_id: removed_extension_id.clone(),
                 provider: Some(provider.clone()),
                 action: SecretCleanupAction::Uninstall,
             };
             let report = cleanup.cleanup_for_lifecycle(request).await.map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
                     error_code = ?error.code,
                     %provider,
                     "extension removal credential cleanup failed"
@@ -1398,7 +1411,7 @@ impl RebornLocalExtensionManagementPort {
                 }
             })?;
             if !report.quarantined_accounts.is_empty() {
-                tracing::warn!(
+                tracing::debug!(
                     %provider,
                     quarantined_accounts = report.quarantined_accounts.len(),
                     "extension removal credential cleanup was incomplete"
@@ -1422,7 +1435,7 @@ impl RebornLocalExtensionManagementPort {
     /// consuming the caller's personal credential account.
     async fn providers_still_in_use(
         &self,
-        removed_extension_id: &str,
+        removed_extension_id: &ExtensionId,
         caller: &UserId,
     ) -> Option<BTreeSet<AuthProviderId>> {
         let installations = match self.installation_store.list_installations().await {
@@ -1437,7 +1450,7 @@ impl RebornLocalExtensionManagementPort {
         };
         let mut providers = BTreeSet::new();
         for installation in installations {
-            if installation.extension_id().as_str() == removed_extension_id
+            if installation.extension_id() == removed_extension_id
                 || !installation.owner().visible_to(caller)
             {
                 continue;
@@ -1947,9 +1960,12 @@ impl RebornLocalExtensionManagementPort {
         };
         match self.filesystem.delete(&extension_root).await {
             Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
-            Err(error) => Err(ProductWorkflowError::Transient {
-                reason: format!("failed to remove extension files: {error}"),
-            }),
+            Err(error) => {
+                tracing::debug!(%error, %extension_id, "extension file removal failed");
+                Err(ProductWorkflowError::Transient {
+                    reason: "failed to remove extension files; retry removal".to_string(),
+                })
+            }
         }
     }
 }
@@ -5725,6 +5741,43 @@ output_schema_ref = "schemas/run.output.json"
             assert_eq!(request.extension_id.as_str(), "github");
             assert_eq!(request.action, SecretCleanupAction::Uninstall);
         }
+    }
+
+    #[tokio::test]
+    async fn extension_remove_does_not_hold_operation_lock_while_waiting_for_catalog() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        let removal_scope = hosted_mcp_scope("lifecycle-owner");
+
+        let catalog_guard = port.catalog.write().await;
+        let spawned_port = Arc::clone(&port);
+        let spawned_scope = removal_scope.clone();
+        let removal = tokio::spawn(async move {
+            spawned_port
+                .remove(package_ref, &spawned_scope, Some(&spawned_scope.user_id))
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let operation_guard = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            port.operation_lock.lock(),
+        )
+        .await
+        .expect("remove must wait for the catalog before taking operation_lock");
+        drop(operation_guard);
+        drop(catalog_guard);
+
+        removal
+            .await
+            .expect("remove task joins")
+            .expect("already-absent repair converges after catalog lock release");
     }
 
     #[tokio::test]
