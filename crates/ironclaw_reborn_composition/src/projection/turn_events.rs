@@ -17,6 +17,7 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
 };
+use ironclaw_resources::{BudgetGateId, BudgetGateStore, ResourceGovernor};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
@@ -31,6 +32,7 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
+use super::budget_gate_details;
 use crate::AuthChallengeProvider;
 use crate::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category,
@@ -85,6 +87,8 @@ pub(super) enum TurnEventBridge {
         service: Arc<TurnEventReducerService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+        budget_gates: Option<Arc<dyn BudgetGateStore>>,
+        budget_governor: Option<Arc<dyn ResourceGovernor>>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
         failure_explanation_cache: Arc<Mutex<FailureExplanationCache>>,
     },
@@ -123,11 +127,15 @@ impl TurnEventBridge {
         source: Arc<dyn TurnEventProjectionSource>,
         coordinator: Arc<dyn TurnCoordinator>,
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+        budget_gates: Option<Arc<dyn BudgetGateStore>>,
+        budget_governor: Option<Arc<dyn ResourceGovernor>>,
     ) -> Self {
         Self::Enabled {
             service: Arc::new(TurnEventReducerService::new(source)),
             coordinator,
             approval_requests,
+            budget_gates,
+            budget_governor,
             failure_explainer: Arc::new(NoopFailureExplanationProvider),
             failure_explanation_cache: Arc::new(Mutex::new(FailureExplanationCache::new(
                 FAILURE_EXPLANATION_CACHE_CAPACITY,
@@ -144,6 +152,26 @@ impl TurnEventBridge {
         } = &mut self
         {
             *approval_requests = requests;
+        }
+        self
+    }
+
+    pub(super) fn with_budget_gates(mut self, gates: Option<Arc<dyn BudgetGateStore>>) -> Self {
+        if let Self::Enabled { budget_gates, .. } = &mut self {
+            *budget_gates = gates;
+        }
+        self
+    }
+
+    pub(super) fn with_budget_governor(
+        mut self,
+        governor: Option<Arc<dyn ResourceGovernor>>,
+    ) -> Self {
+        if let Self::Enabled {
+            budget_governor, ..
+        } = &mut self
+        {
+            *budget_governor = governor;
         }
         self
     }
@@ -172,6 +200,8 @@ impl TurnEventBridge {
             service,
             coordinator,
             approval_requests,
+            budget_gates,
+            budget_governor,
             failure_explainer,
             failure_explanation_cache,
         } = self
@@ -230,6 +260,8 @@ impl TurnEventBridge {
                     failure_explanation_cache,
                     auth_challenges,
                     approval_requests.as_deref(),
+                    budget_gates.as_deref(),
+                    budget_governor.as_deref(),
                     page.entries,
                 )
                 .await?,
@@ -246,6 +278,10 @@ impl TurnEventBridge {
     }
 }
 
+// arch-exempt: too_many_args, needs a BudgetGateContext bundle for the paired
+// budget_gates/budget_governor handles; tracked in
+// docs/plans/2026-06-27-reborn-budget-module-decomposition.md
+#[allow(clippy::too_many_arguments)]
 async fn turn_event_payloads_for_page(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
@@ -253,6 +289,8 @@ async fn turn_event_payloads_for_page(
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
+    budget_gates: Option<&dyn BudgetGateStore>,
+    budget_governor: Option<&dyn ResourceGovernor>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     let futures = events.into_iter().map(|event| {
@@ -265,6 +303,8 @@ async fn turn_event_payloads_for_page(
                 failure_explanation_cache,
                 auth_challenges,
                 approval_requests,
+                budget_gates,
+                budget_governor,
                 &event,
             )
             .await
@@ -288,6 +328,10 @@ async fn turn_event_payloads_for_page(
     Ok(payloads.into_iter().flatten().collect())
 }
 
+// arch-exempt: too_many_args, needs a BudgetGateContext bundle for the paired
+// budget_gates/budget_governor handles; tracked in
+// docs/plans/2026-06-27-reborn-budget-module-decomposition.md
+#[allow(clippy::too_many_arguments)]
 async fn turn_event_payloads(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
@@ -295,6 +339,8 @@ async fn turn_event_payloads(
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
+    budget_gates: Option<&dyn BudgetGateStore>,
+    budget_governor: Option<&dyn ResourceGovernor>,
     event: &TurnLifecycleEvent,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     let mut payloads = Vec::new();
@@ -304,6 +350,8 @@ async fn turn_event_payloads(
             coordinator,
             auth_challenges,
             approval_requests,
+            budget_gates,
+            budget_governor,
             event,
         )
         .await?
@@ -377,6 +425,8 @@ async fn blocked_prompt_payload(
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
+    budget_gates: Option<&dyn BudgetGateStore>,
+    budget_governor: Option<&dyn ResourceGovernor>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     let state = match coordinator
@@ -443,8 +493,15 @@ async fn blocked_prompt_payload(
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
             gate_ref_str,
-            "Resource unavailable",
+            ProductGateKind::Resource,
+            resource_gate_headline(gate_ref.as_str()),
             false,
+            budget_gate_details::budget_gate_details(
+                budget_gates,
+                budget_governor,
+                &event.scope,
+                gate_ref.as_str(),
+            ),
         ))),
         // Non-blocked statuses: no prompt payload. Exhaustive match so a new
         // TurnStatus variant forces a compile error and an explicit decision.
@@ -476,8 +533,10 @@ async fn approval_gate_prompt(
     gate_prompt_with_context(
         event,
         gate_ref_string,
+        ProductGateKind::Approval,
         "Approval required",
         is_approval_gate_ref(gate_ref.as_str()),
+        Vec::new(),
         lookup.context,
         lookup.invocation_id,
     )
@@ -513,11 +572,24 @@ async fn approval_prompt_lookup(
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> ApprovalPromptLookup {
-    let (store, request_id) =
-        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
-            Some(value) => value,
-            None => return ApprovalPromptLookup::default(),
-        };
+    let Some(store) = approval_requests else {
+        tracing::debug!(
+            gate_ref = %gate_ref.as_str(),
+            "approval request lookup skipped during gate projection because no approval store is wired"
+        );
+        return ApprovalPromptLookup::default();
+    };
+    let request_id = match approval_request_id_from_gate_ref(gate_ref) {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                gate_ref = %gate_ref.as_str(),
+                "approval request lookup skipped during gate projection because gate ref is not an approval request"
+            );
+            return ApprovalPromptLookup::default();
+        }
+    };
     let scope =
         ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
             .to_resource_scope();
@@ -526,7 +598,19 @@ async fn approval_prompt_lookup(
             context: approval_context_for_request(&record.request),
             invocation_id: Some(record.scope.invocation_id),
         },
-        Ok(None) => ApprovalPromptLookup::default(),
+        Ok(None) => {
+            tracing::debug!(
+                request_id = %request_id,
+                gate_ref = %gate_ref.as_str(),
+                tenant_id = %scope.tenant_id,
+                user_id = %scope.user_id,
+                agent_id = scope.agent_id.as_ref().map(|id| id.as_str()),
+                project_id = scope.project_id.as_ref().map(|id| id.as_str()),
+                thread_id = scope.thread_id.as_ref().map(|id| id.as_str()),
+                "approval request lookup missed during gate projection"
+            );
+            ApprovalPromptLookup::default()
+        }
         Err(error) => {
             tracing::debug!(
                 %error,
@@ -550,7 +634,7 @@ fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPro
             request.reusable_scope.is_some(),
         )
         .ok()?,
-        non_empty_string(&request.reason),
+        None,
         destination,
         details,
     )
@@ -661,44 +745,75 @@ fn format_bytes(bytes: u64) -> String {
     format!("{bytes} bytes")
 }
 
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 fn gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: String,
-    headline: &'static str,
+    gate_kind: ProductGateKind,
+    headline: &str,
     allow_always: bool,
+    details: Vec<ApprovalPromptDetailView>,
 ) -> ProductOutboundPayload {
-    gate_prompt_with_context(event, gate_ref, headline, allow_always, None, None)
+    gate_prompt_with_context(
+        event,
+        gate_ref,
+        gate_kind,
+        headline,
+        allow_always,
+        details,
+        None,
+        None,
+    )
 }
 
+// arch-exempt: too_many_args, gate-prompt builder threads the paired budget
+// handles; collapses with the BudgetGateContext bundle tracked in
+// docs/plans/2026-06-27-reborn-budget-module-decomposition.md
+#[allow(clippy::too_many_arguments)]
 fn gate_prompt_with_context(
     event: &TurnLifecycleEvent,
     gate_ref: String,
-    headline: &'static str,
+    gate_kind: ProductGateKind,
+    headline: &str,
     allow_always: bool,
+    details: Vec<ApprovalPromptDetailView>,
     approval_context: Option<ApprovalPromptContextView>,
     invocation_id: Option<InvocationId>,
 ) -> ProductOutboundPayload {
+    let body = event
+        .sanitized_reason
+        .clone()
+        .unwrap_or_else(|| gate_prompt_fallback_body(gate_kind, &gate_ref).to_string());
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
+        gate_kind,
         gate_ref,
         invocation_id,
         headline: headline.to_string(),
-        body: event
-            .sanitized_reason
-            .clone()
-            .unwrap_or_else(|| "Resolve this gate to continue the run.".to_string()),
+        body,
         allow_always,
+        details,
         approval_context,
     })
+}
+
+fn resource_gate_headline(gate_ref: &str) -> &'static str {
+    if BudgetGateId::is_budget_gate_ref(gate_ref) {
+        "Budget approval required"
+    } else {
+        "Resource unavailable"
+    }
+}
+
+fn gate_prompt_fallback_body(gate_kind: ProductGateKind, gate_ref: &str) -> &'static str {
+    match gate_kind {
+        ProductGateKind::Approval => "Resolve this approval gate to continue the run.",
+        ProductGateKind::Auth => "Authenticate to continue this run.",
+        ProductGateKind::Resource if BudgetGateId::is_budget_gate_ref(gate_ref) => {
+            "Approve additional model budget to continue this run."
+        }
+        ProductGateKind::Resource => "Resolve this resource gate to continue the run.",
+        ProductGateKind::Generic => "Resolve this gate to continue the run.",
+    }
 }
 
 fn projects_run_status(kind: &TurnEventKind) -> bool {
@@ -740,6 +855,8 @@ struct GateProjectionPromptContext {
     headline: Option<String>,
     body: Option<String>,
     allow_always: Option<bool>,
+    details: Vec<ApprovalPromptDetailView>,
+    approval_context: Option<ApprovalPromptContextView>,
     auth_context: Option<AuthPromptContextView>,
 }
 
@@ -752,6 +869,11 @@ fn gate_projection_prompt_context(
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(prompt.allow_always),
+            details: prompt.details.clone(),
+            approval_context: prompt
+                .approval_context
+                .clone()
+                .map(redact_approval_context_reason),
             auth_context: None,
         },
         // The channel-connection context (for a manual_token pairing gate)
@@ -762,11 +884,20 @@ fn gate_projection_prompt_context(
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(false),
+            details: Vec::new(),
+            approval_context: None,
             auth_context: AuthPromptContextView::from_auth_prompt(prompt)?,
         },
         _ => GateProjectionPromptContext::default(),
     };
     Ok(context)
+}
+
+fn redact_approval_context_reason(
+    mut context: ApprovalPromptContextView,
+) -> ApprovalPromptContextView {
+    context.reason = None;
+    context
 }
 
 fn gate_projection_item(
@@ -784,21 +915,23 @@ fn gate_projection_item(
         .activity_id
         .map(|activity_id| InvocationId::from_uuid(activity_id.as_uuid()));
     let body = prompt_context.body.unwrap_or_else(|| {
-        event
-            .sanitized_reason
-            .clone()
-            .unwrap_or_else(|| gate_projection_body(blocked_gate.gate_kind).to_string())
+        event.sanitized_reason.clone().unwrap_or_else(|| {
+            gate_projection_body(blocked_gate.gate_kind, blocked_gate.gate_ref.as_str()).to_string()
+        })
     });
     Ok(Some(ProductProjectionItem::Gate {
         run_id: event.run_id,
         gate_kind: product_gate_kind(blocked_gate.gate_kind),
         gate_ref: blocked_gate.gate_ref.as_str().to_string(),
         invocation_id: prompt_context.invocation_id.or(blocked_invocation_id),
-        headline: prompt_context
-            .headline
-            .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
+        headline: prompt_context.headline.unwrap_or_else(|| {
+            gate_projection_headline(blocked_gate.gate_kind, blocked_gate.gate_ref.as_str())
+                .to_string()
+        }),
         body: Some(body),
         allow_always: prompt_context.allow_always.unwrap_or(false),
+        details: prompt_context.details,
+        approval_context: prompt_context.approval_context,
         auth_context: prompt_context.auth_context,
     }))
 }
@@ -813,21 +946,23 @@ fn product_gate_kind(kind: TurnBlockedGateKind) -> ProductGateKind {
     }
 }
 
-fn gate_projection_headline(kind: TurnBlockedGateKind) -> &'static str {
+fn gate_projection_headline(kind: TurnBlockedGateKind, gate_ref: &str) -> &'static str {
     match kind {
         TurnBlockedGateKind::Approval => "Approval required",
         TurnBlockedGateKind::Auth => "Authentication required",
-        TurnBlockedGateKind::Resource => "Resource unavailable",
+        TurnBlockedGateKind::Resource => resource_gate_headline(gate_ref),
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for dependent run",
         TurnBlockedGateKind::ExternalTool => "External tool call pending",
     }
 }
 
-fn gate_projection_body(kind: TurnBlockedGateKind) -> &'static str {
+fn gate_projection_body(kind: TurnBlockedGateKind, gate_ref: &str) -> &'static str {
     match kind {
         TurnBlockedGateKind::Approval => "Resolve this approval gate to continue the run.",
         TurnBlockedGateKind::Auth => "Authenticate to continue this run.",
-        TurnBlockedGateKind::Resource => "Resolve this resource gate to continue the run.",
+        TurnBlockedGateKind::Resource => {
+            gate_prompt_fallback_body(ProductGateKind::Resource, gate_ref)
+        }
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for a dependent run to finish.",
         TurnBlockedGateKind::ExternalTool => "Submit the external tool output to continue the run.",
     }

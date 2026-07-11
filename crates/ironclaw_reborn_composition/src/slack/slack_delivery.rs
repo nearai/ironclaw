@@ -29,7 +29,8 @@ use ironclaw_product_adapters::{
     EgressMethod, EgressPath, EgressRequest, EgressResponse, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, FinalReplyView, GatePromptView, OutboundDeliverySink,
     ProductAdapter, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductOutboundPayload, ProductRejection, ProductRejectionKind,
+    ProductGateKind, ProductInboundPayload, ProductOutboundPayload, ProductRejection,
+    ProductRejectionKind,
     ProductWorkflowRejectionKind, ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
@@ -1199,11 +1200,13 @@ fn slack_approval_gate_prompt_view(
 
     GatePromptView {
         turn_run_id: run_id,
+        gate_kind: ProductGateKind::Approval,
         gate_ref: gate_ref_str.to_string(),
         invocation_id: None,
         headline: "Approval needed".to_string(),
         body,
         allow_always: is_approval_gate_ref(gate_ref_str),
+        details: Vec::new(),
         approval_context: context.cloned(),
     }
 }

@@ -7,7 +7,17 @@ use async_trait::async_trait;
 use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
+use ironclaw_resources::{
+    BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
+    BudgetGateStore, BudgetPeriod, ResourceAccount, ResourceDimension, ResourceError,
+    ResourceGovernor, ResourceLimits, ResourceTally, ResourceValue,
+};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use ironclaw_product_workflow::{
+    BudgetSettingsService, RebornBudgetAccountView, RebornBudgetSettingsResponse,
+    RebornBudgetThresholdView, ResourceGateResolutionDecision, ResourceGateResolutionRequest,
+    ResourceGateResolutionService,
     ChannelConnectionFacade, ConnectableChannelsProductFacade, OperatorStatusService,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
     RebornOperatorStatusState, RebornOperatorToolCatalog, RebornOperatorToolInfo,
@@ -136,8 +146,17 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
     )
+    .with_input_enqueue(runtime.webui_input_enqueue())
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+    if let Some((gates, governor)) = runtime_budget_handles(runtime) {
+        api = api
+            .with_resource_gate_resolver(Arc::new(BudgetResourceGateResolutionService::new(
+                gates,
+                Arc::clone(&governor),
+            )))
+            .with_budget_settings(Arc::new(BudgetSettingsSnapshotService::new(governor)));
+    }
     // Admin user-management surface: wired only when the identity directory,
     // the admin secret provisioner, and a token minter are all available.
     // Otherwise the fail-closed RejectingAdminUserService default stands and
@@ -966,6 +985,509 @@ fn status_check(
         summary,
         remediation,
     }
+}
+
+// arch-exempt: large_file, budget services + helpers belong in a sibling
+// `webui_budget.rs`; extraction tracked in
+// docs/plans/2026-06-27-reborn-budget-module-decomposition.md
+#[derive(Clone)]
+struct BudgetResourceGateResolutionService {
+    gates: Arc<dyn BudgetGateStore>,
+    governor: Arc<dyn ResourceGovernor>,
+}
+
+impl BudgetResourceGateResolutionService {
+    fn new(gates: Arc<dyn BudgetGateStore>, governor: Arc<dyn ResourceGovernor>) -> Self {
+        Self { gates, governor }
+    }
+
+    fn resolve_approval(
+        &self,
+        request: &ResourceGateResolutionRequest,
+    ) -> Result<(), RebornServicesError> {
+        let gate_id = budget_gate_id_from_ref(request.gate_ref.as_str())?;
+        let scope = request.scope.to_resource_scope();
+        let gate = self.read_budget_gate(&scope, gate_id)?;
+        match gate.status {
+            BudgetGateStatus::Pending => {
+                let increased_limit = self.increased_limit_for(&gate)?;
+                self.governor
+                    .set_limit(gate.needed.account.clone(), increased_limit.clone())
+                    .map_err(map_resource_error)?;
+                self.gates
+                    .resolve(
+                        &scope,
+                        gate_id,
+                        BudgetGateOutcome::Approve {
+                            increased_limit,
+                            by: request.actor.user_id.clone(),
+                        },
+                        Utc::now(),
+                    )
+                    .map_err(map_budget_gate_error)?;
+                Ok(())
+            }
+            BudgetGateStatus::Approved {
+                increased_limit, ..
+            } => {
+                self.governor
+                    .set_limit(gate.needed.account, increased_limit)
+                    .map_err(map_resource_error)?;
+                Ok(())
+            }
+            BudgetGateStatus::Cancelled { .. } | BudgetGateStatus::Expired { .. } => {
+                Err(budget_gate_conflict())
+            }
+        }
+    }
+
+    fn resolve_decline(
+        &self,
+        request: &ResourceGateResolutionRequest,
+    ) -> Result<(), RebornServicesError> {
+        let gate_id = budget_gate_id_from_ref(request.gate_ref.as_str())?;
+        let scope = request.scope.to_resource_scope();
+        let gate = self.read_budget_gate(&scope, gate_id)?;
+        match gate.status {
+            BudgetGateStatus::Pending => {
+                self.gates
+                    .resolve(
+                        &scope,
+                        gate_id,
+                        BudgetGateOutcome::Cancel {
+                            by: request.actor.user_id.clone(),
+                        },
+                        Utc::now(),
+                    )
+                    .map_err(map_budget_gate_error)?;
+                Ok(())
+            }
+            BudgetGateStatus::Cancelled { .. } => Ok(()),
+            BudgetGateStatus::Approved { .. } | BudgetGateStatus::Expired { .. } => {
+                Err(budget_gate_conflict())
+            }
+        }
+    }
+
+    fn read_budget_gate(
+        &self,
+        scope: &ResourceScope,
+        gate_id: BudgetGateId,
+    ) -> Result<BudgetApprovalGate, RebornServicesError> {
+        self.gates
+            .get(scope, gate_id)
+            .map_err(map_budget_gate_error)?
+            .ok_or_else(budget_gate_not_found)
+    }
+
+    fn increased_limit_for(
+        &self,
+        gate: &BudgetApprovalGate,
+    ) -> Result<ResourceLimits, RebornServicesError> {
+        let mut limits = self
+            .governor
+            .account_snapshot(&gate.needed.account)
+            .map_err(map_resource_error)?
+            .and_then(|snapshot| snapshot.limits)
+            .unwrap_or_default();
+        ensure_dimension_limit(&mut limits, gate.needed.dimension, &gate.needed.limit);
+        let total = resource_total(
+            &gate.needed.current_usage,
+            &gate.needed.active_reserved,
+            &gate.needed.requested,
+        )?;
+        raise_dimension_limit(&mut limits, gate.needed.dimension, total)?;
+        Ok(limits)
+    }
+}
+
+#[async_trait]
+impl ResourceGateResolutionService for BudgetResourceGateResolutionService {
+    async fn resolve_resource_gate(
+        &self,
+        request: ResourceGateResolutionRequest,
+    ) -> Result<(), RebornServicesError> {
+        match request.decision {
+            ResourceGateResolutionDecision::Approve => self.resolve_approval(&request),
+            ResourceGateResolutionDecision::Decline => self.resolve_decline(&request),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BudgetSettingsSnapshotService {
+    governor: Arc<dyn ResourceGovernor>,
+}
+
+impl BudgetSettingsSnapshotService {
+    fn new(governor: Arc<dyn ResourceGovernor>) -> Self {
+        Self { governor }
+    }
+}
+
+#[async_trait]
+impl BudgetSettingsService for BudgetSettingsSnapshotService {
+    async fn budget_settings(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError> {
+        let account = ResourceAccount::user(caller.tenant_id, caller.user_id);
+        let snapshot = self
+            .governor
+            .account_snapshot(&account)
+            .map_err(map_budget_settings_resource_error)?;
+        let (limits, usage, reserved, period_start, period_end) = match snapshot {
+            Some(snapshot) => {
+                let is_per_invocation = snapshot
+                    .limits
+                    .as_ref()
+                    .map(|limits| matches!(limits.period, BudgetPeriod::PerInvocation))
+                    .unwrap_or(true);
+                (
+                    snapshot.limits,
+                    snapshot.ledger.spent,
+                    snapshot.ledger.reserved,
+                    Some(snapshot.ledger.period_start.to_rfc3339()),
+                    if is_per_invocation {
+                        None
+                    } else {
+                        Some(snapshot.ledger.period_end.to_rfc3339())
+                    },
+                )
+            }
+            None => (
+                None,
+                ResourceTally::default(),
+                ResourceTally::default(),
+                None,
+                None,
+            ),
+        };
+
+        let limit_usd = limits.as_ref().and_then(|limits| limits.max_usd);
+        let unlimited = limit_usd.is_none_or(|limit| limit <= Decimal::ZERO);
+        let utilization = if let Some(limit) = limit_usd.filter(|limit| *limit > Decimal::ZERO) {
+            (usage.usd + reserved.usd)
+                .checked_div(limit)
+                .and_then(|value| value.to_f64())
+        } else {
+            None
+        };
+        let thresholds = limits.as_ref().map(|limits| RebornBudgetThresholdView {
+            warn_at: limits.thresholds.warn_at,
+            pause_at: limits.thresholds.pause_at,
+        });
+        let period = limits
+            .as_ref()
+            .map(|limits| budget_period_label(&limits.period))
+            .unwrap_or("unconfigured")
+            .to_string();
+
+        Ok(RebornBudgetSettingsResponse {
+            generated_at: Utc::now().to_rfc3339(),
+            accounts: vec![RebornBudgetAccountView {
+                account: "User budget".to_string(),
+                usage_usd: decimal_wire(usage.usd),
+                reserved_usd: decimal_wire(reserved.usd),
+                limit_usd: limit_usd.map(decimal_wire),
+                utilization,
+                unlimited,
+                period,
+                period_start,
+                period_end,
+                thresholds,
+            }],
+        })
+    }
+}
+
+fn runtime_budget_handles(
+    runtime: &RebornRuntime,
+) -> Option<(Arc<dyn BudgetGateStore>, Arc<dyn ResourceGovernor>)> {
+    let services = runtime.services();
+    if let Some(local_runtime) = &services.local_runtime {
+        return Some((
+            Arc::clone(&local_runtime.budget_gate_store),
+            Arc::clone(&local_runtime.resource_governor),
+        ));
+    }
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    if let Some(production_runtime) = &services.production_runtime {
+        return match production_runtime {
+            #[cfg(feature = "libsql")]
+            crate::factory::RebornProductionRuntimeServices::LibSql(graph) => Some((
+                Arc::clone(&graph.budget_gate_store),
+                Arc::clone(&graph.resource_governor),
+            )),
+            #[cfg(feature = "postgres")]
+            crate::factory::RebornProductionRuntimeServices::Postgres(graph) => Some((
+                Arc::clone(&graph.budget_gate_store),
+                Arc::clone(&graph.resource_governor),
+            )),
+        };
+    }
+    None
+}
+
+fn budget_gate_id_from_ref(gate_ref: &str) -> Result<BudgetGateId, RebornServicesError> {
+    BudgetGateId::from_gate_ref(gate_ref).ok_or_else(|| RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("gate_ref".to_string()),
+        validation_code: None,
+    })
+}
+
+fn resource_total(
+    usage: &ResourceValue,
+    reserved: &ResourceValue,
+    requested: &ResourceValue,
+) -> Result<ResourceValue, RebornServicesError> {
+    match (usage, reserved, requested) {
+        (
+            ResourceValue::Decimal(usage),
+            ResourceValue::Decimal(reserved),
+            ResourceValue::Decimal(requested),
+        ) => Ok(ResourceValue::Decimal(*usage + *reserved + *requested)),
+        (
+            ResourceValue::Integer(usage),
+            ResourceValue::Integer(reserved),
+            ResourceValue::Integer(requested),
+        ) => Ok(ResourceValue::Integer(
+            usage.saturating_add(*reserved).saturating_add(*requested),
+        )),
+        _ => Err(RebornServicesError::internal_from(
+            "budget gate resource values used mixed numeric types",
+        )),
+    }
+}
+
+fn ensure_dimension_limit(
+    limits: &mut ResourceLimits,
+    dimension: ResourceDimension,
+    fallback: &ResourceValue,
+) {
+    match (dimension, fallback) {
+        (ResourceDimension::Usd, ResourceValue::Decimal(value)) if limits.max_usd.is_none() => {
+            limits.max_usd = Some(*value);
+        }
+        (ResourceDimension::InputTokens, ResourceValue::Integer(value))
+            if limits.max_input_tokens.is_none() =>
+        {
+            limits.max_input_tokens = Some(*value);
+        }
+        (ResourceDimension::OutputTokens, ResourceValue::Integer(value))
+            if limits.max_output_tokens.is_none() =>
+        {
+            limits.max_output_tokens = Some(*value);
+        }
+        (ResourceDimension::WallClockMs, ResourceValue::Integer(value))
+            if limits.max_wall_clock_ms.is_none() =>
+        {
+            limits.max_wall_clock_ms = Some(*value);
+        }
+        (ResourceDimension::OutputBytes, ResourceValue::Integer(value))
+            if limits.max_output_bytes.is_none() =>
+        {
+            limits.max_output_bytes = Some(*value);
+        }
+        (ResourceDimension::NetworkEgressBytes, ResourceValue::Integer(value))
+            if limits.max_network_egress_bytes.is_none() =>
+        {
+            limits.max_network_egress_bytes = Some(*value);
+        }
+        (ResourceDimension::ProcessCount, ResourceValue::Integer(value))
+            if limits.max_process_count.is_none() =>
+        {
+            limits.max_process_count = Some(clamp_u32_limit(*value));
+        }
+        (ResourceDimension::ConcurrencySlots, ResourceValue::Integer(value))
+            if limits.max_concurrency_slots.is_none() =>
+        {
+            limits.max_concurrency_slots = Some(clamp_u32_limit(*value));
+        }
+        _ => {}
+    }
+}
+
+fn raise_dimension_limit(
+    limits: &mut ResourceLimits,
+    dimension: ResourceDimension,
+    total: ResourceValue,
+) -> Result<(), RebornServicesError> {
+    match (dimension, total) {
+        (ResourceDimension::Usd, ResourceValue::Decimal(total)) => {
+            let current = limits.max_usd;
+            limits.max_usd = Some(max_decimal_limit(
+                current,
+                decimal_budget_target(current, total, limits.thresholds.pause_at),
+            ));
+        }
+        (ResourceDimension::InputTokens, ResourceValue::Integer(total)) => {
+            let current = limits.max_input_tokens;
+            limits.max_input_tokens = Some(max_integer_limit(
+                current,
+                integer_budget_target(current, total, limits.thresholds.pause_at),
+            ));
+        }
+        (ResourceDimension::OutputTokens, ResourceValue::Integer(total)) => {
+            let current = limits.max_output_tokens;
+            limits.max_output_tokens = Some(max_integer_limit(
+                current,
+                integer_budget_target(current, total, limits.thresholds.pause_at),
+            ));
+        }
+        (ResourceDimension::WallClockMs, ResourceValue::Integer(total)) => {
+            let current = limits.max_wall_clock_ms;
+            limits.max_wall_clock_ms = Some(max_integer_limit(
+                current,
+                integer_budget_target(current, total, limits.thresholds.pause_at),
+            ));
+        }
+        (ResourceDimension::OutputBytes, ResourceValue::Integer(total)) => {
+            let current = limits.max_output_bytes;
+            limits.max_output_bytes = Some(max_integer_limit(
+                current,
+                integer_budget_target(current, total, limits.thresholds.pause_at),
+            ));
+        }
+        (ResourceDimension::NetworkEgressBytes, ResourceValue::Integer(total)) => {
+            let current = limits.max_network_egress_bytes;
+            limits.max_network_egress_bytes = Some(max_integer_limit(
+                current,
+                integer_budget_target(current, total, limits.thresholds.pause_at),
+            ));
+        }
+        (ResourceDimension::ProcessCount, ResourceValue::Integer(total)) => {
+            let current = limits.max_process_count.map(u64::from);
+            let target = clamp_u32_limit(integer_budget_target(
+                current,
+                total,
+                limits.thresholds.pause_at,
+            ));
+            limits.max_process_count =
+                Some(limits.max_process_count.unwrap_or_default().max(target));
+        }
+        (ResourceDimension::ConcurrencySlots, ResourceValue::Integer(total)) => {
+            let current = limits.max_concurrency_slots.map(u64::from);
+            let target = clamp_u32_limit(integer_budget_target(
+                current,
+                total,
+                limits.thresholds.pause_at,
+            ));
+            limits.max_concurrency_slots =
+                Some(limits.max_concurrency_slots.unwrap_or_default().max(target));
+        }
+        _ => {
+            return Err(RebornServicesError::internal_from(
+                "budget gate dimension did not match resource value type",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn decimal_budget_target(current: Option<Decimal>, total: Decimal, pause_at: f64) -> Decimal {
+    match ironclaw_resources::raised_budget_limit(
+        current.map(ResourceValue::Decimal),
+        ResourceValue::Decimal(total),
+        pause_at,
+    ) {
+        Some(ResourceValue::Decimal(value)) => value,
+        // Unreachable: a Decimal `current`/`total` always yields a Decimal.
+        _ => current.unwrap_or(total).round_dp(4),
+    }
+}
+
+fn integer_budget_target(current: Option<u64>, total: u64, pause_at: f64) -> u64 {
+    match ironclaw_resources::raised_budget_limit(
+        current.map(ResourceValue::Integer),
+        ResourceValue::Integer(total),
+        pause_at,
+    ) {
+        Some(ResourceValue::Integer(value)) => value,
+        // Unreachable: an Integer `current`/`total` always yields an Integer.
+        _ => current.unwrap_or(total),
+    }
+}
+
+fn max_decimal_limit(current: Option<Decimal>, target: Decimal) -> Decimal {
+    current.unwrap_or(Decimal::ZERO).max(target)
+}
+
+fn max_integer_limit(current: Option<u64>, target: u64) -> u64 {
+    current.unwrap_or_default().max(target)
+}
+
+fn clamp_u32_limit(value: u64) -> u32 {
+    value.min(u64::from(u32::MAX)) as u32
+}
+
+fn decimal_wire(value: Decimal) -> String {
+    value.round_dp(4).normalize().to_string()
+}
+
+fn budget_period_label(period: &BudgetPeriod) -> &'static str {
+    match period {
+        BudgetPeriod::PerInvocation => "per_invocation",
+        BudgetPeriod::Rolling24h => "rolling_24h",
+        BudgetPeriod::Calendar { unit, .. } => match unit {
+            ironclaw_resources::PeriodUnit::Day => "calendar_day",
+            ironclaw_resources::PeriodUnit::Week => "calendar_week",
+            ironclaw_resources::PeriodUnit::Month => "calendar_month",
+        },
+    }
+}
+
+fn map_budget_gate_error(error: BudgetGateError) -> RebornServicesError {
+    match error {
+        BudgetGateError::Unknown { .. } => budget_gate_not_found(),
+        BudgetGateError::AlreadyResolved { .. } => budget_gate_conflict(),
+        BudgetGateError::Storage { .. } => {
+            tracing::warn!(%error, "budget gate store failed while resolving WebUI gate");
+            RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::BlockedResource,
+                503,
+                true,
+            )
+        }
+    }
+}
+
+fn map_resource_error(error: ResourceError) -> RebornServicesError {
+    tracing::warn!(%error, "resource governor failed while resolving WebUI budget gate");
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Unavailable,
+        RebornServicesErrorKind::BlockedResource,
+        503,
+        true,
+    )
+}
+
+fn map_budget_settings_resource_error(error: ResourceError) -> RebornServicesError {
+    tracing::warn!(%error, "resource governor failed while reading WebUI budget settings");
+    RebornServicesError::service_unavailable(true)
+}
+
+fn budget_gate_not_found() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::NotFound,
+        RebornServicesErrorKind::BlockedResource,
+        404,
+        false,
+    )
+}
+
+fn budget_gate_conflict() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Conflict,
+        RebornServicesErrorKind::BlockedResource,
+        409,
+        false,
+    )
 }
 
 #[cfg(test)]
