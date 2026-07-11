@@ -487,6 +487,7 @@ impl HostRuntimeCapabilityHarness {
             mounts,
             runtime_policy,
             seed_extension_credentials,
+            pre_construct_asset_copy,
             skill_activation_tenant,
             outbound_target_facade,
             network_http_egress_for_test,
@@ -497,6 +498,10 @@ impl HostRuntimeCapabilityHarness {
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        if let Some((source_dir, relative_dest)) = pre_construct_asset_copy {
+            let dest = root.path().join(relative_dest);
+            copy_dir_recursive(&source_dir, &dest)?;
+        }
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {

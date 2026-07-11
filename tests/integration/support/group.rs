@@ -215,6 +215,10 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// The exact loop milestone sink wired into the group's ONE planned runtime.
+    /// Retained so integration tests can assert production loop milestones
+    /// without adding event-specific hooks to the runtime path.
+    pub(crate) milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     /// Enabler (c): the `trace_scope_key(tenant, owner)` the production
     /// trace-capture sink was seeded with when `.with_trace_capture()` opted
     /// in; `None` otherwise. Recorded at wiring time so a test asserts against
@@ -810,6 +814,7 @@ impl RebornIntegrationGroupBuilder {
         // shape this group's runtime is built from — the only place this
         // struct value exists before `build_default_planned_runtime` takes it
         // by value.
+        let milestone_sink_for_assertions = Arc::clone(&milestone_sink);
         let parts = DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -909,6 +914,7 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
                 budget_account,
@@ -1167,6 +1173,7 @@ impl<'g> RebornThreadBuilder<'g> {
             .as_ref()
             .map(|sink| sink.events().len())
             .unwrap_or(0);
+        let baseline_milestone_count = shared.milestone_sink.milestones().len();
 
         // --- per-thread workflow over the SHARED coordinator --------------------
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -1255,6 +1262,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_process_count,
             baseline_network_count,
             baseline_turn_event_count,
+            baseline_milestone_count,
         })
     }
 }

@@ -15,6 +15,11 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) mounts: MountView,
     pub(crate) runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     pub(crate) seed_extension_credentials: bool,
+    /// Test fixture directory copied before `build_reborn_services` so startup
+    /// discovery can observe it. The destination is relative to the harness
+    /// tempdir root. Only the extension-lifecycle profile sets this, placing a
+    /// generic channel manifest under `local-dev/system/extensions`.
+    pub(crate) pre_construct_asset_copy: Option<(PathBuf, PathBuf)>,
     /// Tenant the E-SKILL skill context source is constructed under, when this
     /// harness surfaces the synthetic `skill_activate` capability. Only
     /// `skill_activation_tools()` sets this (via
@@ -72,6 +77,7 @@ impl HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
             seed_extension_credentials: false,
+            pre_construct_asset_copy: None,
             skill_activation_tenant: None,
             outbound_target_facade: None,
             network_http_egress_for_test: None,
@@ -82,6 +88,15 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_seed_extension_credentials(mut self) -> Self {
         self.seed_extension_credentials = true;
+        self
+    }
+
+    pub(crate) fn with_pre_construct_asset_copy(
+        mut self,
+        source_dir: PathBuf,
+        relative_dest_under_harness_root: PathBuf,
+    ) -> Self {
+        self.pre_construct_asset_copy = Some((source_dir, relative_dest_under_harness_root));
         self
     }
 

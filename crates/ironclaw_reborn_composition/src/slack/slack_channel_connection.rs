@@ -219,8 +219,13 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
         caller: WebUiAuthenticatedCaller,
         channel: &str,
     ) -> Result<(), RebornServicesError> {
-        if channel != "slack" || caller.tenant_id != self.tenant_id {
+        if channel != "slack" {
             return Ok(());
+        }
+        if caller.tenant_id != self.tenant_id {
+            return Err(RebornServicesError::internal_from(
+                "Slack channel disconnect caller tenant does not match the configured tenant",
+            ));
         }
         let scope = self.resolve_personal_connection_scope().await?;
         let mut installations = HashSet::new();
@@ -435,6 +440,41 @@ mod tests {
         },
         slack::slack_serve::SlackTeamId,
     };
+
+    #[tokio::test]
+    async fn slack_channel_disconnect_rejects_a_caller_from_another_tenant() {
+        let configured_tenant = TenantId::new("tenant:configured").expect("configured tenant");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::default());
+        let dm_target_store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
+        let cleanup = Arc::new(RecordingCleanupService::default());
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: configured_tenant,
+            personal_connection_scope: None,
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            user_binding_lifecycle_store: identity_store.clone(),
+            conversation_actor_pairings: actor_pairings.clone(),
+            personal_dm_target_store: dm_target_store,
+            personal_credential_cleanup: Some(cleanup.clone()),
+        };
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant:other").expect("other tenant"),
+            UserId::new("user:alice").expect("user"),
+            None::<AgentId>,
+            None,
+        );
+
+        facade
+            .disconnect_channel_for_caller(caller, "slack")
+            .await
+            .expect_err("a cross-tenant disconnect must fail closed");
+
+        assert!(identity_store.deletes().is_empty());
+        assert!(actor_pairings.unpairs().is_empty());
+        assert!(cleanup.requests().is_empty());
+    }
 
     #[tokio::test]
     async fn slack_channel_connection_facade_disconnects_identity_and_personal_dm_target() {

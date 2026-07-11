@@ -11,9 +11,11 @@
 //! (`mcp`, `mcp_discovery`) behind one internal module. The crate root re-exports
 //! the same public items from here so the crate's public API is unchanged.
 
+pub(crate) mod available_extension_import;
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
 pub(crate) mod extension_activation_credentials;
+pub(crate) mod extension_bundle;
 pub(crate) mod extension_credential_requirements;
 pub(crate) mod extension_installation_store;
 pub(crate) mod extension_lifecycle;
@@ -30,3 +32,7 @@ pub(crate) mod mcp_discovery;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;
+
+// Keep the bundle policy owned by `extension_bundle`; lifecycle consumes only
+// the decoder through this narrow module-level seam.
+pub(crate) use extension_bundle::unzip_extension_bundle;

@@ -258,10 +258,12 @@ pub use webui::webui_serve::{
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose
-/// facade-shaped handles only"; these four newtypes are the host-identity
-/// facade.
+/// facade-shaped handles only"; these host-api identity types are the
+/// host-identity facade.
 pub mod host_api {
-    pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    pub use ironclaw_host_api::{
+        AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    };
 }
 
 #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]

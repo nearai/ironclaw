@@ -862,6 +862,10 @@ registerPack("ko", {
   "ext.registry.emptyDesc": "사용 가능한 확장이 이미 모두 설치되어 있거나, 레지스트리가 구성되어 있지 않습니다.",
   "ext.registry.availableTitle": "사용 가능한 확장",
   "ext.registry.noMatch": "필터와 일치하는 확장이 없습니다.",
+  "ext.registry.import": "가져오기",
+  "ext.registry.importing": "가져오는 중…",
+  "ext.registry.importSuccess": "도구를 가져왔습니다 — 레지스트리에서 설치하세요.",
+  "ext.registry.importFailed": "가져오기 실패",
 
   // Chat — history
   "chat.history.loading": "로딩 중...",
@@ -1208,6 +1212,8 @@ registerPack("ko", {
   "extensions.reconfigure": "재구성",
   "extensions.configureName": "{name} 구성",
   "extensions.allInstalled": "설치된 모든 확장 프로그램",
+  "extensions.scope.shared": "공유",
+  "extensions.scope.private": "내 것",
   "mcp.installed": "설치된 MCP 서버",
   "extensions.oneCapability": "1개 기능",
   "extensions.pluralCapabilities": "{count} 기능",

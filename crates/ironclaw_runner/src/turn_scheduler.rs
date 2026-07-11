@@ -361,6 +361,7 @@ impl TurnRunSchedulerHandle {
     pub async fn shutdown(mut self) {
         self.shutdown_token.cancel();
         if let Some(supervisor) = self.supervisor.take() {
+            #[allow(clippy::let_underscore_must_use)] // join result unused during shutdown
             let _ = supervisor.await;
         }
     }
@@ -841,7 +842,9 @@ fn spawn_executor_task(
 
             tracing::debug!("turn run finished");
             drop(permit);
-            let _ = command_tx.send(SchedulerCommand::Drain).await;
+            if let Err(error) = command_tx.send(SchedulerCommand::Drain).await {
+                tracing::debug!(?error, "post-run drain command send failed; scheduler channel likely closed");
+            }
             // Return the run_id so the scheduler loop can remove it from active_runs.
             recovery_run_id
         }
@@ -1033,7 +1036,12 @@ fn schedule_drain_after(command_tx: mpsc::Sender<SchedulerCommand>, delay: Durat
     // Best-effort timer: if shutdown closes the command channel first, send fails harmlessly.
     tokio::spawn(async move {
         sleep(delay).await;
-        let _ = command_tx.send(SchedulerCommand::RetryDrain).await;
+        if let Err(error) = command_tx.send(SchedulerCommand::RetryDrain).await {
+            tracing::debug!(
+                ?error,
+                "retry-drain command send failed; scheduler channel likely closed"
+            );
+        }
     });
 }
 #[cfg(test)]

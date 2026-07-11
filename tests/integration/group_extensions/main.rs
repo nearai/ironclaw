@@ -20,6 +20,7 @@ mod support;
 // Modules are alphabetical (rustfmt reorders `mod` decls); execution order is
 // set by the `report.record(...)` sequence below, not declaration order.
 mod scenario_activate_then_active_cross_thread;
+mod scenario_generic_external_channel_remove_without_slack_facade;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
@@ -70,6 +71,14 @@ async fn extensions_group_e2e() {
     report.record(
         "uninstalled_tool_call_denied_until_activated",
         scenario_uninstalled_tool_call_denied_until_activated::run(&g).await,
+    );
+
+    // Scenario 6: a filesystem-discovered generic ExternalChannel package
+    // installs and removes through builtin.extension_remove without any Slack
+    // connection facade, then is absent from package and durable-store state.
+    report.record(
+        "generic_external_channel_remove_without_slack_facade",
+        scenario_generic_external_channel_remove_without_slack_facade::run(&g).await,
     );
 
     report.assert_all_passed();

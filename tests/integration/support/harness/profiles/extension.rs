@@ -23,6 +23,22 @@ use super::super::{
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
+    extension_lifecycle_tools_profile_for_user("reborn-e2e-extension-lifecycle-user")
+}
+
+/// Same profile as [`extension_lifecycle_tools_profile`], but seeds
+/// credentials and provider trust under a caller-supplied `user_id` instead
+/// of the fixed test constant. Callers that align the built harness's
+/// dispatch scope to a real turn's binding subject (`HostRuntimeCapabilityHarness::with_user_id`,
+/// e.g. `group_constructors.rs`'s `build_group_capability_with_base` and
+/// `RebornBinaryE2EHarness::with_host_runtime_extension_lifecycle_capabilities`)
+/// must also seed under that SAME aligned user — `with_user_id` only
+/// re-points dispatch scope, not the extension-credential rows seeded during
+/// `.build()`, so a mismatched seed user leaves credentialed extensions
+/// (e.g. `github`) `BlockedAuth` for the aligned caller.
+pub(crate) fn extension_lifecycle_tools_profile_for_user(
+    user_id: &str,
+) -> HarnessResult<ToolsProfile> {
     let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
     capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
     // Hermetic guard: without a test egress, `build_local_runtime` defaults to
@@ -41,15 +57,17 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
                 true,
             )?),
         )
+        .with_pre_construct_asset_copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/extension_generic_channel"),
+            std::path::PathBuf::from("local-dev/system/extensions/channel-ext"),
+        )
         .with_seed_extension_credentials()
         .with_network_http_egress_for_test(network_egress),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new(
-            "reborn-e2e-extension-lifecycle-tools",
-            "reborn-e2e-extension-lifecycle-user",
-        )?
+        ..ToolsProfile::new("reborn-e2e-extension-lifecycle-tools", user_id)?
     })
 }
 
