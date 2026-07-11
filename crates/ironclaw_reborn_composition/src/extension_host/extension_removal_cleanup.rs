@@ -1,19 +1,30 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{ResourceScope, UserId};
-use ironclaw_product_workflow::{
-    ChannelConnectionFacade, ProductWorkflowError, RebornServicesError, WebUiAuthenticatedCaller,
-};
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
+use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 
+#[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) const SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID: &str = "slack.personal_connection";
+#[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) const SLACK_EXTENSION_REMOVAL_CHANNEL_ID: &str = "slack";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ExtensionRemovalCleanupAdapterId(String);
 
 impl ExtensionRemovalCleanupAdapterId {
+    #[cfg_attr(
+        not(feature = "slack-v2-host-beta"),
+        allow(
+            dead_code,
+            reason = "typed cleanup ids are constructed by trusted feature-gated extension catalogs"
+        )
+    )]
     pub(crate) fn new(value: impl Into<String>) -> Result<Self, ProductWorkflowError> {
         validate_cleanup_id(value.into(), "cleanup adapter").map(Self)
     }
@@ -27,15 +38,36 @@ impl ExtensionRemovalCleanupAdapterId {
 pub(crate) struct ExtensionRemovalChannelId(String);
 
 impl ExtensionRemovalChannelId {
+    #[cfg_attr(
+        not(feature = "slack-v2-host-beta"),
+        allow(
+            dead_code,
+            reason = "typed cleanup ids are constructed by trusted feature-gated extension catalogs"
+        )
+    )]
     pub(crate) fn new(value: impl Into<String>) -> Result<Self, ProductWorkflowError> {
         validate_cleanup_id(value.into(), "cleanup channel").map(Self)
     }
 
+    #[cfg_attr(
+        not(feature = "slack-v2-host-beta"),
+        allow(
+            dead_code,
+            reason = "typed cleanup channels are read by trusted feature-gated cleanup adapters"
+        )
+    )]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+#[cfg_attr(
+    not(feature = "slack-v2-host-beta"),
+    allow(
+        dead_code,
+        reason = "typed cleanup ids are constructed by trusted feature-gated extension catalogs"
+    )
+)]
 fn validate_cleanup_id(value: String, label: &'static str) -> Result<String, ProductWorkflowError> {
     let valid = !value.is_empty()
         && value.len() <= 128
@@ -61,6 +93,13 @@ fn validate_cleanup_id(value: String, label: &'static str) -> Result<String, Pro
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ExtensionRemovalCleanupBinding {
+    #[cfg_attr(
+        not(feature = "slack-v2-host-beta"),
+        allow(
+            dead_code,
+            reason = "channel cleanup bindings are supplied by trusted feature-gated extension catalogs"
+        )
+    )]
     ChannelConnection { channel: ExtensionRemovalChannelId },
 }
 
@@ -71,6 +110,13 @@ pub(crate) struct ExtensionRemovalCleanupRequirement {
 }
 
 impl ExtensionRemovalCleanupRequirement {
+    #[cfg_attr(
+        not(feature = "slack-v2-host-beta"),
+        allow(
+            dead_code,
+            reason = "channel cleanup bindings are supplied by trusted feature-gated extension catalogs"
+        )
+    )]
     pub(crate) fn channel_connection(
         adapter_id: ExtensionRemovalCleanupAdapterId,
         channel: ExtensionRemovalChannelId,
@@ -177,10 +223,12 @@ impl ExtensionRemovalCleanupRegistry {
     }
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) struct SlackPersonalConnectionCleanupAdapter {
     channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
+#[cfg(any(feature = "slack-v2-host-beta", test))]
 impl SlackPersonalConnectionCleanupAdapter {
     pub(crate) fn new(channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>) -> Self {
         Self { channel_connection }
@@ -188,6 +236,7 @@ impl SlackPersonalConnectionCleanupAdapter {
 }
 
 #[async_trait]
+#[cfg(any(feature = "slack-v2-host-beta", test))]
 impl ExtensionRemovalCleanupAdapter for SlackPersonalConnectionCleanupAdapter {
     fn adapter_id(&self) -> ExtensionRemovalCleanupAdapterId {
         ExtensionRemovalCleanupAdapterId(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID.to_string())
