@@ -26,8 +26,8 @@ use ironclaw_runner::thread_scope::ThreadScopeResolver;
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
-    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
-    ThreadMessageId, ThreadScope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus,
+    SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
@@ -264,6 +264,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
 const LOCAL_DEV_DURABLE_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// First-look preview bound on the initial result-reference observation.
+/// Matches `result_read`'s max chunk size so the preview is exactly the
+/// first chunk `result_read` would itself return at `offset: 0` — a model
+/// that pages past `next_offset` sees no gap or overlap.
+const LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES: usize = TOOL_RESULT_RECORD_READ_MAX_BYTES;
 
 struct LocalDevCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
@@ -713,6 +718,10 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         let output_content = serialized_result_output(&output)?;
         let serialized_bytes = output_content.len();
         let output_bytes = serialized_bytes.try_into().unwrap_or(u64::MAX);
+        // Snapshot the first-look preview from the same bytes the durable
+        // record stores, before `output_content` is moved into persistence,
+        // so its offsets line up exactly with what `result_read` returns.
+        let preview = first_look_result_preview(&output_content);
         self.persist_tool_result(run_context, &result_ref, output_content)
             .await?;
         self.stage_result_best_effort(&result_ref, output.clone(), serialized_bytes);
@@ -759,6 +768,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         write_result.model_observation = Some(local_dev_result_reference_observation(
             &write_result.result_ref,
             write_result.byte_len,
+            preview,
         ));
         Ok(write_result)
     }
@@ -851,21 +861,90 @@ fn serialized_result_output(output: &serde_json::Value) -> Result<Vec<u8>, Agent
     Ok(content)
 }
 
+/// A bounded, UTF-8-safe first-look slice of a serialized result payload,
+/// truncated at `LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES`.
+struct FirstLookResultPreview {
+    text: String,
+    /// `None` when `text` already covers the entire payload.
+    next_offset: Option<u64>,
+}
+
+/// Builds the inline first-look preview from the same serialized bytes the
+/// durable record stores, so a truncated preview's `next_offset` matches
+/// exactly what `result_read` would return continuing from that offset.
+fn first_look_result_preview(serialized: &[u8]) -> Option<FirstLookResultPreview> {
+    let Ok(full_text) = std::str::from_utf8(serialized) else {
+        return None;
+    };
+    if full_text.len() <= LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES {
+        return Some(FirstLookResultPreview {
+            text: full_text.to_string(),
+            next_offset: None,
+        });
+    }
+    let end = floor_char_boundary(full_text, LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES);
+    Some(FirstLookResultPreview {
+        text: full_text[..end].to_string(),
+        next_offset: Some(end as u64),
+    })
+}
+
+fn floor_char_boundary(value: &str, index: usize) -> usize {
+    if index >= value.len() {
+        return value.len();
+    }
+    let mut index = index;
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 fn local_dev_result_reference_observation(
     result_ref: &LoopResultRef,
     byte_len: u64,
+    preview: Option<FirstLookResultPreview>,
 ) -> ModelVisibleToolObservation {
+    let (summary, preview_text, total_bytes, next_offset) = match preview {
+        Some(FirstLookResultPreview {
+            text,
+            next_offset: Some(next_offset),
+        }) => (
+            format!(
+                "Tool completed; preview truncated, use result_read with the result reference \
+                 and offset {next_offset} for more output."
+            ),
+            Some(text),
+            Some(byte_len),
+            Some(next_offset),
+        ),
+        Some(FirstLookResultPreview {
+            text,
+            next_offset: None,
+        }) => (
+            "Tool completed; preview contains the full result.".to_string(),
+            Some(text),
+            Some(byte_len),
+            None,
+        ),
+        None => (
+            "Tool completed; use result_read with the result reference for more output."
+                .to_string(),
+            None,
+            None,
+            None,
+        ),
+    };
     ModelVisibleToolObservation {
         schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
-        summary: "Tool completed; use result_read with the result reference for more output."
-            .to_string(),
+        summary,
         detail: ToolObservationDetail::ResultReference {
             result_ref: result_ref.as_str().to_string(),
             byte_len,
-            preview: None,
-            total_bytes: None,
-            next_offset: None,
+            preview: preview_text,
+            total_bytes,
+            next_offset,
         },
         artifacts: vec![ModelVisibleArtifact {
             artifact_ref: result_ref.as_str().to_string(),

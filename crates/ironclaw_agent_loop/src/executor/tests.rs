@@ -4734,6 +4734,7 @@ async fn executor_continues_after_forced_compaction_rejection_from_tool_result_o
             terminate_hint: false,
             byte_len: 33_001,
             output_digest: None,
+            model_observation: None,
         })],
         stopped_on_suspension: false,
     }])
