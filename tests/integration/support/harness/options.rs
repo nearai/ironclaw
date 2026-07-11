@@ -51,7 +51,10 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// runtime's own dispatchable registry, so dispatch silently no-ops (the
     /// tool call never reaches `invoke_capability`). Empty for every harness
     /// that surfaces no bundled WASM capability.
-    pub(crate) activate_bundled_extensions_for_test: Vec<ExtensionPackage>,
+    pub(crate) activate_bundled_extensions_for_test: Vec<(
+        ExtensionPackage,
+        Option<ironclaw_extensions::ResolvedExtensionManifest>,
+    )>,
     /// C-SYNTH `project_create` fault-injection seam: wrap the real
     /// `Arc<dyn ProjectService>` (`services.local_dev_project_service_for_test()`)
     /// in `FaultInjectingProjectService` before it reaches
@@ -108,7 +111,21 @@ impl HostRuntimeHarnessOptions {
     }
 
     pub(crate) fn with_activated_bundled_extension(mut self, package: ExtensionPackage) -> Self {
-        self.activate_bundled_extensions_for_test.push(package);
+        self.activate_bundled_extensions_for_test
+            .push((package, None));
+        self
+    }
+
+    /// Variant for in-code fixture packages with no catalog entry: the
+    /// caller supplies the resolved contract the generic-host mirror
+    /// publishes.
+    pub(crate) fn with_activated_bundled_extension_resolved(
+        mut self,
+        package: ExtensionPackage,
+        resolved: ironclaw_extensions::ResolvedExtensionManifest,
+    ) -> Self {
+        self.activate_bundled_extensions_for_test
+            .push((package, Some(resolved)));
         self
     }
 

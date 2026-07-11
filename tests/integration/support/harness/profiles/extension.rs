@@ -105,17 +105,25 @@ input_schema_ref = "schemas/audit.input.json"
 output_schema_ref = "schemas/audit.output.json"
 "#;
 
-fn visibility_probe_package() -> HarnessResult<ironclaw_extensions::ExtensionPackage> {
-    let manifest = ironclaw_extensions::ExtensionManifest::parse(
+fn visibility_probe_package() -> HarnessResult<(
+    ironclaw_extensions::ExtensionPackage,
+    ironclaw_extensions::ResolvedExtensionManifest,
+)> {
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
         ironclaw_extensions::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
+        None,
         &capability_provider_contracts(),
     )?;
-    Ok(ironclaw_extensions::ExtensionPackage::from_manifest(
-        manifest,
-        ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
-    )?)
+    let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
+    Ok((
+        ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
+        )?,
+        record.resolved().clone(),
+    ))
 }
 
 /// Harness for the HostInternal surface-hiding probe: the fixture package is
@@ -124,7 +132,7 @@ fn visibility_probe_package() -> HarnessResult<ironclaw_extensions::ExtensionPac
 /// the ONLY thing that can keep `visprobe.audit` off the model surface is the
 /// registry-level visibility filter, not grant absence or non-publication.
 pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsProfile> {
-    let package = visibility_probe_package()?;
+    let (package, resolved) = visibility_probe_package()?;
     Ok(ToolsProfile {
         capability_ids: capability_ids_from_strs(&[
             VISIBILITY_PROBE_MODEL_CAPABILITY_ID,
@@ -137,7 +145,7 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
                 true,
             )?),
         )
-        .with_activated_bundled_extension(package),
+        .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(vec![(
             ironclaw_host_api::ExtensionId::new("visprobe")?,

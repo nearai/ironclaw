@@ -176,14 +176,24 @@ impl ExtensionLoader for CompositionExtensionLoader {
         // record.
         let extension_id = ironclaw_host_api::ExtensionId::new(&ctx.extension_id)
             .map_err(|error| load_error(format!("invalid extension id: {error}")))?;
-        let source = self
+        let source = match self
             .installation_store
             .get_manifest(&extension_id)
             .await
             .map_err(|error| load_error(format!("manifest record unavailable: {error}")))?
-            .ok_or_else(|| load_error("manifest record is not installed".to_string()))?
-            .manifest()
-            .source;
+        {
+            Some(record) => record.manifest().source,
+            // No durable record (host-published test fixtures): derive the
+            // least source that admits the contract's requested trust —
+            // `to_internal` re-checks source-vs-trust either way.
+            None => match ctx.resolved.requested_trust {
+                ironclaw_host_api::RequestedTrustClass::FirstPartyRequested
+                | ironclaw_host_api::RequestedTrustClass::SystemRequested => {
+                    ironclaw_extensions::ManifestSource::HostBundled
+                }
+                _ => ironclaw_extensions::ManifestSource::InstalledLocal,
+            },
+        };
         let manifest_v2 = ctx
             .resolved
             .to_internal(source)

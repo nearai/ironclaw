@@ -526,9 +526,10 @@ impl HostRuntimeCapabilityHarness {
         // registry directly (see `HostRuntimeHarnessOptions::activate_bundled_extensions_for_test`
         // doc) so their capabilities are genuinely dispatchable, not merely
         // granted at the harness-authority layer.
-        for package in &activate_bundled_extensions_for_test {
+        for (package, resolved) in &activate_bundled_extensions_for_test {
             services
-                .publish_bundled_extension_for_test(package)
+                .publish_bundled_extension_for_test(package, resolved.as_ref())
+                .await
                 .ok_or(
                     "local-dev Reborn services missing extension management for test publish",
                 )??;

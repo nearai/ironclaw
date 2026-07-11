@@ -373,6 +373,73 @@ impl RebornLocalExtensionManagementPort {
             .map_err(generic_host_error)
     }
 
+    /// Test-support twin of the production activation choke point: publish a
+    /// bundled package directly into the registry AND mirror it into the
+    /// generic host's snapshot (mirrors `commit_activation` →
+    /// `publish_to_generic_host`, without the durable install/credential
+    /// legs). Direct registry publication alone would leave the package
+    /// undispatchable now that extension dispatch resolves from the snapshot.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn publish_bundled_package_for_test(
+        &self,
+        package: &ExtensionPackage,
+        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
+    ) -> Result<(), ProductWorkflowError> {
+        self.active_extensions.publish(package)?;
+        let Some(host) = self.generic_host.get() else {
+            return Ok(());
+        };
+        // The resolved base: caller-supplied for in-code fixture packages,
+        // else parsed from the catalog entry's raw manifest.
+        let base = match resolved {
+            Some(resolved) => resolved.clone(),
+            None => {
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package.id.as_str())?;
+                let available = self.catalog.resolve(&package_ref)?;
+                let host_ports =
+                    ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+                        ProductWorkflowError::InvalidBindingRequest {
+                            reason: format!(
+                                "host port catalog rejected bundled extension: {error}"
+                            ),
+                        }
+                    })?;
+                let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
+                    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("host API contracts rejected bundled extension: {error}"),
+                    })?;
+                ironclaw_extensions::ExtensionManifestRecord::from_toml(
+                    available.manifest_toml.clone(),
+                    ironclaw_extensions::ManifestSource::HostBundled,
+                    &host_ports,
+                    None,
+                    &contracts,
+                )
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!("bundled extension manifest is invalid: {error}"),
+                })?
+                .resolved()
+                .clone()
+            }
+        };
+        let effective =
+            crate::extension_host::generic_host::effective_resolved_for_package(&base, package);
+        host.install(ironclaw_extension_host::InstallationRecord {
+            extension_id: package.id.as_str().to_string(),
+            installation_id: format!("{}-test-install", package.id.as_str()),
+            state: ironclaw_extension_host::InstallationState::Installed,
+            resolved: Arc::new(effective),
+            config: Vec::new(),
+            last_error: None,
+        })
+        .await
+        .map_err(generic_host_error)?;
+        host.activate(package.id.as_str())
+            .await
+            .map_err(generic_host_error)
+    }
+
     /// Mirror an unpublish into the generic host's snapshot (deactivation is
     /// tolerant: a not-installed record is already unpublished).
     async fn unpublish_from_generic_host(&self, extension_id: &ExtensionId) {

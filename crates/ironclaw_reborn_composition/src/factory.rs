@@ -740,15 +740,16 @@ impl RebornServices {
     /// compositions without a local-dev runtime (mirrors
     /// `extension_installation_store_for_test`).
     #[cfg(feature = "test-support")]
-    pub fn publish_bundled_extension_for_test(
+    pub async fn publish_bundled_extension_for_test(
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
+        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
         let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
         Some(
             extension_management
-                .active_extensions_for_test()
-                .publish(package),
+                .publish_bundled_package_for_test(package, resolved)
+                .await,
         )
     }
 }
