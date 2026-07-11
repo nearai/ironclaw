@@ -1,0 +1,42 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "hacker-news"
+name = "Hacker News"
+version = "0.1.0"
+# Test fixture — the network + no-key case: declares its egress host but
+# injects no credential. Data is CANNED (no real Hacker News call), so it
+# always completes once activated.
+description = "Return canned Hacker News top stories (title, url, score, author, comment count). Data is canned, not live — no real Hacker News request is made."
+# Uploaded bundles are validated as ManifestSource::InstalledLocal, which
+# forbids first_party/system trust claims and legacy top-level [[capabilities]];
+# installed manifests declare third_party trust and the capability_provider
+# host_api shape.
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/hacker_news_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+# Keyless networked capability: declares the `network` effect and its egress
+# host directly via `network_targets`, with NO runtime credential. It therefore
+# gets an `ApplyNetworkPolicy` obligation (scoped to news.ycombinator.com) and
+# NO secret-injection obligation. The fixture returns canned data and never
+# actually calls out.
+[[capability_provider.tools.capabilities]]
+id = "hacker-news.top_stories"
+description = "Return the current top Hacker News stories (title, url, score, author, comment count). Optional `limit` (1-10, default 5)."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/hacker-news/top_stories.input.v1.json"
+output_schema_ref = "schemas/hacker-news/top_stories.output.v1.json"
+prompt_doc_ref = "prompts/hacker-news/top_stories.md"
+
+[[capability_provider.tools.capabilities.network_targets]]
+scheme = "https"
+host_pattern = "news.ycombinator.com"

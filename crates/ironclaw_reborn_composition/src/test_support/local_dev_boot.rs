@@ -104,6 +104,6 @@ where
 #[cfg(feature = "test-support")]
 pub fn build_local_dev_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     crate::runtime::build_local_dev_approval_gate_evidence_for_test(approval_requests)
 }

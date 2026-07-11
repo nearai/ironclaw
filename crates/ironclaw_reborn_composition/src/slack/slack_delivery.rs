@@ -1931,6 +1931,14 @@ pub struct TriggeredRunDeliveryDriver {
     /// `ConversationContentRefMaterializer` (and `record_trigger_prompt`)
     /// uses so the thread-scope key aligns with where the run was stored.
     fallback_agent_id: ironclaw_host_api::AgentId,
+    /// Resolves per-trigger delivery targets (`TriggerFire::delivery_target`)
+    /// into reply-target bindings. Consulted only for fires that carry a
+    /// target; fires without one use the creator's preference as before.
+    /// Production wiring (`build_triggered_run_delivery_hook`) always supplies
+    /// it; when absent (reduced test drivers), a fire carrying a target fails
+    /// closed as `TargetUnavailable` — see
+    /// `driver_fire_with_unresolvable_delivery_target_records_target_unavailable`.
+    outbound_target_provider: Option<Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>>,
 }
 
 impl TriggeredRunDeliveryDriver {
@@ -1969,7 +1977,19 @@ impl TriggeredRunDeliveryDriver {
             delivery_store,
             route_store,
             fallback_agent_id,
+            outbound_target_provider: None,
         }
+    }
+
+    /// Wire the outbound delivery target provider used to resolve per-trigger
+    /// delivery targets. Production wiring must call this; without it, fires
+    /// carrying a `delivery_target` fail closed as `TargetUnavailable`.
+    pub(crate) fn with_outbound_target_provider(
+        mut self,
+        provider: Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>,
+    ) -> Self {
+        self.outbound_target_provider = Some(provider);
+        self
     }
 
     /// Acquire a permit from the pending-delivery semaphore for testing.
@@ -2044,6 +2064,7 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
         let settings = self.settings;
         let delivery_store = Arc::clone(&self.delivery_store);
         let fallback_agent_id = self.fallback_agent_id.clone();
+        let outbound_target_provider = self.outbound_target_provider.clone();
 
         tokio::spawn(async move {
             // Hold the pending permit for the full lifetime of this task so it
@@ -2073,6 +2094,7 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
                 scope,
                 &*delivery_store,
                 &fallback_agent_id,
+                outbound_target_provider.as_deref(),
             )
             .await;
             tracing::debug!(
@@ -2116,6 +2138,7 @@ async fn deliver_triggered_run(
     scope: TurnScope,
     delivery_store: &dyn TriggeredRunDeliveryStore,
     fallback_agent_id: &ironclaw_host_api::AgentId,
+    outbound_target_provider: Option<&dyn crate::outbound::OutboundDeliveryTargetProvider>,
 ) -> TriggeredRunDeliveryOutcomeKind {
     // The actor is the trigger creator.
     let actor = TurnActor::new(fire.creator_user_id.clone());
@@ -2136,6 +2159,34 @@ async fn deliver_triggered_run(
         }
     };
 
+    // Resolve the per-trigger delivery target (when the fire carries one) into
+    // a reply-target binding BEFORE any delivery work. The resolution engine
+    // then prefers this source route over the creator's user-global preference
+    // (`RunNotificationOrigin::TriggeredFromSourceRoute`). Resolution failures
+    // fail closed — a stale or foreign target must never silently fall back to
+    // another conversation.
+    let per_trigger_source_route = match &fire.delivery_target {
+        None => None,
+        Some(target) => {
+            let resolved =
+                resolve_per_trigger_delivery_route(outbound_target_provider, fire, &scope, target)
+                    .await;
+            match resolved {
+                Ok(route) => Some(route),
+                Err(outcome) => {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::slack_delivery",
+                        %run_id,
+                        ?outcome,
+                        "triggered run delivery stopped: per-trigger delivery target did not resolve"
+                    );
+                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                    return outcome;
+                }
+            }
+        }
+    };
+
     // Build a thread scope for reading the finalized assistant message.
     // The turn scope's thread_id is the canonical thread for this trigger session.
     // Use the scope's agent_id when present; otherwise fall back to the configured
@@ -2152,11 +2203,13 @@ async fn deliver_triggered_run(
         mission_id: None,
     };
 
-    // Build the reply-target authority: resolves from the creator's personal preference.
+    // Build the reply-target authority: resolves from the per-trigger source
+    // route when present, otherwise from the creator's personal preference.
     let authority = TriggeredSlackReplyTargetAuthority {
         scope: scope.clone(),
         actor: actor.clone(),
         trigger_context: trigger_context.clone(),
+        per_trigger_source_route,
         resolved_space_id: std::sync::Mutex::new(None),
     };
 
@@ -2733,6 +2786,20 @@ async fn deliver_triggered_notification(
     let projection_ref = ProjectionUpdateRef::new(projection_id.clone()).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;
+    // A fire-resolved per-trigger route becomes the source route the engine
+    // prefers for the final reply; without one, the creator's user-global
+    // preference resolves as before.
+    let origin = match &authority.per_trigger_source_route {
+        Some(source_route) => RunNotificationOrigin::TriggeredFromSourceRoute {
+            trigger: authority.trigger_context.clone(),
+            source_route: SourceRouteContext {
+                reply_target_binding_ref: source_route.clone(),
+            },
+        },
+        None => RunNotificationOrigin::Triggered {
+            trigger: authority.trigger_context.clone(),
+        },
+    };
     let delivery = ironclaw_outbound::PrepareCommunicationDeliveryRequest {
         resolution_request: CommunicationDeliveryResolutionRequest {
             scope: scope.clone(),
@@ -2740,9 +2807,7 @@ async fn deliver_triggered_notification(
             modality: CommunicationModality::Text,
             intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                 event_kind,
-                origin: RunNotificationOrigin::Triggered {
-                    trigger: authority.trigger_context.clone(),
-                },
+                origin,
             }),
         },
         turn_run_id: Some(run_id),
@@ -2832,6 +2897,65 @@ async fn record_triggered_run_outcome(
     }
 }
 
+/// Resolve a fire's per-trigger delivery target id into the reply-target
+/// binding the resolution engine should prefer over the user preference.
+///
+/// Fail-closed contract: any missing provider, malformed id, foreign/stale
+/// target (`Ok(None)`), or provider backend error yields a terminal outcome
+/// instead of a route — delivery never guesses a substitute conversation.
+async fn resolve_per_trigger_delivery_route(
+    outbound_target_provider: Option<&dyn crate::outbound::OutboundDeliveryTargetProvider>,
+    fire: &TriggerFire,
+    scope: &TurnScope,
+    target: &ironclaw_triggers::TriggerDeliveryTargetId,
+) -> Result<ReplyTargetBindingRef, TriggeredRunDeliveryOutcomeKind> {
+    let Some(provider) = outbound_target_provider else {
+        tracing::warn!(
+            target = "ironclaw::reborn::slack_delivery",
+            "per-trigger delivery target present but no outbound target provider is wired"
+        );
+        return Err(TriggeredRunDeliveryOutcomeKind::TargetUnavailable);
+    };
+    let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
+        .map_err(|error| {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                %error,
+                "per-trigger delivery target id failed outbound target id validation"
+            );
+            TriggeredRunDeliveryOutcomeKind::TargetUnavailable
+        })?;
+    // The caller for target ownership checks is the trigger creator in the
+    // fire's scope — the same identity that selected the target at creation.
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        scope.tenant_id.clone(),
+        fire.creator_user_id.clone(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+    );
+    match provider
+        .resolve_outbound_delivery_target(&caller, &target_id)
+        .await
+    {
+        Ok(Some(entry)) => Ok(entry.reply_target_binding_ref),
+        Ok(None) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                "per-trigger delivery target did not resolve for the trigger creator (stale, foreign, or disconnected)"
+            );
+            Err(TriggeredRunDeliveryOutcomeKind::TargetUnavailable)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                %error,
+                "outbound delivery target lookup failed during triggered delivery"
+            );
+            Err(TriggeredRunDeliveryOutcomeKind::Failed)
+        }
+    }
+}
+
 /// Build a `TriggerCommunicationContext` from the fire's identity.
 fn triggered_communication_context(
     fire: &TriggerFire,
@@ -2856,6 +2980,11 @@ struct TriggeredSlackReplyTargetAuthority {
     scope: TurnScope,
     actor: TurnActor,
     trigger_context: TriggerCommunicationContext,
+    /// Reply-target binding resolved from the trigger's own `delivery_target`
+    /// at fire time. When present, delivery uses
+    /// `RunNotificationOrigin::TriggeredFromSourceRoute` so the resolution
+    /// engine prefers it over the creator's user-global preference.
+    per_trigger_source_route: Option<ReplyTargetBindingRef>,
     /// Space id (Slack team id) captured during
     /// `resolve_product_outbound_target_metadata`. Updated on every resolution.
     /// Used after delivery to attach the team id to posted-message gate-route
@@ -3311,6 +3440,7 @@ mod tests {
             agent_id: None,
             project_id,
             prompt: "test prompt".to_string(),
+            delivery_target: None,
         }
     }
 
@@ -3689,6 +3819,255 @@ mod tests {
         assert_eq!(
             record.outcome,
             TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+        );
+    }
+
+    /// Build the real Slack outbound-target provider over in-memory stores with
+    /// one shared-channel route (`channel_id` owned by the creator user) so
+    /// per-trigger delivery target resolution runs the production path.
+    fn shared_channel_target_provider(
+        install: &str,
+        scope: &TurnScope,
+        channel_id: &str,
+    ) -> Arc<crate::slack::slack_outbound_targets::SlackHostBetaOutboundTargetProvider> {
+        use crate::slack::slack_channel_routes::InMemorySlackChannelRouteStore;
+        use crate::slack::slack_outbound_targets::{
+            InMemorySlackPersonalDmTargetStore, SlackConfiguredChannelRoute,
+            SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig,
+        };
+        Arc::new(SlackHostBetaOutboundTargetProvider::new(
+            SlackOutboundTargetProviderConfig {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone().expect("test scope has agent"),
+                project_id: scope.project_id.clone(),
+                installation_id: AdapterInstallationId::new(install).expect("installation id"),
+                team_id: crate::slack::slack_serve::SlackTeamId::new("T123"),
+                configured_channel_routes: vec![SlackConfiguredChannelRoute::new(
+                    channel_id.to_string(),
+                    scope
+                        .explicit_owner_user_id()
+                        .cloned()
+                        .expect("test scope has owner"),
+                )],
+            },
+            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+        ))
+    }
+
+    /// A fire carrying a per-trigger delivery target must deliver to THAT
+    /// target, not to the creator's user-global preference — the preference
+    /// clobbering across automations is exactly the wrong-channel bug.
+    #[tokio::test]
+    async fn driver_fire_with_delivery_target_routes_to_it_over_the_preference() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        // User-global preference points at DM D456.
+        let preference_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(&thread_service, &scope, run_id, "Routed result").await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, preference_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C789", "1234.5678"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        )
+        .with_outbound_target_provider(shared_channel_target_provider(install, &scope, "C789"));
+
+        let mut fire = minimal_trigger_fire(None);
+        fire.delivery_target = Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new("slack:shared-channel:T123:C789")
+                .expect("delivery target id"),
+        );
+        driver.on_trigger_submitted(fire, run_id, scope).await;
+
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+        assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+
+        let posts: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|call| call.path == "/api/chat.postMessage")
+            .map(|call| String::from_utf8_lossy(&call.body).to_string())
+            .collect();
+        assert_eq!(posts.len(), 1, "exactly one delivery post expected");
+        assert!(
+            posts[0].contains("C789"),
+            "delivery must go to the per-trigger target channel: {}",
+            posts[0]
+        );
+        assert!(
+            !posts[0].contains("D456"),
+            "delivery must not fall back to the user-global preference DM: {}",
+            posts[0]
+        );
+    }
+
+    /// A per-trigger delivery target works with NO user-global preference at
+    /// all — previously this fire could only record NoDefaultConfigured.
+    #[tokio::test]
+    async fn driver_fire_with_delivery_target_delivers_without_any_preference() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(&thread_service, &scope, run_id, "Routed result").await;
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // No preference seeded.
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C789", "1234.5678"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        )
+        .with_outbound_target_provider(shared_channel_target_provider(install, &scope, "C789"));
+
+        let mut fire = minimal_trigger_fire(None);
+        fire.delivery_target = Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new("slack:shared-channel:T123:C789")
+                .expect("delivery target id"),
+        );
+        driver.on_trigger_submitted(fire, run_id, scope).await;
+
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+        assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+        assert!(
+            egress
+                .calls()
+                .iter()
+                .any(|call| call.path == "/api/chat.postMessage"),
+            "expected chat.postMessage egress call"
+        );
+    }
+
+    /// A per-trigger target that no longer resolves (stale, foreign, or the
+    /// product is disconnected) fails closed: no egress, TargetUnavailable —
+    /// never a silent fallback to some other conversation.
+    #[tokio::test]
+    async fn driver_fire_with_unresolvable_delivery_target_records_target_unavailable() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(&thread_service, &scope, run_id, "Routed result").await;
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        )
+        .with_outbound_target_provider(shared_channel_target_provider(install, &scope, "C789"));
+
+        let mut fire = minimal_trigger_fire(None);
+        fire.delivery_target = Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new("slack:shared-channel:T123:C_UNKNOWN")
+                .expect("delivery target id"),
+        );
+        driver.on_trigger_submitted(fire, run_id, scope).await;
+
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::TargetUnavailable
+        );
+        assert!(
+            !egress
+                .calls()
+                .iter()
+                .any(|call| call.path == "/api/chat.postMessage"),
+            "unresolvable target must not produce any egress"
         );
     }
 

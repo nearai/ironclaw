@@ -6,8 +6,8 @@ use super::{
     ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
     RebornEventStoreConfig, RebornProfile, ResourceGovernor, RootFilesystem, RuntimeKind,
-    TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, TurnStateStore, component_name,
-    local_only_runtime_policy_reason, production_wiring_report, runtime_http_egress_is_configured,
+    TurnRunTransitionPort, TurnStateStore, component_name, local_only_runtime_policy_reason,
+    production_wiring_report, runtime_http_egress_is_configured,
 };
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
@@ -436,14 +436,12 @@ where
             .with_wake_notifier(Arc::clone(notifier)))
     }
 
-    /// Validates turn persistence wiring and builds a scheduler over the
-    /// configured trusted runner transition port. The concrete executor stays
-    /// injected so product loop strategy remains above host-runtime.
-    pub fn turn_scheduler_for_production(
+    /// Validates turn persistence wiring and returns the configured trusted
+    /// runner transition port. The runner crate owns scheduler construction;
+    /// host runtime only verifies that the lower service is production-ready.
+    pub fn turn_run_transition_port_for_production(
         &self,
-        executor: Arc<dyn TurnRunExecutor>,
-        config: TurnRunSchedulerConfig,
-    ) -> Result<TurnRunScheduler, ProductionWiringReport> {
+    ) -> Result<Arc<dyn TurnRunTransitionPort>, ProductionWiringReport> {
         let mut issues = Vec::new();
         self.push_missing(
             &mut issues,
@@ -488,11 +486,7 @@ where
                 component_name(self.component_types.turn_state),
             ));
         };
-        Ok(TurnRunScheduler::new(
-            Arc::clone(transition_port),
-            executor,
-            config,
-        ))
+        Ok(Arc::clone(transition_port))
     }
 
     fn validate_production_turn_wiring(&self) -> Result<(), ProductionWiringReport> {

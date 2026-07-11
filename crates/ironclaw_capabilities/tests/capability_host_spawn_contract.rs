@@ -172,7 +172,8 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
-    let context = execution_context(CapabilitySet::default());
+    let mut context = execution_context(CapabilitySet::default());
+    context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let estimate = ResourceEstimate::default();
@@ -221,6 +222,42 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
+    let mut forged_context = context.clone();
+    forged_context.authenticated_actor_user_id = Some(UserId::new("slack-bob").unwrap());
+    let forged_error = resume_host
+        .resume_spawn_json(CapabilityResumeRequest {
+            context: forged_context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        forged_error,
+        CapabilityInvocationError::AuthorizationDenied {
+            reason: DenyReason::PolicyDenied,
+            ..
+        }
+    ));
+    assert!(!dispatcher.has_request());
+    assert!(!process_manager.has_start());
+    assert_eq!(
+        run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::BlockedApproval
+    );
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Active
+    );
+
     let result = resume_host
         .resume_spawn_json(CapabilityResumeRequest {
             context: context.clone(),
@@ -236,6 +273,13 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     assert!(!dispatcher.has_request());
     let start = process_manager.take_start();
     assert_eq!(start.scope, context.resource_scope);
+    assert_eq!(
+        start
+            .authenticated_actor_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("slack-alice")
+    );
     assert_eq!(start.capability_id, capability_id());
     assert!(
         start
@@ -458,6 +502,7 @@ impl ProcessManager for RecordingProcessManager {
             parent_process_id: start.parent_process_id,
             invocation_id: start.invocation_id,
             scope: start.scope,
+            authenticated_actor_user_id: start.authenticated_actor_user_id,
             extension_id: start.extension_id,
             capability_id: start.capability_id,
             runtime: start.runtime,
