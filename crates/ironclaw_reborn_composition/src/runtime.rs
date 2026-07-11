@@ -37,7 +37,7 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
-    SkillActivationSelectorConfig, SkillExecutionAdapter,
+    SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
@@ -4251,6 +4251,7 @@ fn optional_nonzero_u32_env(
 /// through silently.
 fn local_dev_selector_config(
     regex_skill_activation_enabled: bool,
+    injection_mode: SkillInjectionMode,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
@@ -4260,11 +4261,42 @@ fn local_dev_selector_config(
         // the learn→reuse loop: a skill distilled from one task is applied
         // automatically on the next similar task. Explicit mentions still
         // force-activate; criteria selection is additive and bounded by
-        // `max_active_skills` / `max_context_tokens`.
+        // `max_active_skills` / `max_context_tokens`. Under the default
+        // `Listing` injection mode a criteria match ranks the skill in the
+        // one-line listing instead of injecting its body.
         selection_mode:
             ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
+        injection_mode,
         ..SkillActivationSelectorConfig::default()
+    }
+}
+
+/// Parse the Reborn skill-injection mode from the
+/// `IRONCLAW_REBORN_SKILL_INJECTION` env switch. Defaults to `listing`
+/// (one-line skill listing; bodies load on `builtin.skill_activate`);
+/// `full` restores the legacy inject-bodies-by-score behavior.
+fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> {
+    match std::env::var(SKILL_INJECTION_MODE_ENV_KEY) {
+        Ok(value) => skill_injection_mode_from(&value),
+        Err(std::env::VarError::NotPresent) => Ok(SkillInjectionMode::Listing),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {SKILL_INJECTION_MODE_ENV_KEY}: {error}"),
+        }),
+    }
+}
+
+const SKILL_INJECTION_MODE_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_INJECTION";
+
+fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "listing" => Ok(SkillInjectionMode::Listing),
+        "full" => Ok(SkillInjectionMode::Full),
+        other => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!(
+                "{SKILL_INJECTION_MODE_ENV_KEY} must be \"listing\" or \"full\", got {other:?}"
+            ),
+        }),
     }
 }
 
@@ -4285,7 +4317,8 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let selector_config = local_dev_selector_config(regex_skill_activation_enabled);
+    let selector_config =
+        local_dev_selector_config(regex_skill_activation_enabled, skill_injection_mode_env()?);
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
@@ -4865,7 +4898,10 @@ output_schema_ref = "schemas/write.output.json"
     /// [`local_dev_filesystem_skill_context_source`] depends on.
     #[test]
     fn local_dev_selector_config_propagates_regex_activation_disabled() {
-        let cfg = super::local_dev_selector_config(false);
+        let cfg = super::local_dev_selector_config(
+            false,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        );
         assert!(
             !cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
@@ -4882,7 +4918,10 @@ output_schema_ref = "schemas/write.output.json"
 
     #[test]
     fn local_dev_selector_config_propagates_regex_activation_enabled() {
-        let cfg = super::local_dev_selector_config(true);
+        let cfg = super::local_dev_selector_config(
+            true,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        );
         assert!(
             cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
@@ -4891,10 +4930,51 @@ output_schema_ref = "schemas/write.output.json"
 
     #[test]
     fn local_dev_selector_config_uses_large_skill_context_budget() {
-        let cfg = super::local_dev_selector_config(true);
+        let cfg = super::local_dev_selector_config(
+            true,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        );
         assert_eq!(
             cfg.max_context_tokens, 6000,
             "local-dev Reborn skill activation should match the legacy 6000-token skill budget"
+        );
+    }
+
+    /// Wiring guard for the `IRONCLAW_REBORN_SKILL_INJECTION` env switch: the
+    /// parsed injection mode must reach
+    /// [`SkillActivationSelectorConfig::injection_mode`] unchanged (not get
+    /// clobbered by the `..default()` spread), and the parser must default to
+    /// `listing` while still accepting the `full` legacy escape hatch.
+    #[test]
+    fn local_dev_selector_config_propagates_injection_mode() {
+        for mode in [
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+            ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
+        ] {
+            let cfg = super::local_dev_selector_config(true, mode);
+            assert_eq!(cfg.injection_mode, mode);
+        }
+    }
+
+    #[test]
+    fn skill_injection_mode_parses_listing_full_and_defaults() {
+        use ironclaw_first_party_extension_ports::SkillInjectionMode;
+        for (value, expected) in [
+            ("", SkillInjectionMode::Listing),
+            ("listing", SkillInjectionMode::Listing),
+            (" Listing ", SkillInjectionMode::Listing),
+            ("full", SkillInjectionMode::Full),
+            ("FULL", SkillInjectionMode::Full),
+        ] {
+            assert_eq!(
+                super::skill_injection_mode_from(value).expect("valid mode parses"),
+                expected,
+                "value {value:?}"
+            );
+        }
+        assert!(
+            super::skill_injection_mode_from("bodies").is_err(),
+            "unknown values must fail loud, not silently pick a mode"
         );
     }
 
@@ -8782,13 +8862,20 @@ output_schema_ref = "schemas/write.output.json"
                 .collect::<Vec<_>>()
         };
         let combined_skill_context = skill_messages.join("\n");
-        assert_eq!(skill_messages.len(), 2);
+        // Default `listing` injection: the two explicitly-mentioned skills load
+        // their full bodies, and every other visible skill (the bundled system
+        // skills) collapses into ONE `available-skills` listing message.
+        assert_eq!(skill_messages.len(), 3);
         assert!(combined_skill_context.contains("system helper description"));
         assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
         assert!(combined_skill_context.contains("local helper description"));
         assert!(combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
         assert!(!combined_skill_context.contains("tenant shared helper description"));
         assert!(!combined_skill_context.contains("TENANT_SHARED_PROMPT_SENTINEL"));
+        assert!(
+            combined_skill_context.contains("builtin.skill_activate"),
+            "available-skills listing message must reach the model"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -10674,9 +10761,21 @@ output_schema_ref = "schemas/write.output.json"
             .map(|candidate| candidate.loaded_skill_md().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(selected.len(), 1);
+        // Default `listing` injection: the explicitly-mentioned skill loads its
+        // full body; the bundled system skills collapse into one additional
+        // `available-skills` listing candidate (description-only).
         assert!(combined_skill_context.contains("webui helper description"));
         assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
+        let listing = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .find(|(name, _)| *name == "available-skills")
+            .map(|(_, listing)| listing.to_string())
+            .expect("available-skills listing candidate");
+        assert!(
+            !listing.contains("WEBUI_HELPER_PROMPT_SENTINEL"),
+            "listing must not carry skill bodies"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

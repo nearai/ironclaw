@@ -385,7 +385,7 @@ impl SkillContextSource for SkillContextService {
             } else {
                 entry.safe_description.clone()
             };
-            let safe_summary = entry.safe_description.clone();
+            let safe_summary = skill_snippet_safe_summary(&entry.name, &entry.safe_description);
 
             if model_content.len() > self.budget.max_snippet_bytes {
                 return Err(SkillContextError::ContextBudgetExceeded);
@@ -476,6 +476,29 @@ mod snippet_ref_tests {
             "msg:snippet.skill.alpha.0.6e54cb74d742607c"
         );
     }
+}
+
+/// Character bound for skill snippet safe summaries. Summaries are diagnostic
+/// strings capped at 4 KiB by the prompt layer (`MODEL_SAFE_SUMMARY_MAX_BYTES`
+/// in `prompt_text.rs`); 256 chars is at most 1 KiB of UTF-8, leaving headroom.
+const MAX_SKILL_SNIPPET_SAFE_SUMMARY_CHARS: usize = 256;
+
+/// Derive the bounded safe summary for a skill snippet.
+///
+/// The full description (which may be long or multi-line, e.g. the
+/// discoverable available-skills listing) belongs to `model_content`; the
+/// summary is the first line, character-bounded, so it always fits the
+/// prompt layer's safe-summary budget. Falls back to the (already validated)
+/// skill name when the description has no leading text.
+fn skill_snippet_safe_summary(name: &str, safe_description: &str) -> String {
+    let first_line = safe_description.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return name.to_string();
+    }
+    first_line
+        .chars()
+        .take(MAX_SKILL_SNIPPET_SAFE_SUMMARY_CHARS)
+        .collect()
 }
 
 fn sanitize_ref_suffix(value: &str) -> String {
