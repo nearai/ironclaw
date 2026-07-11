@@ -74,7 +74,7 @@ mod tests {
 
         assert!(!detail.contains(concat!("ghp", "_012345678901234567890123456789012345")));
         assert!(detail.contains("/host/route"));
-        assert!(detail.contains("EXTERNAL, UNTRUSTED source"));
+        assert!(!detail.contains("EXTERNAL, UNTRUSTED source"));
     }
 
     #[test]
