@@ -46,7 +46,7 @@ Decompose the task into concrete, actionable steps. Use `memory_write` to persis
 ## 3. Set Up Tracking
 
 If the task is recurring or has a deadline:
-- Create a routine using `routine_create` for scheduled check-ins
+- Create a routine using `builtin__trigger_create` for scheduled check-ins (its prompt describes the check-in task only; results are delivered automatically)
 - Add a heartbeat item if it needs daily monitoring
 - Set up an event-triggered routine if it depends on external input
 

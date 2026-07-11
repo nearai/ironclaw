@@ -54,7 +54,7 @@ pub(crate) fn profile_scope_and_path(
 
 /// Reads `context/profile.json` for the run owner and resolves it into a
 /// validated `UserProfileContext`. Owns the `ironclaw_memory` dependency so the
-/// loop driver and `ironclaw_reborn` never import it.
+/// loop driver and `ironclaw_runner` never import it.
 pub struct MemoryBackedUserProfileSource {
     filesystem: Arc<dyn RootFilesystem>,
     cache: Mutex<UserProfileCache>,

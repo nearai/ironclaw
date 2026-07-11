@@ -15,9 +15,9 @@
 //! Ordering matters: the decorator runs at continuation-dispatch time, which
 //! is strictly after `complete_oauth_callback` committed the credential
 //! account, so resumed runs re-running `extension_activate` find their
-//! requirements satisfied. Fan-out is best-effort per run (log and continue)
-//! and idempotent per (flow, run); the primary continuation's result is
-//! returned unchanged.
+//! requirements satisfied. Fan-out is idempotent per (flow, run), and an
+//! incomplete sweep returns an error so the durable continuation remains
+//! undispatched and can be retried.
 //!
 //! Scope safety mirrors the deleted read model: the scan is bounded to the
 //! completed flow's `tenant_id` + explicit owner `user_id`, so this can never
@@ -33,8 +33,8 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::factory::LocalDevTurnStateStore;
 use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
 /// tests can hand-build snapshots without a filesystem-backed store.
@@ -44,33 +44,20 @@ pub(crate) trait BlockedAuthSnapshotSource: Send + Sync {
 }
 
 #[async_trait]
-impl BlockedAuthSnapshotSource for LocalDevTurnStateStore {
+impl<T> BlockedAuthSnapshotSource for T
+where
+    T: TurnRunSnapshotSource + ?Sized,
+{
     async fn snapshot(&self) -> Option<TurnPersistenceSnapshot> {
-        // The durable filesystem store returns an async `Result`; the
-        // in-memory authority returns a sync infallible snapshot. Mirrors the
-        // retired `LocalDevChannelConnectionResumeReadModel::snapshot`.
-        #[cfg(all(
-            any(feature = "libsql", feature = "postgres"),
-            not(feature = "inmemory-turn-state")
-        ))]
-        {
-            match self.persistence_snapshot().await {
-                Ok(snapshot) => Some(snapshot),
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        "blocked-auth fan-out could not read the turn persistence snapshot"
-                    );
-                    None
-                }
+        match self.turn_run_snapshot().await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "blocked-auth fan-out could not read the turn persistence snapshot"
+                );
+                None
             }
-        }
-        #[cfg(any(
-            feature = "inmemory-turn-state",
-            not(any(feature = "libsql", feature = "postgres"))
-        ))]
-        {
-            Some(self.persistence_snapshot())
         }
     }
 }
@@ -96,17 +83,16 @@ impl BlockedAuthResumeFanout {
         }
     }
 
-    async fn fan_out(&self, event: &AuthContinuationEvent) {
+    async fn fan_out(&self, event: &AuthContinuationEvent) -> Result<(), AuthProductError> {
         let primary_run_id = primary_run_id(&event.continuation);
-        // silent-ok: snapshot source logs underlying read failures; auth
-        // continuation fan-out is best-effort.
         let Some(snapshot) = self.snapshot_source.snapshot().await else {
-            tracing::debug!("blocked-auth fan-out skipped: no turn snapshot available");
-            return;
+            tracing::warn!("blocked-auth fan-out could not read the durable turn snapshot");
+            return Err(AuthProductError::BackendUnavailable);
         };
         let tenant_id = &event.scope.resource.tenant_id;
         let user_id = &event.scope.resource.user_id;
         let mut resumed = 0usize;
+        let mut incomplete = false;
         for run in &snapshot.runs {
             if run.status != TurnStatus::BlockedAuth {
                 continue;
@@ -133,8 +119,9 @@ impl BlockedAuthResumeFanout {
                 continue;
             }
             // The run record does not carry the actor; join it from the
-            // parent turn record. Fan-out is best-effort, so a missing parent
-            // is logged and skipped rather than aborting the sweep.
+            // parent turn record. A malformed snapshot must keep the
+            // continuation retryable rather than permanently stranding this
+            // run after the flow is marked dispatched.
             let Some(actor) = snapshot
                 .turns
                 .iter()
@@ -145,6 +132,7 @@ impl BlockedAuthResumeFanout {
                     run_id = %run.run_id,
                     "blocked-auth fan-out found a blocked run with no parent turn record"
                 );
+                incomplete = true;
                 continue;
             };
             let Ok(idempotency_key) = IdempotencyKey::new(format!(
@@ -155,6 +143,7 @@ impl BlockedAuthResumeFanout {
                     run_id = %run.run_id,
                     "blocked-auth fan-out could not build a resume idempotency key"
                 );
+                incomplete = true;
                 continue;
             };
             let request = ResumeTurnRequest {
@@ -175,6 +164,7 @@ impl BlockedAuthResumeFanout {
             match self.turn_coordinator.resume_turn(request).await {
                 Ok(_) => resumed += 1,
                 Err(error) => {
+                    incomplete = true;
                     tracing::warn!(
                         run_id = %run.run_id,
                         flow_id = %event.flow_id,
@@ -191,6 +181,11 @@ impl BlockedAuthResumeFanout {
                 resumed,
                 "blocked-auth fan-out resumed additional parked runs"
             );
+        }
+        if incomplete {
+            Err(AuthProductError::BackendUnavailable)
+        } else {
+            Ok(())
         }
     }
 }
@@ -217,8 +212,18 @@ impl RebornAuthContinuationDispatcher for BlockedAuthResumeFanout {
         // exists once this event is emitted, and the caller's other parked
         // runs deserve the resume even if the primary run's own resume hit a
         // conflict.
-        self.fan_out(&event).await;
-        primary
+        let fan_out = self.fan_out(&event).await;
+        match (primary, fan_out) {
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.inner.dispatch_canceled_auth_continuation(event).await
     }
 }
 
@@ -597,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fan_out_failures_do_not_poison_the_primary_result() {
+    async fn fan_out_failures_keep_the_continuation_retryable() {
         let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![parent_turn(OWNER, &waiting)],
@@ -606,11 +611,12 @@ mod tests {
         };
         let (fanout, coordinator, inner) = fanout_with(snapshot, true);
 
-        fanout
+        let error = fanout
             .dispatch_auth_continuation(event("slack_personal", AuthContinuationRef::SetupOnly))
             .await
-            .expect("resume failures stay best-effort");
+            .expect_err("resume failures must prevent dispatched acknowledgement");
 
+        assert_eq!(error, AuthProductError::BackendUnavailable);
         assert_eq!(inner.events.lock().expect("events").len(), 1);
         assert!(coordinator.resumed.lock().expect("resumed").is_empty());
     }
