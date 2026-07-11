@@ -1,5 +1,7 @@
 #![cfg(feature = "postgres")]
 
+use std::sync::Arc;
+
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, PostgresRootFilesystem, RootFilesystem,
 };
@@ -81,6 +83,7 @@ async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recre
     let Some((fs, prefix)) = postgres_root(&application_name).await else {
         return;
     };
+    let fs = Arc::new(fs);
     let Some(racer_pool) = postgres_pool(None).await else {
         return;
     };
@@ -119,7 +122,11 @@ async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recre
         }
         racer_client
             .execute(
-                "INSERT INTO root_filesystem_entries (path, version) VALUES ($1, 999)",
+                // Normal `CasExpectation::Absent` recreation restarts the
+                // per-incarnation version at 1. The CAS delete must compare
+                // incarnation identity before deleting, or it will remove
+                // this replacement when its expected version is also 1.
+                "INSERT INTO root_filesystem_entries (path, version) VALUES ($1, 1)",
                 &[&path_str],
             )
             .await
@@ -131,7 +138,9 @@ async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recre
         .await
         .expect("racer must signal after its DELETE runs");
     let delete_path = path.clone();
-    let delete_task = tokio::spawn(async move { fs.delete_if_version(&delete_path, v1).await });
+    let delete_fs = Arc::clone(&fs);
+    let delete_task =
+        tokio::spawn(async move { delete_fs.delete_if_version(&delete_path, v1).await });
     wait_for_delete_if_version_lock_wait(&observer_pool, &application_name).await;
     recreate_tx
         .send(())
@@ -146,4 +155,10 @@ async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recre
         matches!(result, Err(FilesystemError::NotFound { .. })),
         "expected NotFound after the expected row was deleted and replaced, got: {result:?}"
     );
+    let replacement = fs
+        .get(&path)
+        .await
+        .expect("replacement lookup must succeed")
+        .expect("replacement incarnation must not be deleted");
+    assert_eq!(replacement.version, v1);
 }

@@ -1650,12 +1650,14 @@ async fn postgres_delete_with_client(
 /// before `locked` waits on a contended tuple. Under READ COMMITTED,
 /// `SELECT ... FOR UPDATE` can follow a concurrent delete+recreate to the
 /// new path row after waiting. Comparing the current row's `created_at` with
-/// the initial candidate lets the Rust classifier treat "expected row was
-/// deleted and a later incarnation now exists at another version" as
-/// NotFound, while still reporting VersionMismatch for ordinary updates
-/// that preserve `created_at`. This relies on `created_at` being immutable
-/// after row creation; if a future writer mutates it on update, replacement
-/// detection would classify that update as a new incarnation.
+/// the initial candidate prevents the DELETE from removing that replacement,
+/// even when its per-incarnation version restarted at the expected value. The
+/// Rust classifier then treats "expected row was deleted and a later
+/// incarnation now exists" as NotFound, while still reporting
+/// VersionMismatch for ordinary updates that preserve `created_at`. This
+/// relies on `created_at` being immutable after row creation; if a future
+/// writer mutates it on update, replacement detection would classify that
+/// update as a new incarnation.
 #[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
     WITH candidate AS MATERIALIZED (
@@ -1700,7 +1702,12 @@ const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
         WHERE path = $1
           AND is_dir = FALSE
           AND version = $2
-          AND path IN (SELECT path FROM locked)
+          AND path IN (
+              SELECT path
+              FROM locked
+              WHERE candidate_version = $2
+                AND candidate_created_at IS NOT DISTINCT FROM created_at
+          )
         RETURNING TRUE AS ok
     )
     SELECT
@@ -2225,10 +2232,15 @@ mod tests {
              the replacement row: {sql}"
         );
         assert!(
-            sql.contains("path IN (SELECT path FROM locked)"),
+            sql.contains("candidate_created_at IS NOT DISTINCT FROM created_at"),
+            "delete_if_version must not delete a replacement incarnation \
+             whose version happens to equal the expected version: {sql}"
+        );
+        assert!(
+            sql.contains("FROM locked\n              WHERE candidate_version = $2"),
             "the delete CTE must depend on the locked CTE so Postgres \
-             sequences lock-then-delete instead of running them \
-             independently: {sql}"
+             sequences lock-then-incarnation-check-then-delete instead of \
+             running them independently: {sql}"
         );
         // Round-C review: a bare `contains("FOR UPDATE")` / `contains("version
         // = $2")` check is fooled by two concrete, semantically-broken
