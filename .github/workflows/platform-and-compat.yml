@@ -453,8 +453,18 @@ jobs:
       - docker-build
       - version-check
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - name: Check Platform & Compat jobs
         run: |
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "changes (scope detection) failed: ${{ needs.changes.result }}"
             exit 1
@@ -473,7 +483,7 @@ jobs:
             "version-check=${{ needs.version-check.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
-            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+            if ! job_result_ok "$name" "$result" true "allow"; then
               echo "$name failed: $result"
               exit 1
             fi
