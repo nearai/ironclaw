@@ -2,7 +2,7 @@
 
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
-    CredentialOwnership, NewCredentialAccount, ProviderScope,
+    CredentialOwnership, NewCredentialAccount, ProviderScope, SLACK_PERSONAL_PROVIDER_ID,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -260,6 +260,24 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
             label: "qa notion",
             secret_handle: "qa_notion_access",
             scopes: &[],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: SLACK_PERSONAL_PROVIDER_ID,
+            label: "qa slack",
+            secret_handle: "qa_slack_personal_access",
+            scopes: &[
+                "search:read",
+                "channels:history",
+                "groups:history",
+                "im:history",
+                "mpim:history",
+                "channels:read",
+                "groups:read",
+                "im:read",
+                "mpim:read",
+                "users:read",
+                "chat:write",
+            ],
         },
     ]
 }
