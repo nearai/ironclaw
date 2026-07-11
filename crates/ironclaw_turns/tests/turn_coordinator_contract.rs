@@ -54,6 +54,7 @@ where
     P: TurnRunTransitionPort + ?Sized,
 {
     port.apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+        model_usage: None,
         run_id,
         runner_id,
         lease_token,
@@ -7390,6 +7391,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             resolved_run_profile_id: RunProfileId::new("default").unwrap(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
@@ -7953,6 +7955,7 @@ async fn cancel_on_legacy_recovery_required_run_reports_already_terminal() {
     // a RecoveryRequired mapping (the compat shim).
     let rr_state = store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,

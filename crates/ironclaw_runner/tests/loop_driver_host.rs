@@ -8441,7 +8441,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             reply_message_refs: vec![reply_ref],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: LoopExitId::new("exit:turn-runner-script-capability-e2e").unwrap(),
         }))
     }
@@ -8566,7 +8566,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
             reply_message_refs: vec![reply_ref],
             result_refs: vec![],
             final_checkpoint_id: None,
-            usage_summary_ref: None,
+            model_usage: None,
             exit_id: LoopExitId::new("exit:turn-runner-e2e").unwrap(),
         }))
     }
@@ -8829,6 +8829,7 @@ impl HostFixture {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,

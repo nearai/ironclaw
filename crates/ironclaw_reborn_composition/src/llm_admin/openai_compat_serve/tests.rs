@@ -887,6 +887,7 @@ fn turn_run_state(
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
@@ -1220,4 +1221,67 @@ fn model_entries_fall_back_to_default_model_when_no_active_selection() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].id, "claude-opus-4");
     assert_eq!(entries[0].owned_by.as_deref(), Some("anthropic"));
+}
+
+#[test]
+fn response_usage_reports_total_input_including_cache_and_breaks_out_cached_tokens() {
+    let usage = LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 2_000,
+        cache_creation_input_tokens: 0,
+    };
+    let built = response_usage_from_model_usage(&usage, "gpt-4o");
+    // OpenAI `input_tokens` is the total input including the cached subset.
+    assert_eq!(built.input_tokens, 3_000);
+    assert_eq!(built.output_tokens, 500);
+    assert_eq!(built.total_tokens, 3_500);
+    assert_eq!(
+        built
+            .input_tokens_details
+            .expect("cached detail")
+            .cached_tokens,
+        2_000
+    );
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn response_cost_prices_input_output_and_discounts_cached_tokens() {
+    // gpt-4o rates: input 0.0000025/tok, output 0.00001/tok; OpenAI cache-read
+    // discount is 2x (50% off).
+    let usage = LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_input_tokens: 2_000,
+        cache_creation_input_tokens: 0,
+    };
+    let cost = response_cost_from_model_usage(&usage, "gpt-4o").expect("cost under llm feature");
+    assert_eq!(cost.currency, "USD");
+    // input = 1000 * 0.0000025 = 0.0025
+    assert_eq!(cost.input_cost_usd, "0.0025");
+    // cached = 2000 * 0.0000025 / 2 = 0.0025
+    assert_eq!(cost.cached_input_cost_usd, "0.0025");
+    // output = 500 * 0.00001 = 0.005
+    assert_eq!(cost.output_cost_usd, "0.005");
+    // total = 0.0025 + 0.0025 + 0.005 = 0.01
+    assert_eq!(cost.total_cost_usd, "0.01");
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn response_cost_falls_back_to_default_rate_for_unknown_model() {
+    // Unknown models must not price at zero — the cost table default (~GPT-4o)
+    // applies so a new paid model still bills.
+    let usage = LoopModelUsage {
+        input_tokens: 1_000,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    let cost =
+        response_cost_from_model_usage(&usage, "some-brand-new-model-9000").expect("cost present");
+    // default input rate is 0.0000025 → 1000 * 0.0000025 = 0.0025
+    assert_eq!(cost.input_cost_usd, "0.0025");
+    assert_eq!(cost.cached_input_cost_usd, "0");
 }

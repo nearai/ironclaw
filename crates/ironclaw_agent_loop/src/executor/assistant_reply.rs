@@ -40,6 +40,7 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
             })?;
         state.assistant_refs.push(reply_ref.clone());
         state.recent_output_token_counts.push(output_tokens);
+        state.accumulate_model_usage(input.usage);
         state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),

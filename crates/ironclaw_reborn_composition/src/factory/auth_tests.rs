@@ -87,6 +87,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(GateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.

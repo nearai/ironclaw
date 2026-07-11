@@ -420,6 +420,7 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit() {
 
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,
@@ -463,6 +464,7 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit_cancelled() {
     // apply_validated_loop_exit Cancelled → cancel_or_fail_claimed_record → cancel_claimed_record.
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,

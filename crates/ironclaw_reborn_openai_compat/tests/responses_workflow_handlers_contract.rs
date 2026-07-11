@@ -1311,6 +1311,8 @@ fn completed_response(id: OpenAiResponseId, text: &str) -> OpenAiResponseObject 
             input_tokens: 3,
             output_tokens: 5,
             total_tokens: 8,
+            input_tokens_details: None,
+            cost: None,
         }),
     }
 }
