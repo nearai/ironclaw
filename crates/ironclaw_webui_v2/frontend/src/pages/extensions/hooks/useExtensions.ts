@@ -299,7 +299,7 @@ export function useExtensions() {
   );
 
   const importMutation = useMutation({
-    mutationFn: ({ file }) => importExtension(file),
+    mutationFn: ({ file }: { file: File }) => importExtension(file),
     onSuccess: (res) => {
       if (res.success) {
         setActionResult({
