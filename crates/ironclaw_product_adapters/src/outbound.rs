@@ -1229,6 +1229,10 @@ fn validate_approval_details(
     Ok(())
 }
 
+// The `Gate` variant carries the resource/approval gate detail rows and
+// approval/auth context; boxing them would obscure the wire DTO shape for no
+// runtime win on a projection item that is constructed once per gate event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
@@ -1419,6 +1423,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
     where
         D: Deserializer<'de>,
     {
+        #[allow(clippy::large_enum_variant)]
         #[derive(Deserialize)]
         #[serde(rename_all = "snake_case")]
         enum Wire {
