@@ -1487,10 +1487,21 @@ mod tests {
             wasm_guest_error_code(r#"{"code":"bad {} `code` <script>","kind":"input"}"#).as_deref(),
             Some("badcodescript")
         );
-        // Legacy plain-string guest errors carry no structured code.
+        // Legacy plain-string guest errors carry no structured code, but the
+        // raw text still rides `safe_summary` as the best available cause so
+        // the model can recover (secret VALUES are scrubbed downstream at the
+        // model-visible Diagnostic seam) instead of collapsing to the kind's
+        // generic sentence.
         assert_eq!(wasm_guest_error_code("invalid_parameters"), None);
         match wasm_guest_dispatch_error("invalid_parameters", &capability) {
-            DispatchError::Wasm { safe_summary, .. } => assert_eq!(safe_summary, None),
+            DispatchError::Wasm { safe_summary, .. } => {
+                assert!(
+                    safe_summary
+                        .as_deref()
+                        .is_some_and(|summary| summary.contains("invalid_parameters")),
+                    "legacy guest error text must survive as the raw cause: {safe_summary:?}"
+                );
+            }
             other => panic!("expected Wasm dispatch error, got {other:?}"),
         }
     }

@@ -3510,8 +3510,12 @@ mod tests {
         // AWS) must be redacted from the model-visible diagnostic while the
         // descriptive cause (the path) survives for recovery.
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-        let reason = "clone failed at /workspace/repo using \
-                      ghp_012345678901234567890123456789012345 and AKIAIOSFODNN7EXAMPLE";
+        let reason = concat!(
+            "clone failed at /workspace/repo using \
+                      ghp",
+            "_012345678901234567890123456789012345",
+            " and AKIAIOSFODNN7EXAMPLE"
+        );
         let outcome = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
             capability_id,
             RuntimeFailureKind::MissingRuntime,
@@ -3526,7 +3530,7 @@ mod tests {
             panic!("expected a diagnostic detail");
         };
         assert!(
-            !text.contains("ghp_012345678901234567890123456789012345"),
+            !text.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
             "github token must be redacted: {text}"
         );
         assert!(

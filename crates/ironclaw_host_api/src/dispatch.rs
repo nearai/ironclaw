@@ -351,11 +351,18 @@ pub enum DispatchError {
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
+    /// MCP dispatch failure. `safe_summary` carries the raw backend cause —
+    /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
+    /// at the model-visible Diagnostic seam (`scrub_model_visible_detail`),
+    /// and display surfaces run their own redaction. Do not log or surface it
+    /// directly.
     #[error("MCP dispatch failed: {kind}")]
     Mcp {
         kind: RuntimeDispatchErrorKind,
         safe_summary: Option<String>,
     },
+    /// Script dispatch failure. Same `safe_summary` contract as [`Self::Mcp`]:
+    /// raw cause, scrubbed downstream — not directly displayable.
     #[error("script dispatch failed: {kind}")]
     Script {
         kind: RuntimeDispatchErrorKind,

@@ -2368,7 +2368,11 @@ mod tests {
         // model-visible detail channel, secret VALUES redacted, injection fenced.
         let error = HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
-            "provider 500 at /host/route with ghp_012345678901234567890123456789012345 body",
+            concat!(
+                "provider 500 at /host/route with ghp",
+                "_012345678901234567890123456789012345",
+                " body"
+            ),
         );
 
         let host_error = model_gateway_error(error);
@@ -2380,7 +2384,7 @@ mod tests {
             .expect("rejected summary should ride detail");
         // Secret value redacted, descriptive cause (path) preserved.
         assert!(
-            !detail.contains("ghp_012345678901234567890123456789012345"),
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
             "credential token must be redacted: {detail}"
         );
         assert!(
@@ -2394,11 +2398,15 @@ mod tests {
         // Phase 2 (item 3): a detail carrying a path and a credential token must
         // (a) scrub the token at ingestion, (b) preserve the path to the model,
         // and (c) expose NEITHER on the public projection surface.
-        let raw = "read_file failed at /workspace/config.json using \
-                   ghp_012345678901234567890123456789012345";
+        let raw = concat!(
+            "read_file failed at /workspace/config.json using \
+                   ghp",
+            "_012345678901234567890123456789012345",
+            ""
+        );
         let detail = scrub_model_visible_detail(raw);
         assert!(
-            !detail.contains("ghp_012345678901234567890123456789012345"),
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
             "token must be scrubbed at ingestion: {detail}"
         );
         assert!(

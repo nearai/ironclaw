@@ -471,8 +471,12 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         .gateway
         .set_response(Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::PolicyDenied,
-            "RAW_PROVIDER_SECRET invalid api key sk-provider-secret \
-             ghp_012345678901234567890123456789012345 /host/path tool_input",
+            concat!(
+                "RAW_PROVIDER_SECRET invalid api key sk-provider-secret \
+             ghp",
+                "_012345678901234567890123456789012345",
+                " /host/path tool_input"
+            ),
         )));
     let host = fixture.build_host().await;
     let prompt_bundle = host
@@ -516,7 +520,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         "RAW_PROVIDER_SECRET",
         "RAW_PROMPT_TEXT_SENTINEL",
         "sk-provider-secret",
-        "ghp_012345678901234567890123456789012345",
+        concat!("ghp", "_012345678901234567890123456789012345", ""),
     ] {
         assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
     }

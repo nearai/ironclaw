@@ -973,7 +973,10 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
                         diagnostic_ref: None,
                         detail: None,
                     },
-                    Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+                    // Full hardened scrub (LeakDetector registry + injection
+                    // fencing), not just the token-prefix pass — this rejected
+                    // text is about to become model-visible detail.
+                    Some(ironclaw_loop_support::scrub_model_visible_detail(
                         raw_summary,
                     )),
                 )

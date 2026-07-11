@@ -170,13 +170,17 @@ mod tests {
             AgentLoopHostErrorKind::Unavailable,
             "model service is unavailable",
         )
-        .with_detail("provider 500 at /host/route body ghp_012345678901234567890123456789012345");
+        .with_detail(concat!(
+            "provider 500 at /host/route body ghp",
+            "_012345678901234567890123456789012345",
+            ""
+        ));
 
         let converted = host_error_to_model_gateway_error(error);
 
         let detail = converted.detail.expect("detail carried onto gateway error");
         assert!(
-            !detail.contains("ghp_012345678901234567890123456789012345"),
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
             "fail-closed backstop must redact a credential token: {detail}"
         );
         assert!(

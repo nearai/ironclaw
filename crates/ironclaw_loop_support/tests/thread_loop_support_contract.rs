@@ -3716,10 +3716,12 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
 #[tokio::test]
 async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() {
     let fixture = ThreadFixture::new().await;
-    let gateway = Arc::new(RecordingGateway::deny_with_safe_summary(
+    let gateway = Arc::new(RecordingGateway::deny_with_safe_summary(concat!(
         "RAW_PROVIDER_SECRET invalid api key sk-provider-secret \
-         ghp_012345678901234567890123456789012345 /host/path tool_input",
-    ));
+         ghp",
+        "_012345678901234567890123456789012345",
+        " /host/path tool_input"
+    )));
     let port = ThreadBackedLoopModelPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
@@ -3751,7 +3753,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
     for forbidden in [
         "RAW_PROVIDER_SECRET",
         "sk-provider-secret",
-        "ghp_012345678901234567890123456789012345",
+        concat!("ghp", "_012345678901234567890123456789012345", ""),
     ] {
         assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
     }

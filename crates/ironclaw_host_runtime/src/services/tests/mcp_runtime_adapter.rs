@@ -95,6 +95,7 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,

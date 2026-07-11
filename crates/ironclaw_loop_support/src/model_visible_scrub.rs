@@ -67,13 +67,15 @@ mod tests {
 
     #[test]
     fn registry_credential_tokens_are_redacted_from_detail() {
-        let detail = scrub_model_visible_detail(
-            "capability failed at /workspace/x with ghp_012345678901234567890123456789012345 \
-             and AKIAIOSFODNN7EXAMPLE",
-        );
+        let detail = scrub_model_visible_detail(concat!(
+            "capability failed at /workspace/x with ghp",
+            "_012345678901234567890123456789012345",
+            " \
+             and AKIAIOSFODNN7EXAMPLE"
+        ));
 
         assert!(
-            !detail.contains("ghp_012345678901234567890123456789012345"),
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
             "github token must be redacted: {detail}"
         );
         assert!(

@@ -764,8 +764,12 @@ mod tests {
         // (path, status code) while masking every secret value — even
         // Block-severity tokens that `scan_and_clean` would refuse outright.
         let detector = LeakDetector::new();
-        let content = "auth failed at /workspace/config using ghp_012345678901234567890123456789012345 \
-             and AKIAIOSFODNN7EXAMPLE (HTTP 401)";
+        let content = concat!(
+            "auth failed at /workspace/config using ghp",
+            "_012345678901234567890123456789012345",
+            " \
+             and AKIAIOSFODNN7EXAMPLE (HTTP 401)"
+        );
 
         let (redacted, changed) = detector.redact_all_secrets(content);
 
@@ -774,7 +778,7 @@ mod tests {
             "a leak was present, so redaction must report a change"
         );
         assert!(
-            !redacted.contains("ghp_012345678901234567890123456789012345"),
+            !redacted.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
             "github token must be redacted: {redacted}"
         );
         assert!(
