@@ -127,7 +127,7 @@ impl RegisteredExtensionStore {
                     // `resolve_any_owner_for_restore` for every tenant, so one
                     // tenant's transient directory error must not abort every
                     // other tenant's restore (cross-tenant DoS).
-                    tracing::warn!(
+                    tracing::debug!(
                         tenant = tenant_id.as_str(),
                         %error,
                         "skipping tenant's registered extensions: directory listing failed"
@@ -151,7 +151,7 @@ impl RegisteredExtensionStore {
                 match Self::list_for_scope(fs, &scope).await {
                     Ok(owner_packages) => packages.extend(owner_packages),
                     Err(error) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             tenant = tenant_id.as_str(),
                             owner = owner.as_str(),
                             %error,
@@ -202,7 +202,7 @@ where
             continue;
         };
         if let Err(error) = migrate_legacy_owner_dir(fs, &owner).await {
-            tracing::warn!(
+            tracing::debug!(
                 owner = owner.as_str(),
                 %error,
                 "skipping legacy registered-extension migration for owner"
@@ -265,7 +265,7 @@ where
                 // A tenant-scoped registration already exists for this id.
                 // Never clobber it, and never delete the divergent legacy
                 // copy — leave it for manual inspection.
-                tracing::warn!(
+                tracing::debug!(
                     owner = owner.as_str(),
                     extension = child.name.as_str(),
                     "legacy registered descriptor also exists tenant-scoped; leaving legacy copy in place"

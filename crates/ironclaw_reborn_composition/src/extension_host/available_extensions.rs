@@ -2302,6 +2302,128 @@ url = "http://127.0.0.1:9/mcp"
         );
     }
 
+    const REGISTERED_LOADER_HEALTHY_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "healthy-registered-loader"
+name = "Healthy Registered Loader Fixture"
+version = "0.1.0"
+description = "User-registered hosted MCP server (loader-tier fixture)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+"#;
+
+    fn registered_loader_test_source() -> ManifestSource {
+        ManifestSource::UserRegistered {
+            tenant_id: TenantId::new("loader-tenant").expect("valid tenant id"),
+            owner: UserId::new("loader-owner").expect("valid owner id"),
+        }
+    }
+
+    /// Review item 4: pins the corrupt-manifest skip-and-log directly at the
+    /// `load_filesystem_packages` (catalog loader) tier, distinct from the
+    /// higher-level `RegisteredExtensionStore`/boot-restore coverage in
+    /// `extension_lifecycle_registered_store_tests.rs`. A TOML-invalid
+    /// `UserRegistered` sibling must be skipped, not abort the healthy
+    /// sibling's load.
+    #[tokio::test]
+    async fn filesystem_catalog_skips_corrupt_user_registered_manifest_without_aborting_siblings() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/healthy-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            REGISTERED_LOADER_HEALTHY_MANIFEST_TOML.as_bytes(),
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/corrupt-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            b"[runtime\nkind = \"mcp\"\n",
+        )
+        .await
+        .unwrap();
+
+        let packages = load_filesystem_packages(
+            &fs,
+            &VirtualPath::new("/system/extensions/registered").unwrap(),
+            registered_loader_test_source(),
+        )
+        .await
+        .expect(
+            "load_filesystem_packages must skip the corrupt UserRegistered sibling, not abort \
+             the whole directory scan",
+        );
+
+        assert_eq!(
+            packages.len(),
+            1,
+            "only the healthy sibling must survive the corrupt-manifest skip"
+        );
+        assert_eq!(
+            packages[0].package_ref,
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "healthy-registered-loader")
+                .unwrap()
+        );
+    }
+
+    /// Review item 3: the UTF-8 decode step (`String::from_utf8`) must join
+    /// the same skip-and-log carve-out as the TOML-parse-error arm right
+    /// below it — a non-UTF-8 `manifest.toml` for one `UserRegistered` owner
+    /// must not abort a healthy sibling's load either.
+    #[tokio::test]
+    async fn filesystem_catalog_skips_non_utf8_user_registered_manifest_without_aborting_siblings()
+    {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/healthy-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            REGISTERED_LOADER_HEALTHY_MANIFEST_TOML.as_bytes(),
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new(
+                "/system/extensions/registered/non-utf8-registered-loader/manifest.toml",
+            )
+            .unwrap(),
+            &[0xff, 0xfe, 0x00, 0x01],
+        )
+        .await
+        .unwrap();
+
+        let packages = load_filesystem_packages(
+            &fs,
+            &VirtualPath::new("/system/extensions/registered").unwrap(),
+            registered_loader_test_source(),
+        )
+        .await
+        .expect(
+            "load_filesystem_packages must skip the non-UTF-8 UserRegistered sibling, not abort \
+             the whole directory scan",
+        );
+
+        assert_eq!(
+            packages.len(),
+            1,
+            "only the healthy sibling must survive the non-UTF-8 skip"
+        );
+        assert_eq!(
+            packages[0].package_ref,
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "healthy-registered-loader")
+                .unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn filesystem_catalog_propagates_malformed_shared_manifest() {
         // The shared `/system/extensions` catalog keeps the pre-skip-and-log
