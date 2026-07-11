@@ -27,6 +27,17 @@ impl SkillActivationTestSource {
     ) -> std::sync::Arc<dyn ironclaw_loop_support::HostSkillContextSource> {
         self.source.clone()
     }
+
+    /// Crate-internal accessor for the wrapped activation source. Kept
+    /// `pub(crate)` (never `pub`) so the crate-private
+    /// `LocalDevSelectableSkillContextSource` type never appears in this
+    /// crate's public API; only `runtime::local_dev`'s test-support
+    /// constructor (which already names the type) may call this.
+    pub(crate) fn activation_source(
+        &self,
+    ) -> std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource> {
+        self.activation_source.clone()
+    }
 }
 
 /// Build the local-dev skill context source (`HostSkillContextSource` for

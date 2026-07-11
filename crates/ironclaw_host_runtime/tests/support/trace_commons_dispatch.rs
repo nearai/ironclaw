@@ -139,6 +139,8 @@ where
         .with_state(state);
 
     tokio::spawn(async move {
+        #[allow(clippy::let_underscore_must_use)]
+        // Background test server; the serve result is unused for test lifetime.
         let _ = axum::serve(listener, app).await;
     });
 

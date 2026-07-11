@@ -537,6 +537,7 @@ fn process_start_with_input(
         parent_process_id: None,
         invocation_id,
         scope,
+        authenticated_actor_user_id: None,
         extension_id: ExtensionId::new("echo").unwrap(),
         capability_id: CapabilityId::new("echo.say").unwrap(),
         runtime: RuntimeKind::Wasm,

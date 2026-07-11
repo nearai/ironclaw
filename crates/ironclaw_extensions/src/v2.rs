@@ -378,6 +378,10 @@ pub struct CapabilityDeclV2 {
     pub prompt_doc_ref: Option<CapabilityProfileSchemaRef>,
     pub required_host_ports: Vec<HostPortId>,
     pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    /// Declared network egress targets, independent of runtime credentials.
+    /// A capability that declares the `network` effect but no credential uses
+    /// this to populate its egress allowlist directly from the manifest.
+    pub network_targets: Vec<NetworkTargetPattern>,
     pub resource_profile: Option<ResourceProfile>,
 }
 
@@ -1023,6 +1027,34 @@ impl CapabilityDeclV2 {
             });
         }
 
+        // Declared network egress requires the `network` effect — same
+        // effect/declaration symmetry the `runtime_credentials`/`use_secret`
+        // check above enforces. This lets a keyless-but-networked tool declare
+        // its egress allowlist without inventing a fake credential.
+        if !raw.network_targets.is_empty() && !raw.effects.contains(&EffectKind::Network) {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!("capability {id} declares network_targets without network effect"),
+            });
+        }
+        let mut network_targets_seen = HashSet::new();
+        let mut network_targets = Vec::with_capacity(raw.network_targets.len());
+        for target in raw.network_targets {
+            target
+                .validate_declaration()
+                .map_err(|error| ManifestV2Error::Invalid {
+                    reason: format!("capability {id} declares invalid network target: {error}"),
+                })?;
+            if !network_targets_seen.insert(target.clone()) {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares duplicate network target {}",
+                        target.host_pattern
+                    ),
+                });
+            }
+            network_targets.push(target);
+        }
+
         Ok(Self {
             id,
             implements,
@@ -1035,6 +1067,7 @@ impl CapabilityDeclV2 {
             prompt_doc_ref,
             required_host_ports,
             runtime_credentials,
+            network_targets,
             resource_profile: raw.resource_profile,
         })
     }
@@ -1573,6 +1606,8 @@ pub(crate) struct RawCapabilityV2 {
     required_host_ports: Vec<String>,
     #[serde(default)]
     runtime_credentials: Vec<RawRuntimeCredentialV2>,
+    #[serde(default)]
+    network_targets: Vec<NetworkTargetPattern>,
     #[serde(default)]
     resource_profile: Option<ResourceProfile>,
 }

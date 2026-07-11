@@ -862,6 +862,10 @@ registerPack("de", {
   "ext.registry.emptyDesc": "Alle verfügbaren Extensions sind bereits installiert oder es ist keine Registry konfiguriert.",
   "ext.registry.availableTitle": "Verfügbare Extensions",
   "ext.registry.noMatch": "Keine Extensions passen zum Filter.",
+  "ext.registry.import": "Importieren",
+  "ext.registry.importing": "Wird importiert…",
+  "ext.registry.importSuccess": "Tool importiert — installiere es aus der Registry.",
+  "ext.registry.importFailed": "Import fehlgeschlagen",
 
   // Chat — history
   "chat.history.loading": "Laden...",
@@ -1208,6 +1212,8 @@ registerPack("de", {
   "extensions.reconfigure": "Neu konfigurieren",
   "extensions.configureName": "{name} konfigurieren",
   "extensions.allInstalled": "Alle installierten Erweiterungen",
+  "extensions.scope.shared": "geteilt",
+  "extensions.scope.private": "meine",
   "mcp.installed": "Installierte MCP-Server",
   "extensions.oneCapability": "1 Fähigkeit",
   "extensions.pluralCapabilities": "{count} Fähigkeiten",

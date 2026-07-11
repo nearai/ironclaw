@@ -862,6 +862,10 @@ registerPack("zh-CN", {
   "ext.registry.emptyDesc": "所有可用扩展已安装，或未配置注册表。",
   "ext.registry.availableTitle": "可用扩展",
   "ext.registry.noMatch": "没有扩展符合筛选条件。",
+  "ext.registry.import": "导入",
+  "ext.registry.importing": "正在导入…",
+  "ext.registry.importSuccess": "工具已导入 — 请从注册表安装。",
+  "ext.registry.importFailed": "导入失败",
 
   // Chat — history
   "chat.history.loading": "加载中...",
@@ -1208,6 +1212,8 @@ registerPack("zh-CN", {
   "extensions.reconfigure": "重新配置",
   "extensions.configureName": "配置 {name}",
   "extensions.allInstalled": "所有已安装扩展",
+  "extensions.scope.shared": "共享",
+  "extensions.scope.private": "我的",
   "mcp.installed": "已安装的 MCP 服务",
   "extensions.oneCapability": "1 个能力",
   "extensions.pluralCapabilities": "{count} 个能力",

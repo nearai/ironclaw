@@ -862,6 +862,10 @@ registerPack("ar", {
   "ext.registry.emptyDesc": "كل الإضافات المتاحة مثبّتة بالفعل، أو لا يوجد سجل مُكوَّن.",
   "ext.registry.availableTitle": "الإضافات المتاحة",
   "ext.registry.noMatch": "لا توجد إضافات تطابق عامل التصفية.",
+  "ext.registry.import": "استيراد",
+  "ext.registry.importing": "جارٍ الاستيراد…",
+  "ext.registry.importSuccess": "تم استيراد الأداة — ثبّتها من السجل.",
+  "ext.registry.importFailed": "فشل الاستيراد",
 
   // Chat — history
   "chat.history.loading": "جارٍ التحميل...",
@@ -1208,6 +1212,8 @@ registerPack("ar", {
   "extensions.reconfigure": "إعادة تكوين",
   "extensions.configureName": "تكوين {name}",
   "extensions.allInstalled": "جميع الامتدادات المثبتة",
+  "extensions.scope.shared": "مشترك",
+  "extensions.scope.private": "خاص بي",
   "mcp.installed": "خوادم MCP المثبتة",
   "extensions.oneCapability": "قدرة واحدة",
   "extensions.pluralCapabilities": "إمكانات {count}",

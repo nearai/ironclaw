@@ -372,6 +372,110 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
     );
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "production-auth-fanout-owner",
+            db,
+            dir.path().join("events.db").display().to_string(),
+            None,
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports())
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::None,
+            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::AuditMode::Standard,
+        }),
+    )
+    .await
+    .expect("production services build");
+    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let turn_coordinator = services
+        .turn_coordinator
+        .as_ref()
+        .expect("turn coordinator");
+    let production_runtime = services
+        .production_runtime
+        .as_ref()
+        .expect("production runtime");
+    #[cfg(not(feature = "postgres"))]
+    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
+    #[cfg(feature = "postgres")]
+    let graph = match production_runtime {
+        RebornProductionRuntimeServices::LibSql(graph) => graph,
+        RebornProductionRuntimeServices::Postgres(_) => panic!("expected libsql runtime"),
+    };
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let first_scope = turn_scope();
+    let second_scope = TurnScope::new_with_owner(
+        first_scope.tenant_id.clone(),
+        first_scope.agent_id.clone(),
+        first_scope.project_id.clone(),
+        ThreadId::new("thread-auth-second").unwrap(),
+        Some(actor.user_id.clone()),
+    );
+    let first_run = submit_and_block_provider_auth_run(
+        turn_coordinator.as_ref(),
+        graph.turn_state.as_ref(),
+        first_scope.clone(),
+        actor.clone(),
+        "first",
+    )
+    .await;
+    let second_run = submit_and_block_provider_auth_run(
+        turn_coordinator.as_ref(),
+        graph.turn_state.as_ref(),
+        second_scope.clone(),
+        actor.clone(),
+        "second",
+    )
+    .await;
+    let auth_scope = auth_scope_for_turn(&first_scope, &actor);
+    let flow_id = create_flow(
+        product_auth,
+        auth_scope.clone(),
+        AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(first_run.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:fanout-first").unwrap(),
+        },
+    )
+    .await;
+
+    product_auth
+        .handle_oauth_callback(authorized_request(auth_scope, flow_id))
+        .await
+        .expect("callback resumes every same-owner provider gate");
+
+    for (scope, run_id) in [(first_scope, first_run), (second_scope, second_run)] {
+        let state = turn_coordinator
+            .get_run_state(GetRunStateRequest { scope, run_id })
+            .await
+            .expect("run state");
+        assert_eq!(state.status, TurnStatus::Queued);
+        assert_eq!(state.gate_ref, None);
+    }
+}
+
 #[tokio::test]
 async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -644,6 +748,75 @@ fn turn_scope() -> TurnScope {
 #[cfg(test)]
 fn in_memory_product_auth_ports() -> RebornProductAuthServicePorts {
     RebornProductAuthServicePorts::from_shared(Arc::new(InMemoryAuthProductServices::new()))
+}
+
+#[cfg(all(test, feature = "libsql"))]
+async fn submit_and_block_provider_auth_run(
+    turn_coordinator: &dyn TurnCoordinator,
+    transition: &dyn TurnRunTransitionPort,
+    scope: TurnScope,
+    actor: TurnActor,
+    suffix: &str,
+) -> TurnRunId {
+    let submit = turn_coordinator
+        .submit_turn(SubmitTurnRequest {
+            scope: scope.clone(),
+            actor,
+            accepted_message_ref: AcceptedMessageRef::new(format!("message-fanout-{suffix}"))
+                .unwrap(),
+            source_binding_ref: SourceBindingRef::new(format!("source-fanout-{suffix}")).unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply-fanout-{suffix}"))
+                .unwrap(),
+            requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+            idempotency_key: IdempotencyKey::new(format!("submit-fanout-{suffix}")).unwrap(),
+            received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .expect("submit turn");
+    let SubmitTurnResponse::Accepted { run_id, .. } = submit;
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope),
+        })
+        .await
+        .expect("claim run")
+        .expect("queued run exists");
+    transition
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new(format!("checkpoint:fanout-{suffix}")).unwrap(),
+            reason: BlockedReason::Auth {
+                gate_ref: GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
+                credential_requirements: vec![
+                    ironclaw_host_api::RuntimeCredentialAuthRequirement {
+                        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
+                            "github",
+                        )
+                        .unwrap(),
+                        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                            scopes: Vec::new(),
+                        },
+                        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+                        provider_scopes: Vec::new(),
+                    },
+                ],
+            },
+        })
+        .await
+        .expect("block auth gate");
+    run_id
 }
 
 #[cfg(test)]

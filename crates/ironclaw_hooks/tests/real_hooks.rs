@@ -281,7 +281,8 @@ impl PrivilegedBeforePromptHook for PiiRedactionWarningHook {
         // `add_trusted_snippet` is the privileged path — only the
         // `PrivilegedMutatorSink` exposes it. An Installed hook trying
         // to call this method would not compile.
-        let _ = sink.add_trusted_snippet(self.instruction.to_string(), PatchOrdinalHint::NearTop);
+        sink.add_trusted_snippet(self.instruction.to_string(), PatchOrdinalHint::NearTop)
+            .expect("privileged trusted-snippet injection succeeds");
     }
 }
 
