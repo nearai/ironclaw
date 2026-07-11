@@ -5,8 +5,8 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
     CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DispatchError,
-    ExecutionContext, InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate,
-    ResourceScope,
+    ExecutionContext, InvocationFingerprint, InvocationId, MountView, Obligation, ProcessId,
+    ResourceEstimate, ResourceScope,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -94,6 +94,23 @@ struct ResumedDispatchParams<'r> {
     descriptor: &'r CapabilityDescriptor,
     /// Approval-lease state for this resume.  See [`ResumedLeaseState`].
     lease_state: ResumedLeaseState<'r>,
+}
+
+fn effective_dispatch_mounts(
+    obligation_mounts: Option<MountView>,
+    context_mounts: &MountView,
+) -> Option<MountView> {
+    // Empty obligation mount views mean "no additional mount terms" for
+    // ambient grants; they must not erase the execution context's mounts.
+    obligation_mounts
+        .filter(|mounts| !mounts.mounts.is_empty())
+        .or_else(|| {
+            if context_mounts.mounts.is_empty() {
+                None
+            } else {
+                Some(context_mounts.clone())
+            }
+        })
 }
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -498,6 +515,8 @@ where
             }
         }
 
+        let dispatch_mounts =
+            effective_dispatch_mounts(obligation_outcome.mounts.clone(), &request.context.mounts);
         debug!("capability dispatch starting");
         let dispatch = match self
             .dispatcher
@@ -506,7 +525,7 @@ where
                 scope: scope.clone(),
                 authenticated_actor_user_id: request.context.authenticated_actor_user_id.clone(),
                 estimate: request.estimate.clone(),
-                mounts: obligation_outcome.mounts.clone(),
+                mounts: dispatch_mounts,
                 resource_reservation: obligation_outcome.resource_reservation.clone(),
                 input: request.input,
             })
@@ -1375,10 +1394,11 @@ where
                 return Err(error);
             }
         };
-        let effective_mounts = obligation_outcome
-            .mounts
-            .clone()
-            .unwrap_or_else(|| authorized_context.mounts.clone());
+        let effective_mounts = effective_dispatch_mounts(
+            obligation_outcome.mounts.clone(),
+            &authorized_context.mounts,
+        )
+        .unwrap_or_default();
         let resource_reservation_id = obligation_outcome
             .resource_reservation
             .as_ref()
@@ -1693,10 +1713,9 @@ where
             }
         }
 
-        let effective_mounts = obligation_outcome
-            .mounts
-            .clone()
-            .unwrap_or_else(|| request.context.mounts.clone());
+        let effective_mounts =
+            effective_dispatch_mounts(obligation_outcome.mounts.clone(), &request.context.mounts)
+                .unwrap_or_default();
         let resource_reservation_id = obligation_outcome
             .resource_reservation
             .as_ref()
@@ -1923,6 +1942,10 @@ where
             }
         };
 
+        let dispatch_mounts = effective_dispatch_mounts(
+            obligation_outcome.mounts.clone(),
+            &authorized_context.mounts,
+        );
         let dispatch = match self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
@@ -1930,7 +1953,7 @@ where
                 scope: scope.clone(),
                 authenticated_actor_user_id: authorized_context.authenticated_actor_user_id.clone(),
                 estimate: estimate.clone(),
-                mounts: obligation_outcome.mounts.clone(),
+                mounts: dispatch_mounts,
                 resource_reservation: obligation_outcome.resource_reservation.clone(),
                 input,
             })

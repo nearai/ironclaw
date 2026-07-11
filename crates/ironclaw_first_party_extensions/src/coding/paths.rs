@@ -1,4 +1,4 @@
-use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
+use ironclaw_filesystem::{DirEntry, FileStat, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use serde_json::Value;
@@ -70,15 +70,15 @@ fn resolve_path(
 }
 
 fn scoped_path_input(path: &str) -> String {
-    if path == "." || path.is_empty() {
+    if path == "." || path.is_empty() || path == "/" {
         DEFAULT_SCOPED_ROOT.to_string()
     } else if path.starts_with('/') {
         path.to_string()
-    } else if let Some(scoped_workspace_path) = workspace_scoped_alias(path) {
-        scoped_workspace_path
     } else {
-        let relative = path.trim_start_matches("./");
-        format!("{DEFAULT_SCOPED_ROOT}/{relative}")
+        workspace_scoped_alias(path).unwrap_or_else(|| {
+            let relative = path.trim_start_matches("./");
+            format!("{DEFAULT_SCOPED_ROOT}/{relative}")
+        })
     }
 }
 
@@ -144,6 +144,41 @@ pub(super) async fn stat_optional(
     }
 }
 
+/// A caller's mount target is logically an empty directory until its first
+/// write. Backends such as libSQL do not materialize that directory, so reads
+/// of the mount root must preserve the virtual filesystem contract and return
+/// an empty result. Missing subpaths remain errors.
+pub(super) async fn stat_or_empty_mount_root(
+    request: &CodingCapabilityRequest<'_>,
+    resolved: &ResolvedPath,
+) -> Result<Option<FileStat>, CodingCapabilityError> {
+    match request.filesystem.stat(&resolved.virtual_path).await {
+        Ok(stat) => Ok(Some(stat)),
+        Err(FilesystemError::NotFound { .. }) if is_mount_root(resolved) => Ok(None),
+        Err(error) => Err(filesystem_error(error)),
+    }
+}
+
+pub(super) async fn list_dir_or_empty_mount_root(
+    request: &CodingCapabilityRequest<'_>,
+    root: &ResolvedPath,
+    path: &VirtualPath,
+) -> Result<Vec<DirEntry>, CodingCapabilityError> {
+    match request.filesystem.list_dir(path).await {
+        Ok(entries) => Ok(entries),
+        Err(FilesystemError::NotFound { .. })
+            if path == &root.virtual_path && is_mount_root(root) =>
+        {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(filesystem_error(error)),
+    }
+}
+
+fn is_mount_root(resolved: &ResolvedPath) -> bool {
+    resolved.virtual_path == resolved.grant.target
+}
+
 pub(super) async fn create_parent_dir_unless_sensitive(
     request: &CodingCapabilityRequest<'_>,
     path: &VirtualPath,
@@ -157,23 +192,6 @@ pub(super) async fn create_parent_dir_unless_sensitive(
         .create_dir_all(&parent)
         .await
         .map_err(filesystem_denied_if_not_found)
-}
-
-pub(super) async fn deny_sensitive_existing_path(
-    request: &CodingCapabilityRequest<'_>,
-    path: &VirtualPath,
-) -> Result<(), CodingCapabilityError> {
-    let stat = request
-        .filesystem
-        .stat(path)
-        .await
-        .map_err(filesystem_error)?;
-    if stat.sensitive {
-        return Err(CodingCapabilityError::new(
-            RuntimeDispatchErrorKind::FilesystemDenied,
-        ));
-    }
-    Ok(())
 }
 
 /// Walk up the directory tree, denying if any existing parent is sensitive.

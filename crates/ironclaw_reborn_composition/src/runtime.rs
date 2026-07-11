@@ -796,15 +796,21 @@ pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
         DefaultApprovalInteractionService::new(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
-                local_dev_capability_policy,
-                Arc::clone(&local_runtime.extension_registry),
-                local_runtime.workspace_mounts.clone(),
-                local_runtime.skill_mounts.clone(),
-                local_runtime.memory_mounts.clone(),
-                local_runtime.system_extensions_lifecycle_mounts.clone(),
-                local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
-                    local_runtime.extension_management.clone(),
-                ),
+                approval::LocalDevApprovalLeaseTermsProviderConfig {
+                    policy: local_dev_capability_policy,
+                    registry: Arc::clone(&local_runtime.extension_registry),
+                    owner_user_id: local_runtime.owner_user_id.clone(),
+                    workspace_mounts: local_runtime.workspace_mounts.clone(),
+                    skill_mounts: local_runtime.skill_mounts.clone(),
+                    memory_mounts: local_runtime.memory_mounts.clone(),
+                    system_extensions_lifecycle_mounts: local_runtime
+                        .system_extensions_lifecycle_mounts
+                        .clone(),
+                    extension_surface_source:
+                        local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
+                            local_runtime.extension_management.clone(),
+                        ),
+                },
             )),
             approval_resolver,
             turn_coordinator,

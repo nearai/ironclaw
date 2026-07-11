@@ -207,6 +207,46 @@ mod tests {
         provider_tool_call_with_name("builtin_echo", arguments)
     }
 
+    async fn invoke_write_file_tool(
+        wiring: &LocalDevCapabilityWiring,
+        run_context: &LoopRunContext,
+        path: &str,
+        content: &str,
+    ) {
+        let port = wiring
+            .capability_factory
+            .create_capability_port(run_context)
+            .await
+            .expect("capability port");
+        let write_tool = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == WRITE_FILE_CAPABILITY_ID)
+            .expect("write_file tool definition");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    write_tool.name.as_str(),
+                    serde_json::json!({
+                        "path": path,
+                        "content": content,
+                    }),
+                ),
+            ))
+            .await
+            .expect("write_file provider call stages");
+        let outcome = port
+            .invoke_capability(invocation_for_candidate(&candidate))
+            .await
+            .expect("write_file invocation");
+
+        match outcome {
+            CapabilityOutcome::Completed(_) => {}
+            other => panic!("expected completed write_file invocation, got {other:?}"),
+        }
+    }
+
     fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> CapabilityInvocation {
         CapabilityInvocation {
             activity_id: candidate.activity_id,
@@ -2966,6 +3006,80 @@ mod tests {
         assert_eq!(
             output["content"],
             serde_json::json!("     1│ safe workspace file")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_scopes_non_owner_workspace_writes() {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
+        let storage_root = dir.path().join("local-dev");
+        let workspace_root = dir.path().join("workspace");
+        let owner_id = UserId::new("local-dev-artifact-owner").expect("owner user id");
+        let sso_user_id = UserId::new("sso-artifact-user").expect("sso user id");
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev(owner_id.as_str(), storage_root)
+                .with_local_dev_workspace_root(workspace_root.clone()),
+        )
+        .await
+        .expect("local-dev services build");
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            owner_id.clone(),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            None,
+            None,
+        )
+        .expect("local-dev capability wiring");
+
+        let sso_run_context = run_context("sso-artifact-write")
+            .await
+            .with_actor(TurnActor::new(sso_user_id.clone()));
+        enable_global_auto_approve_for_run(&services, &sso_run_context, &sso_user_id).await;
+        invoke_write_file_tool(
+            &wiring,
+            &sso_run_context,
+            "/workspace/hello1.md",
+            "hello from sso\n",
+        )
+        .await;
+
+        let scoped_sso_path = workspace_root
+            .join("tenants")
+            .join("tenant-sso-artifact-write")
+            .join("users")
+            .join(sso_user_id.as_str())
+            .join("hello1.md");
+        assert_eq!(
+            std::fs::read_to_string(scoped_sso_path).expect("scoped sso artifact"),
+            "hello from sso\n"
+        );
+        assert!(
+            !workspace_root.join("hello1.md").exists(),
+            "non-owner writes must not land in the shared raw workspace root"
+        );
+
+        let owner_run_context = run_context("owner-artifact-write")
+            .await
+            .with_actor(TurnActor::new(owner_id.clone()));
+        enable_global_auto_approve_for_run(&services, &owner_run_context, &owner_id).await;
+        invoke_write_file_tool(
+            &wiring,
+            &owner_run_context,
+            "/workspace/owner.md",
+            "hello from owner\n",
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("owner.md")).expect("owner artifact"),
+            "hello from owner\n"
         );
     }
 

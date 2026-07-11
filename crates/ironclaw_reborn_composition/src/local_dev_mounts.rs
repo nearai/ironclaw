@@ -5,9 +5,9 @@ use ironclaw_host_api::{
 };
 
 pub(crate) const WORKSPACE_ALIAS: &str = "/workspace";
-const WORKSPACE_TARGET: &str = "/projects/workspace";
+pub(crate) const WORKSPACE_TARGET: &str = "/projects/workspace";
 const HOST_ALIAS: &str = "/host";
-const HOST_TARGET: &str = "/projects/host";
+pub(crate) const HOST_TARGET: &str = "/projects/host";
 const MEMORY_ALIAS: &str = "/memory";
 const MEMORY_TARGET: &str = "/memory";
 
@@ -16,6 +16,21 @@ pub(crate) fn workspace_mount_view(
     host_home_aliases: &[&Path],
 ) -> Result<MountView, HostApiError> {
     ambient_workspace_mount_view(permissions, &[], host_home_aliases)
+}
+
+pub(crate) fn scoped_workspace_mount_view(
+    scope: &ResourceScope,
+    permissions: MountPermissions,
+) -> Result<MountView, HostApiError> {
+    MountView::new(vec![grant(
+        WORKSPACE_ALIAS,
+        &format!(
+            "{WORKSPACE_TARGET}/tenants/{}/users/{}",
+            scope.tenant_id.as_str(),
+            scope.user_id.as_str()
+        ),
+        permissions,
+    )?])
 }
 
 /// Build the workspace mount view used by local-dev capability grants.
@@ -242,6 +257,32 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn scoped_workspace_mount_targets_user_workspace_projection() {
+        let scope = ResourceScope {
+            tenant_id: ironclaw_host_api::TenantId::new("tenant-a").expect("tenant id"),
+            user_id: ironclaw_host_api::UserId::new("user-b").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        let mounts =
+            scoped_workspace_mount_view(&scope, MountPermissions::read_write()).expect("mounts");
+        let mount = mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == WORKSPACE_ALIAS)
+            .expect("workspace mount");
+
+        assert_eq!(
+            mount.target.as_str(),
+            "/projects/workspace/tenants/tenant-a/users/user-b"
+        );
+        assert_eq!(mount.permissions, MountPermissions::read_write());
     }
 
     #[test]

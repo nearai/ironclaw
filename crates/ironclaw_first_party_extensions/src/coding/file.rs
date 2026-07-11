@@ -20,10 +20,10 @@ use super::{
     operation_error_with_summary,
     patch::{parse_apply_patch_input, replacement_error},
     paths::{
-        create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
-        is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
-        resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
-        virtual_to_relative,
+        create_parent_dir_unless_sensitive, filesystem_error, is_excluded_name,
+        is_sensitive_scoped_path, is_workspace_path, list_dir_or_empty_mount_root,
+        operation_allowed, resolve_optional_path, resolve_required_path, scoped_child_path,
+        stat_optional, stat_or_empty_mount_root, virtual_to_relative,
     },
     state::{SharedCodingEditLocks, read_scope_key},
     text::{
@@ -375,7 +375,12 @@ pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
-    deny_sensitive_existing_path(request, &resolved.virtual_path).await?;
+    let root_stat = stat_or_empty_mount_root(request, &resolved).await?;
+    if root_stat.is_some_and(|stat| stat.sensitive) {
+        return Err(CodingCapabilityError::new(
+            RuntimeDispatchErrorKind::FilesystemDenied,
+        ));
+    }
     let recursive = request
         .input
         .get("recursive")
@@ -405,11 +410,7 @@ async fn collect_list_entries(
     let mut stack = vec![(root.virtual_path.clone(), 0usize)];
     let mut visited = 0usize;
     while let Some((dir, depth)) = stack.pop() {
-        let entries = request
-            .filesystem
-            .list_dir(&dir)
-            .await
-            .map_err(filesystem_error)?;
+        let entries = list_dir_or_empty_mount_root(request, root, &dir).await?;
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {

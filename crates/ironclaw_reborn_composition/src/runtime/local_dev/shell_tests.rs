@@ -10,8 +10,9 @@ use ironclaw_loop_support::{
 use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
+        CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRunContext,
+        ProviderToolCall, VisibleCapabilityRequest,
     },
 };
 
@@ -37,6 +38,25 @@ async fn run_context(label: &str) -> LoopRunContext {
     )
 }
 
+async fn owned_run_context(label: &str, owner_user_id: &str) -> LoopRunContext {
+    let resolved = InMemoryRunProfileResolver::default()
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .expect("profile resolves"); // safety: test-only assertion in #[cfg(test)] module.
+    LoopRunContext::new(
+        TurnScope::new_with_owner(
+            TenantId::new(format!("tenant-{label}")).expect("tenant id"), // safety: test-only assertion in #[cfg(test)] module.
+            Some(AgentId::new(format!("agent-{label}")).expect("agent id")), // safety: test-only assertion in #[cfg(test)] module.
+            Some(ProjectId::new(format!("project-{label}")).expect("project id")), // safety: test-only assertion in #[cfg(test)] module.
+            ThreadId::new(format!("thread-{label}")).expect("thread id"), // safety: test-only assertion in #[cfg(test)] module.
+            Some(UserId::new(owner_user_id).expect("owner user id")), // safety: test-only assertion in #[cfg(test)] module.
+        ),
+        TurnId::new(),
+        TurnRunId::new(),
+        resolved,
+    )
+}
+
 fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
     ProviderToolCall {
         provider_id: "test-provider".to_string(),
@@ -48,6 +68,49 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         response_reasoning: None,
         reasoning: None,
         signature: None,
+    }
+}
+
+fn local_dev_shell_factory(
+    services: &crate::RebornServices,
+    fallback_user_id: &str,
+    capability_io: Arc<LocalDevCapabilityIo>,
+) -> LocalDevLoopCapabilityPortFactory {
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+    let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+    LocalDevLoopCapabilityPortFactory {
+        runtime: services.host_runtime.clone().expect("host runtime"), // safety: test-only local-dev service builder always wires host runtime.
+        fallback_user_id: UserId::new(fallback_user_id).expect("user id"), // safety: test helper passes static valid user IDs.
+        policy: Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"), // safety: test-only assertion for static policy definition.
+        ),
+        workspace_mounts: local_runtime.workspace_mounts.clone(),
+        memory_mounts: local_runtime.memory_mounts.clone(),
+        system_extensions_lifecycle_mounts: local_runtime
+            .system_extensions_lifecycle_mounts
+            .clone(),
+        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+        input_resolver,
+        result_writer,
+        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        skill_activation_source: None,
+        project_service: Arc::clone(&local_runtime.project_service),
+        trajectory_observer: None,
+        outbound_preferences_facade: None,
+        outbound_delivery_target_set_requires_approval: false,
+        approval_settings: Arc::new(
+            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+        ),
+        approval_requests: local_runtime.approval_requests.clone(),
+        capability_leases: local_runtime.capability_leases.clone(),
+        external_tool_catalog: std::sync::Arc::new(
+            ironclaw_turns::InMemoryExternalToolCatalog::new(),
+        ),
     }
 }
 
@@ -75,46 +138,16 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     )
     .await
     .expect("local-dev services build");
-    let runtime = services.host_runtime.clone().expect("host runtime");
     let local_runtime = services
         .local_runtime
         .as_ref()
         .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-    let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let memory_mounts = local_runtime.memory_mounts.clone();
-    let policy = Arc::new(
-        crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
-    );
     let capability_io = Arc::new(LocalDevCapabilityIo::default());
-    let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
-    let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let factory = LocalDevLoopCapabilityPortFactory {
-        runtime,
-        fallback_user_id: UserId::new("local-dev-shell-user").expect("user id"),
-        policy,
-        workspace_mounts,
-        memory_mounts,
-        system_extensions_lifecycle_mounts: local_runtime
-            .system_extensions_lifecycle_mounts
-            .clone(),
-        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
-        input_resolver,
-        result_writer,
-        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        skill_activation_source: None,
-        project_service: Arc::clone(&local_runtime.project_service),
-        trajectory_observer: None,
-        outbound_preferences_facade: None,
-        outbound_delivery_target_set_requires_approval: false,
-        approval_settings: Arc::new(
-            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
-        ),
-        approval_requests: local_runtime.approval_requests.clone(),
-        capability_leases: local_runtime.capability_leases.clone(),
-        external_tool_catalog: std::sync::Arc::new(
-            ironclaw_turns::InMemoryExternalToolCatalog::new(),
-        ),
-    };
+    let factory = local_dev_shell_factory(
+        &services,
+        "local-dev-shell-user",
+        Arc::clone(&capability_io),
+    );
     let run_context = run_context("shell-workdir").await;
     // Turn on the global auto-approve switch for this run's actor scope so the
     // scripted shell call exercises the dispatch path instead of stopping at the
@@ -166,7 +199,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .expect("shell invocation");
 
     let CapabilityOutcome::Completed(completed) = outcome else {
-        panic!("expected completed shell invocation");
+        panic!("expected completed shell invocation, got {outcome:?}");
     };
     let output = capability_io
         .result_output(completed.result_ref.as_str())
@@ -181,5 +214,199 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     assert_eq!(
         output["output"],
         serde_json::json!("local-dev-shell-ok:/workspace/qa-coding-smoke")
+    );
+}
+
+#[tokio::test]
+async fn local_dev_shell_scopes_non_owner_workspace_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let workspace_root = dir.path().join("workspace");
+    let host_home = dir.path().join("home");
+    std::fs::create_dir_all(&host_home).expect("host home root");
+    let services = crate::build_reborn_services(
+        crate::local_runtime_build_input_with_options(
+            crate::RebornCompositionProfile::LocalDevYolo,
+            "local-dev-shell-owner",
+            storage_root,
+            crate::RebornLocalRuntimeProfileOptions {
+                confirm_host_access: true,
+            },
+        )
+        .expect("local yolo input")
+        .with_local_dev_workspace_root(workspace_root.clone())
+        .with_local_dev_confirmed_host_home_root(host_home),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+    let capability_io = Arc::new(LocalDevCapabilityIo::default());
+    let factory = local_dev_shell_factory(
+        &services,
+        "local-dev-shell-owner",
+        Arc::clone(&capability_io),
+    );
+    let run_context = owned_run_context("sso-shell-workspace", "sso-shell-user").await;
+    {
+        let mut scope = run_context.scope.to_resource_scope();
+        scope.user_id = UserId::new("sso-shell-user").expect("user id");
+        ironclaw_approvals::AutoApproveSettingStore::set(
+            local_runtime.auto_approve_settings.as_ref(),
+            ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("enabling global auto-approve should succeed");
+    }
+    let port = factory
+        .create_capability_port(&run_context)
+        .await
+        .expect("capability port");
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible surface");
+    let input_ref = capability_io
+        .register_provider_tool_call_input(
+            &run_context,
+            &provider_tool_call(serde_json::json!({
+                "command": "printf '# Hello\\n' > /workspace/hello.md && printf '%s' \"$PWD\""
+            })),
+        )
+        .await
+        .expect("input ref");
+
+    let outcome = port
+        .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            surface_version: surface.version,
+            capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
+            input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("shell invocation");
+
+    let CapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected completed shell invocation");
+    };
+    let output = capability_io
+        .result_output(completed.result_ref.as_str())
+        .expect("result output lookup")
+        .expect("result output");
+    assert_eq!(output["exit_code"], serde_json::json!(0));
+    assert_eq!(output["success"], serde_json::json!(true));
+    assert_eq!(output["output"], serde_json::json!("/workspace"));
+    assert_eq!(
+        std::fs::read_to_string(
+            workspace_root.join("tenants/tenant-sso-shell-workspace/users/sso-shell-user/hello.md")
+        )
+        .expect("scoped shell artifact"),
+        "# Hello\n"
+    );
+    assert!(
+        !workspace_root.join("hello.md").exists(),
+        "non-owner shell writes must not land in the raw workspace root"
+    );
+}
+
+#[tokio::test]
+async fn local_dev_shell_rejects_non_owner_raw_workspace_escape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    let workspace_root = dir.path().join("workspace");
+    let host_home = dir.path().join("home");
+    std::fs::create_dir_all(&host_home).expect("host home root");
+    let services = crate::build_reborn_services(
+        crate::local_runtime_build_input_with_options(
+            crate::RebornCompositionProfile::LocalDevYolo,
+            "local-dev-shell-owner",
+            storage_root,
+            crate::RebornLocalRuntimeProfileOptions {
+                confirm_host_access: true,
+            },
+        )
+        .expect("local yolo input")
+        .with_local_dev_workspace_root(workspace_root.clone())
+        .with_local_dev_confirmed_host_home_root(host_home),
+    )
+    .await
+    .expect("local-dev services build");
+    let other_user_file =
+        workspace_root.join("tenants/tenant-raw-shell-workspace/users/other-shell-user/pwned.md");
+    std::fs::create_dir_all(other_user_file.parent().expect("other user parent"))
+        .expect("other user dir");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+    let capability_io = Arc::new(LocalDevCapabilityIo::default());
+    let factory = local_dev_shell_factory(
+        &services,
+        "local-dev-shell-owner",
+        Arc::clone(&capability_io),
+    );
+    let run_context = owned_run_context("raw-shell-workspace", "sso-shell-user").await;
+    {
+        let mut scope = run_context.scope.to_resource_scope();
+        scope.user_id = UserId::new("sso-shell-user").expect("user id");
+        ironclaw_approvals::AutoApproveSettingStore::set(
+            local_runtime.auto_approve_settings.as_ref(),
+            ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("enabling global auto-approve should succeed");
+    }
+    let port = factory
+        .create_capability_port(&run_context)
+        .await
+        .expect("capability port");
+    let surface = port
+        .visible_capabilities(VisibleCapabilityRequest {})
+        .await
+        .expect("visible surface");
+    let input_ref = capability_io
+        .register_provider_tool_call_input(
+            &run_context,
+            &provider_tool_call(serde_json::json!({
+                "command": format!("printf hacked > {}", other_user_file.display()),
+                "workdir": "/workspace"
+            })),
+        )
+        .await
+        .expect("input ref");
+
+    let outcome = port
+        .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            surface_version: surface.version,
+            capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
+            input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("shell invocation should return a model-visible failure");
+
+    match outcome {
+        CapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.error_kind, CapabilityFailureKind::Backend);
+        }
+        other => panic!("expected raw workspace shell escape to fail, got {other:?}"),
+    }
+    assert!(
+        !other_user_file.exists(),
+        "non-owner shell must not write another user's raw workspace artifact"
     );
 }

@@ -22,9 +22,9 @@ use super::{
     input_error,
     inputs::{optional_usize, optional_usize_allow_zero, required_str},
     paths::{
-        filesystem_error, is_excluded_name, is_sensitive_scoped_path, operation_allowed,
-        resolve_optional_path, scoped_child_path, type_filter_matches, validate_relative_pattern,
-        virtual_to_relative,
+        filesystem_error, is_excluded_name, is_sensitive_scoped_path, list_dir_or_empty_mount_root,
+        operation_allowed, resolve_optional_path, scoped_child_path, stat_or_empty_mount_root,
+        type_filter_matches, validate_relative_pattern, virtual_to_relative,
     },
     text::{decode_text, previous_char_boundary, reject_binary_probe},
     types::{GrepFileResult, GrepLine, ResolvedPath},
@@ -39,24 +39,27 @@ pub(super) async fn grep(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let root_stat = request
-        .filesystem
-        .stat(&resolved.virtual_path)
-        .await
-        .map_err(filesystem_error)?;
-    if root_stat.sensitive {
+    let root_stat = stat_or_empty_mount_root(request, &resolved).await?;
+    if root_stat.as_ref().is_some_and(|stat| stat.sensitive) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    if root_stat.file_type == FileType::Directory
+    let root_is_directory = root_stat
+        .as_ref()
+        .map(|stat| stat.file_type == FileType::Directory)
+        .unwrap_or(true);
+    if root_is_directory
         && !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ListDir)
     {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    if !matches!(root_stat.file_type, FileType::File | FileType::Directory) {
+    if root_stat
+        .as_ref()
+        .is_some_and(|stat| !matches!(stat.file_type, FileType::File | FileType::Directory))
+    {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
         ));
@@ -187,11 +190,14 @@ enum ScanLimit {
 async fn walk_files(
     request: &CodingCapabilityRequest<'_>,
     root: &ResolvedPath,
-    root_stat: FileStat,
+    root_stat: Option<FileStat>,
     mut include: impl FnMut(&str) -> bool,
     mut visit: impl FnMut(&str, &[u8], Option<SystemTime>) -> Result<bool, CodingCapabilityError>,
 ) -> Result<WalkFilesResult, CodingCapabilityError> {
     let mut walk_result = WalkFilesResult::default();
+    let Some(root_stat) = root_stat else {
+        return Ok(walk_result);
+    };
     if root_stat.file_type == FileType::File {
         let relative = root_file_relative(&root.scoped_path);
         if include(&relative)
@@ -216,11 +222,7 @@ async fn walk_files(
     let mut stack = vec![root.virtual_path.clone()];
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
-        let entries = request
-            .filesystem
-            .list_dir(&dir)
-            .await
-            .map_err(filesystem_error)?;
+        let entries = list_dir_or_empty_mount_root(request, root, &dir).await?;
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {

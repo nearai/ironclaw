@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_host_api::{EffectKind, MountView, Principal};
+use ironclaw_host_api::{EffectKind, MountView, Principal, UserId};
 use ironclaw_product_workflow::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
     ProductWorkflowError,
@@ -13,6 +13,7 @@ use crate::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError,
     local_dev_one_shot_lease_approval,
 };
+use crate::local_dev_mounts::{WORKSPACE_ALIAS, scoped_workspace_mount_view};
 use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
 use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
@@ -20,6 +21,7 @@ use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 pub(super) struct LocalDevApprovalLeaseTermsProvider {
     policy: Arc<LocalDevCapabilityPolicy>,
     registry: Arc<ExtensionRegistry>,
+    owner_user_id: UserId,
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
@@ -27,19 +29,33 @@ pub(super) struct LocalDevApprovalLeaseTermsProvider {
     extension_surface_source: LocalDevExtensionSurfaceSource,
 }
 
+pub(super) struct LocalDevApprovalLeaseTermsProviderConfig {
+    pub(super) policy: Arc<LocalDevCapabilityPolicy>,
+    pub(super) registry: Arc<ExtensionRegistry>,
+    pub(super) owner_user_id: UserId,
+    pub(super) workspace_mounts: MountView,
+    pub(super) skill_mounts: MountView,
+    pub(super) memory_mounts: MountView,
+    pub(super) system_extensions_lifecycle_mounts: MountView,
+    pub(super) extension_surface_source: LocalDevExtensionSurfaceSource,
+}
+
 impl LocalDevApprovalLeaseTermsProvider {
-    pub(super) fn new(
-        policy: Arc<LocalDevCapabilityPolicy>,
-        registry: Arc<ExtensionRegistry>,
-        workspace_mounts: MountView,
-        skill_mounts: MountView,
-        memory_mounts: MountView,
-        system_extensions_lifecycle_mounts: MountView,
-        extension_surface_source: LocalDevExtensionSurfaceSource,
-    ) -> Self {
+    pub(super) fn new(config: LocalDevApprovalLeaseTermsProviderConfig) -> Self {
+        let LocalDevApprovalLeaseTermsProviderConfig {
+            policy,
+            registry,
+            owner_user_id,
+            workspace_mounts,
+            skill_mounts,
+            memory_mounts,
+            system_extensions_lifecycle_mounts,
+            extension_surface_source,
+        } = config;
         Self {
             policy,
             registry,
+            owner_user_id,
             workspace_mounts,
             skill_mounts,
             memory_mounts,
@@ -127,6 +143,35 @@ impl LocalDevApprovalLeaseTermsProvider {
             capability.default_permission,
         ))
     }
+
+    fn workspace_mounts_for_gate(
+        &self,
+        gate: &ApprovalGateRecord,
+    ) -> Result<MountView, ProductWorkflowError> {
+        let scope = gate.resource_scope();
+        if scope.user_id == self.owner_user_id {
+            return Ok(self.workspace_mounts.clone());
+        }
+        let permissions = self
+            .workspace_mounts
+            .mounts
+            .iter()
+            .find(|grant| grant.alias.as_str() == WORKSPACE_ALIAS)
+            .map(|grant| grant.permissions.clone())
+            .ok_or_else(|| {
+                tracing::error!(
+                    "local-dev approval lease terms are unavailable: workspace mount is missing"
+                );
+                lease_terms_unavailable()
+            })?;
+        scoped_workspace_mount_view(scope, permissions).map_err(|error| {
+            tracing::error!(
+                %error,
+                "local-dev approval lease terms are unavailable: workspace mount could not be scoped"
+            );
+            lease_terms_unavailable()
+        })
+    }
 }
 
 #[async_trait]
@@ -146,9 +191,10 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
         {
             return Ok(approval);
         }
+        let workspace_mounts = self.workspace_mounts_for_gate(gate)?;
         match self.policy.lease_approval_for(
             action,
-            &self.workspace_mounts,
+            &workspace_mounts,
             &self.skill_mounts,
             &self.memory_mounts,
             &self.system_extensions_lifecycle_mounts,
@@ -181,9 +227,10 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             });
         }
         if action.capability_id().as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+            let workspace_mounts = self.workspace_mounts_for_gate(gate)?;
             match self.policy.lease_approval_for(
                 action,
-                &self.workspace_mounts,
+                &workspace_mounts,
                 &self.skill_mounts,
                 &self.memory_mounts,
                 &self.system_extensions_lifecycle_mounts,
@@ -224,8 +271,8 @@ mod tests {
 
     use ironclaw_host_api::{
         Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-        ExtensionId, InvocationId, PermissionMode, ResourceEstimate, ResourceScope, SecretHandle,
-        TenantId, ThreadId, UserId,
+        ExtensionId, InvocationId, MountPermissions, PermissionMode, ResourceEstimate,
+        ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
     };
     use ironclaw_product_workflow::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
@@ -237,6 +284,78 @@ mod tests {
     };
 
     use super::*;
+
+    fn terms_provider(
+        owner_user_id: UserId,
+        workspace_mounts: MountView,
+        extension_surface_source: LocalDevExtensionSurfaceSource,
+    ) -> LocalDevApprovalLeaseTermsProvider {
+        LocalDevApprovalLeaseTermsProvider::new(LocalDevApprovalLeaseTermsProviderConfig {
+            policy: Arc::new(local_dev_capability_policy().expect("policy parses")),
+            registry: Arc::new(ExtensionRegistry::new()),
+            owner_user_id,
+            workspace_mounts,
+            skill_mounts: MountView::default(),
+            memory_mounts: MountView::default(),
+            system_extensions_lifecycle_mounts: MountView::default(),
+            extension_surface_source,
+        })
+    }
+
+    fn default_terms_provider(
+        extension_surface_source: LocalDevExtensionSurfaceSource,
+    ) -> LocalDevApprovalLeaseTermsProvider {
+        terms_provider(
+            UserId::new("user").expect("owner user id"),
+            crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
+                .expect("workspace mounts"),
+            extension_surface_source,
+        )
+    }
+
+    #[tokio::test]
+    async fn non_owner_workspace_lease_terms_use_scoped_workspace_mounts() {
+        let owner = UserId::new("owner").expect("owner user id");
+        let terms_provider = terms_provider(
+            owner,
+            crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
+                .expect("workspace mounts"),
+            LocalDevExtensionSurfaceSource::default(),
+        );
+        let capability = CapabilityId::new("builtin.read_file").expect("capability id");
+        let resource_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-sso").expect("tenant id"),
+            user_id: UserId::new("sso-user").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: Some(ThreadId::new("thread").expect("thread id")),
+            invocation_id: InvocationId::new(),
+        };
+        let gate = approval_gate_record_for_scope(
+            resource_scope,
+            ApprovalRequestId::new(),
+            Principal::Extension(ExtensionId::new("loop-driver").expect("caller id")),
+            Action::Dispatch {
+                capability,
+                estimated_resources: ResourceEstimate::default(),
+            },
+        );
+
+        let approval = terms_provider
+            .lease_terms_for(&gate)
+            .await
+            .expect("workspace lease terms");
+
+        assert_eq!(approval.constraints.mounts.mounts.len(), 1);
+        let grant = &approval.constraints.mounts.mounts[0];
+        assert_eq!(grant.alias.as_str(), "/workspace");
+        assert_eq!(
+            grant.target.as_str(),
+            "/projects/workspace/tenants/tenant-sso/users/sso-user"
+        );
+        assert_eq!(grant.permissions, MountPermissions::read_write());
+    }
 
     #[tokio::test]
     async fn extension_capability_missing_from_builtin_policy_gets_one_shot_lease_terms() {
@@ -254,15 +373,7 @@ mod tests {
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let request_id = ApprovalRequestId::new();
         let gate = approval_gate_record(
             request_id,
@@ -326,15 +437,7 @@ mod tests {
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let request_id = ApprovalRequestId::new();
         let gate = approval_gate_record(
             request_id,
@@ -379,15 +482,7 @@ mod tests {
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),
@@ -419,15 +514,7 @@ mod tests {
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),
@@ -448,15 +535,7 @@ mod tests {
         let capability =
             CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
         let caller = ExtensionId::new("loop-driver").expect("caller id");
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            LocalDevExtensionSurfaceSource::default(),
-        );
+        let terms_provider = default_terms_provider(LocalDevExtensionSurfaceSource::default());
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),
@@ -488,15 +567,7 @@ mod tests {
                 owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
-            Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            source,
-        );
+        let terms_provider = default_terms_provider(source);
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
             Principal::Extension(caller),
@@ -533,6 +604,15 @@ mod tests {
             thread_id: Some(ThreadId::new("thread").expect("thread id")),
             invocation_id: InvocationId::new(),
         };
+        approval_gate_record_for_scope(resource_scope, request_id, requested_by, action)
+    }
+
+    fn approval_gate_record_for_scope(
+        resource_scope: ResourceScope,
+        request_id: ApprovalRequestId,
+        requested_by: Principal,
+        action: Action,
+    ) -> ApprovalGateRecord {
         let gate_ref: GateRef = approval_gate_ref(request_id).expect("approval gate ref");
         ApprovalGateRecord::new(
             resource_scope,

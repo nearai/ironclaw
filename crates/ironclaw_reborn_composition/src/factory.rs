@@ -181,8 +181,9 @@ use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, Rebo
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+    HOST_TARGET, WORKSPACE_TARGET, ambient_workspace_mount_view, memory_mount_view,
+    scoped_skill_context_mount_view, skill_management_mount_view,
+    system_extensions_lifecycle_mount_view, workspace_mount_view,
 };
 use crate::product_auth::credentials::product_auth_providers::{
     OAuthProviderComposition, compose_provider_client,
@@ -352,7 +353,10 @@ fn local_dev_process_port_for_policy(
         LocalHostProcessPort::new()
     }
     .with_workdir_alias("/workspace", workspace_root);
+    process_port = process_port.with_mount_source(WORKSPACE_TARGET, workspace_root);
     if let Some(host_home_root) = host_home_root {
+        process_port =
+            process_port.with_mount_source(HOST_TARGET, host_home_root.canonical_root.clone());
         process_port =
             process_port.with_workdir_alias("/host", host_home_root.canonical_root.clone());
         for alias in host_home_root.aliases() {

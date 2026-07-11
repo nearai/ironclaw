@@ -6,10 +6,15 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{MountView, ResourceScope};
+use ironclaw_host_api::{MountGrant, MountView, ResourceScope, VirtualPath};
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
 use thiserror::Error;
@@ -176,6 +181,14 @@ pub(crate) enum LocalHostProcessEnvMode {
 pub struct LocalHostProcessPort {
     env_mode: LocalHostProcessEnvMode,
     workdir_aliases: Vec<LocalHostWorkdirAlias>,
+    mount_sources: Vec<LocalHostMountSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalHostMountSource {
+    virtual_root: VirtualPath,
+    host_root: PathBuf,
+    host_root_spellings: Vec<PathBuf>,
 }
 
 impl LocalHostProcessPort {
@@ -183,6 +196,7 @@ impl LocalHostProcessPort {
         Self {
             env_mode: LocalHostProcessEnvMode::Scrubbed,
             workdir_aliases: Vec::new(),
+            mount_sources: Vec::new(),
         }
     }
 
@@ -190,6 +204,7 @@ impl LocalHostProcessPort {
         Self {
             env_mode: LocalHostProcessEnvMode::Inherited,
             workdir_aliases: Vec::new(),
+            mount_sources: Vec::new(),
         }
     }
 
@@ -207,6 +222,193 @@ impl LocalHostProcessPort {
         }
         self
     }
+
+    pub fn with_mount_source(
+        mut self,
+        virtual_root: impl Into<String>,
+        host_root: impl Into<PathBuf>,
+    ) -> Self {
+        let virtual_root = match VirtualPath::new(virtual_root.into()) {
+            Ok(virtual_root) => virtual_root,
+            Err(reason) => {
+                tracing::debug!(
+                    reason = %reason,
+                    "ignoring invalid local host process mount source"
+                );
+                return self;
+            }
+        };
+        let configured_host_root = host_root.into();
+        let host_root = match std::fs::canonicalize(&configured_host_root) {
+            Ok(host_root) if host_root.is_dir() => host_root,
+            Ok(host_root) => {
+                tracing::debug!(
+                    host_root = ?host_root,
+                    "ignoring local host process mount source because it is not a directory"
+                );
+                return self;
+            }
+            Err(reason) => {
+                tracing::debug!(
+                    reason = %reason,
+                    "ignoring unresolved local host process mount source"
+                );
+                return self;
+            }
+        };
+        let mut host_root_spellings = vec![host_root.clone()];
+        if configured_host_root.is_absolute() && configured_host_root != host_root {
+            host_root_spellings.push(configured_host_root);
+        }
+        if self
+            .mount_sources
+            .iter()
+            .any(|source| source.virtual_root == virtual_root)
+        {
+            tracing::debug!(
+                virtual_root = %virtual_root,
+                "ignoring duplicate local host process mount source"
+            );
+            return self;
+        }
+        self.mount_sources.push(LocalHostMountSource {
+            virtual_root,
+            host_root,
+            host_root_spellings,
+        });
+        self
+    }
+
+    fn effective_workdir_aliases(
+        &self,
+        mounts: Option<&MountView>,
+    ) -> Result<Vec<LocalHostWorkdirAlias>, RuntimeProcessError> {
+        let mut aliases = self.workdir_aliases.clone();
+        let Some(mounts) = mounts else {
+            return Ok(aliases);
+        };
+
+        for grant in &mounts.mounts {
+            let source = self.resolve_mount_source(grant)?;
+            let Some(host_path) = source else {
+                continue;
+            };
+            let alias = LocalHostWorkdirAlias::try_new(grant.alias.as_str(), host_path)
+                .map_err(RuntimeProcessError::ExecutionFailed)?;
+            if let Some(existing) = aliases
+                .iter_mut()
+                .find(|existing| existing.alias() == alias.alias())
+            {
+                *existing = alias;
+            } else {
+                aliases.push(alias);
+            }
+        }
+
+        Ok(aliases)
+    }
+
+    fn resolve_mount_source(
+        &self,
+        grant: &MountGrant,
+    ) -> Result<Option<PathBuf>, RuntimeProcessError> {
+        let source = self
+            .mount_sources
+            .iter()
+            .filter(|source| {
+                virtual_path_prefix_matches(source.virtual_root.as_str(), grant.target.as_str())
+            })
+            .max_by_key(|source| source.virtual_root.as_str().len());
+
+        let Some(source) = source else {
+            if self
+                .workdir_aliases
+                .iter()
+                .any(|alias| alias.alias() == grant.alias.as_str())
+            {
+                return Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "no trusted local host mount source is configured for virtual path {}",
+                    grant.target
+                )));
+            }
+            return Ok(None);
+        };
+
+        let mut joined = source.host_root.clone();
+        let tail = grant
+            .target
+            .as_str()
+            .strip_prefix(source.virtual_root.as_str())
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        if !tail.is_empty() {
+            for segment in tail.split('/') {
+                joined.push(segment);
+            }
+        }
+
+        if grant.permissions.write {
+            std::fs::create_dir_all(&joined).map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "local host mount target {} could not be initialized: {error}",
+                    grant.target
+                ))
+            })?;
+        }
+        let canonical = std::fs::canonicalize(&joined).map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "local host mount target {} could not be resolved: {error}",
+                grant.target
+            ))
+        })?;
+        if !canonical.starts_with(&source.host_root) {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "local host mount target {} escapes its trusted source",
+                grant.target
+            )));
+        }
+        if !canonical.is_dir() {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "local host mount target {} is not a directory",
+                grant.target
+            )));
+        }
+
+        Ok(Some(canonical))
+    }
+
+    fn validate_mount_source_access(
+        &self,
+        command: &str,
+        cwd: &Path,
+        workdir_aliases: &[LocalHostWorkdirAlias],
+    ) -> Result<(), RuntimeProcessError> {
+        let guards = mount_source_guards(&self.mount_sources, workdir_aliases);
+        if guards.is_empty() {
+            return Ok(());
+        }
+        validate_mount_source_path(cwd, &guards, "working directory")?;
+        validate_raw_mount_source_paths(command, &guards)?;
+        validate_relative_mount_source_paths(command, cwd, &guards)?;
+        validate_mount_sensitive_shell_expansions(command, &guards)?;
+        Ok(())
+    }
+
+    fn default_scoped_workdir_alias(
+        &self,
+        workdir_aliases: &[LocalHostWorkdirAlias],
+    ) -> Option<String> {
+        workdir_aliases
+            .iter()
+            .filter(|alias| {
+                let host_path = canonicalize_existing_path_prefix(alias.host_path());
+                self.mount_sources.iter().any(|source| {
+                    host_path.starts_with(&source.host_root) && host_path != source.host_root
+                })
+            })
+            .max_by_key(|alias| alias.alias().len())
+            .map(|alias| alias.alias().to_string())
+    }
 }
 
 #[async_trait]
@@ -215,12 +417,20 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let cwd = resolve_local_host_workdir(request.workdir.as_deref(), &self.workdir_aliases)
-            .map_err(|e| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "cannot determine working directory: {e}"
-                ))
-            })?;
+        let workdir_aliases = self.effective_workdir_aliases(request.mounts.as_ref())?;
+        let default_workdir = if request.workdir.is_none() {
+            self.default_scoped_workdir_alias(&workdir_aliases)
+        } else {
+            None
+        };
+        let cwd = resolve_local_host_workdir(
+            request.workdir.as_deref().or(default_workdir.as_deref()),
+            &workdir_aliases,
+        )
+        .map_err(|e| {
+            RuntimeProcessError::ExecutionFailed(format!("cannot determine working directory: {e}"))
+        })?;
+        let canonical_cwd = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
         let timeout = request
             .timeout_secs
             .map(Duration::from_secs)
@@ -231,7 +441,8 @@ impl RuntimeProcessPort for LocalHostProcessPort {
                 "running local host command with inherited environment"
             );
         }
-        let command = rewrite_local_host_command_aliases(&request.command, &self.workdir_aliases);
+        let command = rewrite_local_host_command_aliases(&request.command, &workdir_aliases);
+        self.validate_mount_source_access(&command, &canonical_cwd, &workdir_aliases)?;
         let start = std::time::Instant::now();
         let (output, exit_code) = execute_local_command(
             &request.scope,
@@ -248,7 +459,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         // `/workspace` terms and never leaks the host layout into the reply.
         // (The saved-output full result is a separate, non-model-facing UI
         // surface and is left to the result-fetch path.)
-        let preview = rewrite_local_host_output_aliases(&output.preview, &self.workdir_aliases);
+        let preview = rewrite_local_host_output_aliases(&output.preview, &workdir_aliases);
         Ok(CommandExecutionOutput {
             output: preview,
             saved_output: output.saved_output,
@@ -257,6 +468,336 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             duration: start.elapsed(),
         })
     }
+}
+
+struct LocalHostMountSourceGuard {
+    source_root: PathBuf,
+    source_spellings: Vec<PathBuf>,
+    allowed_roots: Vec<PathBuf>,
+}
+
+impl LocalHostMountSourceGuard {
+    fn is_scoped(&self) -> bool {
+        self.allowed_roots
+            .iter()
+            .all(|allowed_root| allowed_root != &self.source_root)
+    }
+}
+
+fn mount_source_guards(
+    mount_sources: &[LocalHostMountSource],
+    workdir_aliases: &[LocalHostWorkdirAlias],
+) -> Vec<LocalHostMountSourceGuard> {
+    mount_sources
+        .iter()
+        .map(|source| LocalHostMountSourceGuard {
+            source_root: source.host_root.clone(),
+            source_spellings: source.host_root_spellings.to_vec(),
+            allowed_roots: workdir_aliases
+                .iter()
+                .map(LocalHostWorkdirAlias::host_path)
+                .map(canonicalize_existing_path_prefix)
+                .filter(|host_path| host_path.starts_with(&source.host_root))
+                .collect(),
+        })
+        .collect()
+}
+
+fn validate_mount_source_path(
+    path: &Path,
+    guards: &[LocalHostMountSourceGuard],
+    label: &str,
+) -> Result<(), RuntimeProcessError> {
+    let resolved_path = canonicalize_existing_path_prefix(path);
+    let Some(guard) = guards
+        .iter()
+        .find(|guard| resolved_path.starts_with(&guard.source_root))
+    else {
+        return Ok(());
+    };
+    if path_has_parent_dir(path)
+        || !guard
+            .allowed_roots
+            .iter()
+            .any(|allowed_root| resolved_path.starts_with(allowed_root))
+    {
+        return Err(disallowed_mount_source_path(label));
+    }
+    Ok(())
+}
+
+fn validate_raw_mount_source_paths(
+    command: &str,
+    guards: &[LocalHostMountSourceGuard],
+) -> Result<(), RuntimeProcessError> {
+    for guard in guards {
+        for spelling in &guard.source_spellings {
+            let Some(source_root) = spelling.to_str() else {
+                continue;
+            };
+            if source_root.is_empty() {
+                continue;
+            }
+            let mut search_start = 0;
+            while let Some(relative_index) = command[search_start..].find(source_root) {
+                let index = search_start + relative_index;
+                let prefix_end = index + source_root.len();
+                if !command_path_start_boundary(command, index)
+                    || !command_path_end_boundary(command, prefix_end)
+                {
+                    search_start = prefix_end;
+                    continue;
+                }
+                let token_end = command_path_token_end(command, prefix_end);
+                validate_mount_source_path(
+                    Path::new(&command[index..token_end]),
+                    guards,
+                    "command path",
+                )?;
+                search_start = token_end;
+            }
+        }
+    }
+    let mut search_start = 0;
+    while search_start < command.len() {
+        let Some((token_start, token_end)) = next_command_path_token(command, search_start) else {
+            break;
+        };
+        let token = Path::new(&command[token_start..token_end]);
+        if token == Path::new("/") && guards.iter().any(LocalHostMountSourceGuard::is_scoped) {
+            return Err(disallowed_mount_source_path("command path"));
+        }
+        if token.is_absolute() {
+            validate_mount_source_path(token, guards, "command path")?;
+        }
+        search_start = token_end;
+    }
+    Ok(())
+}
+
+fn validate_relative_mount_source_paths(
+    command: &str,
+    cwd: &Path,
+    guards: &[LocalHostMountSourceGuard],
+) -> Result<(), RuntimeProcessError> {
+    let Some(scoped_root) = scoped_allowed_root_for_path(cwd, guards) else {
+        return Ok(());
+    };
+    let mut search_start = 0;
+    while search_start < command.len() {
+        let Some((token_start, token_end)) = next_command_path_token(command, search_start) else {
+            break;
+        };
+        let token = &command[token_start..token_end];
+        let path = Path::new(token);
+        if path.is_relative()
+            && path_has_parent_dir(path)
+            && (token.contains('/') || previous_command_word(command, token_start) == Some("cd"))
+        {
+            let resolved = normalize_path_lexically(&cwd.join(path));
+            if !resolved.starts_with(scoped_root) {
+                return Err(disallowed_mount_source_path("relative command path"));
+            }
+        }
+        search_start = token_end;
+    }
+    Ok(())
+}
+
+fn validate_mount_sensitive_shell_expansions(
+    command: &str,
+    guards: &[LocalHostMountSourceGuard],
+) -> Result<(), RuntimeProcessError> {
+    if !guards.iter().any(LocalHostMountSourceGuard::is_scoped) {
+        return Ok(());
+    }
+    if command.contains('`') || command.contains("$(") {
+        return Err(disallowed_mount_source_path("command expansion"));
+    }
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let Some(next) = bytes.get(index + 1).copied() else {
+            break;
+        };
+        if next == b'{' {
+            let Some(relative_end) = command[index + 2..].find('}') else {
+                return Err(disallowed_mount_source_path("command expansion"));
+            };
+            let name_start = index + 2;
+            let name_end = name_start + relative_end;
+            let variable = &command[name_start..name_end];
+            if variable != "PWD"
+                || command[name_end + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '/' || ch == '\\')
+            {
+                return Err(disallowed_mount_source_path("command expansion"));
+            }
+            index = name_end + 2;
+            continue;
+        }
+        if shell_variable_start(next) {
+            let name_start = index + 1;
+            let mut name_end = name_start + 1;
+            while name_end < bytes.len() && shell_variable_char(bytes[name_end]) {
+                name_end += 1;
+            }
+            let variable = &command[name_start..name_end];
+            if variable != "PWD"
+                || command[name_end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '/' || ch == '\\')
+            {
+                return Err(disallowed_mount_source_path("command expansion"));
+            }
+            index = name_end;
+            continue;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn shell_variable_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn shell_variable_char(byte: u8) -> bool {
+    shell_variable_start(byte) || byte.is_ascii_digit()
+}
+
+fn scoped_allowed_root_for_path<'a>(
+    path: &Path,
+    guards: &'a [LocalHostMountSourceGuard],
+) -> Option<&'a Path> {
+    guards
+        .iter()
+        .filter(|guard| guard.is_scoped())
+        .flat_map(|guard| guard.allowed_roots.iter().map(PathBuf::as_path))
+        .filter(|allowed_root| path.starts_with(allowed_root))
+        .max_by_key(|allowed_root| allowed_root.as_os_str().len())
+}
+
+fn next_command_path_token(command: &str, search_start: usize) -> Option<(usize, usize)> {
+    let mut token_start = None;
+    for (relative_index, ch) in command[search_start..].char_indices() {
+        if command_path_char(ch) {
+            token_start = Some(search_start + relative_index);
+            break;
+        }
+    }
+    let token_start = token_start?;
+    Some((token_start, command_path_token_end(command, token_start)))
+}
+
+fn command_path_token_end(command: &str, mut index: usize) -> usize {
+    while index < command.len() {
+        let Some(ch) = command[index..].chars().next() else {
+            break;
+        };
+        if !command_path_char(ch) {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
+}
+
+fn command_path_start_boundary(command: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    command[..index]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !command_path_char(ch))
+}
+
+fn command_path_end_boundary(command: &str, index: usize) -> bool {
+    if index >= command.len() {
+        return true;
+    }
+    command[index..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '/' || !command_path_char(ch))
+}
+
+fn command_path_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.')
+}
+
+fn previous_command_word(command: &str, token_start: usize) -> Option<&str> {
+    let prefix = &command[..token_start];
+    let end = prefix.trim_end().len();
+    if end == 0 {
+        return None;
+    }
+    let start = prefix[..end]
+        .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    Some(&prefix[start..end])
+}
+
+fn path_has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    normalized
+}
+
+fn canonicalize_existing_path_prefix(path: &Path) -> PathBuf {
+    let mut current = path;
+    let mut missing_tail = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(current) {
+            let mut resolved = canonical;
+            for segment in missing_tail.iter().rev() {
+                resolved.push(segment);
+            }
+            return resolved;
+        }
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        let Some(file_name) = current.file_name() else {
+            return path.to_path_buf();
+        };
+        missing_tail.push(file_name.to_os_string());
+        current = parent;
+    }
+}
+
+fn disallowed_mount_source_path(label: &str) -> RuntimeProcessError {
+    RuntimeProcessError::ExecutionFailed(format!(
+        "{label} references a host workspace path outside the mounted workspace"
+    ))
+}
+
+fn virtual_path_prefix_matches(prefix: &str, path: &str) -> bool {
+    Path::new(path).starts_with(Path::new(prefix))
 }
 
 async fn execute_local_command(
@@ -367,6 +908,7 @@ mod tests {
     use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
     #[cfg(unix)]
     use crate::process_output::SavedCommandOutputSanitization;
+    use ironclaw_host_api::{MountAlias, MountPermissions};
     use std::sync::Mutex;
 
     #[derive(Debug)]
@@ -700,6 +1242,329 @@ mod tests {
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.output, "ok");
         assert!(scratch.exists());
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_scopes_workspace_alias_from_request_mounts() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root.clone());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "printf '# Hello\\n' > /workspace/hello.md && printf '%s' \"$PWD\""
+                    .to_string(),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "/workspace");
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("tenants/tenant-a/users/user-a/hello.md"))
+                .expect("scoped shell artifact"),
+            "# Hello\n"
+        );
+        assert!(
+            !workspace_root.join("hello.md").exists(),
+            "scoped shell writes must not land in the raw workspace root"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_defaults_to_scoped_workspace_workdir() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root.clone());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "printf '# Hello\\n' > /workspace/hello.md && printf '%s' \"$PWD\""
+                    .to_string(),
+                workdir: None,
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "/workspace");
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("tenants/tenant-a/users/user-a/hello.md"))
+                .expect("scoped shell artifact"),
+            "# Hello\n"
+        );
+        assert!(
+            !workspace_root.join("hello.md").exists(),
+            "default shell workdir must not write to the raw workspace root"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_allows_noncanonical_owner_workspace_alias() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace.path().to_path_buf();
+        let shell_workdir = workspace_root.join("qa-coding-smoke");
+        std::fs::create_dir_all(&shell_workdir).expect("nested workspace dir");
+        let host_home = tempfile::tempdir().expect("host home tempdir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root)
+            .with_workdir_alias("/host", host_home.path().to_path_buf());
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "mkdir -p /workspace/qa-coding-smoke && test -d /host && printf ok"
+                    .to_string(),
+                workdir: Some("/workspace/qa-coding-smoke".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "ok");
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_rejects_raw_workspace_source_escape() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let scoped_user_root = workspace_root.join("tenants/tenant-a/users/user-a");
+        let other_user_root = workspace_root.join("tenants/tenant-a/users/user-b");
+        std::fs::create_dir_all(&scoped_user_root).expect("scoped user dir");
+        std::fs::create_dir_all(&other_user_root).expect("other user dir");
+        let other_user_file = other_user_root.join("pwned.md");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root.clone());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: format!("printf hacked > {}", other_user_file.display()),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect_err("raw host workspace escape should be rejected");
+
+        assert!(
+            matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace"))
+        );
+        assert!(
+            !other_user_file.exists(),
+            "raw host workspace path must not write another user's artifact"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_rejects_raw_root_for_scoped_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let scoped_user_root = workspace_root.join("tenants/tenant-a/users/user-a");
+        std::fs::create_dir_all(&scoped_user_root).expect("scoped user dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root);
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "ls /".to_string(),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect_err("scoped shell must not expose the host root");
+
+        assert!(
+            matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace"))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_rejects_relative_workspace_escape() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let scoped_user_root = workspace_root.join("tenants/tenant-a/users/user-a");
+        let other_user_root = workspace_root.join("tenants/tenant-a/users/user-b");
+        std::fs::create_dir_all(&scoped_user_root).expect("scoped user dir");
+        std::fs::create_dir_all(&other_user_root).expect("other user dir");
+        let other_user_file = other_user_root.join("pwned.md");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root.clone());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "printf hacked > ../user-b/pwned.md".to_string(),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect_err("relative workspace escape should be rejected");
+
+        assert!(
+            matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace"))
+        );
+        assert!(
+            !other_user_file.exists(),
+            "relative parent traversal must not write another user's artifact"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_allows_literal_parent_text_in_scoped_command() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let scoped_user_root = workspace_root.join("tenants/tenant-a/users/user-a");
+        std::fs::create_dir_all(&scoped_user_root).expect("scoped user dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root);
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "printf '..'".to_string(),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("literal parent text should not be treated as traversal");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "..");
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_rejects_mount_sensitive_shell_expansion() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let scoped_user_root = workspace_root.join("tenants/tenant-a/users/user-a");
+        std::fs::create_dir_all(&scoped_user_root).expect("scoped user dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace_root.clone())
+            .with_mount_source("/projects/workspace", workspace_root);
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            VirtualPath::new("/projects/workspace/tenants/tenant-a/users/user-a")
+                .expect("workspace target"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view");
+
+        for command in [
+            "printf '%s' \"$(pwd)\"",
+            "printf '%s' `pwd`",
+            "printf '%s' \"$HOME\"",
+            "printf hacked > \"$PWD/../user-b/pwned.md\"",
+        ] {
+            let error = port
+                .run_command(CommandExecutionRequest {
+                    scope: ResourceScope::system(),
+                    mounts: Some(mounts.clone()),
+                    command: command.to_string(),
+                    workdir: Some("/workspace".to_string()),
+                    timeout_secs: Some(5),
+                    extra_env: HashMap::new(),
+                })
+                .await
+                .expect_err("mount-sensitive shell expansion should be rejected");
+
+            assert!(
+                matches!(&error, RuntimeProcessError::ExecutionFailed(message) if message.contains("outside the mounted workspace")),
+                "unexpected error for {command:?}: {error:?}"
+            );
+        }
     }
 
     #[cfg(windows)]
