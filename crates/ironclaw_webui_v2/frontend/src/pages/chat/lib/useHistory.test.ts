@@ -41,7 +41,7 @@ function useHistorySourceForTest() {
   }
   return `${helperLines.join("\n")}\n${lines.join(
     "\n",
-  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh, nextCursorAfterFullRefresh };`;
+  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh, nextCursorAfterFullRefresh, cursorPageCanMerge };`;
 }
 
 function createReactStub({ setCalls = [] } = {}) {
@@ -188,6 +188,125 @@ test("useHistory starts an older-page load while latest refresh is in flight", a
   });
   await loadOlder;
   await flushMicrotasks();
+});
+
+test("useHistory discards stale cursor pages after a refresh changes cursor windows", async () => {
+  const initialLatest = deferred();
+  const staleOlderPage = deferred();
+  const refreshedLatest = deferred();
+  const fetchCalls = [];
+  const setCalls = [];
+  let latestCalls = 0;
+  const context = {
+    console,
+    fetchTimeline: ({ cursor }) => {
+      fetchCalls.push(cursor || null);
+      if (!cursor) {
+        latestCalls += 1;
+        return latestCalls === 1
+          ? initialLatest.promise
+          : refreshedLatest.promise;
+      }
+      if (cursor === "cursor-before-151") return staleOlderPage.promise;
+      throw new Error(`unexpected cursor ${cursor}`);
+    },
+    globalThis: {},
+    messagesFromTimeline: (records) =>
+      records.map((record) => ({
+        id: record.id,
+        role: "user",
+        sequence: record.sequence,
+      })),
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(
+    "thread-stale-cursor",
+    {},
+  );
+
+  initialLatest.resolve({
+    messages: [
+      { id: "msg-151", sequence: 151 },
+      { id: "msg-200", sequence: 200 },
+    ],
+    next_cursor: "cursor-before-151",
+  });
+  await flushMicrotasks();
+
+  const loadOlder = history.loadHistory("cursor-before-151");
+  const refresh = history.loadHistory();
+  refreshedLatest.resolve({
+    messages: [
+      { id: "msg-251", sequence: 251 },
+      { id: "msg-300", sequence: 300 },
+    ],
+    next_cursor: "cursor-before-251",
+  });
+  await refresh;
+  await flushMicrotasks();
+
+  staleOlderPage.resolve({
+    messages: [
+      { id: "msg-101", sequence: 101 },
+      { id: "msg-150", sequence: 150 },
+    ],
+    next_cursor: null,
+  });
+  await loadOlder;
+  await flushMicrotasks();
+
+  assert.deepEqual(fetchCalls, [
+    null,
+    "cursor-before-151",
+    null,
+  ]);
+  assert.equal(setCalls.at(-1).nextCursor, "cursor-before-251");
+  assert.deepEqual(
+    setCalls.at(-1).messages.map((message) => message.id),
+    ["msg-251", "msg-300"],
+  );
+  assert.equal(setCalls.at(-1).isLoading, false);
+});
+
+test("cursor page merge guard requires the current cursor or a connected page", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { cursorPageCanMerge } = context.globalThis.__testExports;
+
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151",
+      [{ id: "msg-101", sequence: 101 }],
+      [{ id: "msg-251", sequence: 251 }],
+      "cursor-before-251",
+    ),
+    false,
+  );
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151",
+      [{ id: "msg-101", sequence: 101 }],
+      [{ id: "msg-251", sequence: 251 }],
+      "cursor-before-151",
+    ),
+    true,
+  );
+  assert.equal(
+    cursorPageCanMerge(
+      "cursor-before-151",
+      [
+        { id: "msg-101", sequence: 101 },
+        { id: "msg-150", sequence: 150 },
+      ],
+      [{ id: "msg-151", sequence: 151 }],
+      "cursor-before-101",
+    ),
+    true,
+  );
 });
 
 test("useHistory tags messages with the thread they belong to (messagesThreadId)", async () => {

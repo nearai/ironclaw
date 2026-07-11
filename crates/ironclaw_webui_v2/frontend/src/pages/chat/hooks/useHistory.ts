@@ -172,6 +172,23 @@ export function useHistory(threadId, options = {}) {
           if (threadIdRef.current !== threadId) return prev;
           let merged;
           if (cursor) {
+            if (
+              !cursorPageCanMerge(
+                cursor,
+                renderable,
+                prev.messages,
+                prev.nextCursor || null,
+              )
+            ) {
+              return {
+                ...prev,
+                isLoading: hasOtherActiveLoadsForThread(
+                  loadingRef.current,
+                  threadId,
+                  loadKey,
+                ),
+              };
+            }
             merged = mergePage(renderable, prev.messages);
           } else {
             merged = mergeFullRefresh(renderable, prev.messages, {
@@ -292,6 +309,28 @@ export function useHistory(threadId, options = {}) {
 function mergePage(older, current) {
   const ids = new Set(current.map((m) => m?.id).filter(Boolean));
   return [...older.filter((m) => !ids.has(m?.id)), ...current];
+}
+
+function cursorPageCanMerge(
+  requestedCursor,
+  pageMessages,
+  currentMessages,
+  currentNextCursor,
+) {
+  return (
+    requestedCursor === currentNextCursor ||
+    cursorPageConnectsToCurrentOldest(pageMessages, currentMessages)
+  );
+}
+
+function cursorPageConnectsToCurrentOldest(pageMessages, currentMessages) {
+  const pageWindow = timelineSequenceWindow(pageMessages);
+  const currentWindow = timelineSequenceWindow(currentMessages);
+  if (!pageWindow || !currentWindow) return false;
+  return (
+    pageWindow.oldest <= currentWindow.oldest &&
+    pageWindow.newest + 1 >= currentWindow.oldest
+  );
 }
 
 function historyLoadKey(threadId, cursor) {
