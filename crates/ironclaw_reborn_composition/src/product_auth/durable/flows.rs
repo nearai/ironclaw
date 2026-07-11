@@ -438,7 +438,7 @@ where
         }
         if !matches!(
             record.status,
-            AuthFlowStatus::Completed | AuthFlowStatus::Canceled
+            AuthFlowStatus::Completed | AuthFlowStatus::Canceled | AuthFlowStatus::Failed
         ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }

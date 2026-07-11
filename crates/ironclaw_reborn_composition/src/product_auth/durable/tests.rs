@@ -1080,6 +1080,31 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
         cleanup_flow_ids,
         [turn_flow.id, failed_turn_flow.id].into_iter().collect()
     );
+    for event in &report.canceled_turn_gate_continuations {
+        service
+            .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+            .await
+            .expect("cleanup denial acknowledgement supports canceled and failed flows");
+    }
+    let failed_after_ack = service
+        .get_flow(&scope, failed_turn_flow.id)
+        .await
+        .expect("failed flow lookup")
+        .expect("failed flow remains durable");
+    assert_eq!(failed_after_ack.status, AuthFlowStatus::Failed);
+    assert!(failed_after_ack.continuation_emitted_at.is_some());
+    let retry = ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(
+        &service,
+        ironclaw_auth::SecretCleanupRequest {
+            scope: scope.clone(),
+            extension_id: ExtensionId::new("example_ext").unwrap(),
+            provider: Some(disconnected.clone()),
+            action: ironclaw_auth::SecretCleanupAction::Uninstall,
+        },
+    )
+    .await
+    .expect("cleanup retry");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
 
     // LLM data is never deleted: flow records are retained (filterable by their
     // terminal status), not removed.
