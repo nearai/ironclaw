@@ -76,6 +76,7 @@ pub use compaction_task::{
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use context_window_cache::ThreadContextWindowCache;
+pub use durable_input_queue::FilesystemHostInputQueue;
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
@@ -86,7 +87,6 @@ pub use identity_context::{
     identity_message_ref,
 };
 pub use input_port::HostQueueLoopInputPort;
-pub use durable_input_queue::FilesystemHostInputQueue;
 pub use input_queue::{
     EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
     HostInputQueue, HostInputQueueError, InMemoryHostInputQueue, RejectingInputEnqueue,

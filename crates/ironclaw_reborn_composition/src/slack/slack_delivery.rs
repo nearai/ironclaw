@@ -28,10 +28,10 @@ use ironclaw_product_adapters::{
     ApprovalPromptContextView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader,
     EgressMethod, EgressPath, EgressRequest, EgressResponse, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, FinalReplyView, GatePromptView, OutboundDeliverySink,
-    ProductAdapter, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductGateKind, ProductInboundPayload, ProductOutboundPayload, ProductRejection,
-    ProductRejectionKind,
-    ProductWorkflowRejectionKind, ProtocolHttpEgress, ProtocolHttpEgressError,
+    ProductAdapter, ProductAdapterError, ProductGateKind, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductRejection,
+    ProductRejectionKind, ProductWorkflowRejectionKind, ProtocolHttpEgress,
+    ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
