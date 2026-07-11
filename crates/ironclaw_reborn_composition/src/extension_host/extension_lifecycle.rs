@@ -1134,6 +1134,11 @@ impl RebornLocalExtensionManagementPort {
             let removed_providers = self
                 .removed_extension_providers_without_lock(&package_ref, caller)
                 .await?;
+            // Deliberately validate cleanup actors only after caller
+            // authorization and provider preflight. Hoisting this immutable
+            // check above the operation guard would change private-install
+            // masking and concurrent error precedence from "not installed" to
+            // an actor-requirement error.
             if !cleanup_requirements.is_empty() && authenticated_actor_user_id.is_none() {
                 return Err(ProductWorkflowError::InvalidBindingRequest {
                     reason: "extension removal cleanup requires an authenticated actor".to_string(),
@@ -3236,6 +3241,55 @@ output_schema_ref = "schemas/run.output.json"
         assert!(
             adapter.calls().is_empty(),
             "adapter must not run without actor"
+        );
+        assert_removal_target_preserved(&storage_root, &installation_store, "telegram").await;
+    }
+
+    #[tokio::test]
+    async fn extension_remove_masks_foreign_private_install_before_cleanup_actor_validation() {
+        let adapter = Arc::new(RecordingExtensionRemovalCleanupAdapter::new(
+            "fixture.cleanup",
+        ));
+        let adapter_trait: Arc<dyn ExtensionRemovalCleanupAdapter> = adapter.clone();
+        let registry = Arc::new(
+            ExtensionRemovalCleanupRegistry::try_from_adapters(vec![adapter_trait])
+                .expect("unique cleanup adapter"),
+        );
+        let package = fixture_external_channel_package_with_cleanup(
+            "telegram",
+            "Telegram",
+            removal_cleanup_requirement("fixture.cleanup", "telegram"),
+        );
+        let (_dir, storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_removal_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![package]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                registry,
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        port.install(
+            package_ref.clone(),
+            &UserId::new("private-owner").expect("private owner"),
+        )
+        .await
+        .expect("install private external channel");
+        let foreign_scope = hosted_mcp_scope("foreign-user");
+
+        let error = port
+            .remove(package_ref, &foreign_scope, None)
+            .await
+            .expect_err("foreign private removal must stay masked");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { reason }
+                if reason.contains("extension telegram is not installed")
+                    && !reason.contains("authenticated actor")
+        ));
+        assert!(
+            adapter.calls().is_empty(),
+            "authorization must fail before cleanup dispatch"
         );
         assert_removal_target_preserved(&storage_root, &installation_store, "telegram").await;
     }
