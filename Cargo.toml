@@ -446,6 +446,10 @@ name = "reborn_integration_attach"
 path = "tests/integration/attach.rs"
 
 [[test]]
+name = "reborn_integration_admin_secrets"
+path = "tests/integration/admin_secrets.rs"
+
+[[test]]
 name = "reborn_integration_subagent_await_edge"
 path = "tests/integration/subagent_await_edge.rs"
 

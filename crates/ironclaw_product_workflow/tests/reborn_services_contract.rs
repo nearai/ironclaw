@@ -84,9 +84,9 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminPutSecretRequest, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
+    AdminUserSecretMeta, AdminUserSecretScope, AdminUserService, AdminUserStatus,
+    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -11537,30 +11537,36 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn list_secrets(
         &self,
-        _tenant: &TenantId,
-        _user_id: &UserId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
+        scope: &AdminUserSecretScope,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
         self.secret_scopes.lock().unwrap().push((
-            agent_id.map(|agent| agent.as_str().to_string()),
-            project_id.map(|project| project.as_str().to_string()),
+            scope
+                .agent_id
+                .as_ref()
+                .map(|agent| agent.as_str().to_string()),
+            scope
+                .project_id
+                .as_ref()
+                .map(|project| project.as_str().to_string()),
         ));
         Ok(Vec::new())
     }
 
     async fn put_secret(
         &self,
-        _tenant: &TenantId,
-        _user_id: &UserId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
+        scope: &AdminUserSecretScope,
         handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
         self.secret_scopes.lock().unwrap().push((
-            agent_id.map(|agent| agent.as_str().to_string()),
-            project_id.map(|project| project.as_str().to_string()),
+            scope
+                .agent_id
+                .as_ref()
+                .map(|agent| agent.as_str().to_string()),
+            scope
+                .project_id
+                .as_ref()
+                .map(|project| project.as_str().to_string()),
         ));
         Ok(AdminUserSecretMeta {
             handle: handle.as_str().to_string(),
@@ -11571,15 +11577,18 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn delete_secret(
         &self,
-        _tenant: &TenantId,
-        _user_id: &UserId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
+        scope: &AdminUserSecretScope,
         _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         self.secret_scopes.lock().unwrap().push((
-            agent_id.map(|agent| agent.as_str().to_string()),
-            project_id.map(|project| project.as_str().to_string()),
+            scope
+                .agent_id
+                .as_ref()
+                .map(|agent| agent.as_str().to_string()),
+            scope
+                .project_id
+                .as_ref()
+                .map(|project| project.as_str().to_string()),
         ));
         Ok(true)
     }

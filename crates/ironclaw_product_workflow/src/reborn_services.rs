@@ -84,11 +84,12 @@ use admin_users::{
 };
 pub use admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
-    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    AdminUserSecretMeta, AdminUserSecretScope, AdminUserService, AdminUserStatus,
+    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
+    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse,
 };
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
@@ -3281,14 +3282,15 @@ impl RebornServicesApi for RebornServices {
         self.authorize_admin(&caller).await?;
         self.require_admin_target(&caller.tenant_id, &user_id)
             .await?;
+        let scope = AdminUserSecretScope::new(
+            caller.tenant_id,
+            user_id,
+            caller.agent_id,
+            caller.project_id,
+        );
         let secrets = self
             .admin_users
-            .list_secrets(
-                &caller.tenant_id,
-                &user_id,
-                caller.agent_id.as_ref(),
-                caller.project_id.as_ref(),
-            )
+            .list_secrets(&scope)
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminUserSecretsListResponse { secrets })
@@ -3304,16 +3306,15 @@ impl RebornServicesApi for RebornServices {
         self.authorize_admin(&caller).await?;
         self.require_admin_target(&caller.tenant_id, &user_id)
             .await?;
+        let scope = AdminUserSecretScope::new(
+            caller.tenant_id,
+            user_id,
+            caller.agent_id,
+            caller.project_id,
+        );
         let secret = self
             .admin_users
-            .put_secret(
-                &caller.tenant_id,
-                &user_id,
-                caller.agent_id.as_ref(),
-                caller.project_id.as_ref(),
-                handle,
-                SecretString::from(request.value),
-            )
+            .put_secret(&scope, handle, SecretString::from(request.value))
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminSecretResponse { secret })
@@ -3330,15 +3331,15 @@ impl RebornServicesApi for RebornServices {
             .await?;
         // Echo the parsed, canonical handle back on the wire as a plain string.
         let handle_str = handle.as_str().to_string();
+        let scope = AdminUserSecretScope::new(
+            caller.tenant_id,
+            user_id,
+            caller.agent_id,
+            caller.project_id,
+        );
         let deleted = self
             .admin_users
-            .delete_secret(
-                &caller.tenant_id,
-                &user_id,
-                caller.agent_id.as_ref(),
-                caller.project_id.as_ref(),
-                handle,
-            )
+            .delete_secret(&scope, handle)
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminSecretDeletedResponse {

@@ -14,8 +14,6 @@
 //! authenticator that validates the bearer). Nothing above the token crypto is
 //! stubbed.
 
-#![cfg(all(feature = "webui-v2-beta", feature = "test-support"))]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -127,10 +125,37 @@ fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
 
 struct AdminHarness {
     router: axum::Router,
+    session_store: Arc<dyn SessionStore>,
+    operator_secret: SecretString,
     // Kept alive for the test: the runtime owns the durable stores the router
     // reads through, and the tempdir backs them.
     _runtime: RebornRuntime,
     _root: tempfile::TempDir,
+}
+
+impl AdminHarness {
+    fn router_for_scope(&self, agent_id: Option<&str>, project_id: Option<&str>) -> axum::Router {
+        let bundle = build_webui_services(&self._runtime, None).expect("webui bundle");
+        let env = EnvBearerAuthenticator::new(
+            self.operator_secret.clone(),
+            UserId::new(OPERATOR_USER).expect("user"),
+        )
+        .expect("env authenticator");
+        let session = SessionAuthenticator::new(Arc::clone(&self.session_store));
+        let authenticator = Arc::new(DualAuthenticator { env, session });
+        let mut config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            authenticator,
+            vec![HeaderValue::from_static("http://localhost:0")],
+        );
+        if let Some(agent_id) = agent_id {
+            config = config.with_default_agent_id(AgentId::new(agent_id).expect("agent"));
+        }
+        if let Some(project_id) = project_id {
+            config = config.with_default_project_id(ProjectId::new(project_id).expect("project"));
+        }
+        webui_v2_app(bundle, config).expect("webui v2 app")
+    }
 }
 
 async fn build_admin_harness() -> AdminHarness {
@@ -167,10 +192,12 @@ async fn build_admin_harness() -> AdminHarness {
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
 
-    let env =
-        EnvBearerAuthenticator::new(operator_secret, UserId::new(OPERATOR_USER).expect("user"))
-            .expect("env authenticator");
-    let session = SessionAuthenticator::new(session_store);
+    let env = EnvBearerAuthenticator::new(
+        operator_secret.clone(),
+        UserId::new(OPERATOR_USER).expect("user"),
+    )
+    .expect("env authenticator");
+    let session = SessionAuthenticator::new(Arc::clone(&session_store));
     let authenticator = Arc::new(DualAuthenticator { env, session });
 
     let config = WebuiServeConfig::new(
@@ -184,6 +211,8 @@ async fn build_admin_harness() -> AdminHarness {
 
     AdminHarness {
         router,
+        session_store,
+        operator_secret,
         _runtime: runtime,
         _root: root,
     }
@@ -320,6 +349,15 @@ impl AdminApiDriver {
         self.send(
             Method::GET,
             &format!("/api/webchat/v2/admin/users/{user_id}/secrets"),
+            None,
+        )
+        .await
+    }
+
+    async fn delete_secret(&self, user_id: &str, handle: &str) -> (StatusCode, Value) {
+        self.send(
+            Method::DELETE,
+            &format!("/api/webchat/v2/admin/users/{user_id}/secrets/{handle}"),
             None,
         )
         .await
@@ -504,6 +542,20 @@ async fn admin_full_lifecycle_and_api_token_login() {
         ),
         "expected UnknownSecret for user-only scope, got {err:?}"
     );
+    let (status, deleted) = operator.delete_secret(&admin_id, "openai_key").await;
+    assert_eq!(status, StatusCode::OK, "scoped secret delete succeeds");
+    assert_eq!(deleted["deleted"].as_bool(), Some(true));
+    let err = secret_store
+        .lease_once(&runtime_scope, &handle)
+        .await
+        .expect_err("admin secret DELETE removes from the runtime agent+project scope");
+    assert!(
+        matches!(
+            err,
+            ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+        ),
+        "expected UnknownSecret after scoped delete, got {err:?}"
+    );
 
     // Delete cascades: the record is gone, and a re-read is a 404.
     let (status, deleted) = operator.delete_user(&member_id).await;
@@ -515,6 +567,67 @@ async fn admin_full_lifecycle_and_api_token_login() {
         StatusCode::NOT_FOUND,
         "a deleted user reads as not found"
     );
+}
+
+#[tokio::test]
+async fn admin_secret_optional_owner_scopes_round_trip_independently() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+    let (target_id, _) = create_admin(&operator, "Optional Scope Target").await;
+    let handle = SecretHandle::new("scope_probe").expect("handle");
+
+    let cases = [
+        (None, None, "user-level"),
+        (Some(AGENT), None, "agent-only"),
+        (None, Some(PROJECT), "project-only"),
+    ];
+    for (agent_id, project_id, material) in cases {
+        let scoped_operator = AdminApiDriver::new(
+            harness.router_for_scope(agent_id, project_id),
+            OPERATOR_TOKEN,
+        );
+        let (status, _) = scoped_operator
+            .put_secret(&target_id, handle.as_str(), material)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{material} PUT succeeds");
+
+        let scope = ResourceScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            user_id: UserId::new(&target_id).expect("target user"),
+            agent_id: agent_id.map(|value| AgentId::new(value).expect("agent")),
+            project_id: project_id.map(|value| ProjectId::new(value).expect("project")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let store = harness._runtime.services().secret_store_for_test();
+        let lease = store
+            .lease_once(&scope, &handle)
+            .await
+            .unwrap_or_else(|error| panic!("{material} scope reads its secret: {error}"));
+        let stored = store
+            .consume(&scope, lease.id)
+            .await
+            .unwrap_or_else(|error| panic!("{material} lease consumes: {error}"));
+        assert_eq!(stored.expose_secret(), material);
+
+        let (status, deleted) = scoped_operator
+            .delete_secret(&target_id, handle.as_str())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{material} DELETE succeeds");
+        assert_eq!(deleted["deleted"].as_bool(), Some(true));
+        let err = store
+            .lease_once(&scope, &handle)
+            .await
+            .expect_err("DELETE removes from the matching optional scope");
+        assert!(
+            matches!(
+                err,
+                ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+            ),
+            "expected UnknownSecret for {material} after delete, got {err:?}"
+        );
+    }
 }
 
 #[tokio::test]

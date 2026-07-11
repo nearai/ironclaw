@@ -125,6 +125,36 @@ pub const ADMIN_USER_LIST_DEFAULT_LIMIT: usize = 100;
 /// response (and the backing directory scan) by passing a huge `limit`.
 pub const ADMIN_USER_LIST_MAX_LIMIT: usize = 200;
 
+/// Trusted owner scope for an admin-managed user secret.
+///
+/// The tenant and runtime dimensions come from the authenticated WebUI caller;
+/// `user_id` is the admin-selected target. Keeping them together prevents the
+/// scope dimensions from being reordered or dropped as the request crosses
+/// the product-workflow and composition boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminUserSecretScope {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+}
+
+impl AdminUserSecretScope {
+    pub fn new(
+        tenant_id: TenantId,
+        user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            user_id,
+            agent_id,
+            project_id,
+        }
+    }
+}
+
 #[async_trait]
 pub trait AdminUserService: Send + Sync {
     /// One bounded page of users in `tenant`, optionally filtered by `status`,
@@ -178,16 +208,11 @@ pub trait AdminUserService: Send + Sync {
 
     async fn count_active_admins(&self, tenant: &TenantId) -> Result<usize, AdminUserError>;
 
-    /// `agent_id` and `project_id` identify the trusted runtime owner scope
-    /// selected by the authenticated WebUI caller for the target user's secret
-    /// namespace. `None` keeps the corresponding dimension user-level,
-    /// matching pre-scoping behavior.
+    /// `scope` identifies the trusted caller-selected runtime namespace for the
+    /// target user. Omitted agent/project dimensions remain user-level.
     async fn list_secrets(
         &self,
-        tenant: &TenantId,
-        user_id: &UserId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
+        scope: &AdminUserSecretScope,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError>;
 
     /// Stores secret material under the target user plus the trusted runtime
@@ -195,10 +220,7 @@ pub trait AdminUserService: Send + Sync {
     /// remain user-level.
     async fn put_secret(
         &self,
-        tenant: &TenantId,
-        user_id: &UserId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
+        scope: &AdminUserSecretScope,
         handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError>;
@@ -207,10 +229,7 @@ pub trait AdminUserService: Send + Sync {
     /// `None` dimensions delete from the corresponding user-level scope.
     async fn delete_secret(
         &self,
-        tenant: &TenantId,
-        user_id: &UserId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
+        scope: &AdminUserSecretScope,
         handle: SecretHandle,
     ) -> Result<bool, AdminUserError>;
 }
@@ -293,20 +312,14 @@ impl AdminUserService for RejectingAdminUserService {
 
     async fn list_secrets(
         &self,
-        _tenant: &TenantId,
-        _user_id: &UserId,
-        _agent_id: Option<&AgentId>,
-        _project_id: Option<&ProjectId>,
+        _scope: &AdminUserSecretScope,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
 
     async fn put_secret(
         &self,
-        _tenant: &TenantId,
-        _user_id: &UserId,
-        _agent_id: Option<&AgentId>,
-        _project_id: Option<&ProjectId>,
+        _scope: &AdminUserSecretScope,
         _handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
@@ -315,10 +328,7 @@ impl AdminUserService for RejectingAdminUserService {
 
     async fn delete_secret(
         &self,
-        _tenant: &TenantId,
-        _user_id: &UserId,
-        _agent_id: Option<&AgentId>,
-        _project_id: Option<&ProjectId>,
+        _scope: &AdminUserSecretScope,
         _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Unavailable)
