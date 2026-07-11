@@ -1,27 +1,26 @@
 //! Composition-only runtime dispatch contracts for IronClaw Reborn.
 //!
-//! `ironclaw_dispatcher` wires validated extension descriptors to runtime lanes. It
-//! does not parse extension manifests, implement sandbox policy, reserve budget
-//! itself, or execute product workflows. Those responsibilities stay in the
-//! owning service crates.
+//! `ironclaw_dispatcher` routes already-authorized capability invocations to
+//! prebound adapters resolved by capability id through the injected
+//! [`ToolResolver`]. It does not select packages or runtime kinds, parse
+//! extension manifests, implement sandbox policy, reserve budget itself, or
+//! execute product workflows. Binding construction (which adapter serves a
+//! capability, with which package, plan, and ports) happens at
+//! activation/registration time in the resolver implementations: the host
+//! built-in registry resolver in `ironclaw_host_runtime` and the
+//! active-snapshot resolver over `ironclaw_extension_host`.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
-use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
-    ResourceReservation, ResourceScope, ResourceUsage, RuntimeKind,
-    runtime_policy::{
-        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
-    },
-};
 pub use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
     CapabilityDisplayOutputPreview, DispatchError, RuntimeDispatchErrorKind,
+};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
+    ResourceScope, ResourceUsage, RuntimeKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
@@ -46,24 +45,39 @@ where
     }
 }
 
-/// Runtime-specific execution request handed to a registered adapter.
+/// Resolve a prebound capability binding by capability id (TOOL-1).
 ///
-/// The dispatcher has already validated the capability descriptor, provider
-/// package, runtime kind, and configured backend presence before building this
-/// request. Adapters own concrete runtime semantics and resource accounting.
-/// If `resource_reservation` is present, the adapter must reconcile or release
-/// that prepared reservation instead of creating a second reservation.
-pub struct RuntimeAdapterRequest<'a, F, G>
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
-    pub package: &'a ExtensionPackage,
-    pub descriptor: &'a CapabilityDescriptor,
-    pub filesystem: &'a F,
-    pub governor: &'a G,
-    pub runtime_policy: &'a EffectiveRuntimePolicy,
-    pub capability_id: &'a CapabilityId,
+/// Implementations are snapshot-shaped: resolution is a lookup into bindings
+/// constructed at activation/registration time, never a per-invocation
+/// package/runtime-kind selection. An unknown id returns `None` and dispatch
+/// fails before any adapter work (TOOL-2).
+pub trait ToolResolver: Send + Sync {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability>;
+}
+
+/// One prebound, ready-to-invoke capability binding.
+#[derive(Clone)]
+pub struct ResolvedCapability {
+    /// The owning extension (host built-ins resolve as the synthetic
+    /// `builtin` provider).
+    pub provider: ExtensionId,
+    /// The implementation lane, carried for dispatch events and results;
+    /// selection already happened when the binding was constructed.
+    pub runtime: RuntimeKind,
+    pub adapter: Arc<dyn BoundCapabilityAdapter>,
+}
+
+/// Per-invocation inputs to a prebound adapter. Everything static — package,
+/// descriptor, execution plan, filesystem, ports — was captured when the
+/// binding was constructed.
+///
+/// If `resource_reservation` is present, the binding owns the
+/// reconcile-or-release leg for it (same legs as the runtime lanes always
+/// had); the dispatcher only releases a reservation when resolution fails
+/// before any binding takes it.
+#[derive(Debug)]
+pub struct BoundCapabilityRequest {
+    pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
@@ -71,7 +85,20 @@ where
     pub input: Value,
 }
 
-/// Runtime-normalized adapter result before dispatcher adds stable identity fields.
+/// A prebound capability implementation behind [`ToolResolver`].
+///
+/// Implementations must not perform caller-facing authorization or approval
+/// resolution and must surface only redacted [`DispatchError`] categories.
+#[async_trait]
+pub trait BoundCapabilityAdapter: Send + Sync {
+    async fn dispatch_json(
+        &self,
+        request: BoundCapabilityRequest,
+    ) -> Result<RuntimeAdapterResult, DispatchError>;
+}
+
+/// Runtime-normalized adapter result before the dispatcher adds stable
+/// identity fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAdapterResult {
     pub output: Value,
@@ -81,117 +108,60 @@ pub struct RuntimeAdapterResult {
     pub output_bytes: u64,
 }
 
-/// Runtime backend adapter used by [`RuntimeDispatcher`].
-///
-/// Implementations must not perform caller-facing authorization or approval
-/// resolution. They may reserve/reconcile resources through the provided
-/// governor and must surface only redacted [`DispatchError`] categories.
-#[async_trait]
-pub trait RuntimeAdapter<F, G>: Send + Sync
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
-    ) -> Result<RuntimeAdapterResult, DispatchError>;
+/// First-`Some`-wins composition of resolvers (host built-ins chained with
+/// the active extension snapshot).
+pub struct ChainToolResolver {
+    resolvers: Vec<Arc<dyn ToolResolver>>,
 }
 
-/// Narrow runtime dispatcher over already-discovered extensions and services.
-pub struct RuntimeDispatcher<'a, F, G>
+impl ChainToolResolver {
+    pub fn new(resolvers: Vec<Arc<dyn ToolResolver>>) -> Self {
+        Self { resolvers }
+    }
+}
+
+impl ToolResolver for ChainToolResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        self.resolvers
+            .iter()
+            .find_map(|resolver| resolver.resolve(capability_id))
+    }
+}
+
+/// Narrow runtime dispatcher over prebound capability bindings.
+pub struct RuntimeDispatcher<'a, G>
 where
-    F: RootFilesystem,
     G: ResourceGovernor,
 {
-    registry: Arc<SharedExtensionRegistry>,
-    filesystem: ServiceHandle<'a, F>,
+    resolver: ServiceHandle<'a, dyn ToolResolver + 'a>,
     governor: ServiceHandle<'a, G>,
-    runtime_policy: EffectiveRuntimePolicy,
-    runtime_adapters: HashMap<RuntimeKind, ServiceHandle<'a, dyn RuntimeAdapter<F, G> + 'a>>,
     event_sink: Option<ServiceHandle<'a, dyn EventSink + 'a>>,
 }
 
-impl<'a, F, G> RuntimeDispatcher<'a, F, G>
+impl<'a, G> RuntimeDispatcher<'a, G>
 where
-    F: RootFilesystem,
     G: ResourceGovernor,
 {
-    pub fn new(registry: &'a ExtensionRegistry, filesystem: &'a F, governor: &'a G) -> Self {
+    pub fn new(resolver: &'a dyn ToolResolver, governor: &'a G) -> Self {
         Self {
-            registry: Arc::new(SharedExtensionRegistry::new(registry.clone())),
-            filesystem: ServiceHandle::Borrowed(filesystem),
+            resolver: ServiceHandle::Borrowed(resolver),
             governor: ServiceHandle::Borrowed(governor),
-            runtime_policy: default_runtime_policy(),
-            runtime_adapters: HashMap::new(),
             event_sink: None,
         }
     }
 
     pub fn from_arcs(
-        registry: Arc<ExtensionRegistry>,
-        filesystem: Arc<F>,
+        resolver: Arc<dyn ToolResolver>,
         governor: Arc<G>,
-    ) -> RuntimeDispatcher<'static, F, G>
+    ) -> RuntimeDispatcher<'static, G>
     where
-        F: 'static,
-        G: 'static,
-    {
-        Self::from_shared_registry(
-            Arc::new(SharedExtensionRegistry::new((*registry).clone())),
-            filesystem,
-            governor,
-        )
-    }
-
-    pub fn from_shared_registry(
-        registry: Arc<SharedExtensionRegistry>,
-        filesystem: Arc<F>,
-        governor: Arc<G>,
-    ) -> RuntimeDispatcher<'static, F, G>
-    where
-        F: 'static,
         G: 'static,
     {
         RuntimeDispatcher {
-            registry,
-            filesystem: ServiceHandle::Shared(filesystem),
+            resolver: ServiceHandle::Shared(resolver),
             governor: ServiceHandle::Shared(governor),
-            runtime_policy: default_runtime_policy(),
-            runtime_adapters: HashMap::new(),
             event_sink: None,
         }
-    }
-
-    /// Replaces the effective runtime policy passed to runtime adapters.
-    ///
-    /// The dispatcher does not resolve profiles; callers must supply the
-    /// concrete policy that should govern each dispatch request.
-    pub fn with_runtime_policy(mut self, runtime_policy: EffectiveRuntimePolicy) -> Self {
-        self.runtime_policy = runtime_policy;
-        self
-    }
-
-    pub fn with_runtime_adapter<T>(mut self, runtime: RuntimeKind, adapter: &'a T) -> Self
-    where
-        T: RuntimeAdapter<F, G> + 'a,
-    {
-        let adapter: &'a (dyn RuntimeAdapter<F, G> + 'a) = adapter;
-        self.runtime_adapters
-            .insert(runtime, ServiceHandle::Borrowed(adapter));
-        self
-    }
-
-    pub fn with_runtime_adapter_arc<T>(mut self, runtime: RuntimeKind, adapter: Arc<T>) -> Self
-    where
-        T: RuntimeAdapter<F, G> + 'static,
-        F: 'static,
-        G: 'static,
-    {
-        let adapter: Arc<dyn RuntimeAdapter<F, G>> = adapter;
-        self.runtime_adapters
-            .insert(runtime, ServiceHandle::Shared(adapter));
-        self
     }
 
     pub fn with_event_sink(mut self, sink: &'a dyn EventSink) -> Self {
@@ -229,85 +199,29 @@ where
         ))
         .await?;
 
-        let registry = self.registry.snapshot();
-        let descriptor = match registry.get_capability(&request.capability_id).cloned() {
-            Some(descriptor) => descriptor,
-            None => {
-                let error = DispatchError::UnknownCapability {
-                    capability: capability_id.clone(),
-                };
-                self.emit_dispatch_failure(scope, capability_id, None, None, &error)
-                    .await?;
-                return Err(error);
-            }
-        };
-        let package = match registry.get_extension(&descriptor.provider).cloned() {
-            Some(package) => package,
-            None => {
-                let error = DispatchError::UnknownProvider {
-                    capability: capability_id.clone(),
-                    provider: descriptor.provider.clone(),
-                };
-                self.emit_dispatch_failure(
-                    scope,
-                    capability_id,
-                    Some(descriptor.provider.clone()),
-                    Some(descriptor.runtime),
-                    &error,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
-        let package_runtime = package.manifest.runtime_kind();
-        if descriptor.runtime != package_runtime {
-            let error = DispatchError::RuntimeMismatch {
+        let Some(resolved) = self.resolver.as_ref().resolve(&request.capability_id) else {
+            let error = DispatchError::UnknownCapability {
                 capability: capability_id.clone(),
-                descriptor_runtime: descriptor.runtime,
-                package_runtime,
             };
-            self.emit_dispatch_failure(
-                scope,
-                capability_id,
-                Some(descriptor.provider.clone()),
-                Some(descriptor.runtime),
-                &error,
-            )
-            .await?;
-            return Err(error);
-        }
-
-        let runtime = descriptor.runtime;
-        let Some(adapter) = self.runtime_adapters.get(&runtime) else {
-            let error = DispatchError::MissingRuntimeBackend { runtime };
-            self.emit_dispatch_failure(
-                scope,
-                capability_id,
-                Some(descriptor.provider.clone()),
-                Some(runtime),
-                &error,
-            )
-            .await?;
+            self.emit_dispatch_failure(scope, capability_id, None, None, &error)
+                .await?;
             return Err(error);
         };
+        let provider = resolved.provider.clone();
+        let runtime = resolved.runtime;
 
         self.emit_event(RuntimeEvent::runtime_selected(
             scope.clone(),
             capability_id.clone(),
-            descriptor.provider.clone(),
+            provider.clone(),
             runtime,
         ))
         .await?;
 
-        let execution = match adapter
-            .as_ref()
-            .dispatch_json(RuntimeAdapterRequest {
-                package: &package,
-                descriptor: &descriptor,
-                filesystem: self.filesystem.as_ref(),
-                governor: self.governor.as_ref(),
-                runtime_policy: &self.runtime_policy,
-                capability_id: &request.capability_id,
+        let execution = match resolved
+            .adapter
+            .dispatch_json(BoundCapabilityRequest {
+                capability_id: request.capability_id,
                 scope: request.scope,
                 estimate: request.estimate,
                 mounts: request.mounts,
@@ -321,7 +235,7 @@ where
                 self.emit_dispatch_failure(
                     scope,
                     capability_id,
-                    Some(descriptor.provider.clone()),
+                    Some(provider),
                     Some(runtime),
                     &error,
                 )
@@ -333,7 +247,7 @@ where
         self.emit_event(RuntimeEvent::dispatch_succeeded(
             scope,
             capability_id.clone(),
-            descriptor.provider.clone(),
+            provider.clone(),
             runtime,
             execution.output_bytes,
         ))
@@ -341,7 +255,7 @@ where
 
         Ok(CapabilityDispatchResult {
             capability_id,
-            provider: descriptor.provider.clone(),
+            provider,
             runtime,
             output: execution.output,
             display_preview: execution.display_preview,
@@ -426,24 +340,9 @@ where
     }
 }
 
-fn default_runtime_policy() -> EffectiveRuntimePolicy {
-    EffectiveRuntimePolicy {
-        deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::SecureDefault,
-        resolved_profile: RuntimeProfile::SecureDefault,
-        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-        process_backend: ProcessBackendKind::None,
-        network_mode: NetworkMode::Deny,
-        secret_mode: SecretMode::BrokeredHandles,
-        approval_policy: ApprovalPolicy::AskAlways,
-        audit_mode: AuditMode::LocalMinimal,
-    }
-}
-
 #[async_trait]
-impl<F, G> CapabilityDispatcher for RuntimeDispatcher<'_, F, G>
+impl<G> CapabilityDispatcher for RuntimeDispatcher<'_, G>
 where
-    F: RootFilesystem,
     G: ResourceGovernor,
 {
     async fn dispatch_json(
@@ -453,6 +352,3 @@ where
         RuntimeDispatcher::dispatch_json(self, request).await
     }
 }
-
-// Removed: dispatch_error_kind was a local copy of DispatchError::event_kind() from ironclaw_host_api.
-// Call error.event_kind() directly instead.

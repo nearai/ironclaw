@@ -3150,13 +3150,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_dispatcher",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "dispatcher still reaches extension routing until the kernel consolidation makes dispatcher an internal kernel module",
-    },
-    LayerMatrixException {
         crate_name: "ironclaw_event_projections",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",

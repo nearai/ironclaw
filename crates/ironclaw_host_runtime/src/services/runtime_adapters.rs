@@ -7,17 +7,23 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 
+use ironclaw_extensions::ExtensionPackage;
+use ironclaw_host_api::{
+    CapabilityDescriptor, MountView, ResourceEstimate, ResourceReservation,
+    runtime_policy::EffectiveRuntimePolicy,
+};
+use serde_json::Value;
+
 use super::wasm_execution::{ReservationGuard, execute_prepared_wasm, run_wasm_prepare_blocking};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
     McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
-    RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, RuntimeKind, ScriptError, ScriptExecutionRequest, ScriptExecutor,
-    ScriptInvocation, SharedRuntimeHttpEgress, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRuntime,
-    WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeKind, ScriptError,
+    ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
+    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
+    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::{
     FirstPartyCapabilityError,
@@ -26,6 +32,50 @@ use crate::{
         trace_runtime_error, trace_runtime_ok,
     },
 };
+
+/// Per-invocation execution request handed to a runtime lane.
+///
+/// Host-internal seam behind the prebound
+/// [`ironclaw_dispatcher::BoundCapabilityAdapter`] bindings: the registry-lane
+/// resolver captures the static fields (package, descriptor, runtime policy,
+/// filesystem, governor) when it constructs a binding and materializes one of
+/// these per call. If `resource_reservation` is present, the lane must
+/// reconcile or release that prepared reservation instead of creating a
+/// second reservation.
+pub(crate) struct RuntimeAdapterRequest<'a, F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    pub package: &'a ExtensionPackage,
+    pub descriptor: &'a CapabilityDescriptor,
+    pub filesystem: &'a F,
+    pub governor: &'a G,
+    pub runtime_policy: &'a EffectiveRuntimePolicy,
+    pub capability_id: &'a CapabilityId,
+    pub scope: ResourceScope,
+    pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
+    pub input: Value,
+}
+
+/// One runtime execution lane (Script/MCP/first-party/WASM).
+///
+/// Implementations must not perform caller-facing authorization or approval
+/// resolution. They may reserve/reconcile resources through the provided
+/// governor and must surface only redacted [`DispatchError`] categories.
+#[async_trait]
+pub(crate) trait RuntimeAdapter<F, G>: Send + Sync
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError>;
+}
 
 type FirstPartyLatencyFields = RuntimeLatencyFields;
 

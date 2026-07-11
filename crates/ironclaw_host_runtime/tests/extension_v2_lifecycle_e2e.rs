@@ -5,8 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    CapabilityDispatcher, DispatchError, RuntimeAdapter, RuntimeAdapterRequest,
-    RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
+    BoundCapabilityAdapter, BoundCapabilityRequest, CapabilityDispatcher, DispatchError,
+    ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
+    ToolResolver,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
@@ -91,10 +92,23 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let adapter = Arc::new(RecordingAdapter::new(
         RuntimeKind::Script,
         json!({"message":"script ok"}),
+        Arc::clone(&governor),
     ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
+    // The registry-lane resolver's selection semantics are pinned in
+    // `ironclaw_host_runtime::services` tests; this e2e drives the dispatch
+    // flow through a binding scripted from the discovered descriptor.
+    let descriptor = discovered
+        .get_capability(&CapabilityId::new("script.echo").unwrap())
+        .unwrap();
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: descriptor.id.clone(),
+        resolved: ResolvedCapability {
+            provider: descriptor.provider.clone(),
+            runtime: descriptor.runtime,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
@@ -113,6 +127,8 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
         .unwrap();
 
     assert_eq!(result.output, json!({"message":"script ok"}));
+    assert_eq!(result.provider, extension_id);
+    assert_eq!(result.runtime, RuntimeKind::Script);
     assert_eq!(result.receipt.id, reservation_id);
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
@@ -120,12 +136,10 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 
     let requests = adapter.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].provider, extension_id);
     assert_eq!(
         requests[0].capability_id,
         CapabilityId::new("script.echo").unwrap()
     );
-    assert_eq!(requests[0].runtime, RuntimeKind::Script);
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].estimate, estimate);
     assert_eq!(requests[0].mounts, None);
@@ -444,14 +458,16 @@ async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required
 struct RecordingAdapter {
     runtime: RuntimeKind,
     output: Value,
+    governor: Arc<InMemoryResourceGovernor>,
     requests: Arc<Mutex<Vec<RecordedAdapterRequest>>>,
 }
 
 impl RecordingAdapter {
-    fn new(runtime: RuntimeKind, output: Value) -> Self {
+    fn new(runtime: RuntimeKind, output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
         Self {
             runtime,
             output,
+            governor,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -463,9 +479,7 @@ impl RecordingAdapter {
 
 #[derive(Debug, Clone, PartialEq)]
 struct RecordedAdapterRequest {
-    provider: ExtensionId,
     capability_id: CapabilityId,
-    runtime: RuntimeKind,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     mounts: Option<MountView>,
@@ -473,16 +487,25 @@ struct RecordedAdapterRequest {
     input: Value,
 }
 
+struct SingleCapabilityResolver {
+    capability_id: CapabilityId,
+    resolved: ResolvedCapability,
+}
+
+impl ToolResolver for SingleCapabilityResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        (capability_id == &self.capability_id).then(|| self.resolved.clone())
+    }
+}
+
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl BoundCapabilityAdapter for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: BoundCapabilityRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
-            provider: request.package.id.clone(),
             capability_id: request.capability_id.clone(),
-            runtime: request.descriptor.runtime,
             scope: request.scope.clone(),
             estimate: request.estimate.clone(),
             mounts: request.mounts.clone(),
@@ -504,14 +527,14 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
         };
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
-            None => request
+            None => self
                 .governor
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| {
                     dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
                 })?,
         };
-        let receipt = request
+        let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| {

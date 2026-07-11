@@ -182,11 +182,38 @@ Rules — kept short on purpose:
 
 ## 4. Tool dispatch (TOOL)
 
-- [ ] TOOL-1 Dispatch resolves a prebound adapter by capability id; the
-  package/runtime-kind selection per invocation is deleted.
-- [ ] TOOL-2 Unknown capability fails before any adapter work.
-- [ ] TOOL-3 Authorization, approvals, obligations, resource reservation,
-  events, and audit behavior are unchanged through the real dispatcher.
+- [x] TOOL-1 Dispatch resolves a prebound adapter by capability id; the
+  package/runtime-kind selection per invocation is deleted. —
+  `RuntimeDispatcher` resolves through the injected `ToolResolver` port and
+  the per-invocation registry/package/runtime-kind selection is gone from
+  `crates/ironclaw_dispatcher` (the crate no longer depends on
+  `ironclaw_extensions` at all);
+  `dispatcher_routes_capability_through_resolved_binding`
+  (`crates/ironclaw_dispatcher/tests/dispatch_contract.rs`) plus
+  `resolver_prebinds_and_dispatches_through_the_registered_lane` /
+  `resolver_tracks_registry_mutations_across_versions`
+  (`crates/ironclaw_host_runtime/src/services/tests/registry_lane_tool_resolver.rs`
+  — bindings rebuilt per registry generation, resolution is a map lookup).
+  The active-snapshot resolver for `ExtensionHost`-activated extensions
+  chains in with the P2 composition cutover.
+- [x] TOOL-2 Unknown capability fails before any adapter work. —
+  `dispatcher_fails_unknown_capability_before_any_binding_work` and
+  `dispatcher_releases_prepared_reservation_when_resolution_fails`
+  (`crates/ironclaw_dispatcher/tests/dispatch_contract.rs`).
+- [x] TOOL-3 Authorization, approvals, obligations, resource reservation,
+  events, and audit behavior are unchanged through the real dispatcher. —
+  authorization keeps its own registry lookup in `CapabilityHost`
+  (independent of the deleted dispatcher lookup); pinned through the real
+  dispatcher by `capability_host_dispatcher_integration.rs` (invoke
+  completes run, approval block/resume, wrong-user resume rejected, expired
+  lease rejected before dispatch), `reborn_invoke_vertical_slice.rs`
+  (obligations fail before dispatch; resources + events),
+  `event_dispatch_contract.rs` (sequence, best-effort sink, redacted kinds),
+  and the full composition suite. One documented event delta: a
+  missing-backend failure now emits `runtime_selected` before
+  `dispatch_failed` (selection succeeded when the binding was constructed;
+  the backend is what's missing) — pinned in
+  `unconfigured_lane_fails_missing_backend_and_releases_prepared_reservation`.
 - [ ] TOOL-4 Credential injection derives from the resolved declaration; an
   adapter cannot reach an undeclared credential, egress host, or port.
 - [ ] TOOL-5 Missing credential raises the generic auth gate and resumes after

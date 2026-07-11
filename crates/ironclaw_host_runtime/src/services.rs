@@ -8,6 +8,7 @@
 
 mod process_executor;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -18,9 +19,7 @@ use ironclaw_authorization::{
     CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
-use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
-};
+use ironclaw_dispatcher::{RuntimeAdapterResult, RuntimeDispatcher, ToolResolver};
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
@@ -95,6 +94,7 @@ mod builder;
 mod production_services;
 mod production_wiring;
 mod runtime_adapters;
+mod tool_resolver;
 mod wasm_diagnostics;
 mod wasm_execution;
 
@@ -107,9 +107,10 @@ pub use production_wiring::{
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
 };
 use runtime_adapters::{
-    FirstPartyRuntimeAdapter, McpRuntimeAdapter, ScriptRuntimeAdapter,
-    ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
+    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRequest,
+    ScriptRuntimeAdapter, ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
 };
+use tool_resolver::RegistryLaneToolResolver;
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
 ///
@@ -383,18 +384,23 @@ where
             .wasm_runtime_credential_provider_captured
     }
 
-    /// Builds a runtime dispatcher with every configured runtime adapter.
-    fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
-        let mut dispatcher = RuntimeDispatcher::from_shared_registry(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.filesystem),
+    /// Builds a runtime dispatcher over the registry-lane resolver.
+    fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, G> {
+        let mut dispatcher = RuntimeDispatcher::from_arcs(
+            self.registry_lane_tool_resolver(),
             Arc::clone(&self.governor),
-        )
-        .with_runtime_policy(
-            self.runtime_policy
-                .clone()
-                .unwrap_or_else(local_testing_runtime_policy),
         );
+        if let Some(event_sink) = &self.event_sink {
+            dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
+        }
+
+        dispatcher
+    }
+
+    /// Builds the registry-backed [`ToolResolver`]: every configured runtime
+    /// lane, prebound per capability whenever the shared registry publishes a
+    /// new version.
+    fn registry_lane_tool_resolver(&self) -> Arc<dyn ToolResolver> {
         let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
             Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
             runtime_http_egress(&self.runtime_http_egress),
@@ -414,8 +420,9 @@ where
         let invocation_services: Arc<dyn InvocationServicesResolver> =
             Arc::new(invocation_services_resolver);
 
+        let mut lanes: HashMap<RuntimeKind, Arc<dyn RuntimeAdapter<F, G>>> = HashMap::new();
         if let Some(runtime) = &self.script_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
+            lanes.insert(
                 RuntimeKind::Script,
                 Arc::new(ServiceResolvedRuntimeAdapter::new(
                     Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
@@ -424,7 +431,7 @@ where
             );
         }
         if let Some(runtime) = &self.mcp_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
+            lanes.insert(
                 RuntimeKind::Mcp,
                 Arc::new(ServiceResolvedRuntimeAdapter::new(
                     Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
@@ -433,7 +440,7 @@ where
             );
         }
         if let Some(runtime) = &self.first_party_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
+            lanes.insert(
                 RuntimeKind::FirstParty,
                 Arc::new(FirstPartyRuntimeAdapter::from_registry(
                     Arc::clone(runtime),
@@ -442,7 +449,7 @@ where
             );
         }
         if let Some(runtime) = &self.wasm_runtime {
-            dispatcher = dispatcher.with_runtime_adapter_arc(
+            lanes.insert(
                 RuntimeKind::Wasm,
                 Arc::new(ServiceResolvedRuntimeAdapter::new(
                     Arc::clone(runtime),
@@ -450,11 +457,16 @@ where
                 )),
             );
         }
-        if let Some(event_sink) = &self.event_sink {
-            dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
-        }
 
-        dispatcher
+        Arc::new(RegistryLaneToolResolver::new(
+            Arc::clone(&self.registry),
+            lanes,
+            Arc::clone(&self.filesystem),
+            Arc::clone(&self.governor),
+            self.runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
+        ))
     }
 
     /// Builds the upper facade without production validation.

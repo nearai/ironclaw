@@ -11,11 +11,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
+    BoundCapabilityAdapter, BoundCapabilityRequest, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
@@ -41,8 +41,8 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 
 #[tokio::test]
 async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_and_events() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"via":"host-runtime"})));
-    let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"via":"host-runtime"}));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
     let authorizer = Arc::new(CountingGrantAuthorizer::default());
     let run_state = Arc::new(InMemoryRunStateStore::new());
@@ -114,8 +114,8 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
 
 #[tokio::test]
 async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispatch() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
-    let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let runtime = DefaultHostRuntime::new(
@@ -182,13 +182,15 @@ struct RecordedRuntimeRequest {
 
 struct RecordingRuntimeAdapter {
     output: Value,
+    governor: Arc<InMemoryResourceGovernor>,
     requests: Mutex<Vec<RecordedRuntimeRequest>>,
 }
 
 impl RecordingRuntimeAdapter {
-    fn new(output: Value) -> Self {
+    fn new(output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
         Self {
             output,
+            governor,
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -203,10 +205,10 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        request: BoundCapabilityRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
             capability_id: request.capability_id.clone(),
@@ -223,7 +225,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
         };
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
-            None => request
+            None => self
                 .governor
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
@@ -231,7 +233,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 })?,
         };
         let output_bytes = usage.output_bytes;
-        let receipt = request
+        let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
@@ -244,6 +246,17 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             receipt,
             output_bytes,
         })
+    }
+}
+
+struct SingleCapabilityResolver {
+    capability_id: CapabilityId,
+    resolved: ResolvedCapability,
+}
+
+impl ToolResolver for SingleCapabilityResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        (capability_id == &self.capability_id).then(|| self.resolved.clone())
     }
 }
 
@@ -292,22 +305,29 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
 }
 
 fn runtime_dispatcher_stack(
-    adapter: Arc<RecordingRuntimeAdapter>,
+    output: Value,
 ) -> (
     Arc<ExtensionRegistry>,
-    RuntimeDispatcher<'static, LocalFilesystem, InMemoryResourceGovernor>,
+    RuntimeDispatcher<'static, InMemoryResourceGovernor>,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,
+    Arc<RecordingRuntimeAdapter>,
 ) {
     let registry = Arc::new(registry_with_echo_capability());
-    let filesystem = Arc::new(LocalFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::clone(&registry), filesystem, Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Wasm, adapter)
-            .with_event_sink_arc(Arc::new(events.clone()));
-    (registry, dispatcher, governor, events)
+    let adapter = Arc::new(RecordingRuntimeAdapter::new(output, Arc::clone(&governor)));
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: capability_id(),
+        resolved: ResolvedCapability {
+            provider: ExtensionId::new("echo").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor))
+        .with_event_sink_arc(Arc::new(events.clone()));
+    (registry, dispatcher, governor, events, adapter)
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
