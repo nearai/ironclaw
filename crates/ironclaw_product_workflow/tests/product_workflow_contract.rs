@@ -2995,6 +2995,7 @@ async fn before_inbound_policy_path_probes_replay_once() {
 async fn before_inbound_policy_rewrite_revalidates_payload_before_turn_path() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.rewrite_user_message(UserMessagePayload {
+        requested_model: None,
         text: "a".repeat(64 * 1024 + 1),
         attachments: vec![],
         trigger: ProductTriggerReason::DirectChat,

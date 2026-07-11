@@ -1985,6 +1985,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         let submit = turn_store
             .submit_turn(
                 SubmitTurnRequest {
+                    requested_model: None,
                     scope: turn_scope.clone(),
                     actor: TurnActor::new(user_id),
                     accepted_message_ref: AcceptedMessageRef::new("accepted-libsql-restart")
@@ -3589,6 +3590,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let SubmitTurnResponse::Accepted { run_id, status, .. } = composition
         .coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: fixture.context.scope.clone(),
             actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("accepted-runtime-planned").unwrap(),
@@ -3761,6 +3763,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let SubmitTurnResponse::Accepted { run_id, .. } = composition
         .coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: fixture.context.scope.clone(),
             actor: TurnActor::new(UserId::new("user-preminted-wake").unwrap()),
             accepted_message_ref: AcceptedMessageRef::new("accepted-preminted").unwrap(),
@@ -8692,6 +8695,7 @@ async fn queue_fixture_turn(
     let submit = turn_store
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: fixture.context.scope.clone(),
                 actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
                 accepted_message_ref: AcceptedMessageRef::new(format!(

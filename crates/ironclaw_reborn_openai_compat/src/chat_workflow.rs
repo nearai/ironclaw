@@ -795,7 +795,8 @@ fn chat_user_message_and_attachments(
             bytes: image.bytes,
         })
         .collect();
-    let payload = UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)?;
+    let payload = UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)?
+        .with_requested_model(Some(request.model.clone()));
     Ok((payload, attachments))
 }
 

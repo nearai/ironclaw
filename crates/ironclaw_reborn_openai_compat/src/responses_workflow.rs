@@ -1386,7 +1386,8 @@ fn responses_user_message_payload(
         responses_input_to_product_text(request)?,
         vec![],
         ProductTriggerReason::DirectChat,
-    )?)
+    )?
+    .with_requested_model(Some(request.model.clone())))
 }
 
 fn responses_input_to_product_text(

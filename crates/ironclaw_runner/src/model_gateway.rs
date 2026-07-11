@@ -391,7 +391,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -426,7 +433,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -461,7 +475,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -501,7 +522,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id.as_str()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -979,14 +1007,22 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
 fn request_model_override<P>(
     route: &LlmModelProfileRoute,
     provider: &P,
+    requested_model: Option<&str>,
 ) -> Result<String, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
-    let model_override = route
-        .model_override
-        .as_deref()
+    // A per-run caller-requested model (an advisory route hint set at submit)
+    // takes precedence over the profile default. Providers that honor
+    // per-request overrides (e.g. NEAR AI) serve the requested model; providers
+    // that bake the model at construction ignore it and fall back to their
+    // active model — the "route if the provider can serve it, else fall back"
+    // behavior, decided at the provider boundary rather than a route allowlist.
+    let model_override = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
         .map(str::to_string)
+        .or_else(|| route.model_override.as_deref().map(str::to_string))
         .unwrap_or_else(|| provider.active_model_name());
     let trimmed = model_override.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {

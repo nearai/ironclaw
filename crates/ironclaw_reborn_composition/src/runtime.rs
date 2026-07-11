@@ -2351,6 +2351,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
@@ -7727,6 +7728,7 @@ output_schema_ref = "schemas/write.output.json"
         let parent = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: parent_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
@@ -10069,6 +10071,7 @@ output_schema_ref = "schemas/write.output.json"
         let submitted = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:audit").unwrap(),
@@ -10650,6 +10653,7 @@ output_schema_ref = "schemas/write.output.json"
         let submitted_a = runtime
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),

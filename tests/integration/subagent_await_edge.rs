@@ -410,6 +410,7 @@ async fn rollback_deleted_edge_is_reconstructed_so_the_parent_still_gets_the_res
     // state a real parent is in while its blocking-mode child runs.
     let submitted = coordinator
         .submit_turn(ironclaw_turns::SubmitTurnRequest {
+            requested_model: None,
             scope: parent_scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:parent-rollback")
@@ -705,6 +706,7 @@ async fn mixed_status_batch_group_reports_each_members_own_status_and_reason() {
     // 1. Submit and block the parent on a shared dependent-run gate.
     let submitted = coordinator
         .submit_turn(ironclaw_turns::SubmitTurnRequest {
+            requested_model: None,
             scope: parent_scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:parent-mixed-batch")

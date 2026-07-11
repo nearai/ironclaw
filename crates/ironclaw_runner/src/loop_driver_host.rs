@@ -1968,9 +1968,14 @@ where
                 .validate()
                 .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
             let Some(resolver) = &self.model_route_resolver else {
-                return Err(RebornLoopDriverHostError::InvalidRequest {
-                    reason: "model route resolver is required for this host".to_string(),
-                });
+                // No route resolver is wired (the default product runtime). The
+                // snapshot is a caller-requested model *hint* rather than an
+                // operator-approved route: pass it through unvalidated so the
+                // non-routed gateway can honor the model id when its provider
+                // supports per-request overrides and otherwise fall back to the
+                // active model. Routed hosts (resolver present) still validate
+                // and fail closed below.
+                return Ok(run_context);
             };
             let slot = slot_for_model_profile(&run_context)?;
             let route = crate::model_routes::ModelRoute::new(

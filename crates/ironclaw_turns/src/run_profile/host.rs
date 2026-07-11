@@ -518,6 +518,10 @@ fn origin_input_cursor_token() -> LoopInputCursorToken {
     LoopInputCursorToken("input-cursor:origin".to_string())
 }
 
+/// Placeholder component value marking a [`LoopModelRouteSnapshot`] as a
+/// caller-requested advisory hint rather than an operator-resolved route.
+const ADVISORY_MODEL_ROUTE_COMPONENT: &str = "requested";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRouteSnapshot {
     pub provider_id: String,
@@ -550,6 +554,38 @@ impl LoopModelRouteSnapshot {
         let snapshot = Self::new(provider_id, model_id, config_version, auth_version);
         snapshot.validate()?;
         Ok(snapshot)
+    }
+
+    /// Build an *advisory* route from a caller-requested model string. The
+    /// provider/config/auth components are placeholders (`"requested"`) — only
+    /// `model_id` carries meaning. Advisory routes exist so a caller (e.g. an
+    /// OpenAI-compatible client) can request a model without an operator-approved
+    /// route binding: the non-routed gateway honors the model id when its
+    /// provider supports per-request overrides and otherwise falls back to the
+    /// active model, while routed hosts still validate the route and fail closed.
+    /// Returns `None` when the model is empty or not a valid route component, so
+    /// the run falls back to the deployment's active model.
+    pub fn advisory(requested_model: &str) -> Option<Self> {
+        let model = requested_model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        Self::try_new(
+            ADVISORY_MODEL_ROUTE_COMPONENT,
+            model,
+            ADVISORY_MODEL_ROUTE_COMPONENT,
+            ADVISORY_MODEL_ROUTE_COMPONENT,
+        )
+        .ok()
+    }
+
+    /// Whether this route is a caller-requested advisory hint (see
+    /// [`LoopModelRouteSnapshot::advisory`]) rather than an operator-resolved
+    /// route.
+    pub fn is_advisory(&self) -> bool {
+        self.provider_id == ADVISORY_MODEL_ROUTE_COMPONENT
+            && self.config_version == ADVISORY_MODEL_ROUTE_COMPONENT
+            && self.auth_version == ADVISORY_MODEL_ROUTE_COMPONENT
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -2580,6 +2616,33 @@ fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advisory_model_route_carries_model_and_marks_itself_advisory() {
+        let route = LoopModelRouteSnapshot::advisory("gpt-4o").expect("valid model");
+        assert_eq!(route.model_id, "gpt-4o");
+        assert!(route.is_advisory());
+        assert!(route.validate().is_ok());
+    }
+
+    #[test]
+    fn advisory_model_route_trims_and_rejects_empty_or_invalid_models() {
+        assert_eq!(LoopModelRouteSnapshot::advisory("   "), None);
+        assert_eq!(LoopModelRouteSnapshot::advisory(""), None);
+        // A model id with a space is not a valid route component → falls back.
+        assert_eq!(LoopModelRouteSnapshot::advisory("gpt 4o"), None);
+        // Surrounding whitespace is trimmed before validation.
+        assert_eq!(
+            LoopModelRouteSnapshot::advisory("  claude-opus-4-6  ").map(|route| route.model_id),
+            Some("claude-opus-4-6".to_string())
+        );
+    }
+
+    #[test]
+    fn operator_resolved_route_is_not_advisory() {
+        let route = LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1");
+        assert!(!route.is_advisory());
+    }
 
     struct DefinitionPort {
         definitions: Vec<ProviderToolDefinition>,

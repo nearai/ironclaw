@@ -15,6 +15,7 @@ use crate::outbound::ProjectionCursor;
 use crate::redaction::RedactedString;
 
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
+const REQUESTED_MODEL_MAX_BYTES: usize = 256;
 const COMMAND_MAX_BYTES: usize = 256;
 const COMMAND_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
 const THREAD_HINT_MAX_BYTES: usize = 512;
@@ -99,6 +100,13 @@ pub struct UserMessagePayload {
     pub text: String,
     pub attachments: Vec<ProductAttachmentDescriptor>,
     pub trigger: ProductTriggerReason,
+    /// Caller-requested model for this turn (e.g. an OpenAI-compatible client's
+    /// `model` field). A model *hint*, not authority: the coordinator routes to
+    /// it only when the operator has it configured, otherwise it falls back to
+    /// the deployment's active model. `None` for surfaces that don't select a
+    /// model (chat UI, channels).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
 }
 
 impl UserMessagePayload {
@@ -111,13 +119,25 @@ impl UserMessagePayload {
             text: text.into(),
             attachments,
             trigger,
+            requested_model: None,
         };
         payload.validate()?;
         Ok(payload)
     }
 
+    /// Attach a caller-requested model to this payload. See
+    /// [`UserMessagePayload::requested_model`].
+    pub fn with_requested_model(mut self, requested_model: Option<String>) -> Self {
+        self.requested_model = requested_model.filter(|model| !model.is_empty());
+        self
+    }
+
     pub fn validate(&self) -> Result<(), ProductAdapterError> {
-        validate_payload_string("user message text", &self.text, USER_MESSAGE_TEXT_MAX_BYTES)
+        validate_payload_string("user message text", &self.text, USER_MESSAGE_TEXT_MAX_BYTES)?;
+        if let Some(model) = &self.requested_model {
+            validate_payload_string("requested model", model, REQUESTED_MODEL_MAX_BYTES)?;
+        }
+        Ok(())
     }
 }
 
@@ -126,6 +146,8 @@ struct UserMessagePayloadWire {
     text: String,
     attachments: Vec<ProductAttachmentDescriptor>,
     trigger: ProductTriggerReason,
+    #[serde(default)]
+    requested_model: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for UserMessagePayload {
@@ -134,7 +156,9 @@ impl<'de> Deserialize<'de> for UserMessagePayload {
         D: Deserializer<'de>,
     {
         let wire = UserMessagePayloadWire::deserialize(deserializer)?;
-        Self::new(wire.text, wire.attachments, wire.trigger).map_err(serde::de::Error::custom)
+        Self::new(wire.text, wire.attachments, wire.trigger)
+            .map(|payload| payload.with_requested_model(wire.requested_model))
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -881,6 +905,37 @@ mod tests {
     use super::*;
     use crate::auth::AuthRequirement;
     use crate::external::{ExternalActorRef, ExternalConversationRef, ExternalEventId};
+
+    #[test]
+    fn user_message_payload_round_trips_and_filters_requested_model() {
+        let with_model = UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+            .unwrap()
+            .with_requested_model(Some("gpt-4o".to_string()));
+        assert_eq!(with_model.requested_model.as_deref(), Some("gpt-4o"));
+        // Round-trips over the wire (custom Deserialize via the wire struct).
+        let decoded: UserMessagePayload =
+            serde_json::from_str(&serde_json::to_string(&with_model).unwrap()).unwrap();
+        assert_eq!(decoded.requested_model.as_deref(), Some("gpt-4o"));
+
+        // Omitted → None, and not serialized when absent.
+        let without =
+            UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat).unwrap();
+        assert!(without.requested_model.is_none());
+        assert!(
+            !serde_json::to_string(&without)
+                .unwrap()
+                .contains("requested_model")
+        );
+
+        // An empty requested model is filtered to None.
+        assert!(
+            UserMessagePayload::new("hi", vec![], ProductTriggerReason::DirectChat)
+                .unwrap()
+                .with_requested_model(Some(String::new()))
+                .requested_model
+                .is_none()
+        );
+    }
 
     fn sample_context() -> TrustedInboundContext {
         let evidence = ProtocolAuthEvidence::test_verified(

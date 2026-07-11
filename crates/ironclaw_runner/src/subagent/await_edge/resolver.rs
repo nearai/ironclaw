@@ -1375,6 +1375,7 @@ mod tests {
         );
         let root_run_id = match coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: root_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:tr-root")
