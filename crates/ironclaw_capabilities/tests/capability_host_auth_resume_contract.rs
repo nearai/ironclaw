@@ -59,6 +59,7 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -85,6 +86,83 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
     assert!(dispatcher.has_request());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
+}
+
+#[tokio::test]
+async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
+    let registry = registry_with_echo_capability();
+    let authorizer = GrantAuthorizer::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+
+    let mut alice_context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let alice = UserId::new("slack-alice").expect("valid authenticated actor user id");
+    alice_context.authenticated_actor_user_id = Some(alice.clone());
+    let scope = alice_context.resource_scope.clone();
+    let invocation_id = alice_context.invocation_id;
+    run_state
+        .start(RunStart {
+            invocation_id,
+            scope: scope.clone(),
+            capability_id: capability_id(),
+            authenticated_actor_user_id: Some(alice),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .unwrap();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let mut forged_context = alice_context.clone();
+    forged_context.authenticated_actor_user_id =
+        Some(UserId::new("slack-bob").expect("valid forged authenticated actor user id"));
+    let forged_error = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context: forged_context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "resume"}),
+            trust_decision: trust_decision(),
+            approval_request_id: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            forged_error,
+            CapabilityInvocationError::AuthorizationDenied {
+                reason: DenyReason::PolicyDenied,
+                ..
+            }
+        ),
+        "changed authenticated actor must fail closed, got {forged_error:?}"
+    );
+    assert_eq!(dispatcher.dispatch_count(), 0);
+
+    host.auth_resume_json(CapabilityAuthResumeRequest {
+        context: alice_context,
+        capability_id: capability_id(),
+        estimate: ResourceEstimate::default(),
+        input: json!({"message": "resume"}),
+        trust_decision: trust_decision(),
+        approval_request_id: None,
+    })
+    .await
+    .expect("the original authenticated actor can resume");
+
+    let dispatched = dispatcher.take_request();
+    assert_eq!(
+        dispatched
+            .authenticated_actor_user_id
+            .as_ref()
+            .map(UserId::as_str),
+        Some("slack-alice")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +250,7 @@ async fn auth_resume_json_rejects_run_in_running_status() {
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -427,6 +506,7 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(), // echo.say
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -498,6 +578,7 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -594,6 +675,7 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -661,6 +743,7 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -1490,6 +1573,7 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -1575,6 +1659,7 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -2536,6 +2621,7 @@ async fn setup_blocked_auth_run_with_stores(
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -3193,6 +3279,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -3325,6 +3412,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
             invocation_id,
             scope: scope.clone(),
             capability_id: capability_id(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();

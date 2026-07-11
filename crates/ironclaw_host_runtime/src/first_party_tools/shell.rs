@@ -41,12 +41,10 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         ],
         PermissionMode::Ask,
         Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(DEFAULT_SHELL_WALL_CLOCK_MS),
-                output_bytes: Some(DEFAULT_SHELL_OUTPUT_BYTES),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(DEFAULT_SHELL_WALL_CLOCK_MS)
+                .set_output_bytes(DEFAULT_SHELL_OUTPUT_BYTES)
+                .set_process_count(1),
             hard_ceiling: Some(ResourceCeiling {
                 max_usd: None,
                 max_input_tokens: None,
@@ -113,8 +111,17 @@ async fn publish_saved_output_for_file_read(
     let Some(saved_output) = saved_output else {
         return Ok(None);
     };
+    let cleanup_saved_output = |context: &'static str| async move {
+        if let Err(error) = tokio::fs::remove_file(&saved_output.path).await {
+            tracing::debug!(
+                ?error,
+                context,
+                "best-effort cleanup of saved output failed"
+            );
+        }
+    };
     let Some((scoped_path, virtual_path)) = saved_output_publish_path(request, saved_output) else {
-        let _ = tokio::fs::remove_file(&saved_output.path).await;
+        cleanup_saved_output("unpublished").await;
         return Ok(None);
     };
     let content = tokio::fs::read(&saved_output.path)
@@ -136,7 +143,7 @@ async fn publish_saved_output_for_file_read(
         .write_file(&virtual_path, &content)
         .await
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
-    let _ = tokio::fs::remove_file(&saved_output.path).await;
+    cleanup_saved_output("published").await;
     Ok(Some(scoped_path))
 }
 

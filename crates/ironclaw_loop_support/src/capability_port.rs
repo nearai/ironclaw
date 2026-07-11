@@ -2316,6 +2316,10 @@ fn invocation_context_from_visible(
     context.process_id = None;
     context.parent_process_id = None;
     context.resource_scope.invocation_id = invocation_id;
+    context.authenticated_actor_user_id = request
+        .run_context
+        .actor()
+        .map(|actor| actor.user_id.clone());
     context.validate().map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
@@ -3109,7 +3113,7 @@ mod tests {
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use ironclaw_turns::{
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
-        TurnId, TurnRunId, TurnScope,
+        TurnActor, TurnId, TurnRunId, TurnScope,
     };
 
     use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
@@ -6539,6 +6543,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_capability_preserves_authenticated_actor_distinct_from_subject_scope() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut context = execution_context("thread-distinct-actor-subject");
+        let subject = UserId::new("shared-subject").expect("valid subject user id");
+        context.user_id = subject.clone();
+        context.resource_scope.user_id = subject;
+        let run_context = loop_run_context(&context).await.with_actor(TurnActor::new(
+            UserId::new("slack-alice").expect("valid authenticated actor user id"),
+        ));
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(StaticInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        invoke_visible_runtime_capability(&port)
+            .await
+            .expect("runtime capability invocation succeeds");
+
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        let recorded = &requests[0].context;
+        assert_eq!(recorded.resource_scope.user_id.as_str(), "shared-subject");
+        assert_eq!(
+            recorded
+                .authenticated_actor_user_id
+                .as_ref()
+                .map(UserId::as_str),
+            Some("slack-alice")
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_capability_with_reserved_synthetic_id_is_rejected_from_surface() {
         let capability_id =
             CapabilityId::new(capability_info::CAPABILITY_ID).expect("valid capability id");
@@ -8126,6 +8181,7 @@ mod tests {
                 effects,
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
                 resource_profile: None,
             },
             access: VisibleCapabilityAccess::Available,
@@ -8266,10 +8322,7 @@ mod tests {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
-                    usage: ResourceUsage {
-                        output_bytes: RECORDING_OUTPUT_BYTES,
-                        ..ResourceUsage::default()
-                    },
+                    usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
             )))
         }
@@ -8369,10 +8422,7 @@ mod tests {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"resumed": true}),
                     display_preview: None,
-                    usage: ResourceUsage {
-                        output_bytes: RECORDING_OUTPUT_BYTES,
-                        ..ResourceUsage::default()
-                    },
+                    usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
             )))
         }

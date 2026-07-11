@@ -2141,6 +2141,12 @@ pub trait LoopCapabilityPort: Send + Sync {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError>;
 
+    fn current_visible_capabilities(
+        &self,
+    ) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
+        Ok(None)
+    }
+
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,

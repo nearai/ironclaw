@@ -117,17 +117,18 @@ fn resolver() -> InMemoryRunProfileResolver {
 }
 
 fn make_trigger_capped_store(cap: u32) -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(InMemoryTurnStateStoreLimits {
-        max_concurrent_trigger_runs: std::num::NonZeroU32::new(cap),
-        ..InMemoryTurnStateStoreLimits::default()
-    })
+    InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default()
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(cap).expect("nonzero cap")),
+    )
 }
 
 fn make_conversation_capped_store(cap: u32) -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(InMemoryTurnStateStoreLimits {
-        max_concurrent_conversation_runs: std::num::NonZeroU32::new(cap),
-        ..InMemoryTurnStateStoreLimits::default()
-    })
+    InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default().set_max_concurrent_conversation_runs(
+            std::num::NonZeroU32::new(cap).expect("nonzero cap"),
+        ),
+    )
 }
 
 fn accepted_run_id(resp: &SubmitTurnResponse) -> ironclaw_turns::TurnRunId {
@@ -872,10 +873,8 @@ async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
     // must already be 1 without claiming again.
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         snapshot,
-        InMemoryTurnStateStoreLimits {
-            max_concurrent_trigger_runs: std::num::NonZeroU32::new(10),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default()
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     )
     .unwrap();
     assert_eq!(

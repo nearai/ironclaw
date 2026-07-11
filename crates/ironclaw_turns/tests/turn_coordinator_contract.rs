@@ -2830,10 +2830,7 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
 #[tokio::test]
 async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_cursors() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_events: 2,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_events(2),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let mut request = submit_request("thread-turn-gap", "idem-turn-gap-submit");
@@ -3995,10 +3992,7 @@ async fn record_model_route_snapshot_is_idempotent_and_rejects_route_changes() {
 #[tokio::test]
 async fn terminal_record_pruning_bounds_released_admission_reservations() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first_run_id = accepted_run_id(
@@ -4067,10 +4061,7 @@ async fn terminal_record_pruning_bounds_released_admission_reservations() {
 #[tokio::test]
 async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-pruned");
@@ -4131,10 +4122,7 @@ async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
 #[tokio::test]
 async fn terminal_root_release_does_not_duplicate_pruning_queue() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release");
@@ -4171,10 +4159,7 @@ async fn terminal_root_release_does_not_duplicate_pruning_queue() {
 #[tokio::test]
 async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release-after-churn");
@@ -5082,10 +5067,7 @@ fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
 #[tokio::test]
 async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
@@ -5157,10 +5139,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
 #[tokio::test]
 async fn idempotency_persistence_snapshot_drops_records_when_replay_cache_prunes_them() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
@@ -5272,10 +5251,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
 #[tokio::test]
 async fn idempotency_retention_keeps_the_newest_result_when_pruned() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 2,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(2),
     ));
     let coordinator = DefaultTurnCoordinator::new(store);
 
@@ -5510,10 +5486,8 @@ async fn runner_claims_queued_run_with_lease_and_heartbeat_requires_matching_lea
 
 #[tokio::test]
 async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(40),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(40));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let request = submit_request("thread-cancel-heartbeat", "idem-submit-cancel-heartbeat");
@@ -5571,10 +5545,8 @@ async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(-1),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
@@ -5637,10 +5609,8 @@ async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_r
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_fail_and_runner_side_cancel_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(-1),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 

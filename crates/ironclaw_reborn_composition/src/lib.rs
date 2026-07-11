@@ -105,7 +105,7 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
-pub use ironclaw_reborn::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
@@ -235,21 +235,6 @@ pub use slack::slack_host_beta::{
     build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
-};
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve::{
@@ -273,24 +258,26 @@ pub use webui::webui_serve::{
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose
-/// facade-shaped handles only"; these four newtypes are the host-identity
-/// facade.
+/// facade-shaped handles only"; these host-api identity types are the
+/// host-identity facade.
 pub mod host_api {
-    pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    pub use ironclaw_host_api::{
+        AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    };
 }
 
 #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
-pub use ironclaw_reborn::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
+pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
 /// Reborn-owned local trigger-fire access store, re-exported so host
 /// binaries reach it through this composition facade instead of taking a
-/// direct `ironclaw_reborn` dependency (the
+/// direct `ironclaw_runner` dependency (the
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
 /// boundary forbids that). The store is a reborn-owned repository. Local-dev
 /// callers use [`open_local_trigger_access_store`]; hosted-single-tenant
 /// callers use the filesystem-backed store through the host filesystem
 /// abstraction.
 #[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_reborn::local_trigger_access::{
+pub use ironclaw_runner::local_trigger_access::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
     LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
@@ -493,9 +480,9 @@ mod webui_user_access_checker_tests {
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///
 /// This keeps CLI diagnostics on the composition boundary instead of making
-/// the CLI mirror `ironclaw_reborn::model_routes::ModelSlot`.
+/// the CLI mirror `ironclaw_runner::model_routes::ModelSlot`.
 pub fn reborn_model_slot_names() -> Vec<&'static str> {
-    ironclaw_reborn::model_routes::ModelSlot::all()
+    ironclaw_runner::model_routes::ModelSlot::all()
         .iter()
         .map(|slot| slot.as_str())
         .collect()
@@ -537,17 +524,17 @@ impl RebornRuntimeComponentStatus {
 
 /// Side-effect-free runtime readiness snapshot for diagnostic callers.
 pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
-    let mut registry = ironclaw_reborn::driver_registry::DriverRegistry::new();
+    let mut registry = ironclaw_runner::driver_registry::DriverRegistry::new();
     let text_only_driver = RebornRuntimeComponentStatus::from_result(
-        ironclaw_reborn::planned_driver_factory::register_default_text_only_driver(
+        ironclaw_runner::planned_driver_factory::register_default_text_only_driver(
             &mut registry,
-            ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriverConfig::default(),
+            ironclaw_runner::text_loop_driver::TextOnlyModelReplyDriverConfig::default(),
         ),
     );
-    let family_registry = ironclaw_reborn::app_loop_family::build_loop_family_registry();
+    let family_registry = ironclaw_runner::app_loop_family::build_loop_family_registry();
     let planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
-            ironclaw_reborn::planned_driver_factory::register_default_planned_driver(
+            ironclaw_runner::planned_driver_factory::register_default_planned_driver(
                 &mut registry,
                 Arc::clone(family_registry),
             ),
@@ -556,7 +543,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     };
     let subagent_planned_driver = match family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
-            ironclaw_reborn::planned_driver_factory::register_subagent_planned_driver(
+            ironclaw_runner::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
                 family_registry,
             ),
@@ -564,7 +551,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
         Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
     };
     let planned_default_profile = RebornRuntimeComponentStatus::from_result(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver(),
+        ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver(),
     );
     RebornRuntimeReadinessSnapshot {
         text_only_driver,

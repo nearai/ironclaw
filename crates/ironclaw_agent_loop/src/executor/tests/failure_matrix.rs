@@ -172,11 +172,12 @@ const ROWS: &[MatrixRow] = &[
     MatrixRow {
         label: "CompactionUnavailable <- compaction port returns Err",
         setup: FailureSetup::CompactionUnavailable,
-        expected_kind: ExpectedTerminal::Failed {
-            kind: LoopFailureKind::CompactionUnavailable,
-            safe_summary: Some("compaction_security_rejected"),
+        // stack #5838 makes best-effort compaction failures recoverable; matrix
+        // asserts the prompt path continues instead of failing the whole run.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::CompactionUnavailable,
         },
-        expects_explanation: true,
+        expects_explanation: false,
     },
     MatrixRow {
         label: "TranscriptWriteFailed <- fail_transcript_with",

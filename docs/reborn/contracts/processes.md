@@ -42,6 +42,7 @@ pub struct ProcessRecord {
     pub parent_process_id: Option<ProcessId>,
     pub invocation_id: InvocationId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
     pub runtime: RuntimeKind,
@@ -54,7 +55,7 @@ pub struct ProcessRecord {
 }
 ```
 
-The record always carries tenant/user/agent scope and capability identity so lifecycle, accounting, audit, and future runtime boundaries can be traced back to the same host authority envelope.
+The record always carries tenant/user/agent scope, the optional authenticated actor, and capability identity so lifecycle, accounting, audit, and future runtime boundaries can be traced back to the same host authority envelope. The actor is distinct from `scope.user_id`: `ProcessStart`, `ProcessRecord`, and `ProcessExecutionRequest` preserve it unchanged and never infer it from the subject. Older serialized records without this field load it as `None`.
 
 ---
 
@@ -88,7 +89,7 @@ async fn get(scope, process_id) -> Result<Option<ProcessRecord>>;
 async fn records_for_scope(scope) -> Result<Vec<ProcessRecord>>;
 ```
 
-`ProcessManager::spawn` is the lower-level lifecycle mechanic used by `CapabilityHost`. It receives the spawn input in `ProcessStart` so runtime-backed managers can start work, but `ProcessRecord` does not persist raw input. The in-memory and filesystem stores implement the manager by recording a new `Running` process.
+`ProcessManager::spawn` is the lower-level lifecycle mechanic used by `CapabilityHost`. It receives the spawn input and authenticated actor in `ProcessStart` so runtime-backed managers can start work, but `ProcessRecord` does not persist raw input. The in-memory and filesystem stores implement the manager by recording a new `Running` process, including the actor. `BackgroundProcessManager` then copies the record actor into `ProcessExecutionRequest` for the executor.
 
 `ProcessStart.resource_reservation_id` is an internal store-assigned channel. Callers must not pre-fill it. `ResourceManagedProcessStore::start` rejects caller-supplied reservation IDs before persisting any process record so forged reservation IDs cannot bypass `ResourceGovernor::reserve`. The wrapper also tracks the reservations it created per process and refuses `complete`, `fail`, or `kill` cleanup for reservation IDs it did not create for that process.
 

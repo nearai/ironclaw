@@ -1208,6 +1208,7 @@ impl Drop for TraceScopeCleanup {
         let dir = ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
             self.0.as_str(),
         ));
+        #[allow(clippy::let_underscore_must_use)] // best-effort per-test scope dir cleanup on drop
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -1284,10 +1285,7 @@ async fn trace_credits_reports_enrolled_for_caller_with_enabled_policy() {
     let user_id = unique_trace_credits_user();
     let scope = trace_scope_key(TENANT, user_id.as_str());
     let _cleanup = TraceScopeCleanup(scope.clone());
-    let policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ..StandingTraceContributionPolicy::default()
-    };
+    let policy = StandingTraceContributionPolicy::default().set_enabled(true);
     write_trace_policy_for_scope(Some(scope.as_str()), &policy).expect("write trace policy");
 
     let (app, _services) = build_app_with_authenticator(Arc::new(FixedUserToken {
@@ -1365,6 +1363,8 @@ async fn sse_query_token_authenticates_event_stream() {
     // generator far enough to record at least the first poll, then
     // drop the body so the long-lived stream does not pin the test.
     let mut body = response.into_body();
+    #[allow(clippy::let_underscore_must_use)]
+    // frame result intentionally unused; only drives the SSE generator past the first poll
     let _ = tokio::time::timeout(Duration::from_secs(2), body.frame()).await;
     drop(body);
     let calls = services.stream_events_calls.lock().expect("lock").clone();
@@ -1732,6 +1732,8 @@ async fn spawn_serve(app: axum::Router) -> (std::net::SocketAddr, tokio::task::J
         .expect("bind loopback");
     let addr = listener.local_addr().expect("local_addr");
     let handle = tokio::spawn(async move {
+        #[allow(clippy::let_underscore_must_use)]
+        // background serve task; result observed via the spawned handle
         let _ = axum::serve(listener, app).await;
     });
     (addr, handle)

@@ -91,13 +91,11 @@ pub(super) fn onboard_manifest() -> Result<CapabilityManifest, ExtensionError> {
         ],
         PermissionMode::Ask,
         Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(15_000),
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(15_000)
                 // The surface contract requires every visible capability to
                 // advertise an output_bytes estimate.
-                output_bytes: Some(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
-                ..ResourceEstimate::default()
-            },
+                .set_output_bytes(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
             hard_ceiling: None,
         }),
     )
@@ -148,11 +146,9 @@ pub(super) fn profile_token_manifest() -> Result<CapabilityManifest, ExtensionEr
         ],
         PermissionMode::Ask,
         Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(10_000),
-                output_bytes: Some(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
-                ..ResourceEstimate::default()
-            },
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(10_000)
+                .set_output_bytes(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
             hard_ceiling: None,
         }),
     )
@@ -179,11 +175,9 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
         // also deliberately NOT on the local-dev approval-gate exemption list.
         PermissionMode::Ask,
         Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(15_000),
-                output_bytes: Some(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
-                ..ResourceEstimate::default()
-            },
+            default_estimate: ResourceEstimate::default()
+                .set_wall_clock_ms(15_000)
+                .set_output_bytes(FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
             hard_ceiling: None,
         }),
     )
@@ -885,12 +879,21 @@ fn persist_profile_token(scope: &str, token: &ProfileAttributionToken) -> std::i
         file.write_all(token.access_token.as_bytes())?;
         file.sync_all()
     };
+    let cleanup_temp = |context: &'static str| {
+        if let Err(cleanup_error) = std::fs::remove_file(&temp_path) {
+            tracing::debug!(
+                error = ?cleanup_error,
+                context,
+                "best-effort cleanup of profile token temp file failed"
+            );
+        }
+    };
     if let Err(error) = write_temp() {
-        let _ = std::fs::remove_file(&temp_path);
+        cleanup_temp("write");
         return Err(error);
     }
     if let Err(error) = std::fs::rename(&temp_path, &path) {
-        let _ = std::fs::remove_file(&temp_path);
+        cleanup_temp("rename");
         return Err(error);
     }
     Ok(path)
@@ -1357,6 +1360,7 @@ mod tests {
         FirstPartyCapabilityRequest {
             capability_id: CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
@@ -1562,15 +1566,13 @@ mod tests {
 
     #[test]
     fn format_status_enabled_device_key_policy() {
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            auth_mode: TraceUploadAuthMode::DeviceKey,
-            upload_token_tenant_id: Some("tenant-z".to_string()),
-            include_message_text: true,
-            include_tool_payloads: false,
-            ingestion_endpoint: Some("https://ingest.example.com".to_string()),
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_auth_mode(TraceUploadAuthMode::DeviceKey)
+            .set_upload_token_tenant_id("tenant-z")
+            .set_include_message_text(true)
+            .set_include_tool_payloads(false)
+            .set_ingestion_endpoint("https://ingest.example.com");
         let v = format_status(&policy);
         assert_eq!(v["enrolled"], json!(true));
         assert_eq!(v["auth_mode"], json!("device_key"));

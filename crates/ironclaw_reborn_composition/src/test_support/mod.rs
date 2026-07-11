@@ -41,6 +41,10 @@
 //! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
 //!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
 //!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
+//! 12. [`refreshing_capability_port`] — `create_refreshing_local_dev_capability_port_for_test`,
+//!     the production `create_refreshing_local_dev_capability_port` factory
+//!     (all wrap layers) driven with harness-injectable parts (harness-port-seam
+//!     P1 seam).
 
 mod automation;
 mod budget_gateway;
@@ -50,6 +54,7 @@ mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
 mod projection;
+mod refreshing_capability_port;
 mod skill_activation;
 mod trace_capture;
 mod trigger_materializer;
@@ -90,6 +95,10 @@ pub use outbound_delivery::{
 pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};
 #[cfg(feature = "test-support")]
 pub use projection::build_webui_event_stream_for_test;
+#[cfg(feature = "test-support")]
+pub use refreshing_capability_port::{
+    RefreshingLocalDevCapabilityPortTestParts, create_refreshing_local_dev_capability_port_for_test,
+};
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
