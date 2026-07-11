@@ -309,24 +309,10 @@ impl LeakDetector {
         if result.matches.is_empty() {
             return (content.to_string(), false);
         }
-        // Different patterns can match overlapping spans of one secret; merge
-        // the ranges so a single value redacts to one `[REDACTED]` and no slice
-        // ever crosses a redaction already applied by an earlier range.
-        let mut ranges: Vec<Range<usize>> =
-            result.matches.iter().map(|m| m.location.clone()).collect();
-        ranges.sort_by_key(|range| range.start);
-        let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            match merged.last_mut() {
-                Some(last) if range.start <= last.end => {
-                    if range.end > last.end {
-                        last.end = range.end;
-                    }
-                }
-                _ => merged.push(range),
-            }
-        }
-        (apply_redactions(content, &merged), true)
+        // `apply_redactions` coalesces overlapping/adjacent ranges itself, so a
+        // single value always redacts to one `[REDACTED]`.
+        let ranges: Vec<Range<usize>> = result.matches.iter().map(|m| m.location.clone()).collect();
+        (apply_redactions(content, &ranges), true)
     }
 
     /// Scan an outbound HTTP request for potential secret leakage.
@@ -404,10 +390,36 @@ fn mask_secret(secret: &str) -> String {
 }
 
 /// Apply redaction ranges to content.
+/// Sort and coalesce match ranges so overlapping or adjacent spans of one
+/// secret (different patterns matching the same value, e.g. `bearer_token` and
+/// `bare_jwt` over one `Bearer <jwt>`) collapse into a single disjoint range.
+fn merge_ranges(ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = ranges.to_vec();
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => {
+                if range.end > last.end {
+                    last.end = range.end;
+                }
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 fn apply_redactions(content: &str, ranges: &[Range<usize>]) -> String {
     if ranges.is_empty() {
         return content.to_string();
     }
+
+    // Coalesce first: callers pass raw per-pattern ranges that can overlap, and
+    // emitting one `[REDACTED]` per raw range double-redacts a single secret
+    // (e.g. `Bearer eyJ…` -> `[REDACTED][REDACTED]`). Merging here keeps every
+    // caller correct without each having to pre-merge.
+    let ranges = merge_ranges(ranges);
 
     let mut result = String::with_capacity(content.len());
     let mut last_end = 0;
