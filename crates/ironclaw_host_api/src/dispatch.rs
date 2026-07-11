@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
     ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -21,6 +22,7 @@ use crate::{
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -359,6 +361,12 @@ pub enum DispatchError {
         kind: RuntimeDispatchErrorKind,
         safe_summary: Option<String>,
     },
+    /// WASM guest dispatch failure. `safe_summary` carries the best available
+    /// cause: the stable, host-sanitized error code a structured guest error
+    /// declared (e.g. a Slack `channel_not_found`) when present, otherwise the
+    /// raw error text (secret VALUES are scrubbed downstream at the
+    /// model-visible Diagnostic seam), so the failure keeps its actionable
+    /// cause instead of collapsing to the kind's generic sentence.
     #[error("WASM dispatch failed: {kind}")]
     Wasm {
         kind: RuntimeDispatchErrorKind,

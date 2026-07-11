@@ -38,6 +38,7 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_output_bytes(10_000),
@@ -99,6 +100,7 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1)
@@ -149,6 +151,7 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1)
@@ -204,6 +207,7 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1)
@@ -242,6 +246,7 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
@@ -272,6 +277,7 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -301,6 +307,7 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1),
@@ -337,6 +344,7 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default()
                 .set_concurrency_slots(1)
                 .set_process_count(1),
@@ -373,6 +381,7 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
         .dispatch_json(CapabilityDispatchRequest {
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,

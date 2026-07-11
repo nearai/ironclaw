@@ -1,3 +1,4 @@
+import { Link } from "react-router";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { StatusPill } from "../../../design-system/primitives";
@@ -7,6 +8,17 @@ import { runSummaryView } from "../lib/automations-presenters";
 import { buildScopedLogsPath } from "../../logs/lib/logs-data";
 
 const MAX_VISIBLE_DOTS = 8;
+const MAX_NAVIGATION_ID_LENGTH = 512;
+const DISABLED_LINK_TARGET = "#";
+
+function navigationId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_NAVIGATION_ID_LENGTH || /[\u0000-\u001F\u007F]/.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
 
 export function recentRunKey(run) {
   return run.run_id || run.thread_id || run.submitted_at || run.timestamp_source;
@@ -79,14 +91,18 @@ export function RunHistorySummary({ runs = [], className = "" }) {
   );
 }
 
-export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
+export function RecentRunRow({ run }) {
   const t = useT();
-  const canOpen = Boolean(run.chat_path);
-  const logsPath = buildScopedLogsPath({
-    threadId: run.thread_id,
-    runId: run.run_id,
-  });
-  const canOpenLogs = Boolean((run.thread_id || run.run_id) && onOpenLogs);
+  const threadId = navigationId(run.thread_id);
+  const runId = navigationId(run.run_id);
+  const chatPath = threadId ? `/chat/${encodeURIComponent(threadId)}` : null;
+  const canOpenLogs = Boolean(threadId || runId);
+  const logsPath = canOpenLogs
+    ? buildScopedLogsPath({
+        threadId,
+        runId,
+      })
+    : DISABLED_LINK_TARGET;
 
   return (
     <div className="grid gap-3 border-b border-[var(--v2-panel-border)] py-3 last:border-0 sm:grid-cols-[6.5rem_minmax(0,1fr)_auto] sm:items-center">
@@ -109,19 +125,23 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
       </div>
       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
         <Button
+          as={Link}
+          to={chatPath || DISABLED_LINK_TARGET}
           variant="secondary"
           size="sm"
-          disabled={!canOpen}
-          onClick={canOpen ? () => onOpenRun(run.chat_path) : undefined}
+          disabled={!chatPath}
+          data-testid="automation-run-open"
         >
           <Icon name="chat" className="mr-1.5 h-4 w-4" />
           {t("automations.detail.openRun")}
         </Button>
         <Button
+          as={Link}
+          to={logsPath}
           variant="ghost"
           size="sm"
           disabled={!canOpenLogs}
-          onClick={canOpenLogs ? () => onOpenLogs(logsPath) : undefined}
+          data-testid="automation-run-logs"
         >
           <Icon name="file" className="mr-1.5 h-4 w-4" />
           {t("nav.logs")}

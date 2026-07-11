@@ -3005,7 +3005,7 @@ impl LoopAttachmentReadPort for StubImageReader {
 /// on a resolved user message must be read back through the
 /// [`LoopAttachmentReadPort`] and threaded to the gateway as a base64 image
 /// part. The consumer side (`convert_messages` -> `ContentPart::ImageUrl`) is
-/// unit-tested in `ironclaw_reborn`; this closes the loop on the read side per
+/// unit-tested in `ironclaw_runner`; this closes the loop on the read side per
 /// the "test through the caller" rule (the read port gates a side effect with
 /// the model port wrapper between).
 #[tokio::test]

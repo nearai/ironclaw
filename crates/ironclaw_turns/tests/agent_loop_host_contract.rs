@@ -4301,7 +4301,7 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
         .expect("runtime section must exist");
     let content = &runtime_msg.model_content;
     assert!(
-        content.contains("Warning: no delivery target is set"),
+        content.contains("Warning: no default delivery target is set"),
         "{content}"
     );
     assert!(

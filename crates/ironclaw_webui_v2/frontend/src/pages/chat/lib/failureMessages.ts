@@ -1,7 +1,14 @@
 import { isConnectionLostStatus } from "./connection-status.js";
+import {
+  createErrorChatMessage,
+  isErrorChatMessage,
+  RUN_FAILURE_ID_PREFIX,
+} from "./message-types.js";
 
 export const CONNECTION_LOST_RUN_FAILURE_MESSAGE =
   "Connection to the server was lost. Please reconnect and try again.";
+const REQUEST_FAILURE_FALLBACK_MESSAGE =
+  "The request failed before it could be sent.";
 
 type RunFailureMessageInput = {
   status?: string | null;
@@ -67,6 +74,51 @@ export function failureMessageForRunStatus({
     : "The run failed before producing a reply.";
 }
 
+type StreamFailureMessageInput = {
+  error?: string | null;
+  kind?: string | null;
+  retryable?: boolean | null;
+};
+
+const SENSITIVE_ERROR_MESSAGE_PATTERNS = [
+  /\b(?:authorization|bearer|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|secret|password)\b\s*[:=]\s*\S+/i,
+  /\b(?:sk-[A-Za-z0-9_-]{8,}|sk-proj-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{8,})\b/,
+  /\bapi[_ -]?key\b.{0,80}\b[A-Za-z0-9_-]{24,}\b/i,
+];
+
+function messageContainsSensitiveCredential(message: string): boolean {
+  return SENSITIVE_ERROR_MESSAGE_PATTERNS.some((pattern) =>
+    pattern.test(message),
+  );
+}
+
+export function failureMessageForRequestError(error: unknown): string {
+  const message =
+    typeof (error as { message?: unknown })?.message === "string"
+      ? (error as { message: string }).message.trim()
+      : "";
+  if (!message) return REQUEST_FAILURE_FALLBACK_MESSAGE;
+  return messageContainsSensitiveCredential(message)
+    ? REQUEST_FAILURE_FALLBACK_MESSAGE
+    : message;
+}
+
+export function failureMessageForStreamError(
+  { error, kind, retryable }: StreamFailureMessageInput = {},
+): string {
+  const detail = humanizeFailureToken(kind || error || "stream_error");
+  return retryable
+    ? `The chat stream hit a retryable error: ${detail}.`
+    : `The chat stream failed: ${detail}.`;
+}
+
+function humanizeFailureToken(token: unknown): string {
+  return String(token)
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/^\w/, (char) => char.toUpperCase());
+}
+
 export function rewriteConnectionLostRunFailures(
   messages: any,
   { runId }: { runId?: string | null } = {},
@@ -74,9 +126,9 @@ export function rewriteConnectionLostRunFailures(
   if (!Array.isArray(messages)) return messages;
   if (!runId) return messages;
   let changed = false;
-  const targetId = `err-${runId}`;
+  const targetId = `${RUN_FAILURE_ID_PREFIX}${runId}`;
   const next = messages.map((message) => {
-    if (!message || message.role !== "error") return message;
+    if (!isErrorChatMessage(message)) return message;
     if (message.id !== targetId) return message;
 
     const content = failureMessageForRunStatus({
@@ -100,16 +152,15 @@ export function upsertConnectionLostRunFailure(
   }: { runId?: string | null; timestamp?: string | null } = {},
 ) {
   if (!Array.isArray(messages)) return messages;
-  const messageId = `err-${runId || "connection-lost"}`;
-  const nextMessage = {
+  const messageId = `${RUN_FAILURE_ID_PREFIX}${runId || "connection-lost"}`;
+  const nextMessage = createErrorChatMessage({
     id: messageId,
-    role: "error",
     content: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
     timestamp: timestamp || new Date().toISOString(),
     failureStatus: "failed",
     failureCategory: "connection_lost",
     failureSummary: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
-  };
+  });
   const existing = messages.findIndex((message) => message?.id === messageId);
   if (existing < 0) return [...messages, nextMessage];
   if (messages[existing]?.content === CONNECTION_LOST_RUN_FAILURE_MESSAGE) {

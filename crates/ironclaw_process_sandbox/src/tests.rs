@@ -947,6 +947,7 @@ fn sample_request(input: Value) -> ProcessExecutionRequest {
             thread_id: Some(ThreadId::new("thread").unwrap()),
             invocation_id: InvocationId::new(),
         },
+        authenticated_actor_user_id: None,
         extension_id: ExtensionId::new("system.process_sandbox").unwrap(),
         capability_id: CapabilityId::new("system.process_sandbox.run").unwrap(),
         runtime: RuntimeKind::System,

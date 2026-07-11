@@ -1,7 +1,7 @@
 //! Subagent await-edge delivery — integration-tier coverage for the P1.x
 //! rows the design doc tags "integration-tier" (not covered by the
 //! crate-tier unit tests already living alongside
-//! `crates/ironclaw_reborn/src/subagent/await_edge/{roster,store}.rs`):
+//! `crates/ironclaw_runner/src/subagent/await_edge/{roster,store}.rs`):
 //! scope isolation through the REAL composed `invocation_mount_view`
 //! resolver (§4.5a, P1.6c), roster write-before-first-edge + boot-pass
 //! prune (§4.5, P1.6a), the close-path's own live roster prune (§4.5
@@ -20,13 +20,13 @@ use std::sync::Arc;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::AwaitEdgeWriter;
-use ironclaw_reborn::subagent::await_edge::{
+use ironclaw_reborn_composition::wrap_scoped;
+use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver,
     resolver::AwaitEdgeResolver,
     roster::{self, RosterKey},
     store::FilesystemAwaitEdgeStore,
 };
-use ironclaw_reborn_composition::wrap_scoped;
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     DefaultTurnCoordinator, InMemoryTurnStateStore, TurnCoordinator, TurnRunId, TurnScope,
@@ -302,7 +302,7 @@ async fn scope_with_unclosed_edge_is_recovered_before_new_spawns_are_admitted() 
         .unwrap();
 
     let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
-        Arc::new(ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
     let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> =
         Arc::new(InMemoryTurnStateStore::default());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -347,7 +347,7 @@ async fn brand_new_scope_with_no_unclosed_edges_is_admitted_immediately() {
     let store = real_store();
     let scope = scope("tenant-fresh", "user-fresh", Some("agent-fresh"), None);
     let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
-        Arc::new(ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
     let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> =
         Arc::new(InMemoryTurnStateStore::default());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -625,7 +625,7 @@ async fn rollback_deleted_edge_is_reconstructed_so_the_parent_still_gets_the_res
     // exact call `TurnCommittedEventObserver::observe_committed_event`
     // makes in production.
     let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
-        Arc::new(ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
     let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> = state_store.clone();
     let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
         Arc::new(AllowResultWriter);
@@ -939,7 +939,7 @@ async fn mixed_status_batch_group_reports_each_members_own_status_and_reason() {
     // child_a fails first (group not yet fully settled -> no drain), then
     // child_b completes last and drives the batch drain.
     let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
-        Arc::new(ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
     let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> = state_store.clone();
     let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
         Arc::new(AllowResultWriter);

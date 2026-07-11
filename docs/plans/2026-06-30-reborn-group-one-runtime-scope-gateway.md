@@ -43,7 +43,7 @@ wider for identical behavior.
   `HostManagedModelGateway` trait a default method
   `fn resolve_for_scope(&self, _scope: &TurnScope) -> Option<Arc<dyn HostManagedModelGateway>> { None }`.
   Every real gateway inherits the default → prod resolves to its own gateway.
-- `crates/ironclaw_reborn/src/loop_driver_host.rs` (~6 lines, 2 sites): before
+- `crates/ironclaw_runner/src/loop_driver_host.rs` (~6 lines, 2 sites): before
   the wrap at :1636, `let host_gateway = self.model_gateway.resolve_for_scope(&request.loop_run_context.scope).unwrap_or_else(|| Arc::clone(&self.model_gateway))`
   and use it; apply the same one-line resolve in `build_compaction_ports`
   (:1062-1065) so compaction/system-inference also hit the right scope.

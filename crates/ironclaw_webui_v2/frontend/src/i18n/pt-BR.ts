@@ -862,6 +862,10 @@ registerPack("pt-BR", {
   "ext.registry.emptyDesc": "Todas as extensões disponíveis já estão instaladas, ou nenhum registro está configurado.",
   "ext.registry.availableTitle": "Extensões disponíveis",
   "ext.registry.noMatch": "Nenhuma extensão corresponde ao filtro.",
+  "ext.registry.import": "Importar",
+  "ext.registry.importing": "Importando…",
+  "ext.registry.importSuccess": "Ferramenta importada — instale-a pelo registro.",
+  "ext.registry.importFailed": "Falha na importação",
 
   // Chat — history
   "chat.history.loading": "Carregando...",
@@ -1075,6 +1079,13 @@ registerPack("pt-BR", {
   "admin.dashboard.jobs": "Trabalhos",
   "admin.dashboard.lastActive": "Última atividade",
 
+  // Admin — relative time
+  "admin.relative.never": "Nunca",
+  "admin.relative.justNow": "agora mesmo",
+  "admin.relative.minutesAgo": "há {count} min",
+  "admin.relative.hoursAgo": "há {count} h",
+  "admin.relative.daysAgo": "há {count} d",
+
   // Admin — users list
   "admin.users.user": "usuário",
   "admin.users.userFallback": "usuário",
@@ -1085,6 +1096,8 @@ registerPack("pt-BR", {
   "admin.users.filter.active": "Ativos",
   "admin.users.filter.suspended": "Suspensos",
   "admin.users.filter.admins": "Administradores",
+  "admin.users.status.active": "Ativo",
+  "admin.users.status.suspended": "Suspenso",
   "admin.users.newUser": "Novo usuário",
   "admin.users.createUser": "Criar usuário",
   "admin.users.creating": "Criando…",
@@ -1199,6 +1212,8 @@ registerPack("pt-BR", {
   "extensions.reconfigure": "Reconfigurar",
   "extensions.configureName": "Configurar {name}",
   "extensions.allInstalled": "Todas as extensões instaladas",
+  "extensions.scope.shared": "compartilhadas",
+  "extensions.scope.private": "minhas",
   "mcp.installed": "Servidores MCP instalados",
   "extensions.oneCapability": "1 capacidade",
   "extensions.pluralCapabilities": "Capacidades {count}",

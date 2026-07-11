@@ -3,7 +3,7 @@
 //! This module is the "later slice" the crate-level docstring promises:
 //! product-level wiring on top of the substrate facades exposed by
 //! `build_reborn_services`. It is the **only** place in the workspace where
-//! `ironclaw_reborn` (drivers, host factory, model gateway bridge),
+//! `ironclaw_runner` (drivers, host factory, model gateway bridge),
 //! `ironclaw_threads` (session thread service), and (under the
 //! `root-llm-provider` feature) `ironclaw_llm` are composed into a running
 //! agent.
@@ -60,27 +60,27 @@ use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, PersistentApprovalGranteeResolver,
     RunStateApprovalInteractionReadModel,
 };
-use ironclaw_reborn::loop_exit_applier::{
+use ironclaw_runner::loop_exit_applier::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
-use ironclaw_reborn::milestone_events::{
+use ironclaw_runner::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
 };
-use ironclaw_reborn::runtime::{
+use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     RuntimeSubagentGoalStore, RuntimeTurnStateStore, ToolDisclosureMode,
     build_default_planned_runtime,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn::subagent::await_edge::{
+use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
     store::FilesystemAwaitEdgeStore,
 };
-use ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver;
+use ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
+use ironclaw_runner::subagent::goal_store::FilesystemSubagentGoalStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
+use ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -479,7 +479,7 @@ fn enforce_runtime_cutover_gate(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn check_production_scheduler_wake_wiring(
     profile: RebornCompositionProfile,
-    wiring: &Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
+    wiring: &Option<ironclaw_runner::runtime::SchedulerWakeWiring>,
 ) -> Result<(), RebornRuntimeError> {
     if wiring.is_none()
         && matches!(
@@ -1054,7 +1054,7 @@ struct LocalDevApprovalGateEvidence {
 #[cfg(feature = "test-support")]
 pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
 }
 
@@ -1149,6 +1149,22 @@ pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
     local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
+}
+
+/// Test-support forwarder (harness-port-seam P1 seam) for
+/// `create_refreshing_local_dev_capability_port`
+/// (`refreshing_capability_port.rs:75`), production's sole capability-port
+/// factory. Bridges the private `local_dev` module to `test_support`; mirrors
+/// the `outbound_delivery` forwarder above. For tests only -- gated behind
+/// `test-support`, ships zero bytes in production builds.
+#[cfg(feature = "test-support")]
+pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
+    parts: crate::test_support::RefreshingLocalDevCapabilityPortTestParts,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::create_refreshing_local_dev_capability_port_for_test(parts).await
 }
 
 #[async_trait::async_trait]
@@ -1400,6 +1416,31 @@ impl RebornRuntime {
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
     pub fn services(&self) -> &RebornServices {
         &self.services
+    }
+
+    /// Seed a bare `secret_handle` secret for an owner scope so keyed
+    /// capabilities (network + `use_secret`) can resolve their
+    /// `InjectSecretOnce` obligation. `serve` uses this to write the value of
+    /// an `IRONCLAW_REBORN_DEV_SECRET__<handle>` env var into the tenant-shared
+    /// admin-managed scope, so one operator-provisioned key serves every user of
+    /// the tenant (SSO users included) without per-user provisioning. The secret
+    /// store is composition-private, so this is the single narrow write seam.
+    pub async fn seed_local_dev_secret(
+        &self,
+        owner: ResourceScope,
+        handle: ironclaw_host_api::SecretHandle,
+        secret_value: String,
+    ) -> Result<(), ironclaw_secrets::SecretStoreError> {
+        self.services
+            .secret_store()
+            .put(
+                owner,
+                handle,
+                ironclaw_secrets::SecretMaterial::from(secret_value),
+                None,
+            )
+            .await
+            .map(|_| ())
     }
 
     pub(crate) fn webui_tenant_id(&self) -> &TenantId {
@@ -3134,7 +3175,7 @@ pub async fn build_reborn_runtime(
         wiring
     };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
+    let production_scheduler_wake: Option<ironclaw_runner::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev
@@ -3431,8 +3472,11 @@ pub async fn build_reborn_runtime(
             )
             .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
     }
+    // The registry is created with the local-runtime services (one instance
+    // per runtime) so the trigger-create hook validates per-trigger delivery
+    // targets against the same registry product hosts register into.
     let outbound_delivery_target_registry =
-        local_runtime.map(|_| Arc::new(MutableOutboundDeliveryTargetRegistry::default()));
+        local_runtime.map(|local_runtime| Arc::clone(&local_runtime.outbound_delivery_targets));
     let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
         match (local_runtime, &outbound_delivery_target_registry) {
             (Some(local_runtime), Some(registry)) => {
@@ -4459,7 +4503,7 @@ struct LlmGatewayBundle {
     /// Policy used to derive the budget accountant's cost table — kept
     /// alongside the gateway so the composer doesn't re-derive the
     /// `ModelProfileId → provider-model` mapping in two places.
-    policy: ironclaw_reborn::model_gateway::LlmModelProfilePolicy,
+    policy: ironclaw_runner::model_gateway::LlmModelProfilePolicy,
     /// Hot-swap handle + session for the live-reload path. The model gateway
     /// wraps a [`SwappableLlmProvider`], so the settings service can rebuild
     /// the provider chain from updated config and atomically swap the inner
@@ -4524,7 +4568,7 @@ fn wrap_swappable_gateway(
     provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
-    use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+    use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
 
     let swappable = Arc::new(SwappableLlmProvider::new(raw));
@@ -5639,6 +5683,8 @@ output_schema_ref = "schemas/write.output.json"
 
                 if is_chat_completion {
                     if let Some(auth_tx) = auth_tx.take() {
+                        #[allow(clippy::let_underscore_must_use)]
+                        // oneshot send; dropped receiver is expected
                         let _ = auth_tx.send(auth_header);
                     }
                     break;
@@ -5968,7 +6014,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6073,7 +6122,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6472,6 +6524,8 @@ output_schema_ref = "schemas/write.output.json"
         // First model call routes through the instrumentation wrapper. The dead
         // endpoint makes the underlying call error, but the wrapper counts before
         // delegating, so the result is irrelevant — only that it was observed.
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -6491,6 +6545,8 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("live reload rebuilds the provider chain");
 
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -7392,6 +7448,7 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(envelope["outcome"]["task_success"], "success");
 
         runtime.shutdown().await.expect("runtime shutdown");
+        #[allow(clippy::let_underscore_must_use)] // best-effort per-test scope dir cleanup
         let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
             Some(&scope),
         ));
@@ -7597,7 +7654,10 @@ output_schema_ref = "schemas/write.output.json"
         let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
             .expect("valid notion ref");
         extension_management
-            .install(notion_ref.clone())
+            .install(
+                notion_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Notion MCP");
         extension_management
@@ -10413,9 +10473,12 @@ output_schema_ref = "schemas/write.output.json"
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                         .expect("valid github ref");
+                // #5459 P1: act as the runtime owner (the tenant operator) so
+                // the install is tenant-shared and visible to the run's
+                // surface user — a non-operator install would now be private.
                 let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
-                    user_id: UserId::new("user-multi-tool-surface").expect("user id"),
+                    user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
                     agent_id: None,
                     project_id: None,
                 });

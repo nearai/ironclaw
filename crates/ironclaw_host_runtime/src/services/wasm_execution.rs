@@ -410,9 +410,32 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
         },
         WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
             kind,
-            safe_summary: Some(error.to_string()),
+            safe_summary: wasm_guest_error_code(error)
+                .map(|code| format!("provider error code: {code}"))
+                .or_else(|| Some(error.to_string())),
         },
     }
+}
+
+/// Extract the stable error `code` from a structured guest error payload so
+/// the model-visible failure keeps its actionable cause (e.g. a Slack
+/// `channel_not_found`) instead of collapsing to the kind's generic sentence.
+///
+/// Guests are sandboxed but not trusted with free text on this channel: the
+/// code is reduced to a short `[A-Za-z0-9_.-]` identifier, and the composed
+/// summary is still re-validated downstream (`LoopSafeSummary`) before it
+/// reaches the model. Returns `None` for legacy plain-string guest errors.
+fn wasm_guest_error_code(error: &str) -> Option<String> {
+    let payload = serde_json::from_str::<StructuredWasmGuestError>(error).ok()?;
+    let code: String = payload
+        .code
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .take(64)
+        .collect();
+    (!code.is_empty()).then_some(code)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,7 +458,6 @@ enum StructuredWasmGuestErrorKind {
 
 #[derive(Debug, Deserialize)]
 struct StructuredWasmGuestError {
-    #[allow(dead_code)]
     code: String,
     kind: StructuredWasmGuestErrorKind,
 }
@@ -1436,6 +1458,40 @@ mod tests {
 
         for (error, expected) in cases {
             assert_eq!(wasm_guest_error_kind(error), expected);
+        }
+    }
+
+    /// A structured guest error's `code` must ride the dispatch error as a
+    /// sanitized safe summary so the model sees the actionable cause (e.g.
+    /// `channel_not_found`), while hostile codes are reduced to identifier
+    /// characters and legacy plain-string errors stay summary-less.
+    #[test]
+    fn wasm_guest_dispatch_error_carries_sanitized_structured_code() {
+        let capability = CapabilityId::new("slack.get_conversation_history").unwrap();
+        match wasm_guest_dispatch_error(
+            r#"{"code":"channel_not_found","kind":"input"}"#,
+            &capability,
+        ) {
+            DispatchError::Wasm { kind, safe_summary } => {
+                assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+                assert_eq!(
+                    safe_summary.as_deref(),
+                    Some("provider error code: channel_not_found")
+                );
+            }
+            other => panic!("expected Wasm dispatch error, got {other:?}"),
+        }
+
+        // Hostile codes are reduced to identifier characters, never free text.
+        assert_eq!(
+            wasm_guest_error_code(r#"{"code":"bad {} `code` <script>","kind":"input"}"#).as_deref(),
+            Some("badcodescript")
+        );
+        // Legacy plain-string guest errors carry no structured code.
+        assert_eq!(wasm_guest_error_code("invalid_parameters"), None);
+        match wasm_guest_dispatch_error("invalid_parameters", &capability) {
+            DispatchError::Wasm { safe_summary, .. } => assert_eq!(safe_summary, None),
+            other => panic!("expected Wasm dispatch error, got {other:?}"),
         }
     }
 }
