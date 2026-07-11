@@ -299,7 +299,7 @@ export function useExtensions() {
   );
 
   const importMutation = useMutation({
-    mutationFn: ({ file }: { file: File }) => importExtension(file),
+    mutationFn: ({ file }) => importExtension(file),
     onSuccess: (res) => {
       if (res.success) {
         setActionResult({
@@ -318,6 +318,10 @@ export function useExtensions() {
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending || importMutation.isPending;
+  const importTool = React.useCallback(
+    (payload) => importMutation.mutate(payload),
+    [importMutation]
+  );
   const remove = React.useCallback(
     (extension) => {
       const name = extension?.displayName || extension?.packageRef?.id || "this extension";
@@ -346,7 +350,7 @@ export function useExtensions() {
     install: installMutation.mutate,
     activate: activateMutation.mutate,
     remove,
-    importTool: importMutation.mutate,
+    importTool,
     isImporting: importMutation.isPending,
     invalidate,
   };

@@ -706,8 +706,7 @@ function clearRunFailureMessages(setMessages) {
       (message) =>
         !(
           message?.role === "error" &&
-          typeof message.id === "string" &&
-          message.id.startsWith("err-")
+          isRunFailureMessageId(message.id)
         ),
     );
     return next.length === prev.length ? prev : next;

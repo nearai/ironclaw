@@ -2235,6 +2235,19 @@ test("useChatEvents: terminal success clears prior run failure banner", () => {
 
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-failed");
+  harness.replaceMessages([
+    ...harness.messages,
+    {
+      id: "err-request-user-1",
+      role: "error",
+      content: "The request failed before a run was accepted.",
+    },
+    {
+      id: "err-stream-unavailable-service_unavailable-retryable-1",
+      role: "error",
+      content: "The event stream disconnected.",
+    },
+  ]);
 
   harness.handleEvent({
     type: "projection_update",
@@ -2266,6 +2279,17 @@ test("useChatEvents: terminal success clears prior run failure banner", () => {
     harness.messages.some((message) => message.id === "err-run-failed"),
     false,
   );
+  assert.equal(
+    harness.messages.some((message) => message.id === "err-request-user-1"),
+    true,
+  );
+  assert.equal(
+    harness.messages.some(
+      (message) =>
+        message.id === "err-stream-unavailable-service_unavailable-retryable-1",
+    ),
+    true,
+  );
   assert.deepEqual(harness.settledRuns, [
     { runId: "run-failed", success: false },
     { runId: "run-success", success: true },
@@ -2287,6 +2311,18 @@ test("useChatEvents: final reply clears prior run failure banner", () => {
       content: "System notices are not run-failure banners.",
       timestamp: "2026-06-03T11:44:44Z",
     },
+    {
+      id: "err-request-user-1",
+      role: "error",
+      content: "The request failed before a run was accepted.",
+      timestamp: "2026-06-03T11:44:44Z",
+    },
+    {
+      id: "err-stream-unavailable-service_unavailable-retryable-1",
+      role: "error",
+      content: "The event stream disconnected.",
+      timestamp: "2026-06-03T11:44:44Z",
+    },
   ]);
 
   harness.handleEvent({
@@ -2306,6 +2342,17 @@ test("useChatEvents: final reply clears prior run failure banner", () => {
   );
   assert.equal(
     harness.messages.some((message) => message.id === "system-keep"),
+    true,
+  );
+  assert.equal(
+    harness.messages.some((message) => message.id === "err-request-user-1"),
+    true,
+  );
+  assert.equal(
+    harness.messages.some(
+      (message) =>
+        message.id === "err-stream-unavailable-service_unavailable-retryable-1",
+    ),
     true,
   );
   assert.equal(
