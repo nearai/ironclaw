@@ -659,6 +659,7 @@ test("mergeFullRefresh drops older timeline messages when the fresh page skipped
     ],
     [
       { id: "msg-stale-user", role: "user", sequence: 51 },
+      { id: "tool-stale", role: "tool_activity", sequence: 75 },
       { id: "msg-stale-assistant", role: "assistant", sequence: 100 },
     ],
   );

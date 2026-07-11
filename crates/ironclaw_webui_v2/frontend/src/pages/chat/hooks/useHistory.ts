@@ -337,7 +337,9 @@ function mergeFullRefresh(fresh, current, options = {}) {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
     }
-    if (isRunActivityMessage(message)) return true;
+    if (isRunActivityMessage(message) && timelineSequence(message) === null) {
+      return true;
+    }
     if (
       typeof message.timelineMessageId === "string" &&
       ids.has(`msg-${message.timelineMessageId}`)
