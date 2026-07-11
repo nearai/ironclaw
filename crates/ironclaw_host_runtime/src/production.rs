@@ -2305,14 +2305,18 @@ fn dispatch_failure_message(
     safe_summary: Option<&str>,
     kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
-    // Preserve the raw cause until loop support can split it into a strict
-    // card summary and a secret-value-scrubbed Diagnostic. Strict validation
-    // here would discard path/JSON-bearing causes before the detail channel
-    // (`runtime_failure_diagnostic_detail` in `ironclaw_loop_support`) can
-    // retain them. The card channels downstream still strict-validate this
-    // message and fall back safely, so no unscrubbed cause reaches them.
+    // Preserve the descriptive cause, but display-scrub it here: this message
+    // is persisted into run-state rows and published on the runtime event sink
+    // BEFORE any downstream validation, so host paths, URLs, and
+    // credential-shaped tokens must be redacted at this choke point
+    // (reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces
+    // pins it). Strict summary validation would still be wrong here — it
+    // discards the whole cause; display redaction keeps the descriptive text
+    // and error codes the model needs, and the loop-side Diagnostic seam
+    // (`runtime_failure_diagnostic_detail`) re-scrubs secret values
+    // fail-closed.
     safe_summary
-        .map(str::to_string)
+        .map(ironclaw_safety::sanitize_display_text)
         .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
@@ -2844,19 +2848,32 @@ output_schema_ref = "schemas/test.output.json"
 
     #[test]
     fn sanitized_failure_message_retains_dispatch_cause_for_detail_consumer() {
-        // Phase 1: a dispatch cause containing path/JSON delimiters (which the
-        // strict card-summary validator rejects) must survive at this
-        // host-internal layer so the downstream Diagnostic channel keeps it.
-        // Secret-value scrubbing happens in loop support, not here.
-        let cause = "read_file failed at /workspace/{config}";
+        // The dispatch cause must survive DESCRIPTIVELY at this layer so the
+        // downstream Diagnostic channel keeps it — but this message is also
+        // persisted into run-state rows and published on the runtime event
+        // sink, so host paths and credential-shaped tokens are display-scrubbed
+        // here (the reborn_e2e_gate public-surface test pins that boundary).
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            safe_summary: Some(cause.to_string()),
+            safe_summary: Some(
+                "read_file failed at /workspace/config using sk-live-token".to_string(),
+            ),
             detail: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        assert_eq!(message, cause);
+        assert!(
+            message.contains("read_file failed"),
+            "descriptive cause must survive: {message}"
+        );
+        assert!(
+            !message.contains("/workspace/config"),
+            "host path must be display-redacted: {message}"
+        );
+        assert!(
+            !message.contains("sk-live-token"),
+            "credential-shaped token must be display-redacted: {message}"
+        );
     }
 
     #[test]

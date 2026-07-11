@@ -388,7 +388,7 @@ where
                 );
                 DispatchError::FirstParty {
                     kind,
-                    safe_summary: None,
+                    safe_summary: Some(error.to_string()),
                     detail: None,
                 }
             })?;
@@ -432,7 +432,7 @@ where
                 );
                 DispatchError::FirstParty {
                     kind: error.kind(),
-                    safe_summary: None,
+                    safe_summary: Some(error.to_string()),
                     detail: None,
                 }
             })?;
