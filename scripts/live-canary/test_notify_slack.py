@@ -124,6 +124,22 @@ class ParseSummaryStatusTests(unittest.TestCase):
             -1,
         )
 
+
+class GoogleOauthPreflightReportTests(unittest.TestCase):
+    def test_healthy_or_absent_preflight_adds_no_failure(self):
+        self.assertIsNone(notify.google_oauth_preflight_report(""))
+        self.assertIsNone(notify.google_oauth_preflight_report("healthy"))
+
+    def test_invalid_grant_becomes_one_actionable_infrastructure_failure(self):
+        report = notify.google_oauth_preflight_report("invalid_grant")
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.tests, 1)
+        self.assertEqual(report.status, "fail")
+        self.assertEqual(report.error, "invalid_grant")
+        self.assertIn("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", report.fix)
+
     def test_large_status_is_preserved(self):
         # Bash exit codes wrap at 256, but the regex is unbounded;
         # ensure no accidental truncation/clamping by the parser.

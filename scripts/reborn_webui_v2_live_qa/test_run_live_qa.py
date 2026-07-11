@@ -4741,7 +4741,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("(authorized trigger)", workflow)
-        self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn("- prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn(
+            "- preflight-reborn-webui-v2-google-oauth",
+            match.group("body"),
+        )
         self.assertIn("always() &&", match.group("body"))
         self.assertIn(
             "needs.prepare-reborn-webui-v2-live-qa.result == 'success'",
@@ -4759,6 +4763,40 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("cache: pip", match.group("body"))
         self.assertNotIn("Build WASM channels", match.group("body"))
         self.assertNotIn("Setup OVH sccache", match.group("body"))
+        self.assertIn(
+            "Suppress Google cases after OAuth preflight failure",
+            match.group("body"),
+        )
+        self.assertIn(
+            "Mint fresh Google OAuth access token for selected cases",
+            match.group("body"),
+        )
+        self.assertIn(
+            "AUTH_LIVE_GOOGLE_ACCESS_TOKEN_PATH=${access_token_path}",
+            match.group("body"),
+        )
+
+        google_preflight_match = re.search(
+            r"(?ms)^  preflight-reborn-webui-v2-google-oauth:\n"
+            r"(?P<body>.*?)^  prepare-reborn-webui-v2-live-qa:",
+            workflow,
+        )
+        self.assertIsNotNone(
+            google_preflight_match,
+            "shared Google OAuth preflight job missing",
+        )
+        google_preflight_body = google_preflight_match.group("body")
+        self.assertIn("refresh_google_oauth.py", google_preflight_body)
+        self.assertIn("continue-on-error: true", google_preflight_body)
+        self.assertIn(
+            "Google-dependent cases will be skipped; non-Google cases will continue",
+            google_preflight_body,
+        )
+        self.assertIn(
+            "REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS: "
+            "${{ needs.preflight-reborn-webui-v2-google-oauth.outputs.status }}",
+            workflow,
+        )
 
         prepare_match = re.search(
             r"(?ms)^  prepare-reborn-webui-v2-live-qa:\n(?P<body>.*?)^  reborn-webui-v2-live-qa:",
