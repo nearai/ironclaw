@@ -179,6 +179,17 @@ resolve_env_placeholder_arg() {
   esac
 }
 
+# Deploy-hardening: IronClaw capability ids must be lowercase. A legacy
+# agent-market manifest on the persistent volume carried the invalid id
+# `marketplace__MARKET_SUBMIT_DELIVERABLE`, which fails the fail-closed
+# capability-id validator and bricks runtime assembly on boot. Sanitize the
+# on-volume manifest in place before serving. Idempotent — a no-op once the
+# manifest is valid. See kirikov/agents-market-v2 deploy/ironclaw/agent-market.
+for _am_manifest in "$IRONCLAW_REBORN_HOME"/*/system/extensions/agent-market/manifest.toml; do
+  [ -f "$_am_manifest" ] || continue
+  sed -i 's/marketplace__MARKET_SUBMIT_DELIVERABLE/marketplace__submit_deliverable/g' "$_am_manifest" 2>/dev/null || true
+done
+
 if [ "$#" -gt 0 ]; then
   original_arg_count="$#"
   while [ "$original_arg_count" -gt 0 ]; do
