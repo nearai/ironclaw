@@ -732,7 +732,7 @@ jobs:
               python3 scripts/live-canary/validate_reborn_binary_artifact.py \
                 artifacts/prepared-reborn-webui-v2-binary \
                 "${TARGET_REF}" \
-                "openai-compat-beta,slack-v2-host-beta"
+                "webui-v2-beta,slack-v2-host-beta"
             ); then
               echo "::warning::The Reborn E2E artifact could not be downloaded or validated; using the canary fallback build."
               rm -rf artifacts/prepared-reborn-webui-v2-binary
@@ -776,7 +776,7 @@ jobs:
         run: >-
           cargo build
           -p ironclaw_reborn_cli
-          --features openai-compat-beta,slack-v2-host-beta
+          --features webui-v2-beta,slack-v2-host-beta
           --bin ironclaw-reborn
 
       - name: Package fallback Reborn WebUI v2 binary
@@ -795,7 +795,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${TARGET_REF}" \
-            --arg features "openai-compat-beta,slack-v2-host-beta" \
+            --argjson features '["slack-v2-host-beta","webui-v2-beta"]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > artifacts/prepared-reborn-webui-v2-binary/manifest.json
           echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
@@ -1036,12 +1036,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
-          (cd .live-qa-binary && sha256sum --check ironclaw-reborn.tar.gz.sha256)
-          jq -e \
-            --arg product_ref "${TARGET_REF}" \
-            --arg features "openai-compat-beta,slack-v2-host-beta" \
-            '.format_version == 1 and .product_ref == $product_ref and .features == $features' \
-            .live-qa-binary/manifest.json > /dev/null
+          python3 scripts/live-canary/validate_reborn_binary_artifact.py \
+            .live-qa-binary \
+            "${TARGET_REF}" \
+            "webui-v2-beta,slack-v2-host-beta"
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
           chmod 755 target/debug/ironclaw-reborn

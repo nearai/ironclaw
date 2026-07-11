@@ -4771,6 +4771,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("Build fallback Reborn WebUI v2 binary once", prepare_body)
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
+        self.assertIn(
+            "--features webui-v2-beta,slack-v2-host-beta",
+            prepare_body,
+        )
+        self.assertIn(
+            "webui-v2-beta,slack-v2-host-beta",
+            prepare_body,
+        )
         self.assertIn("using the canary fallback build", prepare_body)
         self.assertIn("prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}", prepare_body)
         self.assertIn("path: artifacts/prepared-reborn-webui-v2-binary/", prepare_body)
@@ -4784,7 +4792,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_e2e,
         )
         self.assertIn(
-            "--features webui-v2-beta,slack-v2-host-beta",
+            "--features openai-compat-beta,slack-v2-host-beta",
+            reborn_e2e,
+        )
+        self.assertIn(
+            '["openai-compat-beta","slack-v2-host-beta","webui-v2-beta"]',
             reborn_e2e,
         )
         self.assertIn(
