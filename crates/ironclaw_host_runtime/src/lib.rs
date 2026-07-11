@@ -592,7 +592,7 @@ pub struct RuntimeCapabilityFailure {
     /// persisted or published by run-state/event writers — the loop-support
     /// seam (`runtime_failure_diagnostic_detail`) re-scrubs and injection-
     /// fences it before it reaches the model.
-    pub model_visible_cause: Option<String>,
+    model_visible_cause: Option<String>,
 }
 
 impl fmt::Debug for RuntimeCapabilityFailure {
@@ -819,6 +819,12 @@ impl RuntimeCapabilityFailure {
     pub fn with_model_visible_cause(mut self, cause: impl Into<String>) -> Self {
         self.model_visible_cause = Some(cause.into());
         self
+    }
+
+    /// Return the scrubbed cause for the loop adapter's model-visible
+    /// Diagnostic seam. This value is never a public display label.
+    pub fn model_visible_cause(&self) -> Option<&str> {
+        self.model_visible_cause.as_deref()
     }
 
     pub fn safe_summary(&self) -> Option<String> {

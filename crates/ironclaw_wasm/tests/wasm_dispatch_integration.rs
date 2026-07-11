@@ -638,7 +638,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
                 .resolve_under(&request.package.root)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
             other => {
                 return Err(DispatchError::Wasm {
@@ -647,7 +647,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
-                    safe_summary: None,
+                    model_visible_cause: None,
                 });
             }
         };
@@ -666,14 +666,14 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         let prepared = Arc::new(
             self.runtime
                 .prepare(request.capability_id.as_str(), &wasm_bytes)
                 .map_err(|error| DispatchError::Wasm {
                     kind: wasm_error_kind(&error),
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         );
         let prepared = {
@@ -698,7 +698,7 @@ fn execute_prepared_wasm(
 ) -> Result<RuntimeAdapterResult, DispatchError> {
     let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::InputEncode,
-        safe_summary: None,
+        model_visible_cause: None,
     })?;
     let reservation = match request.resource_reservation {
         Some(reservation) => reservation,
@@ -707,7 +707,7 @@ fn execute_prepared_wasm(
             .reserve(request.scope, request.estimate)
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?,
     };
     let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
@@ -718,7 +718,7 @@ fn execute_prepared_wasm(
                     release_wasm_reservation(request.governor, reservation.id);
                     return Err(DispatchError::Wasm {
                         kind: RuntimeDispatchErrorKind::Resource,
-                        safe_summary: None,
+                        model_visible_cause: None,
                     });
                 }
             } else {
@@ -726,7 +726,7 @@ fn execute_prepared_wasm(
             }
             return Err(DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };
@@ -734,14 +734,14 @@ fn execute_prepared_wasm(
         release_wasm_reservation(request.governor, reservation.id);
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            model_visible_cause: None,
         });
     }
     let Some(output_json) = execution.output_json else {
         release_wasm_reservation(request.governor, reservation.id);
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
-            safe_summary: None,
+            model_visible_cause: None,
         });
     };
     let output = match serde_json::from_str::<Value>(&output_json) {
@@ -750,7 +750,7 @@ fn execute_prepared_wasm(
             release_wasm_reservation(request.governor, reservation.id);
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };
@@ -763,7 +763,7 @@ fn execute_prepared_wasm(
             release_wasm_reservation(request.governor, reservation.id);
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };

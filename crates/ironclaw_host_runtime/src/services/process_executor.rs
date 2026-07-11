@@ -547,21 +547,21 @@ mod tests {
             (
                 DispatchError::Script {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 },
                 "resource",
             ),
             (
                 DispatchError::Mcp {
                     kind: RuntimeDispatchErrorKind::NetworkDenied,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 },
                 "network_denied",
             ),
             (
                 DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 },
                 "output_decode",
             ),

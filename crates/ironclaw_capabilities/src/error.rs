@@ -138,7 +138,7 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::Wasm { .. }
             | DispatchError::FirstParty { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
-                safe_summary: dispatch_error_safe_summary(&other),
+                safe_summary: dispatch_error_model_visible_cause(&other),
                 detail: dispatch_error_detail(&other),
             },
         }
@@ -149,12 +149,21 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
     error.failure_kind()
 }
 
-fn dispatch_error_safe_summary(error: &DispatchError) -> Option<String> {
+fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
     match error {
-        DispatchError::Mcp { safe_summary, .. }
-        | DispatchError::Script { safe_summary, .. }
-        | DispatchError::Wasm { safe_summary, .. }
-        | DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
+        DispatchError::Mcp {
+            model_visible_cause,
+            ..
+        }
+        | DispatchError::Script {
+            model_visible_cause,
+            ..
+        }
+        | DispatchError::Wasm {
+            model_visible_cause,
+            ..
+        } => model_visible_cause.clone(),
+        DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
         // These variants carry no free-form runtime string; their `Display`
         // is a stable capability-id + category description that is itself the
         // real cause. Carry it so the model-visible detail channel keeps it
@@ -240,17 +249,17 @@ mod tests {
     #[test]
     fn dispatch_error_kind_forwards_mcp_runtime_kind_as_str() {
         // Regression (Phase 1): an MCP dispatch error's raw cause must be
-        // carried on the safe-summary channel — including path/JSON delimiters
+        // carried on the model-visible-cause channel — including path/JSON delimiters
         // that the strict summary validator rejects — so it reaches the
         // model-visible Diagnostic/detail downstream instead of being dropped.
         let error = DispatchError::Mcp {
             kind: RuntimeDispatchErrorKind::Backend,
-            safe_summary: Some("MCP request failed at /tmp/{socket}".to_string()),
+            model_visible_cause: Some("MCP request failed at /tmp/{socket}".to_string()),
         };
         let kind = dispatch_error_kind(&error);
         assert_eq!(kind.as_str(), "Backend");
         assert_eq!(
-            dispatch_error_safe_summary(&error).as_deref(),
+            dispatch_error_model_visible_cause(&error).as_deref(),
             Some("MCP request failed at /tmp/{socket}")
         );
     }
@@ -259,7 +268,7 @@ mod tests {
     fn dispatch_error_kind_forwards_script_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::Script {
             kind: RuntimeDispatchErrorKind::OutputTooLarge,
-            safe_summary: None,
+            model_visible_cause: None,
         });
         assert_eq!(kind.as_str(), "OutputTooLarge");
     }
@@ -268,7 +277,7 @@ mod tests {
     fn dispatch_error_kind_forwards_wasm_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Memory,
-            safe_summary: None,
+            model_visible_cause: None,
         });
         assert_eq!(kind.as_str(), "Memory");
     }
@@ -299,7 +308,7 @@ mod tests {
     fn from_dispatch_error_preserves_redacted_runtime_kind() {
         let err = CapabilityInvocationError::from(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            model_visible_cause: None,
         });
         match err {
             CapabilityInvocationError::Dispatch { kind, .. } => {

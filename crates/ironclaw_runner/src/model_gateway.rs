@@ -50,6 +50,7 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
+use crate::model_gateway_error_mapping::host_error_to_model_gateway_error;
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     model_routes::{
@@ -948,53 +949,6 @@ fn map_model_route_error(error: ModelRouteError) -> HostManagedModelError {
             "model route is invalid",
         ),
     }
-}
-
-fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
-    let diagnostic_ref = error.diagnostic_ref;
-    let reason_kind = error.reason_kind;
-    let gate_ref = error.gate_ref;
-    let existing_detail = error.detail;
-    let raw_summary = error.safe_summary;
-    let (mut converted, rejected_summary_detail) =
-        match LoopModelGatewayError::new(error.kind, raw_summary.clone()) {
-            Ok(error) => (error, None),
-            Err(validation_error) => {
-                tracing::debug!(
-                    validation_error = %validation_error,
-                    "model gateway summary rejected; using fallback"
-                );
-                (
-                    LoopModelGatewayError {
-                        kind: error.kind,
-                        safe_summary: LoopSafeSummary::model_gateway_failed(),
-                        reason_kind: None,
-                        gate_ref: None,
-                        diagnostic_ref: None,
-                        detail: None,
-                    },
-                    // Full hardened scrub (LeakDetector registry + injection
-                    // fencing), not just the token-prefix pass — this rejected
-                    // text is about to become model-visible detail.
-                    Some(ironclaw_loop_support::scrub_model_visible_detail(
-                        raw_summary,
-                    )),
-                )
-            }
-        };
-    if let Some(detail) = existing_detail.or(rejected_summary_detail) {
-        converted = converted.with_detail(detail);
-    }
-    if let Some(reason_kind) = reason_kind {
-        converted = converted.with_reason_kind(reason_kind);
-    }
-    if let Some(gate_ref) = gate_ref {
-        converted = converted.with_gate_ref(gate_ref);
-    }
-    if let Some(diagnostic_ref) = diagnostic_ref {
-        converted = converted.with_diagnostic_ref(diagnostic_ref);
-    }
-    converted
 }
 
 #[cfg(test)]

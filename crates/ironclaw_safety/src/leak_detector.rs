@@ -543,6 +543,15 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
+        // Bare JSON Web Tokens. Keep every segment bounded away from ordinary
+        // dotted identifiers while accepting base64url without padding.
+        LeakPattern {
+            name: "bare_jwt".to_string(),
+            regex: Regex::new(r"\b[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
+                .unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
+        },
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
             name: "bearer_token".to_string(),
@@ -806,6 +815,30 @@ mod tests {
 
         assert!(!changed);
         assert_eq!(redacted, content);
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_bare_jwt() {
+        let detector = LeakDetector::new();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
+
+        let (redacted, changed) = detector.redact_all_secrets(jwt);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn redact_all_secrets_merges_overlapping_matches() {
+        let detector = LeakDetector::new();
+        let token = "abcdefghijklmnopqrstuvwxyz123456";
+        let content = format!("Authorization: Bearer {token}");
+
+        let (redacted, changed) = detector.redact_all_secrets(&content);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+        assert_eq!(redacted.matches("[REDACTED]").count(), 1);
     }
 
     #[test]

@@ -68,7 +68,7 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
 #[tokio::test]
 async fn mcp_adapter_preserves_executor_failure_cause() {
     // Regression (Phase 1): an MCP dispatch failure's raw cause — including
-    // path/JSON delimiters — must ride the safe-summary channel so the
+    // path/JSON delimiters — must ride the model-visible-cause channel so the
     // model-visible Diagnostic downstream keeps it instead of collapsing to a
     // bare failure category.
     let raw = "MCP client failed at /tmp/{socket}";
@@ -104,8 +104,11 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
         .await;
 
     match result {
-        Err(DispatchError::Mcp { safe_summary, .. }) => {
-            let summary = safe_summary.expect("MCP cause should be retained");
+        Err(DispatchError::Mcp {
+            model_visible_cause,
+            ..
+        }) => {
+            let summary = model_visible_cause.expect("MCP cause should be retained");
             assert!(summary.contains(raw), "unexpected cause: {summary}");
         }
         other => panic!("expected MCP dispatch failure, got {other:?}"),

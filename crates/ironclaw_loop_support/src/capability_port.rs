@@ -2782,8 +2782,8 @@ fn runtime_failure_diagnostic_detail(
     // rides `model_visible_cause` and only becomes model-visible through this
     // scrub (full registry + injection fencing).
     let raw = failure
-        .model_visible_cause
-        .clone()
+        .model_visible_cause()
+        .map(str::to_owned)
         .or_else(|| failure.safe_summary())?;
     let scrubbed = crate::scrub_model_visible_detail(raw);
     if scrubbed.trim().is_empty() {
@@ -4969,35 +4969,29 @@ mod tests {
     async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
         let cases = [
             (
-                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                    kind: RuntimeFailureKind::InvalidInput,
-                    message: Some("invalid JSON: expected value at line 1 column 1".to_string()),
-                    detail: None,
-                    model_visible_cause: None,
-                }),
+                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
+                    CapabilityId::new("demo.echo").expect("valid capability id"),
+                    RuntimeFailureKind::InvalidInput,
+                    Some("invalid JSON: expected value at line 1 column 1".to_string()),
+                )),
                 CapabilityFailureKind::InvalidInput,
                 Some("invalid JSON: expected value at line 1 column 1"),
             ),
             (
-                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                    kind: RuntimeFailureKind::InvalidInput,
-                    message: Some("invalid JSON: expected value near {invalid".to_string()),
-                    detail: None,
-                    model_visible_cause: None,
-                }),
+                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
+                    CapabilityId::new("demo.echo").expect("valid capability id"),
+                    RuntimeFailureKind::InvalidInput,
+                    Some("invalid JSON: expected value near {invalid".to_string()),
+                )),
                 CapabilityFailureKind::InvalidInput,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
             ),
             (
-                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                    kind: RuntimeFailureKind::InvalidInput,
-                    message: None,
-                    detail: None,
-                    model_visible_cause: None,
-                }),
+                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
+                    CapabilityId::new("demo.echo").expect("valid capability id"),
+                    RuntimeFailureKind::InvalidInput,
+                    None,
+                )),
                 CapabilityFailureKind::InvalidInput,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
             ),

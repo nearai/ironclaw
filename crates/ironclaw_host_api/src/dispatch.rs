@@ -351,7 +351,7 @@ pub enum DispatchError {
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
-    /// MCP dispatch failure. `safe_summary` carries the raw backend cause —
+    /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —
     /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
     /// at the model-visible Diagnostic seam (`scrub_model_visible_detail`),
     /// and display surfaces run their own redaction. Do not log or surface it
@@ -359,16 +359,16 @@ pub enum DispatchError {
     #[error("MCP dispatch failed: {kind}")]
     Mcp {
         kind: RuntimeDispatchErrorKind,
-        safe_summary: Option<String>,
+        model_visible_cause: Option<String>,
     },
-    /// Script dispatch failure. Same `safe_summary` contract as [`Self::Mcp`]:
+    /// Script dispatch failure. Same `model_visible_cause` contract as [`Self::Mcp`]:
     /// raw cause, scrubbed downstream — not directly displayable.
     #[error("script dispatch failed: {kind}")]
     Script {
         kind: RuntimeDispatchErrorKind,
-        safe_summary: Option<String>,
+        model_visible_cause: Option<String>,
     },
-    /// WASM guest dispatch failure. `safe_summary` carries the best available
+    /// WASM guest dispatch failure. `model_visible_cause` carries the best available
     /// cause: the stable, host-sanitized error code a structured guest error
     /// declared (e.g. a Slack `channel_not_found`) when present, otherwise the
     /// raw error text (secret VALUES are scrubbed downstream at the
@@ -377,7 +377,7 @@ pub enum DispatchError {
     #[error("WASM dispatch failed: {kind}")]
     Wasm {
         kind: RuntimeDispatchErrorKind,
-        safe_summary: Option<String>,
+        model_visible_cause: Option<String>,
     },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty {

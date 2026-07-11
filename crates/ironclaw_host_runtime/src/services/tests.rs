@@ -1262,7 +1262,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         let receipt: ResourceReceipt = request
@@ -1270,7 +1270,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,

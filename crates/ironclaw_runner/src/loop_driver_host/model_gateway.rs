@@ -8,10 +8,12 @@ use ironclaw_loop_support::{
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway,
-    LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
-    LoopModelResponse, LoopPromptBundleAuthority, LoopSafeSummary,
+    InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
+    LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
+    LoopPromptBundleAuthority,
 };
+
+use crate::model_gateway_error_mapping::host_error_to_model_gateway_error;
 
 pub(super) struct ThreadResolvingLoopModelGateway<S, G>
 where
@@ -109,83 +111,5 @@ struct LoopProgressHostStreamSink {
 impl HostManagedModelStreamSink for LoopProgressHostStreamSink {
     async fn safe_text_update(&self, safe_text: String) {
         self.inner.model_text_update(safe_text).await;
-    }
-}
-
-fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
-    let diagnostic_ref = error.diagnostic_ref;
-    let reason_kind = error.reason_kind;
-    let gate_ref = error.gate_ref;
-    // Phase 2 (item 4): the card summary still degrades to a fixed fallback when
-    // it fails strict validation, but the model-visible `detail` — already
-    // producer-scrubbed upstream (`scrub_model_visible_detail` via
-    // `HostManagedModelError::safe_with_detail` / `model_gateway_error`) — is no
-    // longer dropped. It rides through, re-scrubbed here as a fail-closed
-    // backstop so this highest-leak-risk path is provably safe even if an
-    // upstream producer forgot: secret VALUES are redacted through the full
-    // leak-detector registry + prefix matcher and any injection payload is
-    // fenced. See the `text_only_host_factory_*` contracts in
-    // `ironclaw_reborn/tests/loop_driver_host.rs`.
-    let detail = error
-        .detail
-        .map(ironclaw_loop_support::scrub_model_visible_detail);
-    let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
-        Ok(error) => error,
-        Err(_) => LoopModelGatewayError {
-            kind: error.kind,
-            safe_summary: LoopSafeSummary::model_gateway_failed(),
-            reason_kind: None,
-            gate_ref: None,
-            diagnostic_ref: None,
-            detail: None,
-        },
-    };
-    if let Some(reason_kind) = reason_kind {
-        converted = converted.with_reason_kind(reason_kind);
-    }
-    if let Some(gate_ref) = gate_ref {
-        converted = converted.with_gate_ref(gate_ref);
-    }
-    if let Some(diagnostic_ref) = diagnostic_ref {
-        converted = converted.with_diagnostic_ref(diagnostic_ref);
-    }
-    if let Some(detail) = detail {
-        converted = converted.with_detail(detail);
-    }
-    converted
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ironclaw_turns::run_profile::AgentLoopHostErrorKind;
-
-    #[test]
-    fn host_error_carries_model_visible_detail_with_fail_closed_rescrub() {
-        // Phase 2 (item 4): the model-visible detail is carried onto the
-        // gateway error (previously dropped) and defensively re-scrubbed here so
-        // a credential token an upstream producer forgot never reaches this
-        // highest-leak-risk wire, while the descriptive cause survives.
-        let error = AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "model service is unavailable",
-        )
-        .with_detail(concat!(
-            "provider 500 at /host/route body ghp",
-            "_012345678901234567890123456789012345",
-            ""
-        ));
-
-        let converted = host_error_to_model_gateway_error(error);
-
-        let detail = converted.detail.expect("detail carried onto gateway error");
-        assert!(
-            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
-            "fail-closed backstop must redact a credential token: {detail}"
-        );
-        assert!(
-            detail.contains("/host/route"),
-            "descriptive cause must survive: {detail}"
-        );
     }
 }

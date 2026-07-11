@@ -138,7 +138,7 @@ pub struct LoopModelGatewayError {
     /// Secret-value-scrubbed cause text for model recovery and failure
     /// explanation. Unlike `safe_summary`, path and payload delimiters are
     /// allowed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub detail: Option<String>,
 }
 
@@ -675,5 +675,20 @@ mod tests {
             gateway_error.into_host_error().detail.as_deref(),
             Some(detail)
         );
+    }
+
+    #[test]
+    fn model_gateway_error_detail_stays_out_of_wire_shape() {
+        let error =
+            LoopModelGatewayError::new(AgentLoopHostErrorKind::Unavailable, "model gateway failed")
+                .expect("valid summary")
+                .with_detail("private diagnostic");
+
+        let serialized = serde_json::to_value(&error).expect("gateway error serializes");
+        assert!(serialized.get("detail").is_none());
+
+        let decoded: LoopModelGatewayError = serde_json::from_value(serialized)
+            .expect("older wire shape without detail still deserializes");
+        assert_eq!(decoded.detail, None);
     }
 }
