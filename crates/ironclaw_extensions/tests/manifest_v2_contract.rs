@@ -958,6 +958,36 @@ url = "https://example.com/mcp"
 }
 
 #[test]
+fn user_registered_manifest_rejects_non_mcp_runtime() {
+    // Review item 2: a `UserRegistered` descriptor is server-synthesized by
+    // the register verb and never resolves under an owner-scoped filesystem
+    // path, so any runtime other than `mcp` — a wasm module in particular —
+    // must be rejected at manifest validation, not left to downstream
+    // zero-capability gating.
+    let toml = third_party_wasm_manifest("acme-mcp-registered", "acme-mcp-registered.echo");
+    let tenant_id = TenantId::new("acme-mcp-tenant").expect("valid tenant id");
+    let owner = UserId::new("acme-mcp-owner").expect("valid owner id");
+
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::UserRegistered { tenant_id, owner },
+        &catalog(),
+    )
+    .expect_err("wasm runtime must be rejected for a UserRegistered manifest");
+
+    assert!(
+        matches!(
+            err,
+            ManifestV2Error::RuntimeKindForbiddenForRegisteredSource {
+                kind: RuntimeKind::Wasm,
+                ..
+            }
+        ),
+        "expected RuntimeKindForbiddenForRegisteredSource for a wasm runtime, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_duplicate_required_host_ports_in_one_capability() {
     let toml = format!(
         r#"
