@@ -346,7 +346,7 @@ export function useExtensions() {
     install: installMutation.mutate,
     activate: activateMutation.mutate,
     remove,
-    importTool: (payload: { file: File }) => importMutation.mutate(payload),
+    importTool: (payload) => importMutation.mutate(payload),
     isImporting: importMutation.isPending,
     invalidate,
   };
