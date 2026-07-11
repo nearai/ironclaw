@@ -645,6 +645,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatePromptView {
     pub turn_run_id: TurnRunId,
+    #[serde(default = "default_product_gate_kind")]
+    pub gate_kind: ProductGateKind,
     pub gate_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<InvocationId>,
@@ -652,6 +654,8 @@ pub struct GatePromptView {
     pub body: String,
     #[serde(default)]
     pub allow_always: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ApprovalPromptDetailView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_context: Option<ApprovalPromptContextView>,
 }
@@ -1203,6 +1207,32 @@ pub enum ProductGateKind {
     Generic,
 }
 
+fn default_product_gate_kind() -> ProductGateKind {
+    // An omitted `gate_kind` on the wire defaults to the inert `Generic`, never
+    // the most-privileged `Approval`. A producer that fails to set the kind (or
+    // a legacy/replay shape) must not be silently upgraded to an approval gate.
+    ProductGateKind::Generic
+}
+
+fn validate_approval_details(
+    details: &[ApprovalPromptDetailView],
+) -> Result<(), ProductAdapterError> {
+    if details.len() > APPROVAL_PROMPT_DETAIL_MAX_ITEMS {
+        return Err(invalid(
+            "approval_prompt_details",
+            format!("must contain at most {APPROVAL_PROMPT_DETAIL_MAX_ITEMS} items"),
+        ));
+    }
+    for detail in details {
+        detail.validate()?;
+    }
+    Ok(())
+}
+
+// The `Gate` variant carries the resource/approval gate detail rows and
+// approval/auth context; boxing them would obscure the wire DTO shape for no
+// runtime win on a projection item that is constructed once per gate event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
@@ -1255,6 +1285,10 @@ pub enum ProductProjectionItem {
         body: Option<String>,
         #[serde(default)]
         allow_always: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<ApprovalPromptDetailView>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_context: Option<ApprovalPromptContextView>,
         /// Auth challenge context. For a `manual_token` gate whose paste is a
         /// pairing code, its `connection` field carries the channel-connection
         /// render copy + resolve route — the single canonical place the
@@ -1318,6 +1352,8 @@ impl ProductProjectionItem {
                 gate_ref,
                 headline,
                 body,
+                details,
+                approval_context,
                 auth_context,
                 ..
             } => {
@@ -1333,6 +1369,10 @@ impl ProductProjectionItem {
                 )?;
                 if let Some(body) = body {
                     validate_bounded_text("projection_gate_body", body, PROJECTION_TEXT_MAX_BYTES)?;
+                }
+                validate_approval_details(details)?;
+                if let Some(context) = approval_context {
+                    context.validate()?;
                 }
                 if let Some(context) = auth_context {
                     context.validate()?;
@@ -1383,6 +1423,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
     where
         D: Deserializer<'de>,
     {
+        #[allow(clippy::large_enum_variant)]
         #[derive(Deserialize)]
         #[serde(rename_all = "snake_case")]
         enum Wire {
@@ -1426,6 +1467,10 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 body: Option<String>,
                 #[serde(default)]
                 allow_always: bool,
+                #[serde(default)]
+                details: Vec<ApprovalPromptDetailView>,
+                #[serde(default)]
+                approval_context: Option<ApprovalPromptContextView>,
                 #[serde(default)]
                 auth_context: Option<AuthPromptContextView>,
             },
@@ -1479,6 +1524,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
+                details,
+                approval_context,
                 auth_context,
             } => ProductProjectionItem::Gate {
                 run_id,
@@ -1488,6 +1535,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
+                details,
+                approval_context,
                 auth_context,
             },
             Wire::SkillActivation {
@@ -1671,6 +1720,8 @@ mod tests {
                 headline: "Connect Slack".to_string(),
                 body: Some("Message the app to get a pairing code.".to_string()),
                 allow_always: false,
+                details: Vec::new(),
+                approval_context: None,
                 auth_context: Some(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::ManualToken,
@@ -1930,6 +1981,8 @@ mod tests {
                 headline: "Approval required".to_string(),
                 body: Some("capability requires approval".to_string()),
                 allow_always: true,
+                details: Vec::new(),
+                approval_context: None,
                 auth_context: None,
             }],
         )
@@ -1967,6 +2020,8 @@ mod tests {
                 headline: "Authentication required".to_string(),
                 body: Some("Authenticate to continue this run.".to_string()),
                 allow_always: false,
+                details: Vec::new(),
+                approval_context: None,
                 auth_context: Some(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::OAuthUrl,
@@ -2039,11 +2094,13 @@ mod tests {
     fn gate_prompt_view_round_trips_approval_context() {
         let view = GatePromptView {
             turn_run_id: TurnRunId::new(),
+            gate_kind: ProductGateKind::Approval,
             gate_ref: "gate:approval-test".to_string(),
             invocation_id: Some(InvocationId::new()),
             headline: "Approval required".to_string(),
             body: "capability requires approval".to_string(),
             allow_always: true,
+            details: Vec::new(),
             approval_context: Some(
                 ApprovalPromptContextView::new(
                     "builtin.http",

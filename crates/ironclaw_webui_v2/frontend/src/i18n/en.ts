@@ -237,12 +237,27 @@ registerPack("en", {
   "settings.channels": "Channels",
   "settings.networking": "Networking",
   "settings.tools": "Tools",
+  "settings.budget": "Usage",
   "settings.skills": "Skills",
   "settings.traceCommons": "Trace Commons",
   "settings.users": "Users",
   "settings.language": "Language",
 
   // Settings — usage tab
+  "budget.title": "Usage",
+  "budget.description": "Current spend, active limit, reset window, and approval thresholds.",
+  "budget.userBudget": "User usage",
+  "budget.generated": "updated",
+  "budget.usage": "Usage",
+  "budget.reserved": "Reserved",
+  "budget.limit": "Limit",
+  "budget.utilization": "Used",
+  "budget.reset": "Reset",
+  "budget.warnPause": "Warn / pause",
+  "budget.unlimited": "Unlimited",
+  "budget.unconfigured": "unconfigured",
+  "budget.empty": "No budget data is available for this account.",
+  "budget.loadFailed": "Failed to load budget: {message}",
 
   // Settings — Trace Commons credits (read-only)
   "traceCommons.title": "Trace Commons credits",

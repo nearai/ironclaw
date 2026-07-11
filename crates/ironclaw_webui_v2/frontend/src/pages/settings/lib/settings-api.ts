@@ -2,6 +2,7 @@ import { apiFetch } from "../../../lib/api";
 
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
+const SETTINGS_USAGE_URL = "/api/webchat/v2/settings/usage";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 const TOOL_PREFIX = "tool.";
 const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
@@ -57,6 +58,12 @@ export async function fetchSettingsExport() {
     diagnostics: data.diagnostics || [],
     precedence: data.precedence || [],
   };
+}
+// Per-user budget/usage view (read-only). Returns the usage snapshot rendered
+// by the Usage settings tab: current spend, reserved holds, active limit,
+// reset window, and approval thresholds per account.
+export function fetchBudgetSettings() {
+  return apiFetch(SETTINGS_USAGE_URL);
 }
 export async function fetchSetting(key) {
   if (key === AUTO_APPROVE_KEY) {

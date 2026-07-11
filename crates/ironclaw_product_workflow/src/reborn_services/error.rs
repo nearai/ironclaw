@@ -71,7 +71,11 @@ impl RebornServicesError {
         Self::from_status_kind(code, default_kind_for_code(code), status_code, retryable)
     }
 
-    pub(super) fn from_status_kind(
+    /// Build a sanitized error from an explicit `(code, kind, status, retryable)`
+    /// tuple. Host-composition adapters outside this crate should route through
+    /// this constructor instead of hand-rolling the struct literal, so the
+    /// status/kind pairing has one source of truth.
+    pub fn from_status_kind(
         code: RebornServicesErrorCode,
         kind: RebornServicesErrorKind,
         status_code: u16,
@@ -113,7 +117,7 @@ impl RebornServicesError {
         Self::from_status(RebornServicesErrorCode::Internal, 500, false)
     }
 
-    pub(super) fn service_unavailable(retryable: bool) -> Self {
+    pub fn service_unavailable(retryable: bool) -> Self {
         Self::from_status_kind(
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::ServiceUnavailable,
