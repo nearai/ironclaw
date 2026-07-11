@@ -545,6 +545,126 @@ pub enum ResourceValue {
     Integer(u64),
 }
 
+impl ResourceValue {
+    /// True when this value is zero.
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Self::Decimal(value) => *value == Decimal::ZERO,
+            Self::Integer(value) => *value == 0,
+        }
+    }
+
+    /// Saturating sum of two same-representation values.
+    ///
+    /// Returns `None` when the variants differ. Within a single dimension,
+    /// usage/reserved/requested/limit always share a representation, so a
+    /// mismatch is a programming error the caller should surface, not paper over.
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Decimal(left), Self::Decimal(right)) => Some(Self::Decimal(left + right)),
+            (Self::Integer(left), Self::Integer(right)) => {
+                Some(Self::Integer(left.saturating_add(*right)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Saturating sum of three same-representation values (usage + reserved +
+    /// requested). `None` on any representation mismatch.
+    pub fn checked_sum3(first: &Self, second: &Self, third: &Self) -> Option<Self> {
+        first.checked_add(second)?.checked_add(third)
+    }
+
+    /// Difference clamped at zero. `None` on representation mismatch.
+    pub fn saturating_sub(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Decimal(left), Self::Decimal(right)) => {
+                Some(Self::Decimal((left - right).max(Decimal::ZERO)))
+            }
+            (Self::Integer(left), Self::Integer(right)) => {
+                Some(Self::Integer(left.saturating_sub(*right)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Larger of two values. `None` on representation mismatch.
+    pub fn max_value(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Decimal(left), Self::Decimal(right)) => Some(Self::Decimal((*left).max(*right))),
+            (Self::Integer(left), Self::Integer(right)) => Some(Self::Integer((*left).max(*right))),
+            _ => None,
+        }
+    }
+
+    /// Human-readable rendering for `dimension` (USD gets a `$` prefix and 4dp;
+    /// other decimals normalize; integers render as-is).
+    pub fn display(&self, dimension: ResourceDimension) -> String {
+        match (dimension, self) {
+            (ResourceDimension::Usd, Self::Decimal(value)) => {
+                format!("${}", value.round_dp(4).normalize())
+            }
+            (_, Self::Decimal(value)) => value.normalize().to_string(),
+            (_, Self::Integer(value)) => value.to_string(),
+        }
+    }
+}
+
+/// Compute the raised limit for a budget-gate approval on one dimension.
+///
+/// `current` is the existing limit (`None` = unset). An existing limit is raised
+/// by 20% (integers round up); an unset limit jumps to `total`. The result is
+/// then floored so it clears the pause threshold, guaranteeing the resumed run
+/// can make progress past the gate.
+///
+/// This is the single source of truth for the approval-raise policy. Both the
+/// apply path (resource-governor limit update) and the read-side preview
+/// (turn-event projection's "limit after approval") call it, so the figure the
+/// user is shown always matches what approval actually applies. Returns `None`
+/// when `current` and `total` use different representations.
+pub fn raised_budget_limit(
+    current: Option<ResourceValue>,
+    total: ResourceValue,
+    pause_at: f64,
+) -> Option<ResourceValue> {
+    use rust_decimal::prelude::FromPrimitive;
+    let clears_pause = pause_at.is_finite() && pause_at > 0.0 && pause_at < 1.0;
+    match total {
+        ResourceValue::Decimal(total) => {
+            let current = match current {
+                Some(ResourceValue::Decimal(value)) => Some(value),
+                Some(ResourceValue::Integer(_)) => return None,
+                None => None,
+            };
+            let mut target = current
+                .map(|value| value + (value * Decimal::new(20, 2)))
+                .unwrap_or(total);
+            if clears_pause && let Some(pause_at_decimal) = Decimal::from_f64(pause_at) {
+                target = target.max(total / pause_at_decimal + Decimal::new(1, 4));
+            }
+            Some(ResourceValue::Decimal(target.round_dp(4)))
+        }
+        ResourceValue::Integer(total) => {
+            let current = match current {
+                Some(ResourceValue::Integer(value)) => Some(value),
+                Some(ResourceValue::Decimal(_)) => return None,
+                None => None,
+            };
+            let mut target = current
+                .map(|value| {
+                    value
+                        .saturating_add(value / 5)
+                        .saturating_add(u64::from(value % 5 != 0))
+                })
+                .unwrap_or(total);
+            if clears_pause {
+                target = target.max((((total as f64) / pause_at).ceil() as u64).saturating_add(1));
+            }
+            Some(ResourceValue::Integer(target))
+        }
+    }
+}
+
 /// Structured reservation denial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceDenial {

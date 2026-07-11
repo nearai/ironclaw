@@ -4774,6 +4774,7 @@ dependencies = [
  "ironclaw_product_workflow",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_traces",
+ "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runner",
  "ironclaw_telegram_v2_adapter",

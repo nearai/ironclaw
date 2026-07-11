@@ -33,35 +33,35 @@ use ironclaw_product_workflow::{
     RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
-    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornCancelRunResponse,
-    RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
-    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornBudgetSettingsResponse,
+    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
+    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1788,6 +1788,16 @@ pub async fn set_settings_tool_permission(
         )
         .await?;
     validate_settings_tool_config_response(&response)?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/settings/usage`
+pub async fn get_settings_usage(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornBudgetSettingsResponse>, WebUiV2HttpError> {
+    let response = state.services().get_budget_settings(caller).await?;
     Ok(Json(response))
 }
 
