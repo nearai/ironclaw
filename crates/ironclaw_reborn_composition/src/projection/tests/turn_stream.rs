@@ -410,6 +410,8 @@ async fn webui_event_stream_projects_budget_resource_gate_prompt() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: None,
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
