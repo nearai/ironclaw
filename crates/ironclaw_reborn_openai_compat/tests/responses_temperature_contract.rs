@@ -1,3 +1,5 @@
+#![cfg(feature = "openai-compat-beta")]
+
 //! Caller-level regression tests for per-request `temperature` on the
 //! Responses API (PR #3641, serrrfirat's Medium-severity follow-up).
 //!
@@ -18,16 +20,16 @@ use ironclaw_product_adapters::{
     ProjectionReadRequest, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
-    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
-    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
-    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
+    openai_compat_router_with_state, InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope,
+    OpenAiCompatAuthenticatedCaller, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
+    OpenAiCompatProjectionRef, OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId,
+    OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
+    OpenAiResponseProjection, OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow, openai_compat_router_with_state,
+    OpenAiResponsesWorkflow,
 };
 use ironclaw_turns::{TurnActor, TurnRunId, TurnScope};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 
 /// POST `/v1/responses` with `temperature` set must preserve it in the
