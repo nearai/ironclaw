@@ -911,6 +911,153 @@ async def test_emulate_slack_covers_qa9_and_qa10_provider_shapes(
         ) == 1
 
 
+async def test_emulate_slack_covers_identity_membership_and_last_sent(
+    emulate_slack_server,
+):
+    """Cover the remaining deterministic inputs consumed by Slack transforms."""
+    base_url = emulate_slack_server["url"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        identity = await slack_post(client, base_url, "auth.test")
+        assert identity["user"] == "reborn-user"
+        assert identity["user_id"].startswith("U")
+
+        channels = await slack_post(
+            client,
+            base_url,
+            "conversations.list",
+            {"types": "public_channel"},
+        )
+        alerts = next(
+            channel
+            for channel in channels["channels"]
+            if channel["name"] == "reborn-alerts"
+        )
+        await slack_post(
+            client,
+            base_url,
+            "conversations.join",
+            {"channel": alerts["id"]},
+        )
+        joined_channels = await slack_post(
+            client,
+            base_url,
+            "conversations.list",
+            {"types": "public_channel"},
+        )
+        joined_alerts = next(
+            channel
+            for channel in joined_channels["channels"]
+            if channel["id"] == alerts["id"]
+        )
+        assert joined_alerts["is_member"] is True
+
+        first_marker = "QA10 self-authored earlier message"
+        last_marker = "QA10 self-authored last-sent message"
+        await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {"channel": alerts["id"], "text": first_marker},
+        )
+        posted = await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {"channel": alerts["id"], "text": last_marker},
+        )
+        history = await slack_post(
+            client,
+            base_url,
+            "conversations.history",
+            {"channel": alerts["id"], "limit": 10},
+        )
+        matching = [
+            message
+            for message in history["messages"]
+            if message["text"] in {first_marker, last_marker}
+        ]
+        assert matching[0]["text"] == last_marker
+        assert matching[0]["user"] == identity["user_id"]
+        assert posted["message"]["user"] == identity["user_id"]
+
+
+async def test_emulate_google_drive_update_roundtrips(emulate_google_server):
+    """Pin Drive update semantics in addition to create/read coverage."""
+    base_url = emulate_google_server["url"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        renamed = await client.patch(
+            f"{base_url}/drive/v3/files/drv_reborn_qa_brief",
+            headers=google_headers(),
+            json={"name": "Reborn QA Brief Updated"},
+        )
+        renamed.raise_for_status()
+        assert renamed.json()["name"] == "Reborn QA Brief Updated"
+
+        readback = await client.get(
+            f"{base_url}/drive/v3/files/drv_reborn_qa_brief",
+            headers=google_headers(),
+        )
+        readback.raise_for_status()
+        assert readback.json()["name"] == "Reborn QA Brief Updated"
+
+
+async def test_emulate_github_distinguishes_repositories_and_private_accounts(
+    emulate_github_server,
+):
+    base_url = emulate_github_server["url"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        second_repo = await github_json(
+            client,
+            base_url,
+            "POST",
+            "/user/repos",
+            payload={
+                "name": "release-fixture-secondary",
+                "private": True,
+                "auto_init": True,
+            },
+            expected_status=201,
+        )
+        primary_release = await github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/releases",
+            payload={"tag_name": "fixture-primary-v2", "name": "Primary v2"},
+            expected_status=201,
+        )
+        secondary_release = await github_json(
+            client,
+            base_url,
+            "POST",
+            f"/repos/{second_repo['full_name']}/releases",
+            payload={"tag_name": "fixture-secondary-v7", "name": "Secondary v7"},
+            expected_status=201,
+        )
+
+        latest_primary = await github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/releases/latest",
+        )
+        latest_secondary = await github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/{second_repo['full_name']}/releases/latest",
+        )
+        assert latest_primary["id"] == primary_release["id"]
+        assert latest_secondary["id"] == secondary_release["id"]
+        assert latest_primary["tag_name"] != latest_secondary["tag_name"]
+
+        foreign_private = await client.get(
+            f"{base_url}/repos/{second_repo['full_name']}",
+            headers=github_headers(EMULATE_GITHUB_SECONDARY_BEARER),
+        )
+        assert foreign_private.status_code in (403, 404), foreign_private.text
+
+
 async def test_emulate_github_covers_identity_and_negative_results(
     emulate_github_server,
 ):
