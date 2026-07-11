@@ -155,6 +155,9 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   const contentWidthClass =
     isUser || isError ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
+  // A user message accepted-and-queued behind an active run: render a distinct
+  // "queued" badge (never the error styling / resend action).
+  const showQueuedStatus = isUser && status === "queued";
   const showMetaRow = showActions || showRetryAction || timeLabel;
   const roleStyle =
     ROLE_STYLES[role as keyof typeof ROLE_STYLES] ||
@@ -184,6 +187,14 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
           {status === "error" && (
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300">
               <span>{error}</span>
+            </div>
+          )}
+
+          {showQueuedStatus && (
+            <div className="mt-2 flex justify-end">
+              <span className="rounded border border-iron-600 bg-iron-900/70 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-iron-300">
+                {t("chat.queued")}
+              </span>
             </div>
           )}
 

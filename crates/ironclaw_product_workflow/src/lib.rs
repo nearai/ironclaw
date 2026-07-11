@@ -50,6 +50,7 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
+mod steering;
 mod webui_inbound;
 mod workflow;
 

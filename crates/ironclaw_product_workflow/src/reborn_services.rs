@@ -24,6 +24,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
     Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
+use ironclaw_loop_support::{HostInputEnqueuePort, HostInputQueueError, RejectingInputEnqueue};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
@@ -2665,6 +2666,7 @@ pub trait InboundAttachmentReader: Send + Sync {
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    input_enqueue: Arc<dyn HostInputEnqueuePort>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
@@ -2699,6 +2701,7 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
+            input_enqueue: Arc::new(RejectingInputEnqueue),
             inbound_attachments: None,
             project_filesystem: None,
             filesystem_browser: None,
@@ -2732,6 +2735,11 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
+        self.input_enqueue = input_enqueue;
         self
     }
 
@@ -3656,6 +3664,25 @@ impl RebornServicesApi for RebornServices {
                         notice: NOTICE_BUSY_GENERIC.to_string(),
                     });
                 }
+                MessageStatus::Queued => {
+                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
+                    let state = self
+                        .turn_coordinator
+                        .get_run_state(GetRunStateRequest {
+                            scope: scope.clone(),
+                            run_id,
+                        })
+                        .await
+                        .map_err(map_turn_error)?;
+                    return Ok(RebornSubmitTurnResponse::DeferredBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: run_id,
+                        status: state.status,
+                        event_cursor: state.event_cursor,
+                        notice: rejected_busy_notice(state.status),
+                    });
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -3786,22 +3813,109 @@ impl RebornServicesApi for RebornServices {
                     "webui submit_turn deferred: thread busy with an active run"
                 );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_rejected_busy_or_replay(
+                // Mark the message `Queued` BEFORE the steering input becomes
+                // drainable, so the loop's consumer always observes a `Queued`
+                // row and performs a deterministic `Queued` → `Submitted`
+                // transition. Enqueuing first leaves a window where the run can
+                // drain + submit the input while the transcript still reads
+                // `Accepted`, producing an out-of-order status write. If the
+                // enqueue then fails, roll the row back to `RejectedBusy` so it
+                // never sticks in `Queued` with no backing input.
+                mark_message_queued_or_replay(
                     &*self.thread_service,
                     &thread_scope,
                     &handoff,
                     &client_action_id,
+                    busy.active_run_id.to_string(),
                 )
                 .await?;
-                let notice = rejected_busy_notice(busy.status);
-                Ok(RebornSubmitTurnResponse::RejectedBusy {
-                    thread_id: handoff.thread_id,
-                    accepted_message_ref,
-                    active_run_id: Some(busy.active_run_id),
-                    status: Some(busy.status),
-                    event_cursor: Some(busy.event_cursor),
-                    notice,
-                })
+                match crate::steering::enqueue_busy_steering(
+                    &*self.turn_coordinator,
+                    self.input_enqueue.as_ref(),
+                    scope.clone(),
+                    thread_scope.clone(),
+                    handoff.thread_id.clone(),
+                    handoff.message_id,
+                    &accepted_message_ref,
+                    busy.active_run_id,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        let notice = rejected_busy_notice(busy.status);
+                        Ok(RebornSubmitTurnResponse::DeferredBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: busy.active_run_id,
+                            status: busy.status,
+                            event_cursor: busy.event_cursor,
+                            notice,
+                        })
+                    }
+                    // No input queue wired for this runtime: queueing is
+                    // disabled, so reject the message as busy instead of
+                    // deferring it. This is the single mapped fallback for the
+                    // "no steering" mode (see RejectingInputEnqueue). The
+                    // rejected-busy mark also rolls the `Queued` row written
+                    // above back to its terminal `RejectedBusy` state.
+                    Err(crate::steering::SteeringEnqueueError::Enqueue(
+                        HostInputQueueError::Unavailable { .. },
+                    )) => {
+                        mark_message_rejected_busy_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                        )
+                        .await?;
+                        let notice = rejected_busy_notice(busy.status);
+                        Ok(RebornSubmitTurnResponse::RejectedBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: Some(busy.active_run_id),
+                            status: Some(busy.status),
+                            event_cursor: Some(busy.event_cursor),
+                            notice,
+                        })
+                    }
+                    // Any other enqueue failure leaves the `Queued` row above
+                    // with no drainable input. Best-effort roll it back to
+                    // `RejectedBusy` (preserving the original error), then
+                    // surface the sanitized failure.
+                    Err(other) => {
+                        if let Err(rollback) = mark_message_rejected_busy_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                %rollback,
+                                "failed to roll back queued message to rejected-busy after steering enqueue failure"
+                            );
+                        }
+                        match other {
+                            crate::steering::SteeringEnqueueError::InvalidMessageRef(_) => {
+                                Err(RebornServicesError::internal_invariant())
+                            }
+                            crate::steering::SteeringEnqueueError::RunState(error) => {
+                                Err(map_turn_error(error))
+                            }
+                            crate::steering::SteeringEnqueueError::Enqueue(error) => {
+                                // Carry the cause to the server log; the
+                                // user-facing surface stays the sanitized 503
+                                // (error-handling.md).
+                                tracing::warn!(
+                                    %error,
+                                    "failed to enqueue steering input for busy run"
+                                );
+                                Err(RebornServicesError::service_unavailable(false))
+                            }
+                        }
+                    }
+                }
             }
             Err(error) => {
                 tracing::debug!(
@@ -5584,6 +5698,51 @@ async fn mark_message_rejected_busy_or_replay(
                 error,
             )
             .await
+        }
+    }
+}
+
+async fn mark_message_queued_or_replay(
+    thread_service: &dyn SessionThreadService,
+    thread_scope: &ThreadScope,
+    handoff: &AcceptedWebUiMessage,
+    client_action_id: &IdempotencyKey,
+    run_id: String,
+) -> Result<(), RebornServicesError> {
+    match thread_service
+        .mark_message_queued(
+            thread_scope,
+            &handoff.thread_id,
+            handoff.message_id,
+            run_id.clone(),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let reconciled = reconcile_terminal_duplicate(
+                thread_service,
+                thread_scope,
+                handoff,
+                client_action_id,
+                |replay| {
+                    matches!(
+                        replay.status,
+                        MessageStatus::Queued | MessageStatus::Submitted
+                    ) && replay.turn_run_id == Some(run_id)
+                },
+                error,
+            )
+            .await;
+            if let Err(error) = reconciled {
+                tracing::debug!(
+                    %error,
+                    thread_id = %handoff.thread_id,
+                    message_id = %handoff.message_id,
+                    "queued steering input accepted before transcript queued-status reconciliation failed"
+                );
+            }
+            Ok(())
         }
     }
 }

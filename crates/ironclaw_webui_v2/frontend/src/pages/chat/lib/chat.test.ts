@@ -5,6 +5,7 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
+import { enrichApprovalGateWithActivityArguments } from "./gate-arguments";
 
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.tsx", import.meta.url), "utf8");
@@ -115,6 +116,7 @@ function renderChat({
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
     buildRuntimeContext: () => ({}),
+    enrichApprovalGateWithActivityArguments,
     buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: (threadId) =>
       threadStateUpdates.push({ threadId, state: null }),
@@ -205,7 +207,9 @@ test("Chat leaves the composer editable while a run is processing", () => {
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.disabled, false);
-  assert.equal(props.sendDisabled, true);
+  // Queued-message UX: a processing run no longer disables the composer send —
+  // a follow-up is accepted and queued behind the active run.
+  assert.equal(props.sendDisabled, false);
 });
 
 test("Chat shows typing indicator before assistant text streams", () => {
@@ -307,7 +311,7 @@ test("Chat keeps typing indicator when streamed text belongs to another run", ()
   assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
-test("Chat refuses composer sends while a run is processing", async () => {
+test("Chat admits composer sends while a run is processing (queued)", async () => {
   let sendCalls = 0;
   const { tree, components } = renderChat({
     hookState: {
@@ -339,8 +343,10 @@ test("Chat refuses composer sends while a run is processing", async () => {
   const props = componentProps(chatInput, components.ChatInput);
   const response = await props.onSend("draft while busy");
 
-  assert.equal(response, null);
-  assert.equal(sendCalls, 0);
+  // Queued-message UX: the send is admitted (reaches useChat.send, which routes
+  // it to the backend queue) rather than being refused locally.
+  assert.notEqual(response, null);
+  assert.equal(sendCalls, 1);
 });
 
 test("Chat cancel button ignores active runs from another thread", () => {

@@ -23,6 +23,7 @@ import { useChat } from "./hooks/useChat";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
+import { enrichApprovalGateWithActivityArguments } from "./lib/gate-arguments";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
 
@@ -160,12 +161,13 @@ export function Chat({
             name: pendingOnboardingLabel(pendingOnboarding),
           })
         : "";
+  // Queued-message UX: a running thread no longer disables the composer — a
+  // follow-up sent while a run is active is accepted and queued. Only a
+  // pending gate / onboarding step (which needs the user's input first) or an
+  // active cooldown blocks a send.
   const composerSendDisabled =
     activeThreadHasGate ||
     activeThreadHasOnboarding ||
-    (activeThreadIsProcessing &&
-      !activeThreadHasGate &&
-      !activeThreadHasOnboarding) ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
@@ -186,6 +188,12 @@ export function Chat({
       activeThreadIsProcessing &&
       !activeThreadHasGate &&
       !activeThreadHasOnboarding
+  );
+  // Surface the gated tool's staged arguments on the approval card by joining
+  // the pending gate to its tool-activity row by invocationId (strict join).
+  const pendingGateForDisplay = React.useMemo(
+    () => enrichApprovalGateWithActivityArguments(pendingGate, messages),
+    [pendingGate, messages]
   );
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [], displayContent } = {}) => {
@@ -392,7 +400,7 @@ export function Chat({
                 ))
               : (
               <ApprovalCard
-                gate={pendingGate}
+                gate={pendingGateForDisplay}
                 globalAutoApproveEnabled={globalAutoApproveEnabled}
                 onApprove={() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}

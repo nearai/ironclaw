@@ -4,13 +4,21 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
+import { GATE_KIND } from "./gate-kinds";
+
 function loadGates() {
+  // Strip ES `import` lines (the vm context has no module loader) and inject
+  // the imported symbols as context globals — gates.ts imports `GATE_KIND`
+  // from ./gate-kinds.
   const source = readFileSync(new URL("./gates.ts", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => !line.startsWith("import "))
+    .join("\n")
     .replace(
       /export function (gateFromEvent|gateFromProjectionGate)/g,
       "function $1",
     );
-  const context = { globalThis: {} };
+  const context = { globalThis: {}, GATE_KIND };
   vm.runInNewContext(
     `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate };`,
     context,
@@ -68,6 +76,38 @@ test("gateFromEvent defaults missing always-allow affordance to false", () => {
     },
   );
 });
+test("gateFromEvent preserves a live resource gate kind, headline, and details", () => {
+  const { gateFromEvent } = loadGates();
+
+  assert.deepEqual(
+    plain(gateFromEvent("gate", {
+      turn_run_id: "run-1",
+      gate_kind: "resource",
+      gate_ref: "gate:budget-1",
+      headline: "Budget approval required",
+      body: "Approve additional model budget to continue this run.",
+      details: [
+        { label: "Current usage", value: "$4.4525" },
+        { label: "Current limit", value: "$5" },
+      ],
+    })),
+    {
+      kind: "gate",
+      gateKind: "resource",
+      runId: "run-1",
+      gateRef: "gate:budget-1",
+      invocationId: null,
+      headline: "Budget approval required",
+      body: "Approve additional model budget to continue this run.",
+      allowAlways: false,
+      approvalDetails: [
+        { label: "Current usage", value: "$4.4525" },
+        { label: "Current limit", value: "$5" },
+      ],
+    },
+  );
+});
+
 test("gateFromEvent maps approval context into readable approval card props", () => {
   const { gateFromEvent } = loadGates();
 
