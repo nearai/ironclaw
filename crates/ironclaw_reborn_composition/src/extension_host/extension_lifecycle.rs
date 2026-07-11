@@ -8691,6 +8691,48 @@ url = "http://127.0.0.1:9/mcp"
         );
     }
 
+    /// Review item 5 (list/project coverage): `project()` — the single-
+    /// package projection `LifecycleProductFacade::project_package` calls —
+    /// must mask a registered install the same way `list_installed`
+    /// (`extension_list_shows_owner_registered_install_only_to_owner`,
+    /// above) and `search` already do. `builtin.extension_search`/
+    /// `builtin.extension_install` are the only agent-tool-dispatched
+    /// entrypoints for registered packages; list/project are WebUI-facade-
+    /// only (`RebornServicesApi::list_extensions`, `project_package`), with
+    /// no `submit_turn`-reachable capability id, so this pins the same
+    /// owner-scoped port method the integration harness cannot dispatch to.
+    #[tokio::test]
+    async fn project_of_registered_package_masks_foreign_owner() {
+        let owner_scope = resource_scope_for("default", "owner-a");
+        let other_scope = resource_scope_for("default", "owner-b");
+        let (_dir, port, package_ref, _active_registry, _installation_store) =
+            user_registered_isolation_fixture(&owner_scope, true).await;
+
+        let owner_projection = port
+            .project(package_ref.clone(), &owner_scope)
+            .await
+            .expect("owner A's project must see their own registered package");
+        let Some(LifecycleProductPayload::ExtensionList { extensions, count }) =
+            owner_projection.payload
+        else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(count, 1, "owner A must see their registered install");
+        assert_eq!(
+            extensions[0].summary.package_ref.id.as_str(),
+            "acme-mcp-registered"
+        );
+
+        let error = port
+            .project(package_ref, &other_scope)
+            .await
+            .expect_err("a foreign caller's project of another owner's registered package must fail");
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn extension_activate_rejects_caller_outside_owning_scope() {
         let owner_scope = resource_scope_for("default", "owner-a");

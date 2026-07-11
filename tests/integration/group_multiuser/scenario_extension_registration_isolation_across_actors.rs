@@ -9,6 +9,15 @@
 //! `submit_turn`s) through `ExtensionLifecycleToolHandler::dispatch`
 //! (`extension_lifecycle_capabilities.rs`), the load-bearing caller the T1
 //! review flagged as easy to miss.
+//!
+//! `ExtensionList`/`ExtensionProject` have no `builtin.*` capability id (they
+//! are WebUI-facade-only) and this harness never builds the `RebornRuntime`
+//! `build_webui_services` requires, so they cannot be driven from here; their
+//! owner-masking is pinned at the crate tier instead
+//! (`extension_list_shows_owner_registered_install_only_to_owner` and
+//! `project_of_registered_package_masks_foreign_owner` in
+//! `extension_lifecycle.rs`, the only tier that can call `list_installed`/
+//! `project` directly).
 
 use super::reborn_support::assertions::ToolErrorClass;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
