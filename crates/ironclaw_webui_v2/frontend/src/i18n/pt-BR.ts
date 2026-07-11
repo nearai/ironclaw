@@ -862,6 +862,10 @@ registerPack("pt-BR", {
   "ext.registry.emptyDesc": "Todas as extensões disponíveis já estão instaladas, ou nenhum registro está configurado.",
   "ext.registry.availableTitle": "Extensões disponíveis",
   "ext.registry.noMatch": "Nenhuma extensão corresponde ao filtro.",
+  "ext.registry.import": "Importar",
+  "ext.registry.importing": "Importando…",
+  "ext.registry.importSuccess": "Ferramenta importada — instale-a pelo registro.",
+  "ext.registry.importFailed": "Falha na importação",
 
   // Chat — history
   "chat.history.loading": "Carregando...",
@@ -1208,6 +1212,8 @@ registerPack("pt-BR", {
   "extensions.reconfigure": "Reconfigurar",
   "extensions.configureName": "Configurar {name}",
   "extensions.allInstalled": "Todas as extensões instaladas",
+  "extensions.scope.shared": "compartilhadas",
+  "extensions.scope.private": "minhas",
   "mcp.installed": "Servidores MCP instalados",
   "extensions.oneCapability": "1 capacidade",
   "extensions.pluralCapabilities": "Capacidades {count}",

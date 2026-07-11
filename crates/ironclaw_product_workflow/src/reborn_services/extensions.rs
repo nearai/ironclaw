@@ -111,6 +111,19 @@ pub(super) async fn install_extension(
     Ok(action_response(&lifecycle, None, projection.as_ref()))
 }
 
+pub(super) async fn import_extension(
+    facade: &dyn LifecycleProductFacade,
+    caller: WebUiAuthenticatedCaller,
+    bundle: Vec<u8>,
+) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    let context = lifecycle_surface_context(caller);
+    let lifecycle = facade
+        .import_extension_bundle(context, bundle)
+        .await
+        .map_err(map_lifecycle_error)?;
+    Ok(action_response(&lifecycle, None, None))
+}
+
 pub(super) async fn activate_extension(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
@@ -286,6 +299,7 @@ fn extension_info(
     };
     let onboarding =
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
+    let install_scope = installed.install_scope;
     let summary = installed.summary;
     let has_external_channel_surface = has_external_channel_surface(&summary);
     let kind = extension_kind(&summary).to_string();
@@ -322,6 +336,7 @@ fn extension_info(
         version: Some(summary.version),
         onboarding_state,
         onboarding: onboarding.onboarding,
+        install_scope,
     }
 }
 
@@ -565,6 +580,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
         let credentials = Arc::new(RecordingCredentials::default());
@@ -609,6 +625,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_with_onboarding(),
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
         let credentials = UnavailableCredentials;
@@ -638,6 +655,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary: summary_without_browser_setup_credentials(),
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
         let credentials = Arc::new(RecordingCredentials::default());
@@ -672,6 +690,7 @@ mod tests {
                 .map(|index| LifecycleInstalledExtensionSummary {
                     summary: summary_with_onboarding_for(&format!("fixture-{index}")),
                     phase: LifecyclePhase::Active,
+                    install_scope: None,
                 })
                 .collect(),
         };
@@ -755,6 +774,7 @@ mod tests {
             extension: LifecycleInstalledExtensionSummary {
                 summary,
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
         };
 
@@ -774,6 +794,7 @@ mod tests {
                 extension: LifecycleInstalledExtensionSummary {
                     summary: unconnected_summary,
                     phase: LifecyclePhase::Active,
+                    install_scope: None,
                 },
             }),
             None,
@@ -823,6 +844,7 @@ mod tests {
             installed: LifecycleInstalledExtensionSummary {
                 summary: installed_summary,
                 phase: LifecyclePhase::Active,
+                install_scope: None,
             },
             registry: vec![
                 search_extension_summary(registry_installed_summary),
@@ -1118,6 +1140,7 @@ mod tests {
                     extensions: vec![LifecycleInstalledExtensionSummary {
                         summary: summary_with_onboarding(),
                         phase: LifecyclePhase::Installed,
+                        install_scope: None,
                     }],
                     count: 1,
                 }),
@@ -1176,6 +1199,7 @@ mod tests {
                             extensions: vec![LifecycleInstalledExtensionSummary {
                                 summary,
                                 phase: LifecyclePhase::Installed,
+                                install_scope: None,
                             }],
                             count: 1,
                         }),

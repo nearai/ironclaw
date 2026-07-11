@@ -453,6 +453,7 @@ fn first_party_capability_manifest(
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile,
     })
 }

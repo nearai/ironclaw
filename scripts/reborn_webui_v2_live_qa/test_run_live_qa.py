@@ -4736,6 +4736,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("needs: prepare-reborn-webui-v2-live-qa", match.group("body"))
+        self.assertIn("always() &&", match.group("body"))
+        self.assertIn(
+            "needs.prepare-reborn-webui-v2-live-qa.result == 'success'",
+            match.group("body"),
+        )
+        self.assertIn("github.event_name == 'schedule'", match.group("body"))
+        self.assertNotIn("github.event.schedule ==", match.group("body"))
         self.assertIn(
             "ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}",
             match.group("body"),
