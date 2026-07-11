@@ -197,12 +197,11 @@ impl NearAiChatProvider {
         flatten_tool_messages: bool,
         request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
-        let client = crate::config::hardened_client_builder(request_timeout_secs)
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("Failed to build HTTP client: {}", e),
-            })?;
+        let client = crate::url_check::build_http_client(
+            "nearai_chat",
+            &config.base_url,
+            crate::config::hardened_client_builder(request_timeout_secs),
+        )?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let pricing = Arc::new(std::sync::RwLock::new(HashMap::new()));
