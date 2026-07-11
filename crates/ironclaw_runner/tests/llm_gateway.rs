@@ -45,6 +45,7 @@ use ironclaw_turns::{
 };
 use rust_decimal::Decimal;
 use tokio::sync::Barrier;
+use tracing_test::traced_test;
 
 const STATIC_PROVIDER_ID: &str = "static-test-provider";
 
@@ -98,6 +99,47 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
     assert_eq!(requests[0].messages[1].content, "hello model");
+}
+
+#[traced_test]
+#[tokio::test]
+async fn gateway_warns_on_prompt_cache_break_within_a_run() {
+    // Per-call cache_read series: healthy continuity (200K -> 190K is exactly
+    // at both detection floors, so NOT a break), then a collapse to 50K.
+    let provider = Arc::new(CacheUsageSequenceProvider::new(vec![
+        200_000, 190_000, 50_000,
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let request = model_request(interactive_model());
+    let run_id = request.run_id;
+    gateway.stream_model(request).await.unwrap();
+    assert!(
+        logs_contain("reborn model gateway prompt cache usage"),
+        "every completed call must emit the per-call cache series"
+    );
+    assert!(!logs_contain("prompt cache break detected"));
+
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    gateway.stream_model(request).await.unwrap();
+    assert!(
+        !logs_contain("prompt cache break detected"),
+        "a drop at the detection floors must stay quiet"
+    );
+
+    let mut request = model_request(interactive_model());
+    request.run_id = run_id;
+    gateway.stream_model(request).await.unwrap();
+    assert!(
+        logs_contain("prompt cache break detected"),
+        "a 190K -> 50K cache_read collapse in the same run must warn"
+    );
 }
 
 #[tokio::test]
@@ -3392,6 +3434,59 @@ impl LlmProvider for StreamingRecordingLlmProvider {
         Err(LlmError::RequestFailed {
             provider: self.model_name.clone(),
             reason: "tool completion is not expected".to_string(),
+        })
+    }
+}
+
+/// Provider that scripts the `cache_read_input_tokens` of successive calls so
+/// tests can drive the gateway's prompt-cache-break detector.
+struct CacheUsageSequenceProvider {
+    cache_reads: Mutex<VecDeque<u32>>,
+}
+
+impl CacheUsageSequenceProvider {
+    fn new(cache_reads: Vec<u32>) -> Self {
+        Self {
+            cache_reads: Mutex::new(cache_reads.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for CacheUsageSequenceProvider {
+    fn model_name(&self) -> &str {
+        "cache-usage-model"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let cache_read_input_tokens = self
+            .cache_reads
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("scripted cache usage for every call");
+        Ok(CompletionResponse {
+            content: "ok".to_string(),
+            input_tokens: 120_000,
+            output_tokens: 10,
+            finish_reason: FinishReason::Stop,
+            reasoning: None,
+            cache_read_input_tokens,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "cache-usage".to_string(),
+            reason: "tool completion is not used by this test".to_string(),
         })
     }
 }

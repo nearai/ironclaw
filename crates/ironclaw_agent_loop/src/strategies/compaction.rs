@@ -29,6 +29,11 @@ pub(crate) enum CompactionDecision {
         drop_through_seq: u64,
         preserve_tail_tokens: u64,
         deadline_ms: u64,
+        /// The visible-transcript token threshold that triggered this
+        /// compaction. The executor compares the post-compaction prompt
+        /// estimate against it to decide whether the compaction was
+        /// effective (circuit-breaker accounting).
+        trigger_threshold_tokens: u64,
     },
 }
 
@@ -44,6 +49,9 @@ impl DefaultCompactionStrategy {
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
 
     pub(super) fn can_evaluate(&self, state: &LoopExecutionState) -> bool {
+        if state.compaction_state.compaction_circuit_open {
+            return false;
+        }
         if state.compaction_prompt.message_index.is_empty() {
             return false;
         }
@@ -60,6 +68,7 @@ impl DefaultCompactionStrategy {
             drop_through_seq,
             preserve_tail_tokens: self.preserve_tail_tokens,
             deadline_ms: self.deadline_ms,
+            trigger_threshold_tokens: self.prompt_context_budget.visible_transcript_tokens(),
         }
     }
 }
@@ -377,6 +386,7 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 60,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -410,6 +420,7 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 60,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -492,6 +503,7 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -539,6 +551,7 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 60,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -613,6 +626,7 @@ mod tests {
                 drop_through_seq: 3,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -665,6 +679,7 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -697,6 +712,7 @@ mod tests {
                 drop_through_seq: 1,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 70,
             }
         );
     }
@@ -737,6 +753,36 @@ mod tests {
         );
 
         assert_eq!(boundary, Some(1));
+    }
+
+    #[test]
+    fn evaluate_skips_when_compaction_circuit_is_open_even_when_forced() {
+        let context = crate::test_support::test_run_context("compaction-strategy-circuit-open");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.compaction_circuit_open = true;
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 100,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 100,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+            preserve_tail_tokens: 1,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
     }
 
     // --- ByteCapStrategy tests ---

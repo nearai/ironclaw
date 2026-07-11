@@ -27,7 +27,7 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         planner=DefaultPlanner;\
         strategies=\
         context:DefaultContextStrategy(max_messages=128),\
-        compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000),\
+        compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),\
         capability:DefaultCapabilityStrategy(all),\
         model:DefaultModelStrategy(primary_or_fallback_index),\
         batch:DefaultBatchPolicyStrategy(exclusive_sequential),\
@@ -46,8 +46,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x9b, 0x6b, 0x42, 0x36, 0x87, 0xdc, 0xbe, 0xe3, 0x5d, 0x5e, 0x4b, 0x5a, 0x41, 0xb4, 0x14, 0xad,
-    0xe3, 0x65, 0x40, 0xd0, 0x5e, 0x85, 0x64, 0xd5, 0x11, 0xfd, 0xbf, 0xf6, 0xab, 0x28, 0x69, 0xbb,
+    0xd7, 0xc0, 0xe7, 0xdd, 0xc4, 0x17, 0xe9, 0xe4, 0xe2, 0xcb, 0xa1, 0x4b, 0xab, 0xc4, 0x42, 0x40,
+    0x7d, 0x0d, 0x38, 0x64, 0xff, 0xe3, 0x85, 0xaa, 0xbe, 0x6a, 0x7b, 0xc1, 0xc7, 0xcc, 0x1f, 0xad,
 ]);
 
 /// The default loop family: the text-tool-use baseline.

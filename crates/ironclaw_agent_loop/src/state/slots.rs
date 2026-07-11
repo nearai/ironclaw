@@ -32,6 +32,51 @@ pub struct CompactionStrategyState {
     /// instead of falling back to `Auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_compact_initiator: Option<CompactionInitiator>,
+    /// Consecutive completed compactions whose post-compaction prompt token
+    /// estimate stayed at or above the threshold that triggered them —
+    /// compaction ran but did not relieve context pressure, so it would fire
+    /// again immediately. Reset to zero by any effective compaction.
+    #[serde(default)]
+    pub consecutive_ineffective_compactions: u32,
+    /// One-way circuit breaker: opened by `PromptCompactionStep` after
+    /// [`Self::INEFFECTIVE_COMPACTION_TRIP_LIMIT`] consecutive ineffective
+    /// compactions. While open, compaction strategies skip for the remainder
+    /// of the run so a doomed compact-recompact loop cannot keep burning
+    /// summarization inference on a prompt it can never shrink.
+    #[serde(default)]
+    pub compaction_circuit_open: bool,
+}
+
+impl CompactionStrategyState {
+    /// Consecutive ineffective compactions tolerated before the circuit opens.
+    pub const INEFFECTIVE_COMPACTION_TRIP_LIMIT: u32 = 3;
+
+    /// Returns a new slot value with one completed compaction's effectiveness
+    /// recorded.
+    ///
+    /// `post_compaction_prompt_tokens` is the executor's prompt token estimate
+    /// after dropping compacted messages; `trigger_threshold_tokens` is the
+    /// visible-transcript threshold that triggered the compaction. Staying at
+    /// or above the threshold counts as ineffective; dropping below it resets
+    /// the consecutive counter. Once the circuit opens it never closes for the
+    /// rest of the run.
+    pub fn with_compaction_effectiveness_observed(
+        &self,
+        post_compaction_prompt_tokens: u64,
+        trigger_threshold_tokens: u64,
+    ) -> Self {
+        let mut next = self.clone();
+        if post_compaction_prompt_tokens >= trigger_threshold_tokens {
+            next.consecutive_ineffective_compactions =
+                self.consecutive_ineffective_compactions.saturating_add(1);
+            if next.consecutive_ineffective_compactions >= Self::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
+                next.compaction_circuit_open = true;
+            }
+        } else {
+            next.consecutive_ineffective_compactions = 0;
+        }
+        next
+    }
 }
 
 /// Records the deferred cut point and prompt snapshot fingerprint for a
@@ -188,6 +233,53 @@ mod tests {
         let second = CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
 
         assert_eq!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn compaction_effectiveness_trips_circuit_after_consecutive_ineffective_runs() {
+        let mut state = CompactionStrategyState::default();
+
+        // Two ineffective compactions: counter grows, circuit stays closed.
+        for expected in 1..CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
+            state = state.with_compaction_effectiveness_observed(100, 90);
+            assert_eq!(state.consecutive_ineffective_compactions, expected);
+            assert!(!state.compaction_circuit_open);
+        }
+
+        // Third consecutive ineffective compaction opens the circuit.
+        state = state.with_compaction_effectiveness_observed(90, 90);
+        assert_eq!(
+            state.consecutive_ineffective_compactions,
+            CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT
+        );
+        assert!(state.compaction_circuit_open);
+
+        // The circuit never closes, even after an effective compaction.
+        state = state.with_compaction_effectiveness_observed(10, 90);
+        assert_eq!(state.consecutive_ineffective_compactions, 0);
+        assert!(state.compaction_circuit_open);
+    }
+
+    #[test]
+    fn compaction_effectiveness_resets_counter_when_tokens_drop_below_threshold() {
+        let state = CompactionStrategyState::default()
+            .with_compaction_effectiveness_observed(100, 90)
+            .with_compaction_effectiveness_observed(100, 90)
+            .with_compaction_effectiveness_observed(89, 90);
+
+        assert_eq!(state.consecutive_ineffective_compactions, 0);
+        assert!(!state.compaction_circuit_open);
+    }
+
+    #[test]
+    fn compaction_state_deserializes_without_circuit_breaker_fields() {
+        // Pre-breaker checkpoints must rehydrate with the breaker closed.
+        let state: CompactionStrategyState =
+            serde_json::from_str(r#"{"force_compact_on_next_iteration":true}"#).expect("decode");
+
+        assert!(state.force_compact_on_next_iteration);
+        assert_eq!(state.consecutive_ineffective_compactions, 0);
+        assert!(!state.compaction_circuit_open);
     }
 
     #[test]

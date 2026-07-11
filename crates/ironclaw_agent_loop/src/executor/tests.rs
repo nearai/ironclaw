@@ -360,6 +360,114 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
 }
 
 #[tokio::test]
+async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffective_runs() {
+    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+
+    use crate::state::CompactionStrategyState;
+
+    // Threshold is 90 tokens (100 - 10). The retained tail alone (assistant
+    // message, 100 tokens) stays above it, so the compaction cannot relieve
+    // pressure no matter how often it runs.
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            // First prompt-stage run: candidate bundle, over threshold.
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::User, 20),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 100),
+            ],
+            // Rebuild after the (ineffective) compaction: still over threshold.
+            vec![compaction_metadata(
+                2,
+                LoopContextCompactionKind::Assistant,
+                100,
+            )],
+            // Second prompt-stage run: over threshold WITH an eligible user
+            // boundary, so only the open circuit can explain a skip.
+            vec![
+                compaction_metadata(3, LoopContextCompactionKind::User, 20),
+                compaction_metadata(4, LoopContextCompactionKind::Assistant, 100),
+            ],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
+        preserve_tail_tokens: 60,
+        deadline_ms: 1,
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Two prior compactions already failed to bring the prompt below the
+    // trigger threshold; this run's ineffective compaction is the third.
+    state.compaction_state.consecutive_ineffective_compactions =
+        CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT - 1;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        _ => panic!("expected prepared prompt"),
+    };
+    assert!(
+        output.state.compaction_state.compaction_circuit_open,
+        "third consecutive ineffective compaction must open the circuit"
+    );
+    assert_eq!(
+        output
+            .state
+            .compaction_state
+            .consecutive_ineffective_compactions,
+        CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT
+    );
+    assert_eq!(
+        host.progress_event_names()
+            .iter()
+            .filter(|&&name| name == "compaction_started")
+            .count(),
+        1
+    );
+
+    // Drive the prompt stage again with the breaker open and the prompt still
+    // over threshold: compaction must NOT run again.
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state: output.state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage after breaker opened");
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        _ => panic!("expected prepared prompt"),
+    };
+    assert!(output.state.compaction_state.compaction_circuit_open);
+    assert_eq!(
+        host.progress_event_names()
+            .iter()
+            .filter(|&&name| name == "compaction_started")
+            .count(),
+        1,
+        "an open circuit breaker must stop further compactions for the run"
+    );
+}
+
+#[tokio::test]
 async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(

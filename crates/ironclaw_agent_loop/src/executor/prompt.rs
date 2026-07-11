@@ -467,6 +467,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
             drop_through_seq,
             preserve_tail_tokens,
             deadline_ms,
+            trigger_threshold_tokens,
         } = decision
         else {
             return Ok(PromptCompactionOutcome::Skipped(state));
@@ -555,6 +556,31 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         state
             .compaction_prompt
             .retain_after_sequence(drop_through_seq);
+        // Circuit-breaker accounting: a compaction whose retained prompt
+        // estimate is still at/above the trigger threshold would fire again
+        // immediately — it didn't help. The retained estimate excludes the
+        // injected summary's tokens (the rebuilt bundle isn't known yet), so
+        // this under-counts and only makes the breaker harder to trip. After
+        // `INEFFECTIVE_COMPACTION_TRIP_LIMIT` consecutive ineffective runs the
+        // strategies stop compacting for the remainder of the run — Claude
+        // Code measured ~250K wasted API calls/day from exactly this
+        // compact-recompact doom loop before adding a breaker.
+        let circuit_was_open = state.compaction_state.compaction_circuit_open;
+        state.compaction_state = state
+            .compaction_state
+            .with_compaction_effectiveness_observed(
+                state.compaction_prompt.observed_prompt_tokens,
+                trigger_threshold_tokens,
+            );
+        if !circuit_was_open && state.compaction_state.compaction_circuit_open {
+            tracing::warn!(
+                consecutive_ineffective_compactions =
+                    state.compaction_state.consecutive_ineffective_compactions,
+                post_compaction_prompt_tokens = state.compaction_prompt.observed_prompt_tokens,
+                trigger_threshold_tokens,
+                "context compaction circuit breaker opened after repeated ineffective compactions; compaction disabled for the remainder of this run"
+            );
+        }
         CheckpointStage
             .emit_progress(
                 self.ctx,

@@ -397,6 +397,7 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }

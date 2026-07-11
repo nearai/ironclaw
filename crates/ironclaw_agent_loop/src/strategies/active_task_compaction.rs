@@ -183,6 +183,7 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -242,6 +243,7 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                trigger_threshold_tokens: 90,
             }
         );
     }
@@ -266,6 +268,22 @@ mod tests {
         let mut strategy = active_task_preserving_strategy(0);
         strategy.minimum_tail_messages = 0;
         strategy.minimum_compacted_messages = 3;
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn active_task_strategy_skips_when_compaction_circuit_is_open() {
+        let context = crate::test_support::test_run_context("active-task-preserving-circuit-open");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.compaction_circuit_open = true;
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(active_task_message_index());
+        state.compaction_prompt.observed_prompt_tokens = 90;
+        let strategy = active_task_preserving_strategy(1);
 
         assert_eq!(
             strategy.should_compact(&state, &context),
