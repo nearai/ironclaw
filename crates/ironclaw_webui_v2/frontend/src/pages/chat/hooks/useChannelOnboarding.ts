@@ -20,6 +20,7 @@ import { queryClient } from "../../../lib/query-client";
 import {
   fetchExtensionSetup,
   fetchExtensions,
+  fetchOauthFlowStatus,
   startExtensionOauth,
 } from "../../extensions/lib/extensions-api";
 import { redeemPairingCode } from "../../extensions/lib/pairing-api";
@@ -395,7 +396,13 @@ export function useChannelOnboarding(
       const pending = pendingOnboardingOauthFlowRef.current;
       if (!pending) return;
       if (failureMatchesFlow(payload, pending.flowId)) {
-        failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
+        // The callback can report failure while exact lifecycle compensation
+        // is still retrying. Keep the watcher alive when a durable flow scope
+        // is available; the status poll below is the authoritative terminal
+        // signal and also resumes cleanup after a service restart.
+        if (!pending.invocationId) {
+          failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
+        }
         return;
       }
       if (!completionMatchesFlow(payload, pending.flowId)) return;
@@ -407,8 +414,20 @@ export function useChannelOnboarding(
       const pending = pendingOnboardingOauthFlowRef.current;
       if (!pending || pending.completing || serverCheckInFlight) return;
       serverCheckInFlight = true;
-      Promise.resolve(fetchExtensions())
+      const flowStatus = pending.flowId
+        ? Promise.resolve(fetchOauthFlowStatus(pending.flowId, pending.invocationId))
+        : Promise.resolve(null);
+      flowStatus
+        .then((result) => {
+          if (result?.status === "completed") return finishCompletion();
+          if (result?.status === "failed") {
+            failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
+            return null;
+          }
+          return fetchExtensions();
+        })
         .then((snapshot) => {
+          if (!snapshot) return null;
           const extensions = Array.isArray(snapshot)
             ? snapshot
             : snapshot?.extensions || [];
@@ -637,6 +656,10 @@ export function useChannelOnboarding(
       );
       pendingOnboardingOauthFlowRef.current = {
         flowId: response.flow_id,
+        invocationId:
+          response?.callback_scope?.invocation_id ||
+          response?.callbackScope?.invocationId ||
+          null,
         channel: onboarding.extensionName,
         threadId: onboarding.threadId || threadId || null,
         startedAt: Date.now(),

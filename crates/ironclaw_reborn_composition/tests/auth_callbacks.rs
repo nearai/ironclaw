@@ -7,13 +7,14 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
-    AuthFlowKind, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
-    AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
-    CredentialAccountRecordSource, CredentialAccountStatus, InMemoryAuthProductServices,
-    LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderIdentity, OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    AuthFlowKind, AuthFlowManager, AuthProductError, AuthProductScope, AuthProviderClient,
+    AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountId,
+    CredentialAccountLabel, CredentialAccountRecordSource, CredentialAccountStatus,
+    InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
+    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderIdentity, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
@@ -21,6 +22,7 @@ use ironclaw_reborn_composition::{
     RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 use secrecy::SecretString;
+use tokio::sync::Semaphore;
 
 #[derive(Default)]
 struct RecordingContinuationDispatcher {
@@ -166,6 +168,57 @@ struct FailingContinuationDispatcher {
     error: AuthProductError,
 }
 
+struct BlockingContinuationDispatcher {
+    calls: AtomicUsize,
+    entered: Semaphore,
+    release: Semaphore,
+}
+
+impl Default for BlockingContinuationDispatcher {
+    fn default() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }
+    }
+}
+
+impl BlockingContinuationDispatcher {
+    async fn wait_until_entered(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("dispatcher entry semaphore closed")
+            .forget();
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for BlockingContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("dispatcher release semaphore closed")
+            .forget();
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct CleanupRecordingProviderClient {
     cleaned: Mutex<Vec<SecretHandle>>,
@@ -283,6 +336,21 @@ fn secret(value: &str) -> SecretString {
 }
 
 async fn create_flow(services: &RebornProductAuthServices, scope: AuthProductScope) -> AuthFlowId {
+    create_flow_with_continuation(
+        services,
+        scope,
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
+        },
+    )
+    .await
+}
+
+async fn create_flow_with_continuation(
+    services: &RebornProductAuthServices,
+    scope: AuthProductScope,
+    continuation: AuthContinuationRef,
+) -> AuthFlowId {
     services
         .flow_manager()
         .create_flow(NewAuthFlow {
@@ -294,9 +362,7 @@ async fn create_flow(services: &RebornProductAuthServices, scope: AuthProductSco
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
             },
-            continuation: AuthContinuationRef::LifecycleActivation {
-                package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
-            },
+            continuation,
             update_binding: None,
             opaque_state_hash: Some(state_hash("state-hash")),
             pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
@@ -425,7 +491,7 @@ async fn oauth_callback_handler_returns_provider_identity_for_host_binding() {
 }
 
 #[tokio::test]
-async fn oauth_callback_handler_reports_completed_continuation_dispatch_failure_as_retryable() {
+async fn oauth_callback_handler_terminalizes_and_compensates_lifecycle_activation_failure() {
     let shared_auth = Arc::new(InMemoryAuthProductServices::new());
     let services = RebornProductAuthServices::from_shared(
         shared_auth.clone(),
@@ -463,15 +529,127 @@ async fn oauth_callback_handler_reports_completed_continuation_dispatch_failure_
         shared_auth,
         dispatcher.clone(),
     );
-    let retry = retry_services
+    let retry_error = retry_services
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
-        .expect("completed callback can be retried for continuation dispatch");
+        .expect_err("terminal lifecycle failure cannot redispatch");
 
-    assert_eq!(retry.flow_id, flow_id);
+    assert_eq!(retry_error.code, AuthErrorCode::FlowAlreadyTerminal);
+    assert_eq!(provider_client.calls(), 0);
+    assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn oauth_callback_handler_keeps_non_lifecycle_continuation_failure_retryable() {
+    let shared_auth = Arc::new(InMemoryAuthProductServices::new());
+    let services = RebornProductAuthServices::from_shared(
+        shared_auth.clone(),
+        Arc::new(FailingContinuationDispatcher {
+            error: AuthProductError::TokenExchangeFailed,
+        }),
+    );
+    let owner = scope("alice");
+    let flow_id =
+        create_flow_with_continuation(&services, owner.clone(), AuthContinuationRef::SetupOnly)
+            .await;
+
+    let error = services
+        .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
+        .await
+        .expect_err("dispatch failure is retryable");
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert!(error.retryable);
+    let account = shared_auth
+        .accounts_for_owner(&owner)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("OAuth account");
+    assert_eq!(account.status, CredentialAccountStatus::Configured);
+
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let retry_services = RebornProductAuthServices::new(
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        provider_client.clone(),
+        shared_auth,
+        dispatcher.clone(),
+    );
+    let retry = retry_services
+        .handle_oauth_callback(authorized_request(owner, flow_id))
+        .await
+        .expect("non-lifecycle continuation can be retried");
     assert_eq!(retry.status, ironclaw_auth::AuthFlowStatus::Completed);
     assert_eq!(provider_client.calls(), 0);
     assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_lifecycle_callbacks_dispatch_once_and_never_reexchange() {
+    let shared_auth = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(BlockingContinuationDispatcher::default());
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let services = Arc::new(RebornProductAuthServices::new(
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        provider_client.clone(),
+        shared_auth.clone(),
+        dispatcher.clone(),
+    ));
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+
+    let first_services = services.clone();
+    let first_owner = owner.clone();
+    let first = tokio::spawn(async move {
+        first_services
+            .handle_oauth_callback(authorized_request(first_owner, flow_id))
+            .await
+    });
+    dispatcher.wait_until_entered().await;
+
+    let second_services = services.clone();
+    let second_owner = owner.clone();
+    let mut second = tokio::spawn(async move {
+        second_services
+            .handle_oauth_callback(authorized_request(second_owner, flow_id))
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut second)
+            .await
+            .is_err(),
+        "the second callback waits for claim, side effect, and settlement to finish"
+    );
+    assert_eq!(provider_client.calls(), 1);
+    assert_eq!(dispatcher.calls(), 1);
+
+    dispatcher.release();
+    let winner = first
+        .await
+        .expect("first callback task")
+        .expect("claim owner completes callback");
+    let replay = second
+        .await
+        .expect("second callback task")
+        .expect("second callback observes the acknowledged success");
+    assert_eq!(winner.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert_eq!(replay.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert_eq!(provider_client.calls(), 1);
+    assert_eq!(dispatcher.calls(), 1);
+    let flow = shared_auth
+        .get_flow(&owner, flow_id)
+        .await
+        .unwrap()
+        .expect("completed flow");
+    assert_eq!(flow.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert!(flow.continuation_emitted_at.is_some());
 }
 
 #[tokio::test]

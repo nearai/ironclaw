@@ -1183,3 +1183,109 @@ test("useOauthSetup surfaces a failed flow-status poll as a retryable error when
     "a failed flow-status poll must surface a retryable error",
   );
 });
+
+test("useOauthSetup still times out when a matched failure signal cannot reach durable status", async () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let now = 0;
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date: { now: () => now },
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.reject(new Error("status unavailable")),
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+  context.globalThis.__testExports.useOauthSetup({ id: "slack" });
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-pending-cleanup",
+        callback_scope: { invocation_id: "invocation-pending-cleanup" },
+      },
+      popup,
+    },
+    {},
+  );
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "failed",
+      flowId: "flow-pending-cleanup",
+    }),
+  );
+
+  now = 10 * 60 * 1000 + 1;
+  intervals[0]();
+  await flushAsyncWork();
+
+  assert.ok(
+    stateUpdates.some((update) => update.index === 0 && update.value === false),
+    "the watcher must stop after its bounded timeout",
+  );
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === 1 &&
+        typeof update.value === "string" &&
+        /timed out/i.test(update.value),
+    ),
+    "a persistent status outage must surface a retryable timeout",
+  );
+});

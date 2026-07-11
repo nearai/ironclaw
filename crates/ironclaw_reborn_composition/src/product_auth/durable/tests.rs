@@ -33,10 +33,12 @@ use ironclaw_auth::{
     AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountLabel,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountRecordSource,
     CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash,
-    PkceVerifierHash, ProviderScope, SecretSubmitRequest, TurnRunRef,
+    CredentialAccountUpdateBinding, CredentialOwnership, ManualTokenCompletionInput,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest, OAuthProviderExchange,
+    OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretCleanupService, SecretSubmitRequest,
+    TurnRunRef,
 };
 
 fn test_scope() -> AuthProductScope {
@@ -3952,6 +3954,422 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
         "CAS-conflict branch must reuse the pre-seeded account id"
     );
     assert_eq!(completed.status, AuthFlowStatus::Completed);
+}
+
+#[tokio::test]
+async fn filesystem_oauth_compensation_preserves_newer_secret_material() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("original-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let first = complete_bound_oauth_generation(&service, &scope, &account, "first").await;
+    let first_fingerprint = first
+        .credential_secret_fingerprint
+        .clone()
+        .expect("first secret fingerprint");
+    let first_claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: first.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("first continuation claim");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: first.id,
+                expected_claimed_at: first_claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("first continuation failure");
+    let second = complete_bound_oauth_generation(&service, &scope, &account, "second").await;
+    assert_ne!(
+        second.credential_secret_fingerprint,
+        Some(first_fingerprint.clone()),
+        "a reconnect must replace the secret fingerprint"
+    );
+
+    let outcome = service
+        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
+            scope: scope.clone(),
+            flow_id: first.id,
+            provider: google_provider(),
+            credential_account_id: account.id,
+            expected_secret_fingerprint: first_fingerprint,
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, OAuthCompletionCompensationOutcome::Superseded);
+    let current = service
+        .get_account(CredentialAccountLookupRequest::new(scope, account.id))
+        .await
+        .unwrap()
+        .expect("newer account remains");
+    assert_eq!(current.status, CredentialAccountStatus::Configured);
+    assert_eq!(
+        current.access_secret,
+        Some(SecretHandle::new("second-access").unwrap())
+    );
+}
+
+#[tokio::test]
+async fn filesystem_oauth_compensation_revokes_only_the_exact_account() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let failed_account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("failed-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let unrelated_account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: CredentialAccountLabel::new("unrelated google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("unrelated-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &failed_account, "failed").await;
+    let expected_secret_fingerprint = completed
+        .credential_secret_fingerprint
+        .clone()
+        .expect("completed secret fingerprint");
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("continuation claim");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("continuation failure");
+
+    let outcome = service
+        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
+            scope: scope.clone(),
+            flow_id: completed.id,
+            provider: google_provider(),
+            credential_account_id: failed_account.id,
+            expected_secret_fingerprint,
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, OAuthCompletionCompensationOutcome::Compensated);
+    let failed = service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            failed_account.id,
+        ))
+        .await
+        .unwrap()
+        .expect("failed account retained as tombstone");
+    assert_eq!(failed.status, CredentialAccountStatus::Revoked);
+    assert!(failed.access_secret.is_none());
+    let unrelated = service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope,
+            unrelated_account.id,
+        ))
+        .await
+        .unwrap()
+        .expect("unrelated account remains");
+    assert_eq!(unrelated.status, CredentialAccountStatus::Configured);
+    assert!(unrelated.access_secret.is_some());
+}
+
+#[tokio::test]
+async fn filesystem_oauth_compensation_retries_after_restart_without_losing_its_journal() {
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("restart-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &account, "restart-failed").await;
+    let expected_secret_fingerprint = completed
+        .credential_secret_fingerprint
+        .clone()
+        .expect("completed secret fingerprint");
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let request = OAuthCompletionCompensationRequest {
+        scope: scope.clone(),
+        flow_id: completed.id,
+        provider: google_provider(),
+        credential_account_id: account.id,
+        expected_secret_fingerprint,
+    };
+
+    // Bound OAuth completion may clean the replaced generation first; inject
+    // the failure specifically at compensation so the failed flow is already
+    // durable when deletion stops.
+    concrete_secret_store.set_delete_failure(true);
+
+    assert_eq!(
+        service.compensate_oauth_completion(request.clone()).await,
+        Err(AuthProductError::BackendUnavailable)
+    );
+    let pending = service
+        .get_flow(&scope, completed.id)
+        .await
+        .unwrap()
+        .expect("failed flow remains durable");
+    assert_eq!(pending.status, AuthFlowStatus::Failed);
+    assert!(
+        pending.credential_secret_fingerprint.is_some(),
+        "the fingerprint is the durable pending-compensation journal"
+    );
+
+    let reopened = test_service(filesystem, secret_store);
+    assert_eq!(
+        reopened.compensate_oauth_completion(request).await.unwrap(),
+        OAuthCompletionCompensationOutcome::Compensated
+    );
+    let converged = reopened
+        .get_flow(&scope, completed.id)
+        .await
+        .unwrap()
+        .expect("flow after retry");
+    assert!(converged.credential_secret_fingerprint.is_none());
+    let revoked = reopened
+        .get_account(CredentialAccountLookupRequest::new(scope, account.id))
+        .await
+        .unwrap()
+        .expect("revoked tombstone");
+    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
+    assert!(revoked.access_secret.is_none());
+    assert!(revoked.refresh_secret.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_continuation_failure_is_durable_and_fenced() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("before-failure").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &account, "continuation-failure").await;
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("claim continuation");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("mark continuation failed");
+
+    let reopened = test_service(filesystem, secret_store);
+    let persisted = reopened
+        .get_flow(&scope, completed.id)
+        .await
+        .unwrap()
+        .expect("persisted flow");
+    assert_eq!(persisted.status, AuthFlowStatus::Failed);
+    assert_eq!(persisted.error, Some(AuthErrorCode::BackendUnavailable));
+    let stale = reopened
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect_err("stale failure is fenced");
+    assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
+}
+
+async fn complete_bound_oauth_generation(
+    service: &FilesystemAuthProductServices<InMemoryBackend>,
+    scope: &AuthProductScope,
+    account: &ironclaw_auth::CredentialAccount,
+    suffix: &str,
+) -> ironclaw_auth::AuthFlowRecord {
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("google-extension").unwrap(),
+            },
+            update_binding: Some(CredentialAccountUpdateBinding::from_projection(
+                &account.projection(),
+            )),
+            opaque_state_hash: Some(state_hash(suffix)),
+            pkce_verifier_hash: Some(pkce_hash(suffix)),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    service
+        .claim_oauth_callback(
+            scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash(suffix),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash(suffix),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .complete_oauth_callback(
+            scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash(suffix),
+                outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash(suffix),
+                        pkce_verifier_hash: pkce_hash(suffix),
+                        access_secret: SecretHandle::new(format!("{suffix}-access")).unwrap(),
+                        refresh_secret: None,
+                        scopes: Vec::new(),
+                        account_id: Some(account.id),
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .unwrap()
 }
 
 // ─── fix: grant-removal on non-owner account in cleanup_for_lifecycle ─────────

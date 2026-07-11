@@ -14,10 +14,11 @@ In production, a Slack OAuth callback completed successfully after the Slack pac
 
 ## Idempotent removal design
 
-The generic extension lifecycle remover will resolve removal metadata from the installed extension summary when present and otherwise from the trusted available-extension catalog. Both summaries already describe the extension's credential providers and removable channel surface.
+The generic extension lifecycle remover resolves removal metadata from the persisted installed manifest when present and otherwise from the trusted available-extension catalog. The persisted manifest doubles as a cleanup tombstone: package/runtime state and materialized files may be removed first, but the manifest record is deleted only after external cleanup converges. This preserves the exact credential providers and removable channel surface across retries, restarts, and catalog drift without adding a new schema.
 
-- Installed known extension: run shared channel/auth cleanup, remove installed state and materialized files, then return `removed: true`.
-- Already-absent known catalog extension: run the same shared channel/auth cleanup, skip package/file deletion, then return a successful response explaining that the package was already absent and cleanup completed.
+- Installed known extension: run shared channel cleanup, remove runtime/installed state and materialized files, run credential cleanup from the retained manifest tombstone, delete the tombstone, then return `removed: true`.
+- Already-absent extension with a retained manifest tombstone: retry the same external cleanup from that exact manifest, delete the tombstone only after convergence, and return a truthful already-absent success.
+- Already-absent known catalog extension without a tombstone: persist the trusted catalog manifest as a tombstone before external cleanup, then follow the same retry/finalization path so a later catalog deployment cannot change the cleanup obligation.
 - Unknown or unmanaged extension: preserve the current rejection and never delete unmanaged files.
 
 The remover remains provider-generic. It will not add Slack OAuth, binding, or path logic. Slack cleanup continues through the existing channel connection facade and product-auth lifecycle cleanup authority used by WebUI removal.
@@ -32,7 +33,7 @@ OAuth start for an extension will reject a catalog entry that is not currently i
 
 The WebUI will treat server-confirmed lifecycle activation as the completion authority. It must not close the modal, broadcast `channel-connected`, or claim success when activation fails. The existing best-effort post-OAuth activation call will be removed or reduced to an idempotent status refresh once the durable continuation owns activation.
 
-If lifecycle activation fails after Slack binding/token mutation, the callback compensation path revokes the credential and disconnects the failed connection epoch rather than commit a half-configured connection. A failed reconfiguration must not restore an older identity after its credential has already been replaced. If activation succeeds and only persistence of the continuation acknowledgement fails, the working binding and credential are preserved and the callback retains enough state for an idempotent acknowledgement retry.
+If lifecycle activation fails after Slack binding/token mutation, the callback compensation path revokes only the exact credential material written by that callback and disconnects the failed connection epoch rather than commit a half-configured connection. Before activation, the flow takes an exclusive, leased `completing` claim; timestamp-fenced settlement prevents concurrent callbacks from letting a losing failure tear down a successful activation. The completed flow stores a redacted fingerprint of its access/refresh handles. Metadata-only account writes do not suppress cleanup, while a later reconnect or refresh with different handles makes stale compensation a no-op. It never selects every account for the provider. A failed flow plus its fingerprint is the durable cleanup journal; the fingerprint is cleared only after compensation succeeds, and flow-status polling resumes stale dispatch or cleanup after restart. A failed reconfiguration must not restore an older identity after its credential has already been replaced. If activation succeeds and only persistence of the continuation acknowledgement fails, the working binding and credential are preserved and the claim is released for an idempotent retry.
 
 ## Error behavior
 
@@ -60,7 +61,10 @@ Add caller-level OAuth and WebUI coverage to prove installation behavior:
 6. A lifecycle activation failure after reconfiguration revokes the replaced credential and leaves the Slack owner fully disconnected instead of restoring a stale binding.
 7. The configuration modal does not close or broadcast channel-connected when activation/completion fails, and it renders a retryable error.
 8. A whole-path regression drives install -> OAuth callback -> activation and asserts against the active capability surface, not merely that an activation request was attempted.
+9. Activation compensation leaves unrelated accounts for the same provider configured.
+10. A stale failed callback cannot revoke a newer credential generation, in either the in-memory contract or durable filesystem implementation, and a failed lifecycle flow is durably projected as `failed`.
+11. Concurrent callbacks invoke lifecycle activation once, stale claim owners cannot settle after lease takeover, and fail-once compensation converges after service restart.
 
 ## Scope
 
-No schema changes, migrations, Slack-specific activation fallback, automatic reinstall, global registry redesign, or broader extension lifecycle refactor. The change fills the already-modeled generic lifecycle continuation and keeps Slack-specific work limited to its existing identity-binding compensation hook.
+No database migration, Slack-specific activation fallback, automatic reinstall, global registry redesign, or broader extension lifecycle refactor. One backwards-compatible optional fingerprint field is added to the existing serialized OAuth flow record so compensation can be generation-safe across retries and restarts. The generic continuation state machine reuses the existing `Completing` status; Slack-specific work remains limited to its existing identity-binding compensation hook.

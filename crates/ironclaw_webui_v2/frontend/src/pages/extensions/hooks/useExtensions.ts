@@ -486,6 +486,13 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
 
       function handleCompletion(payload) {
         if (failureMatchesFlow(payload, flowId)) {
+          if (invocationId) {
+            pollFlowStatus();
+            // Durable status owns terminal reconciliation when an invocation
+            // id is available. Keep the interval's timeout path alive if the
+            // status endpoint remains unavailable.
+            return false;
+          }
           setAuthError("Authorization failed. Try connecting again.");
           stopWatcher();
           refreshSetupState();

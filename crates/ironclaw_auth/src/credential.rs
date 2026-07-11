@@ -13,6 +13,29 @@ use crate::{
     ids::AuthProviderId, scope::AuthProductScope, scope_matches,
 };
 
+/// Redacted fingerprint of the exact secret handles committed by an OAuth
+/// callback. Lifecycle compensation compares this value before revoking an
+/// account, so metadata-only account updates do not suppress cleanup while a
+/// later reconnect or token refresh remains protected from a stale callback.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CredentialSecretFingerprint(String);
+
+impl CredentialSecretFingerprint {
+    pub fn from_handles(
+        access_secret: Option<&SecretHandle>,
+        refresh_secret: Option<&SecretHandle>,
+    ) -> Self {
+        // Secret handles are opaque identifiers rather than secret values, but
+        // only their digest belongs in an auth-flow record. Length-prefixing
+        // makes the two optional fields unambiguous.
+        let access = access_secret.map(SecretHandle::as_str).unwrap_or_default();
+        let refresh = refresh_secret.map(SecretHandle::as_str).unwrap_or_default();
+        let material = format!("{}:{access}{}:{refresh}", access.len(), refresh.len());
+        Self(ironclaw_common::hashing::sha256_hex(material.as_bytes()))
+    }
+}
+
 /// Credential account status projected to product surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +109,13 @@ impl fmt::Debug for CredentialAccount {
 }
 
 impl CredentialAccount {
+    pub fn secret_fingerprint(&self) -> CredentialSecretFingerprint {
+        CredentialSecretFingerprint::from_handles(
+            self.access_secret.as_ref(),
+            self.refresh_secret.as_ref(),
+        )
+    }
+
     pub fn projection(&self) -> CredentialAccountProjection {
         let secret_handle_count =
             self.access_secret.iter().count() + self.refresh_secret.iter().count();

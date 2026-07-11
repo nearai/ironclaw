@@ -1,3 +1,4 @@
+// arch-exempt: large_file, provider-neutral DCR OAuth registry and test doubles, plan #5905
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -2078,6 +2079,22 @@ mod tests {
             _input: ironclaw_auth::OAuthCallbackFailureInput,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             unreachable!("create-flow failure test does not fail callbacks")
+        }
+
+        async fn claim_continuation_dispatch(
+            &self,
+            _scope: &AuthProductScope,
+            _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            unreachable!("create-flow failure test does not claim continuations")
+        }
+
+        async fn settle_continuation_dispatch(
+            &self,
+            _scope: &AuthProductScope,
+            _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            unreachable!("create-flow failure test does not settle continuations")
         }
 
         async fn mark_continuation_dispatched(

@@ -829,8 +829,8 @@ async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
             .flow_status(&auth_scope, flow_id)
             .await
             .expect("sanitized flow status"),
-        ironclaw_auth::AuthFlowStatus::Completing,
-        "the popup poll must not treat an undispatched lifecycle continuation as success"
+        ironclaw_auth::AuthFlowStatus::Failed,
+        "the popup poll must terminate after lifecycle activation fails"
     );
 }
 

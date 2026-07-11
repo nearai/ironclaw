@@ -15,7 +15,7 @@ use ironclaw_extensions::{
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
     InstallationOwner, ManifestHash, ManifestSource,
 };
-use ironclaw_filesystem::RootFilesystem;
+use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
     PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
@@ -76,13 +76,15 @@ mod install_policy;
 use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, SLACK_EXTENSION_ID,
     imported_extension_package, is_internal_extension_package_ref, materialize_available_extension,
-    visible_capability_ids,
+    surface_kinds_from_manifest_record, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
     UnavailableExtensionActivationCredentialGate,
 };
-use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
+use crate::extension_host::extension_credential_requirements::{
+    manifest_runtime_credential_auth_requirements, package_runtime_credential_auth_requirements,
+};
 use crate::extension_host::lifecycle::response_with_payload;
 use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
@@ -113,18 +115,18 @@ impl RemovableChannelCleanup {
     }
 }
 
-fn removable_channel_cleanup_for_summary(
-    summary: &LifecycleExtensionSummary,
+fn removable_channel_cleanup(
+    package_ref: &LifecyclePackageRef,
+    surface_kinds: &[LifecycleExtensionSurfaceKind],
+    declares_credentials: bool,
 ) -> Option<RemovableChannelCleanup> {
     // The bundled Slack tools package owns the personal Slack channel even
     // though its manifest surface is tool-only.
-    if summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
-        || summary
-            .surface_kinds
-            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+    if package_ref.id.as_str() == SLACK_EXTENSION_ID
+        || surface_kinds.contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
     {
         return Some(RemovableChannelCleanup::Required(
-            summary.package_ref.id.as_str().to_string(),
+            package_ref.id.as_str().to_string(),
         ));
     }
     // Tool-only companion extensions can still own a personal connection
@@ -132,11 +134,9 @@ fn removable_channel_cleanup_for_summary(
     // facade when such an extension declares credentials; a missing channel is
     // intentionally a no-op. This keeps provider-specific OAuth knowledge out
     // of the lifecycle core.
-    if summary.package_ref.kind == LifecyclePackageKind::Extension
-        && !summary.credential_requirements.is_empty()
-    {
+    if package_ref.kind == LifecyclePackageKind::Extension && declares_credentials {
         return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            summary.package_ref.id.as_str().to_string(),
+            package_ref.id.as_str().to_string(),
         ));
     }
     None
@@ -1079,6 +1079,20 @@ impl RebornLocalExtensionManagementPort {
         previous_state: ExtensionActivationState,
         active_package: ExtensionPackage,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        if previous_state == ExtensionActivationState::Enabled
+            && self
+                .active_extensions
+                .snapshot()
+                .get_extension(extension_id)
+                == Some(&active_package)
+        {
+            // Lifecycle OAuth continuation dispatch is lease-recoverable. A
+            // replacement claimant can therefore arrive after the original
+            // claimant already activated this exact package. Treat that state
+            // as the authoritative success instead of re-publishing and
+            // risking a conflicting failure followed by credential rollback.
+            return Ok(activation_success_response(package_ref, &active_package));
+        }
         self.enable_lifecycle_package(extension_id).await?;
         if let Err(error) = self
             .installation_store
@@ -1118,32 +1132,7 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
 
-        let visible_capability_ids = package_visible_capability_ids(&active_package);
-        let message =
-            activation_success_message(&package_ref, &active_package, &visible_capability_ids);
-        // For an inbound-channel extension, attach the structured connect
-        // requirement so WebChat can render the in-chat connection panel from
-        // structured state (the activation message is model guidance only).
-        let connection_required = if package_declares_inbound_product_adapter(&active_package) {
-            Some(channel_connection_requirement(
-                package_ref.id.as_str(),
-                active_package.manifest.name.as_str(),
-            ))
-        } else {
-            None
-        };
-
-        let mut response = response_with_payload(
-            Some(package_ref),
-            LifecyclePhase::Active,
-            LifecycleProductPayload::ExtensionActivate {
-                activated: true,
-                visible_capability_ids,
-                connection_required,
-            },
-        );
-        response.message = Some(message);
-        Ok(response)
+        Ok(activation_success_response(package_ref, &active_package))
     }
 
     pub(crate) async fn package_requires_hosted_mcp_discovery(
@@ -1171,50 +1160,101 @@ impl RebornLocalExtensionManagementPort {
         scope: &ResourceScope,
         authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        // Resolve removal metadata from the managed catalog rather than the
-        // installation. Cleanup must still converge when the package is already
-        // absent, while unknown package refs must remain rejected.
-        let available = self.catalog.resolve(&package_ref)?;
-        let removal_summary = available.summary();
         let removed_extension_id = package_ref.id.as_str().to_string();
         let caller = authenticated_actor_user_id.unwrap_or(&scope.user_id);
-        let removed_providers = Self::removed_extension_providers(available)?;
-        if !removed_providers.is_empty() && authenticated_actor_user_id.is_none() {
-            return Err(ProductWorkflowError::InvalidBindingRequest {
-                reason: "extension credential cleanup requires an authenticated actor".to_string(),
-            });
-        }
         let mut removal_scope = scope.clone();
         if let Some(actor_user_id) = authenticated_actor_user_id {
             removal_scope.user_id = actor_user_id.clone();
         }
         let mut response = {
             let _operation_guard = self.operation_lock.lock().await;
+            let (extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
+            let installation = self.search_installation(&extension_id).await?;
+            let installed_manifest = self
+                .installation_store
+                .get_manifest(&extension_id)
+                .await
+                .map_err(map_extension_installation_error)?;
+            if installation.is_some() && installed_manifest.is_none() {
+                return Err(ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} manifest is not installed",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            let removal_manifest = if let Some(manifest_record) = installed_manifest.as_ref() {
+                // Cleanup is owed by the manifest that was actually installed,
+                // even if today's catalog entry changed or disappeared. A
+                // manifest without an installation is the durable tombstone
+                // left by a prior remove whose post-delete cleanup must retry.
+                manifest_record.clone()
+            } else {
+                // Seed the same durable tombstone before an already-absent
+                // catalog repair. A later catalog deployment cannot otherwise
+                // change or remove the only metadata needed by a retry.
+                let available = self.catalog.resolve(&package_ref)?;
+                prepare_install(available)?.manifest_record
+            };
+            let removed_providers =
+                Self::removed_extension_providers_from_manifest(&removal_manifest)?;
+            let surface_kinds =
+                surface_kinds_from_manifest_record(&removal_manifest, package_ref.id.as_str())?;
+            let channel_cleanup = removable_channel_cleanup(
+                &package_ref,
+                &surface_kinds,
+                !removed_providers.is_empty(),
+            );
+            if !removed_providers.is_empty() && authenticated_actor_user_id.is_none() {
+                return Err(ProductWorkflowError::InvalidBindingRequest {
+                    reason: "extension credential cleanup requires an authenticated actor"
+                        .to_string(),
+                });
+            }
+            if installed_manifest.is_none() {
+                self.installation_store
+                    .upsert_manifest(removal_manifest)
+                    .await
+                    .map_err(map_extension_installation_error)?;
+            }
             self.cleanup_channel_before_remove(
-                &removal_summary,
+                channel_cleanup,
                 &removal_scope,
                 authenticated_actor_user_id,
             )
             .await?;
-            let (extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
-            if self.search_installation(&extension_id).await?.is_some() {
-                self.remove_locked(package_ref, caller).await
+            let response = if installation.is_some() {
+                self.remove_locked(package_ref.clone(), caller).await
             } else {
+                self.remove_orphaned_runtime_state(&extension_id).await?;
                 let response = response_with_payload(
-                    Some(package_ref),
+                    Some(package_ref.clone()),
                     LifecyclePhase::Removed,
                     LifecycleProductPayload::ExtensionRemove { removed: false },
                 );
                 Ok(response)
+            }?;
+            // `remove_locked` intentionally retains the persisted manifest as
+            // a durable cleanup tombstone. Only erase it after every external
+            // cleanup converges; retryable failures can then recover the exact
+            // providers/surfaces without trusting a changed catalog.
+            self.revoke_exclusive_credentials(
+                &removal_scope,
+                &removed_extension_id,
+                &removed_providers,
+                caller,
+            )
+            .await?;
+            // A membership-only removal leaves the shared installation in
+            // place, so its installed manifest must remain too.
+            if self.search_installation(&extension_id).await?.is_none() {
+                match self.installation_store.delete_manifest(&extension_id).await {
+                    Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
+                    Err(error) => return Err(map_extension_installation_error(error)),
+                }
             }
-        }?;
-        self.revoke_exclusive_credentials(
-            &removal_scope,
-            &removed_extension_id,
-            &removed_providers,
-            caller,
-        )
-        .await?;
+            response
+        };
         if matches!(
             response.payload.as_ref(),
             Some(LifecycleProductPayload::ExtensionRemove { removed: false })
@@ -1229,11 +1269,10 @@ impl RebornLocalExtensionManagementPort {
 
     async fn cleanup_channel_before_remove(
         &self,
-        summary: &LifecycleExtensionSummary,
+        cleanup: Option<RemovableChannelCleanup>,
         scope: &ResourceScope,
         authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
     ) -> Result<(), ProductWorkflowError> {
-        let cleanup = removable_channel_cleanup_for_summary(summary);
         let Some(cleanup) = cleanup else {
             return Ok(());
         };
@@ -1270,10 +1309,21 @@ impl RebornLocalExtensionManagementPort {
     /// manifest is gone afterward). Discovery fails closed because an empty
     /// result would otherwise bypass authenticated-actor validation and personal
     /// credential cleanup.
-    fn removed_extension_providers(
-        available: &AvailableExtensionPackage,
+    fn removed_extension_providers_from_manifest(
+        manifest_record: &ExtensionManifestRecord,
     ) -> Result<Vec<AuthProviderId>, ProductWorkflowError> {
-        let requirements = package_runtime_credential_auth_requirements(&available.package);
+        let manifest = manifest_record
+            .manifest()
+            .clone()
+            .try_into()
+            .map_err(map_extension_error)?;
+        let requirements = manifest_runtime_credential_auth_requirements(&manifest);
+        Self::removed_extension_providers_from_requirements(requirements)
+    }
+
+    fn removed_extension_providers_from_requirements(
+        requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Result<Vec<AuthProviderId>, ProductWorkflowError> {
         let mut providers = Vec::new();
         for requirement in requirements {
             let provider = AuthProviderId::new(requirement.provider.as_str()).map_err(|_| {
@@ -1306,8 +1356,8 @@ impl RebornLocalExtensionManagementPort {
         if removed_providers.is_empty() {
             return Ok(());
         }
-        let providers_still_in_use =
-            self.providers_still_in_use(caller)
+        let providers_still_in_use = self
+            .providers_still_in_use(removed_extension_id, caller)
                 .await
                 .ok_or_else(|| ProductWorkflowError::Transient {
                     reason: "extension credential cleanup could not determine whether credentials are shared; retry removal"
@@ -1363,13 +1413,15 @@ impl RebornLocalExtensionManagementPort {
     /// fails safe and skips revocation rather than risk deleting a shared
     /// credential.
     ///
-    /// Enumeration is caller-masked (#5459 P1): another user's private install
-    /// is invisible here, and that is the right universe — the revocation is
-    /// scoped to the remover's own credential accounts, which a foreign
-    /// private install cannot be consuming.
-    async fn providers_still_in_use(&self, caller: &UserId) -> Option<BTreeSet<AuthProviderId>> {
-        let response = match self.list_installed(caller).await {
-            Ok(response) => response,
+    /// Enumeration is caller-masked: another user's private install cannot be
+    /// consuming the caller's personal credential account.
+    async fn providers_still_in_use(
+        &self,
+        removed_extension_id: &str,
+        caller: &UserId,
+    ) -> Option<BTreeSet<AuthProviderId>> {
+        let installations = match self.installation_store.list_installations().await {
+            Ok(installations) => installations,
             Err(error) => {
                 tracing::debug!(
                     %error,
@@ -1378,42 +1430,123 @@ impl RebornLocalExtensionManagementPort {
                 return None;
             }
         };
-        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = response.payload
-        else {
-            return Some(BTreeSet::new());
-        };
         let mut providers = BTreeSet::new();
-        for installed in extensions {
-            match self
-                .activation_credential_requirements(&installed.summary.package_ref, caller)
+        for installation in installations {
+            if installation.extension_id().as_str() == removed_extension_id
+                || !installation.owner().visible_to(caller)
+            {
+                continue;
+            }
+            let manifest_record = match self
+                .installation_store
+                .get_manifest(installation.extension_id())
                 .await
             {
-                Ok(requirements) => {
-                    for requirement in requirements {
-                        let provider = match AuthProviderId::new(requirement.provider.as_str()) {
-                            Ok(provider) => provider,
-                            Err(error) => {
-                                tracing::debug!(
-                                    %error,
-                                    provider = %requirement.provider,
-                                    "remaining extension provider id invalid for credential cleanup"
-                                );
-                                return None;
-                            }
-                        };
-                        providers.insert(provider);
-                    }
+                Ok(Some(manifest_record)) => manifest_record,
+                Ok(None) => {
+                    tracing::debug!(
+                        extension_id = %installation.extension_id(),
+                        "remaining extension manifest missing during credential cleanup discovery"
+                    );
+                    return None;
                 }
                 Err(error) => {
                     tracing::debug!(
                         %error,
+                        extension_id = %installation.extension_id(),
+                        "could not load a remaining extension manifest during credential cleanup discovery"
+                    );
+                    return None;
+                }
+            };
+            let requirements = match Self::removed_extension_providers_from_manifest(
+                &manifest_record,
+            ) {
+                Ok(requirements) => requirements,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        extension_id = %installation.extension_id(),
                         "could not resolve a remaining extension's credential providers; skipping credential cleanup"
                     );
                     return None;
                 }
+            };
+            for provider in requirements {
+                providers.insert(provider);
             }
         }
         Some(providers)
+    }
+
+    /// Converge a manifest-only removal tombstone that may have been left by a
+    /// compensated file/installation failure. The normal successful remove has
+    /// already cleared these surfaces, so every step is idempotent there.
+    async fn remove_orphaned_runtime_state(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError> {
+        let lifecycle_package = {
+            self.lifecycle_service
+                .lock()
+                .await
+                .registry()
+                .get_extension(extension_id)
+                .cloned()
+        };
+        let active_package = self
+            .active_extensions
+            .snapshot()
+            .get_extension(extension_id)
+            .cloned();
+        if let Some(package) = active_package.as_ref() {
+            self.active_extensions.unpublish(package)?;
+        }
+        if lifecycle_package.is_some()
+            && let Err(error) = self.remove_lifecycle_package(extension_id).await
+        {
+            if let Some(package) = active_package.as_ref()
+                && let Err(restore_error) = self.active_extensions.publish(package)
+            {
+                return Err(compensation_failure(
+                    "orphan extension cleanup failed and active publication restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.delete_materialized_extension_files(extension_id).await {
+            let restore_package = lifecycle_package.as_ref().or(active_package.as_ref());
+            if let Some(package) = restore_package {
+                let previous_state = if active_package.is_some() {
+                    ExtensionActivationState::Enabled
+                } else {
+                    ExtensionActivationState::Installed
+                };
+                if let Err(restore_error) = self
+                    .restore_lifecycle_package(package, previous_state)
+                    .await
+                {
+                    return Err(compensation_failure(
+                        "orphan extension file cleanup failed and lifecycle restore failed",
+                        error,
+                        restore_error,
+                    ));
+                }
+            }
+            if let Some(package) = active_package.as_ref()
+                && let Err(restore_error) = self.active_extensions.publish(package)
+            {
+                return Err(compensation_failure(
+                    "orphan extension file cleanup failed and active publication restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn remove_locked(
@@ -1449,17 +1582,6 @@ impl RebornLocalExtensionManagementPort {
                 LifecycleProductPayload::ExtensionRemove { removed: true },
             ));
         }
-        let manifest = self
-            .installation_store
-            .get_manifest(&extension_id)
-            .await
-            .map_err(map_extension_installation_error)?
-            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} manifest is not installed",
-                    extension_id.as_str()
-                ),
-            })?;
         let previous_state = installation.activation_state();
         let lifecycle_package = self.lifecycle_package(&extension_id).await?;
         if let Err(error) = self
@@ -1547,36 +1669,6 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(original_error);
         }
-        if let Err(error) = self.installation_store.delete_manifest(&extension_id).await {
-            let original_error = map_extension_installation_error(error);
-            if let Err(restore_error) = self
-                .restore_lifecycle_package(&lifecycle_package, previous_state)
-                .await
-            {
-                return Err(compensation_failure(
-                    "extension remove failed to delete manifest and lifecycle restore failed",
-                    original_error,
-                    restore_error,
-                ));
-            }
-            if let Err(restore_error) =
-                self.restore_active_publication(&lifecycle_package, previous_state)
-            {
-                return Err(compensation_failure(
-                    "extension remove failed to delete manifest and active publication restore failed",
-                    original_error,
-                    restore_error,
-                ));
-            }
-            if let Err(restore_error) = self.restore_installation(&installation).await {
-                return Err(compensation_failure(
-                    "extension remove failed to delete manifest and installation restore failed",
-                    original_error,
-                    restore_error,
-                ));
-            }
-            return Err(original_error);
-        }
         if let Err(error) = self
             .delete_materialized_extension_files(&extension_id)
             .await
@@ -1600,10 +1692,7 @@ impl RebornLocalExtensionManagementPort {
                     restore_error,
                 ));
             }
-            if let Err(restore_error) = self
-                .restore_installation_records(manifest, installation)
-                .await
-            {
+            if let Err(restore_error) = self.restore_installation(&installation).await {
                 return Err(compensation_failure(
                     "extension remove failed to delete files and installation restore failed",
                     error,
@@ -1795,21 +1884,6 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)
     }
 
-    async fn restore_installation_records(
-        &self,
-        manifest: ExtensionManifestRecord,
-        installation: ExtensionInstallation,
-    ) -> Result<(), ProductWorkflowError> {
-        self.installation_store
-            .upsert_manifest(manifest)
-            .await
-            .map_err(map_extension_installation_error)?;
-        self.installation_store
-            .upsert_installation(installation)
-            .await
-            .map_err(map_extension_installation_error)
-    }
-
     fn restore_active_publication(
         &self,
         package: &ExtensionPackage,
@@ -1866,12 +1940,12 @@ impl RebornLocalExtensionManagementPort {
         else {
             return Ok(());
         };
-        self.filesystem
-            .delete(&extension_root)
-            .await
-            .map_err(|error| ProductWorkflowError::Transient {
+        match self.filesystem.delete(&extension_root).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(ProductWorkflowError::Transient {
                 reason: format!("failed to remove extension files: {error}"),
-            })
+            }),
+        }
     }
 }
 
@@ -2044,6 +2118,33 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
         .filter(|capability| capability.visibility == CapabilityVisibility::Model)
         .map(|capability| capability.id.as_str().to_string())
         .collect()
+}
+
+fn activation_success_response(
+    package_ref: LifecyclePackageRef,
+    package: &ExtensionPackage,
+) -> LifecycleProductResponse {
+    let visible_capability_ids = package_visible_capability_ids(package);
+    let message = activation_success_message(&package_ref, package, &visible_capability_ids);
+    let connection_required = if package_declares_inbound_product_adapter(package) {
+        Some(channel_connection_requirement(
+            package_ref.id.as_str(),
+            package.manifest.name.as_str(),
+        ))
+    } else {
+        None
+    };
+    let mut response = response_with_payload(
+        Some(package_ref),
+        LifecyclePhase::Active,
+        LifecycleProductPayload::ExtensionActivate {
+            activated: true,
+            visible_capability_ids,
+            connection_required,
+        },
+    );
+    response.message = Some(message);
+    response
 }
 
 fn activation_success_message(
@@ -3723,6 +3824,43 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
+    async fn repeated_activation_of_same_published_package_is_idempotent() {
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install extension");
+
+        for attempt in 0..2 {
+            let response = port
+                .activate_with_prechecked_credentials_for_test(
+                    package_ref.clone(),
+                    ExtensionActivationMode::Static,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("activation attempt {attempt} failed: {error}"));
+            assert!(matches!(
+                response.payload,
+                Some(LifecycleProductPayload::ExtensionActivate {
+                    activated: true,
+                    ..
+                })
+            ));
+        }
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").expect("valid extension id"))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn commit_activation_publish_failure_preserves_previously_enabled_extension() {
         let lifecycle_sink = Arc::new(RecordingLifecycleSink::default());
         let lifecycle_service = ExtensionLifecycleService::new(ExtensionRegistry::new())
@@ -5216,7 +5354,7 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     #[tokio::test]
-    async fn extension_remove_manifest_delete_failure_restores_active_trust_policy() {
+    async fn extension_remove_manifest_delete_failure_leaves_retry_tombstone() {
         let (_dir, port, active_registry, failing_store, trust_policy) =
             extension_port_with_delete_manifest_failing_store();
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
@@ -5243,14 +5381,40 @@ output_schema_ref = "schemas/run.output.json"
             error,
             ProductWorkflowError::InvalidBindingRequest { .. }
         ));
-        assert_enabled_active_extension_state(&active_registry, failing_store.as_ref()).await;
-        assert_eq!(
+        let extension_id = ExtensionId::new("fixture").expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new("fixture").expect("valid installation id");
+        assert!(
+            failing_store
+                .get_installation(&installation_id)
+                .await
+                .expect("installation lookup")
+                .is_none(),
+            "the runtime package is already removed"
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none(),
+            "removed tools must stay unpublished"
+        );
+        assert_ne!(
             trust_policy
                 .evaluate(&trust_input)
-                .expect("restored active extension trust")
+                .expect("removed extension trust")
                 .effective_trust
                 .class(),
-            TrustClass::UserTrusted
+            TrustClass::UserTrusted,
+            "removed extension trust must stay revoked"
+        );
+        assert!(
+            failing_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_some(),
+            "failed finalization retains the durable cleanup tombstone"
         );
     }
 
@@ -5460,7 +5624,7 @@ output_schema_ref = "schemas/run.output.json"
         assert!(reason.contains("retry removal"));
         assert!(
             !storage_root.join("system/extensions/github").exists(),
-            "the package was removed before post-removal cleanup failed"
+            "the package is removed before post-removal cleanup; only the durable manifest tombstone remains"
         );
 
         let quarantined_error = facade
@@ -5558,6 +5722,368 @@ output_schema_ref = "schemas/run.output.json"
             assert_eq!(request.extension_id.as_str(), "github");
             assert_eq!(request.action, SecretCleanupAction::Uninstall);
         }
+    }
+
+    #[tokio::test]
+    async fn extension_remove_uses_installed_manifest_when_catalog_entry_disappears() {
+        let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
+        let (_dir, storage_root, installed_port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        installed_port
+            .install(package_ref.clone())
+            .await
+            .expect("install github");
+
+        // Simulate a process restart after the bundled catalog dropped or
+        // renamed the entry. The persisted manifest remains the authoritative
+        // record of the cleanup owed by this installed package.
+        let port = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&installed_port.filesystem),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store,
+            Arc::clone(&installed_port.lifecycle_service),
+            installed_port.active_extensions.clone(),
+            Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+        );
+        let removal_scope = hosted_mcp_scope("extension-remove-missing-catalog");
+        let response = port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("installed manifest permits complete removal without a catalog entry");
+
+        assert!(matches!(
+            response.payload,
+            Some(LifecycleProductPayload::ExtensionRemove { removed: true })
+        ));
+        assert!(
+            !storage_root.join("system/extensions/github").exists(),
+            "installed files must be removed"
+        );
+        let requests = cleanup.requests.lock().expect("cleanup lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].provider.as_ref().map(AuthProviderId::as_str),
+            Some("github"),
+            "cleanup provider must come from the persisted installed manifest"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_remove_retries_from_manifest_tombstone_without_catalog_entry() {
+        let cleanup = Arc::new(FailThenQuarantineExtensionCredentialCleanup::default());
+        let (_dir, storage_root, installed_port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        installed_port
+            .install(package_ref.clone())
+            .await
+            .expect("install github");
+        let port = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&installed_port.filesystem),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store.clone(),
+            Arc::clone(&installed_port.lifecycle_service),
+            installed_port.active_extensions.clone(),
+            Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+        );
+        let removal_scope = hosted_mcp_scope("extension-remove-tombstone-retry");
+
+        for expected in ["backend failure", "quarantined cleanup"] {
+            let error = port
+                .remove(
+                    package_ref.clone(),
+                    &removal_scope,
+                    Some(&removal_scope.user_id),
+                )
+                .await
+                .expect_err(expected);
+            assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+        }
+        assert!(
+            !storage_root.join("system/extensions/github").exists(),
+            "package files remain absent while cleanup retries"
+        );
+        let extension_id = ExtensionId::new("github").expect("valid extension id");
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_some(),
+            "persisted manifest is the cleanup tombstone"
+        );
+
+        let response = port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("tombstone retry converges without catalog metadata");
+        assert!(matches!(
+            response.payload,
+            Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+        ));
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_none(),
+            "cleanup tombstone is deleted only after convergence"
+        );
+    }
+
+    #[tokio::test]
+    async fn already_absent_catalog_repair_persists_tombstone_before_cleanup() {
+        let cleanup = Arc::new(FailThenQuarantineExtensionCredentialCleanup::default());
+        let (_dir, _storage_root, base_port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        let removal_scope = hosted_mcp_scope("absent-catalog-repair-tombstone");
+        let repair_port = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&base_port.filesystem),
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+            installation_store.clone(),
+            Arc::clone(&base_port.lifecycle_service),
+            base_port.active_extensions.clone(),
+            Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+        );
+        repair_port
+            .remove(
+                package_ref.clone(),
+                &removal_scope,
+                Some(&removal_scope.user_id),
+            )
+            .await
+            .expect_err("first repair cleanup fails after seeding its tombstone");
+
+        let extension_id = ExtensionId::new("github").expect("valid extension id");
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_some(),
+            "catalog repair metadata must survive a cleanup failure"
+        );
+        let no_catalog_port = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&base_port.filesystem),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store.clone(),
+            Arc::clone(&base_port.lifecycle_service),
+            base_port.active_extensions.clone(),
+            Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+        );
+        no_catalog_port
+            .remove(
+                package_ref.clone(),
+                &removal_scope,
+                Some(&removal_scope.user_id),
+            )
+            .await
+            .expect_err("quarantined repair remains retryable without catalog metadata");
+        no_catalog_port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("repair converges from tombstone after catalog removal");
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_only_retry_removes_orphaned_active_runtime_and_files() {
+        let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
+        let (_dir, storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install github");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate github");
+        let installation_id =
+            ExtensionInstallationId::new("github").expect("valid installation id");
+        installation_store
+            .delete_installation(&installation_id)
+            .await
+            .expect("simulate failed installation restoration");
+
+        let retry_port = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&port.filesystem),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store.clone(),
+            Arc::clone(&port.lifecycle_service),
+            port.active_extensions.clone(),
+            Some(cleanup as Arc<dyn ExtensionCredentialCleanup>),
+        );
+        let removal_scope = hosted_mcp_scope("orphan-runtime-removal-retry");
+        retry_port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("manifest-only retry converges orphan runtime state");
+
+        let extension_id = ExtensionId::new("github").expect("valid extension id");
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none()
+        );
+        assert!(
+            retry_port
+                .lifecycle_service
+                .lock()
+                .await
+                .registry()
+                .get_extension(&extension_id)
+                .is_none()
+        );
+        assert!(
+            !storage_root.join("system/extensions/github").exists(),
+            "orphan materialized files are deleted"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup")
+                .is_none(),
+            "cleanup tombstone is finalized"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_catalog_repair_removes_orphan_runtime_without_installation_records() {
+        let (_dir, storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install github");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate github");
+        let extension_id = ExtensionId::new("github").expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new("github").expect("valid installation id");
+        installation_store
+            .delete_installation(&installation_id)
+            .await
+            .expect("delete installation");
+        installation_store
+            .delete_manifest(&extension_id)
+            .await
+            .expect("delete manifest");
+
+        let repair_port = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&port.filesystem),
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+            installation_store,
+            Arc::clone(&port.lifecycle_service),
+            port.active_extensions.clone(),
+            None,
+        );
+        let removal_scope = hosted_mcp_scope("fresh-orphan-runtime-repair");
+        repair_port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("catalog-authorized orphan cleanup converges");
+
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none()
+        );
+        assert!(
+            repair_port
+                .lifecycle_service
+                .lock()
+                .await
+                .registry()
+                .get_extension(&extension_id)
+                .is_none()
+        );
+        assert!(!storage_root.join("system/extensions/github").exists());
+    }
+
+    #[tokio::test]
+    async fn fresh_catalog_repair_removes_files_only_orphan() {
+        let (_dir, storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install github");
+        let extension_id = ExtensionId::new("github").expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new("github").expect("valid installation id");
+        installation_store
+            .delete_installation(&installation_id)
+            .await
+            .expect("delete installation");
+        installation_store
+            .delete_manifest(&extension_id)
+            .await
+            .expect("delete manifest");
+        port.lifecycle_service
+            .lock()
+            .await
+            .remove(&extension_id)
+            .await
+            .expect("remove runtime registry entry");
+        assert!(storage_root.join("system/extensions/github").exists());
+
+        let repair_port = RebornLocalExtensionManagementPort::new(
+            Arc::clone(&port.filesystem),
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+            installation_store,
+            Arc::clone(&port.lifecycle_service),
+            port.active_extensions.clone(),
+            None,
+        );
+        let removal_scope = hosted_mcp_scope("files-only-orphan-repair");
+        repair_port
+            .remove(package_ref, &removal_scope, Some(&removal_scope.user_id))
+            .await
+            .expect("files-only orphan cleanup converges");
+
+        assert!(!storage_root.join("system/extensions/github").exists());
     }
 
     #[tokio::test]

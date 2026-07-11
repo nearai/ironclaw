@@ -4057,6 +4057,7 @@ function channelConnectionContext({
   messagesThreadId,
   fetchExtensions,
   fetchExtensionSetup,
+  fetchOauthFlowStatus,
   initialByIndex = new Map(),
   sendMessage,
   startExtensionOauth,
@@ -4085,6 +4086,7 @@ function channelConnectionContext({
       fetchExtensions ||
       (async () => ({ extensions: slackExtension ? [slackExtension] : [] })),
     fetchExtensionSetup: fetchExtensionSetup || (async () => ({ secrets: [] })),
+    fetchOauthFlowStatus: fetchOauthFlowStatus || (async () => null),
     globalThis: storage ? { localStorage: storage } : {},
     queryClient: {
       fetchQuery: async ({ queryFn }) => queryFn(),
@@ -4512,6 +4514,8 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
   const sourceMessageId = "tool-slack-oauth-failed";
   const stateUpdates = [];
   const sendBodies = [];
+  const flowStatusCalls = [];
+  let flowStatus = null;
   const store = new Map();
   const intervalCallbacks = [];
   const storage = {
@@ -4557,8 +4561,13 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
     }),
     startExtensionOauth: async () => ({
       flow_id: "flow-slack-failed",
+      callback_scope: { invocation_id: "invocation-slack-failed" },
       authorization_url: "https://slack.com/oauth/v2/authorize?client_id=client",
     }),
+    fetchOauthFlowStatus: async (flowId, invocationId) => {
+      flowStatusCalls.push({ flowId, invocationId });
+      return flowStatus;
+    },
     sendMessage: async (body) => {
       sendBodies.push(body);
       return { run_id: "run-continue", status: "queued", thread_id: body.threadId };
@@ -4583,6 +4592,18 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.ok(
+    !stateUpdates.some(
+      (update) =>
+        update.index === STATE_SLOT.pendingOnboarding &&
+        typeof update.value?.oauthError === "string",
+    ),
+    "a callback failure must wait for durable compensation to settle",
+  );
+  flowStatus = { status: "failed" };
+  for (const callback of intervalCallbacks) callback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.ok(
     stateUpdates.some(
       (update) =>
         update.index === STATE_SLOT.pendingOnboarding &&
@@ -4598,6 +4619,10 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
     "the card must stay mounted so the user can retry",
   );
   assert.equal(sendBodies.length, 0, "a failed flow must not send the continuation");
+  assert.deepEqual(flowStatusCalls.at(-1), {
+    flowId: "flow-slack-failed",
+    invocationId: "invocation-slack-failed",
+  });
 
   // Retry after the failure: a fresh start must clear the stale card error and
   // track a new flow instead of leaving the dead one's message up.

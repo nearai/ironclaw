@@ -1,6 +1,4 @@
-// arch-exempt: large_file, first-party asset catalog remains 2.9k lines after import/materialization extraction; future asset-registry split, plan #5499
-use std::sync::Arc;
-
+// arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_extensions::{
@@ -21,6 +19,7 @@ use ironclaw_product_workflow::{
     LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecyclePackageKind,
     LifecyclePackageRef, ProductWorkflowError,
 };
+use std::sync::Arc;
 use toml::Value;
 
 use crate::extension_host::extension_credential_requirements::{
