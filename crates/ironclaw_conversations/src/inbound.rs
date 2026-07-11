@@ -864,6 +864,7 @@ mod tests {
             agent_id: Some(agent()),
             project_id: Some(project()),
             prompt: "test trigger prompt".to_string(),
+            delivery_target: None,
         };
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(
             &fire,
