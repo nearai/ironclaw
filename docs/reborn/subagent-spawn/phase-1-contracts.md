@@ -3,7 +3,7 @@
 **Status:** Implementation-ready
 **Date:** 2026-05-19
 **Parent:** [`README.md`](./README.md) (overarching design)
-**Scope:** `crates/ironclaw_turns`, `crates/ironclaw_agent_loop`, `crates/ironclaw_reborn`
+**Scope:** `crates/ironclaw_turns`, `crates/ironclaw_agent_loop`, `crates/ironclaw_runner`
 
 > **Status: partially superseded (2026-07).** The contracts below (lineage fields,
 > `CapabilityOutcome`/gate-kind variants, `prepare_turn`) are partially live in
@@ -15,7 +15,7 @@
 > through §3.2/§3.3/§3.6** (direction files, the flavor table, and its tests —
 > the same scope §3's own intro note flags), which is historical: v1's two
 > flavors (`general`, `researcher`) shipped as four (`General`, `Explorer`,
-> `Coder`, `Planner`, `crates/ironclaw_reborn/src/subagent/flavors.rs`) —
+> `Coder`, `Planner`, `crates/ironclaw_runner/src/subagent/flavors.rs`) —
 > `thread-harness-design.md` §10 is canonical for the current flavor set and
 > naming.
 >
@@ -69,8 +69,8 @@ they are the seam.
 | New store atomic (companion) | `release_tree_descendants(scope: &TurnScope, root: TurnRunId, delta: u32) -> Result<(), TurnError>` | P1.A | P2.A partial-spawn rollback; scoped to the exact reservation key |
 | New turn error category | `TurnError::CapacityExceeded { resource: &'static str, cap: u64 }` or the equivalent existing capacity/admission variant if present at implementation time | P1.A | `reserve_tree_descendants` rejects over-cap without mutation; P2.A maps only this typed error to `tree_descendant_cap_exceeded` |
 | New coordinator hook | `DefaultTurnCoordinator::with_event_sink(Arc<dyn TurnEventSink>)` | P1.A | live `SubagentCompletionObserver` notification (P2.D/P3) |
-| New spawn-result payload struct | `SpawnedChildRunPayload { child_run_id, child_thread_id, flavor, mode, status, output_available, final_text, failure_summary }` | P1.C (`ironclaw_reborn::subagent`) | P2.A `result_ref` content; parent's model receives it as tool result |
-| New tombstone struct | `SubagentResultTombstone { child_run_id, terminal_status, disposition: SubagentResultDisposition }` + enum `SubagentResultDisposition::DiscardedByParentCancel` | P1.C (`ironclaw_reborn::subagent`) | P2.D writes on mid-cancel terminal completes; reconciler reads |
+| New spawn-result payload struct | `SpawnedChildRunPayload { child_run_id, child_thread_id, flavor, mode, status, output_available, final_text, failure_summary }` | P1.C (`ironclaw_runner::subagent`) | P2.A `result_ref` content; parent's model receives it as tool result |
+| New tombstone struct | `SubagentResultTombstone { child_run_id, terminal_status, disposition: SubagentResultDisposition }` + enum `SubagentResultDisposition::DiscardedByParentCancel` | P1.C (`ironclaw_runner::subagent`) | P2.D writes on mid-cancel terminal completes; reconciler reads |
 
 ### 0.2 Wire-string contract for the new enum variants
 
@@ -1416,7 +1416,7 @@ use crate::strategies::DefaultBudgetStrategy;
 
 /// Iteration ceiling for the subagent family. Lower than the default 32:
 /// subagents are scoped, single-purpose runs. The per-flavor iteration budget
-/// in `ironclaw_reborn` is resolved into the run profile (P1.C / P2.C); this
+/// in `ironclaw_runner` is resolved into the run profile (P1.C / P2.C); this
 /// is the family-level hard safety net.
 const SUBAGENT_ITERATION_LIMIT: u32 = 16;
 
@@ -1666,16 +1666,16 @@ In `strategies/gate.rs` `#[cfg(test)] mod tests`:
 
 ---
 
-## 3. P1.C — `ironclaw_reborn` data: directions, goal stores, flavor table
+## 3. P1.C — `ironclaw_runner` data: directions, goal stores, flavor table
 
-**Goal:** land the *pure data* the subagent feature needs in `ironclaw_reborn` —
+**Goal:** land the *pure data* the subagent feature needs in `ironclaw_runner` —
 direction prompt `.md` files, the goal-store contract plus production/test
 implementations, and the static built-in flavor table. No driver, no observer,
 no runtime wiring (those are Phase 2/3).
 
 **Flavor naming below is historical (v1 proposal: `general`/`researcher`,
 §3.2/§3.3/§3.6).** The shipped set is four flavors — `General`, `Explorer`,
-`Coder`, `Planner` (`crates/ironclaw_reborn/src/subagent/flavors.rs`,
+`Coder`, `Planner` (`crates/ironclaw_runner/src/subagent/flavors.rs`,
 `.../directions/{general,explorer,coder,planner}.md`) — per
 `thread-harness-design.md` §10, which is canonical for flavor naming. The
 goal-store contract (§3.4) is unaffected by this and remains accurate as
@@ -1685,15 +1685,15 @@ written.
 
 | File | Purpose |
 |---|---|
-| `crates/ironclaw_reborn/src/directions/mod.rs` | `DirectionId` newtype + static `direction_prompt(DirectionId) -> &'static str` |
-| `crates/ironclaw_reborn/src/directions/general.md` | direction prompt for the `general` flavor |
-| `crates/ironclaw_reborn/src/directions/researcher.md` | direction prompt for the `researcher` flavor |
-| `crates/ironclaw_reborn/src/subagent/mod.rs` | module hub: re-exports flavor table + goal store |
-| `crates/ironclaw_reborn/src/subagent/flavors.rs` | static built-in subagent flavor table |
-| `crates/ironclaw_reborn/src/subagent/goal_store.rs` | `SubagentGoalStore` trait, DB-backed production implementation, bounded in-memory test implementation |
-| `crates/ironclaw_reborn/src/lib.rs` | + `pub mod directions;` + `pub mod subagent;` |
+| `crates/ironclaw_runner/src/directions/mod.rs` | `DirectionId` newtype + static `direction_prompt(DirectionId) -> &'static str` |
+| `crates/ironclaw_runner/src/directions/general.md` | direction prompt for the `general` flavor |
+| `crates/ironclaw_runner/src/directions/researcher.md` | direction prompt for the `researcher` flavor |
+| `crates/ironclaw_runner/src/subagent/mod.rs` | module hub: re-exports flavor table + goal store |
+| `crates/ironclaw_runner/src/subagent/flavors.rs` | static built-in subagent flavor table |
+| `crates/ironclaw_runner/src/subagent/goal_store.rs` | `SubagentGoalStore` trait, DB-backed production implementation, bounded in-memory test implementation |
+| `crates/ironclaw_runner/src/lib.rs` | + `pub mod directions;` + `pub mod subagent;` |
 
-> **[NOTE]** `ironclaw_reborn/src` is currently a *flat* directory of modules
+> **[NOTE]** `ironclaw_runner/src` is currently a *flat* directory of modules
 > plus two subdirectories (`loop_exit_applier/`, `turn_runner/`). `directions/`
 > and `subagent/` follow that same module-directory pattern. The crate
 > `CLAUDE.md` says "Add a new file when adding a new … concern" and "The public
@@ -2158,12 +2158,12 @@ pub mod subagent;
 
 No `pub use` flattening — consistent with the `lib.rs` doc comment ("a directory
 of modules, not a shopping list of types"). Downstream Phase 2 code reaches in
-by path: `ironclaw_reborn::subagent::flavors::lookup_flavor`,
-`ironclaw_reborn::subagent::goal_store::SubagentGoalStore`,
-`ironclaw_reborn::directions::direction_prompt`.
+by path: `ironclaw_runner::subagent::flavors::lookup_flavor`,
+`ironclaw_runner::subagent::goal_store::SubagentGoalStore`,
+`ironclaw_runner::directions::direction_prompt`.
 
-`thiserror` must be available to `ironclaw_reborn` for `SubagentGoalStoreError`.
-Check `crates/ironclaw_reborn/Cargo.toml` `[dependencies]` — it is **not**
+`thiserror` must be available to `ironclaw_runner` for `SubagentGoalStoreError`.
+Check `crates/ironclaw_runner/Cargo.toml` `[dependencies]` — it is **not**
 currently listed (the crate uses `serde`, `tracing`, etc.). **Add
 `thiserror = "1"`** to `[dependencies]` as part of P1.C (every other crate in
 the workspace pins `thiserror = "1"` per `error.rs` convention).
@@ -2217,9 +2217,9 @@ The shared contract covers:
 Backend parity commands:
 
 ```bash
-cargo test -p ironclaw_reborn subagent_goal_store_contract
-cargo test -p ironclaw_reborn subagent_goal_store_contract --features libsql
-cargo test -p ironclaw_reborn subagent_goal_store_contract --features postgres
+cargo test -p ironclaw_runner subagent_goal_store_contract
+cargo test -p ironclaw_runner subagent_goal_store_contract --features libsql
+cargo test -p ironclaw_runner subagent_goal_store_contract --features postgres
 ```
 - restart/reopen: write a goal through the DB-backed store, drop/recreate the
   store over the same backend, then `get_goal` returns the same value
@@ -2317,7 +2317,7 @@ with whichever of A/B is chosen.
   evicts a live in-flight subagent's goal, which P2.B then turns into a loud
   child-run failure (acceptable fail-loud behavior, but undesirable under normal
   load — hence the `debug!` log on eviction as an early-warning signal).
-- `thiserror` must be added to `ironclaw_reborn/Cargo.toml` (§3.5) or
+- `thiserror` must be added to `ironclaw_runner/Cargo.toml` (§3.5) or
   `SubagentGoalStoreError` will not compile.
 
 ### 4.5 Phase 1 exit criteria
@@ -2330,7 +2330,7 @@ Phase 1 is done when, per workstream:
 - **P1.B** — `ironclaw_agent_loop` compiles **against the Phase-1 `ironclaw_turns`**
   and `cargo test -p ironclaw_agent_loop` green; `SUBAGENT_FAMILY_DIGEST`
   filled in with the real hash; all §2.6 tests passing.
-- **P1.C** — `ironclaw_reborn` compiles; `cargo test -p ironclaw_reborn` green;
+- **P1.C** — `ironclaw_runner` compiles; `cargo test -p ironclaw_runner` green;
   all §3.6 tests passing across bounded, libSQL, and PostgreSQL backends;
   `thiserror` added to `Cargo.toml`.
 - Workspace-wide `cargo fmt` clean and `cargo clippy --all --benches --tests

@@ -12,11 +12,12 @@
  *   loading   boolean — shows an inline spinner, disables the button, sets
  *             aria-busy. The label stays visible so the button keeps its width.
  *   disabled  boolean
- *   as        "button" | "a" (renders anchor; pass href via ...props)
+ *   as        "button" | "a" | Link-like component (pass href/to via ...props)
  *   className string — for layout/spacing overrides (margin, width, etc.)
  *   children
  *   ...rest   forwarded to the element (type, onClick, href, …)
  */
+import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
 import { cn } from "../utils/cn";
 import { Spinner } from "./spinner";
 
@@ -69,6 +70,38 @@ const VARIANTS = {
     "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
 };
 
+type ButtonOwnProps = {
+  children?: ReactNode;
+  className?: string;
+  variant?: "primary" | keyof typeof VARIANTS;
+  size?: keyof typeof SIZES;
+  fullWidth?: boolean;
+  loading?: boolean;
+  disabled?: boolean;
+  as?: ElementType;
+};
+
+type ButtonNativeProps = Omit<
+  ComponentPropsWithoutRef<"button">,
+  keyof ButtonOwnProps | "disabled"
+>;
+
+type LinkLikeProps = {
+  href?: ComponentPropsWithoutRef<"a">["href"];
+  target?: ComponentPropsWithoutRef<"a">["target"];
+  rel?: ComponentPropsWithoutRef<"a">["rel"];
+  download?: ComponentPropsWithoutRef<"a">["download"];
+  to?: string;
+  replace?: boolean;
+  reloadDocument?: boolean;
+  preventScrollReset?: boolean;
+  relative?: "route" | "path";
+  state?: unknown;
+  viewTransition?: boolean;
+};
+
+type ButtonProps = ButtonOwnProps & ButtonNativeProps & LinkLikeProps;
+
 /* ── Component ─────────────────────────────────────────────────────── */
 
 export function Button({
@@ -81,18 +114,19 @@ export function Button({
   disabled = false,
   as: Tag = "button",
   ...rest
-}) {
-  const Element: any = Tag;
+}: ButtonProps) {
+  const Element = Tag;
   const sizeClass  = SIZES[size] ?? SIZES.md;
   const fullClass  = fullWidth ? "w-full" : "";
   const isDisabled = disabled || loading;
-  const isAnchor = Tag === "a";
-  const disabledAnchorClass = isAnchor && isDisabled ? "cursor-not-allowed opacity-50" : "";
+  const isLinkLike = Tag === "a" || rest.href != null || rest.to != null;
+  const disabledAnchorClass = isLinkLike && isDisabled ? "cursor-not-allowed opacity-50" : "";
+  const nativeDisabled = isLinkLike ? undefined : isDisabled;
   const elementProps =
-    isAnchor && isDisabled
+    isLinkLike && isDisabled
       ? {
           ...rest,
-          onClick: (event) => {
+          onClick: (event: { preventDefault?: () => void; stopPropagation?: () => void }) => {
             event?.preventDefault?.();
             event?.stopPropagation?.();
           },
@@ -116,10 +150,10 @@ export function Button({
           "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}
-        disabled={isDisabled}
-        aria-disabled={isAnchor && isDisabled ? true : undefined}
+        disabled={nativeDisabled}
+        aria-disabled={isLinkLike && isDisabled ? true : undefined}
         aria-busy={loading || undefined}
-        tabIndex={isAnchor && isDisabled ? -1 : undefined}
+        tabIndex={isLinkLike && isDisabled ? -1 : undefined}
         {...elementProps}
       >
         <span
@@ -141,10 +175,10 @@ export function Button({
   return (
     <Element
       className={cn(BASE, sizeClass, fullClass, disabledAnchorClass, variantClass, className)}
-      disabled={isDisabled}
-      aria-disabled={isAnchor && isDisabled ? true : undefined}
+      disabled={nativeDisabled}
+      aria-disabled={isLinkLike && isDisabled ? true : undefined}
       aria-busy={loading || undefined}
-      tabIndex={isAnchor && isDisabled ? -1 : undefined}
+      tabIndex={isLinkLike && isDisabled ? -1 : undefined}
       {...elementProps}
     >
       {loading ? (

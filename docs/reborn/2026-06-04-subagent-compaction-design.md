@@ -318,7 +318,7 @@ Alternative seams (inside CapabilityStage, before PromptStage, on `DefaultPlanne
 - `crates/ironclaw_agent_loop/src/strategies/compaction.rs:42,76` — `DEFAULT_CONTEXT_LIMIT_TOKENS`, `should_compact`; Responsibility 1 threshold table per `capability_id`
 - `crates/ironclaw_agent_loop/src/executor/prompt.rs:303` — `PromptCompactionStep::run()` (compaction decision)
 - `crates/ironclaw_loop_support/src/subagent_spawn_port.rs:183` — re-enable Background mode in `TryFrom`; `:207` `SubagentDefinition`
-- `crates/ironclaw_reborn/src/subagent/completion_observer.rs:180` — Background branch (exists); `:516` `write_terminal_result`
+- `crates/ironclaw_runner/src/subagent/completion_observer.rs:180` — Background branch (exists); `:516` `write_terminal_result`
 - `crates/ironclaw_turns/src/run_profile/host.rs:2057` — add `LoopBackgroundChildPort` to `AgentLoopDriverHost`
 - `crates/ironclaw_turns/src/store.rs:189` — `TurnRunRecord` parent/depth/tree fields (source of truth)
 - `crates/ironclaw_events/src/runtime_event.rs:80` — `RuntimeEvent`; add depth + tree-root fields

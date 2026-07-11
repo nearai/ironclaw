@@ -23,7 +23,7 @@ const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    active_fire_slot, active_run_ref, created_at, schedule_at";
+    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
 const RENAME_SCOPED_TRIGGER_SQL: &str = "\
     UPDATE trigger_records
        SET name = $6
@@ -35,7 +35,7 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
      RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
        name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
        state, next_run_at, last_run_at, last_fired_slot, last_status,
-       active_fire_slot, active_run_ref, created_at, schedule_at";
+       active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
 const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
@@ -100,18 +100,22 @@ impl TriggerRepository for PostgresTriggerRepository {
         let active_fire_slot = record.active_fire_slot.as_ref().map(fmt_ts);
         let active_run_ref = record.active_run_ref.as_ref().map(ToString::to_string);
         let created_at = fmt_ts(&record.created_at);
+        let delivery_target = record
+            .delivery_target
+            .as_ref()
+            .map(|target| target.as_str().to_string());
 
         let sql = r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
-                    active_fire_slot, active_run_ref, created_at, schedule_at
+                    active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9, $10,
                     $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19, $20
+                    $16, $17, $18, $19, $20, $21
                 )
                 ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                     creator_user_id = EXCLUDED.creator_user_id,
@@ -130,7 +134,8 @@ impl TriggerRepository for PostgresTriggerRepository {
                     last_status = EXCLUDED.last_status,
                     active_fire_slot = EXCLUDED.active_fire_slot,
                     active_run_ref = EXCLUDED.active_run_ref,
-                    schedule_at = EXCLUDED.schedule_at
+                    schedule_at = EXCLUDED.schedule_at,
+                    delivery_target = EXCLUDED.delivery_target
                 "#;
         cached_execute(
             &client,
@@ -156,6 +161,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                 &active_run_ref,
                 &created_at,
                 &schedule_at,
+                &delivery_target,
             ],
         )
         .await
@@ -1332,6 +1338,9 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
     let active_run_ref = optional_text(row, "active_run_ref")?
         .map(|value| parse_turn_run_id(&value))
         .transpose()?;
+    let delivery_target = optional_text(row, "delivery_target")?
+        .map(crate::TriggerDeliveryTargetId::new)
+        .transpose()?;
 
     let record = TriggerRecord {
         trigger_id,
@@ -1343,6 +1352,7 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
         source: crate::parse_source_kind_codec(&required_text(row, "source")?)?,
         schedule,
         prompt: required_text(row, "prompt")?,
+        delivery_target,
         state: crate::parse_state_codec(&required_text(row, "state")?)?,
         next_run_at: parse_timestamp(&required_text(row, "next_run_at")?, "next_run_at")?,
         last_run_at,
@@ -1437,12 +1447,14 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     active_run_ref TEXT,
     created_at TEXT NOT NULL,
     schedule_at TEXT,
+    delivery_target TEXT,
     PRIMARY KEY (tenant_id, trigger_id)
 );
 
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_timezone TEXT NOT NULL DEFAULT 'UTC';
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_kind TEXT NOT NULL DEFAULT 'cron';
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_at TEXT;
+ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS delivery_target TEXT;
 -- Completion is derived from the schedule (Once / exhausted cron); the legacy
 -- completion_policy column is no longer written and is dropped so inserts that
 -- omit it do not violate its NOT NULL constraint on pre-rework tables.

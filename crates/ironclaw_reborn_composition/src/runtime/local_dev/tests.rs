@@ -286,10 +286,14 @@ mod tests {
         )
     }
 
-    fn lifecycle_context(label: &str) -> LifecycleProductContext {
+    /// #5459 P1: lifecycle context acting AS the runtime's tenant operator, so
+    /// test installs are tenant-shared and visible to every surface user —
+    /// what these runtime-surface tests always meant. A `lifecycle_context`
+    /// user would now produce a PRIVATE install invisible to the run's user.
+    fn operator_lifecycle_context(label: &str, operator: &UserId) -> LifecycleProductContext {
         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
             tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-            user_id: UserId::new(format!("user-{label}")).expect("user id"),
+            user_id: operator.clone(),
             agent_id: None,
             project_id: None,
         })
@@ -535,6 +539,76 @@ mod tests {
         (descriptor_ids, tool_definition_ids)
     }
 
+    #[tokio::test]
+    async fn extension_remove_tool_discloses_generic_unpair_disconnect_semantics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "extension-remove-generic-unpair-tool-copy",
+                dir.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_minimal_approval_policy()),
+        )
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("extension-remove-generic-unpair-tool-copy").await;
+        let user_id = UserId::new("extension-remove-unpair-user").expect("user id");
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            user_id,
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            None,
+            None,
+        )
+        .expect("local-dev capability wiring");
+
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let remove_tool = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == EXTENSION_REMOVE_CAPABILITY_ID)
+            .expect("extension_remove tool definition");
+        let description = remove_tool.description.to_ascii_lowercase();
+
+        for required in [
+            "uninstall",
+            "remove",
+            "disconnect",
+            "unpair",
+            "unlink",
+            "revoke",
+            "external channel",
+            "current external chat",
+            "extension_id",
+            "identity",
+            "channel binding",
+        ] {
+            assert!(
+                description.contains(required),
+                "extension_remove description must tell the model how to handle generic unpair/disconnect requests; missing {required:?} in: {}",
+                remove_tool.description
+            );
+        }
+        assert!(
+            !description.contains("slack"),
+            "extension_remove is a generic lifecycle tool and should not hard-code provider-specific examples: {}",
+            remove_tool.description
+        );
+    }
+
     fn gsuite_capability_ids() -> [&'static str; 15] {
         [
             "gmail.list_messages",
@@ -635,6 +709,13 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
+        // #5459 P1: install AS the runtime's tenant operator so the extensions
+        // are tenant-shared (what these surface tests always meant) — a
+        // non-operator context would now produce a private install invisible
+        // to the run's surface user.
+        let operator = extension_management
+            .tenant_operator_user_id_for_test()
+            .clone();
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -644,9 +725,17 @@ mod tests {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
                     .expect("valid extension ref");
+            let operator_context = |label: &str| {
+                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                    tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
+                    user_id: operator.clone(),
+                    agent_id: None,
+                    project_id: None,
+                })
+            };
             facade
                 .execute(
-                    lifecycle_context(extension_id),
+                    operator_context(extension_id),
                     LifecycleProductAction::ExtensionInstall {
                         package_ref: package_ref.clone(),
                     },
@@ -656,7 +745,7 @@ mod tests {
             if matches!(extension_state, GsuiteExtensionState::Activated) {
                 facade
                     .execute(
-                        lifecycle_context(extension_id),
+                        operator_context(extension_id),
                         LifecycleProductAction::ExtensionActivate { package_ref },
                     )
                     .await
@@ -1929,10 +2018,14 @@ mod tests {
             .find(|definition| definition.name.as_str() == "builtin__outbound_delivery_target_set")
             .expect("set tool definition should exist");
         assert!(
+            set_tool.description.contains("DEFAULT"),
+            "set tool description should frame the preference as the user-wide default"
+        );
+        assert!(
             set_tool
                 .description
-                .contains("before creating the routine or trigger"),
-            "set tool description should steer delivery requests before trigger creation"
+                .contains("pass delivery_target_id to builtin__trigger_create"),
+            "set tool description should steer per-trigger routing to trigger_create"
         );
 
         let malformed_list = port
@@ -3159,6 +3252,9 @@ mod tests {
                 .as_ref()
                 .expect("extension management")
                 .clone();
+            let operator = extension_management
+                .tenant_operator_user_id_for_test()
+                .clone();
             let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
@@ -3168,7 +3264,7 @@ mod tests {
                 .expect("valid github ref");
             facade
                 .execute(
-                    lifecycle_context("github-install"),
+                    operator_lifecycle_context("github-install", &operator),
                     LifecycleProductAction::ExtensionInstall {
                         package_ref: package_ref.clone(),
                     },
@@ -3177,7 +3273,7 @@ mod tests {
                 .expect("install github extension");
             facade
                 .execute(
-                    lifecycle_context("github-activate"),
+                    operator_lifecycle_context("github-activate", &operator),
                     LifecycleProductAction::ExtensionActivate { package_ref },
                 )
                 .await
@@ -3263,6 +3359,9 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
+        let operator = extension_management
+            .tenant_operator_user_id_for_test()
+            .clone();
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -3272,7 +3371,7 @@ mod tests {
             .expect("valid github ref");
         facade
             .execute(
-                lifecycle_context("github-live-install"),
+                operator_lifecycle_context("github-live-install", &operator),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
@@ -3281,7 +3380,7 @@ mod tests {
             .expect("install github extension");
         facade
             .execute(
-                lifecycle_context("github-live-activate"),
+                operator_lifecycle_context("github-live-activate", &operator),
                 LifecycleProductAction::ExtensionActivate { package_ref },
             )
             .await
@@ -3455,6 +3554,9 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
+        let operator = extension_management
+            .tenant_operator_user_id_for_test()
+            .clone();
         let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
@@ -3464,7 +3566,7 @@ mod tests {
             .expect("valid github ref");
         facade
             .execute(
-                lifecycle_context("mid-response-install"),
+                operator_lifecycle_context("mid-response-install", &operator),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
@@ -3473,7 +3575,7 @@ mod tests {
             .expect("install github extension");
         facade
             .execute(
-                lifecycle_context("mid-response-activate"),
+                operator_lifecycle_context("mid-response-activate", &operator),
                 LifecycleProductAction::ExtensionActivate { package_ref },
             )
             .await

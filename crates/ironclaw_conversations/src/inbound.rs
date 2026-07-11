@@ -400,7 +400,7 @@ fn trusted_inbound_request_from_trigger(
             received_at,
             // Issue #5505: a trusted trigger fire must run under the
             // dedicated scheduled_trigger profile so the host deny-map
-            // (ironclaw_reborn runtime.rs) strips the trigger mutator
+            // (ironclaw_runner runtime.rs) strips the trigger mutator
             // capabilities from the fire's model-visible surface — a fire
             // must not be able to create/remove/pause/resume triggers.
             requested_run_profile: Some(
@@ -813,6 +813,7 @@ mod tests {
             agent_id: Some(agent()),
             project_id: Some(project()),
             prompt: "test trigger prompt".to_string(),
+            delivery_target: None,
         };
         let content_ref =
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
@@ -834,7 +835,7 @@ mod tests {
             "submit_trusted_trigger_fire must surface the creator as explicit turn-scope owner"
         );
         // Issue #5505: a trusted trigger fire must request the dedicated
-        // scheduled_trigger run profile so the host deny-map (ironclaw_reborn
+        // scheduled_trigger run profile so the host deny-map (ironclaw_runner
         // runtime.rs) strips the trigger mutator capabilities from the fire's
         // model-visible surface. Assert through the same recording
         // coordinator already used above, on the SubmitTurnRequest that
@@ -1061,6 +1062,7 @@ mod tests {
             resolution: ConversationBindingResolution {
                 tenant_id: tenant_id.clone(),
                 actor: actor.clone(),
+                binding_epoch: None,
                 turn_scope: TurnScope::new(
                     tenant_id.clone(),
                     Some(agent()),

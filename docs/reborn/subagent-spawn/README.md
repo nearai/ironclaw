@@ -2,11 +2,11 @@
 
 **Status:** Blocking implementation exists but is temporarily disabled in shipped profiles; background mode deferred
 
-> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` (`ironclaw_host_runtime`) plus `RebornTurnRunExecutor` (`ironclaw_reborn`). `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
+> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_runner`. `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,
-`crates/ironclaw_loop_support`, `crates/ironclaw_reborn`,
+`crates/ironclaw_loop_support`, `crates/ironclaw_runner`,
 `crates/ironclaw_reborn_composition`
 
 This is the **overarching design doc**. Per-phase implementation docs (detailed,
@@ -181,7 +181,7 @@ ironclaw_loop_support  + spawn handling in the capability-port impl
 (host I/O glue)        ~ prompt/context port: direction system msg + user-role goal
                        + attenuation (CapabilityAllowSet) + hard allow_nesting gate
 
-ironclaw_reborn        + `subagent` PlannedDriver + run-profile→driver binding
+ironclaw_runner        + `subagent` PlannedDriver + run-profile→driver binding
 (loop library)         + built-in subagent flavor table + direction .md files
                        + DURABLE subagent goal store (DB-backed; piggybacks on
                          turn-state persistence — not an in-memory store)
@@ -276,7 +276,7 @@ spawn time and keyed by the coordinator-minted `TurnRunId`.
 | **Per-tree descendant atomicity** | The per-run-tree descendant cap (`MAX_TREE_DESCENDANTS`) is enforced via a **durable `SpawnTreeReservation` row keyed by scoped `spawn_tree_root_run_id`** — `reserve_tree_descendants(scope, root, delta, cap)` is atomic at the store, fails closed without mutation when over cap, and runs **before `submit_turn`**. Concurrent admit across subtrees cannot over-admit. (Concurrent parent turns on the *same* parent thread are impossible by the per-`TurnScope` active-run lock, but a single root can have many concurrent subtrees on different threads.) |
 | Loop family | One static `subagent` `LoopFamily` (`LoopFamilyId "subagent"`); default strategies + tighter `BudgetStrategy`. Bound to a dedicated `subagent` `PlannedDriver`. |
 | Flavors | Built-in static table — v1 proposal: `general`, `researcher`. Each: direction id, tool allowlist, model, iteration + token/cost budget, `allow_nesting`. **Historical naming** — shipped as four flavors (`General`/`Explorer`/`Coder`/`Planner`); `thread-harness-design.md` §10 is canonical. |
-| Direction prompt | Static `.md` per flavor (`include_str!`, shipped at `crates/ironclaw_reborn/src/subagent/directions/`), selected by static match. The system message. |
+| Direction prompt | Static `.md` per flavor (`include_str!`, shipped at `crates/ironclaw_runner/src/subagent/directions/`), selected by static match. The system message. |
 | Goal placement | The parent-injected goal + `Handoff` blob are the child's **first user message**, delimited as task data (`## Task (from parent)` / `## Context from parent`). **Never** the system message — the goal is model-generated and may carry upstream-tainted content. |
 | **Goal durability (DB-backed)** | Persisted in a **durable, DB-backed** subagent goal store keyed by the child `TurnRunId`. Implementation piggybacks on turn-state persistence (the same backend that stores `TurnRunRecord`). The child run id is **known before** `submit_turn` via `prepare_turn` — no staging key, no rekey. Survives process restart by construction. A store miss **fails the child run loudly**. |
 | Lineage | `parent_run_id`, `subagent_depth`, and `spawn_tree_root_run_id` fields on `SubmitTurnRequest` and `TurnRunRecord` (durable). `children_of` and `get_run_record` are store queries — no in-memory index as source of truth. |
@@ -470,7 +470,7 @@ mitigations below are **load-bearing**, not optional.
 | `ironclaw_agent_loop` | sealed; product-agnostic; refs not raw prompts | one `subagent` family; `GateKind::AwaitDependentRun` is neutral; executor gains only outcome-to-existing-gate/result mapping | ✅ |
 | `ironclaw_turns` | coordination contracts; lifecycle metadata + refs | `CapabilityOutcome` variants, blocked-kind variants, lineage fields, `prepare_turn` API, atomic descendant reservation query | ✅ |
 | `ironclaw_loop_support` | host-port adapter glue; no stateful stores | blocking spawn handling in the capability port; concrete stores and projection sinks are injected by composition | ✅ |
-| `ironclaw_reborn` | generic loop library; driver/profile/readiness; no root `src/` adapters | family driver, profiles, flavors, directions, Reborn-neutral goal/tombstone traits, observer/reconciler logic, and readiness metadata | ✅ |
+| `ironclaw_runner` | generic loop library; driver/profile/readiness; no root `src/` adapters | family driver, profiles, flavors, directions, Reborn-neutral goal/tombstone traits, observer/reconciler logic, and readiness metadata | ✅ |
 | `ironclaw_reborn_composition` | concrete product-live assembly; still no root `src/` imports | DB-backed store construction, root-provided `PendingGateProjectionSink`, composite event sink, and runtime assembly | ✅ |
 | `ironclaw_host_runtime` / `ironclaw_host_api` | — | untouched | ✅ |
 
@@ -520,7 +520,7 @@ PHASE 1 — Contracts & isolated units                                [needs non
   P1.B  ironclaw_agent_loop: `subagent` family + GateKind::AwaitDependentRun
           ── needs P1.A's variant names; in practice land P1.A first, then P1.B
              can build in parallel with P1.C
-  P1.C  ironclaw_reborn data: direction .md files, DB-backed goal-store schema,
+  P1.C  ironclaw_runner data: direction .md files, DB-backed goal-store schema,
         flavor table, SpawnTreeReservation row schema
           ── independent of P1.A/B at the data level
 
@@ -529,9 +529,9 @@ PHASE 2 — Mechanisms                   (4 parallel workstreams; each needs Pha
           uses prepare_turn + reservation; persists goal under known child id
   P2.B  loop_support: prompt composition + attenuation             [needs P1.A, P1.C]
           system = direction .md ; user = goal + handoff
-  P2.C  ironclaw_reborn: `subagent` PlannedDriver + profile binding [needs P1.B]
+  P2.C  ironclaw_runner: `subagent` PlannedDriver + profile binding [needs P1.B]
           + child runs inherit parent owner_user_id
-  P2.D  ironclaw_reborn: SubagentCompletionObserver                [needs P1.A, P1.C]
+  P2.D  ironclaw_runner: SubagentCompletionObserver                [needs P1.A, P1.C]
           live delivery; writes SubagentResultTombstone on mid-cancel completes
         ── P2.A and P2.B touch the same crate but different files; coordinate
            file ownership (capability port vs prompt port).

@@ -95,6 +95,7 @@ async fn build_triggered_run_delivery_hook_over_real_runtime_records_denied_for_
         agent_id: Some(agent_id.clone()),
         project_id: Some(project_id.clone()),
         prompt: "triggered-delivery-outcome-seam".to_string(),
+        delivery_target: None,
     };
     let scope = TurnScope::new_with_owner(
         tenant_id.clone(),
