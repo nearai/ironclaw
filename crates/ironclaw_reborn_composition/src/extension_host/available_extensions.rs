@@ -2425,12 +2425,14 @@ url = "http://127.0.0.1:9/mcp"
     }
 
     #[tokio::test]
-    async fn filesystem_catalog_propagates_malformed_shared_manifest() {
-        // The shared `/system/extensions` catalog keeps the pre-skip-and-log
-        // all-or-nothing behavior: a corrupt shared manifest aborts catalog
-        // load instead of silently vanishing from the set. The skip-and-log
-        // carve-out in `load_filesystem_packages` applies ONLY to
-        // `ManifestSource::UserRegistered`.
+    async fn filesystem_catalog_skips_malformed_shared_manifest_without_aborting_boot() {
+        // #5966/#5967 generalized the skip-and-log carve-out to every
+        // `load_filesystem_packages` source, including the shared
+        // `/system/extensions` catalog: a corrupt shared manifest (e.g. a
+        // stale pre-#5499 first-party copy) must not crash-loop boot.
+        // `UserRegistered` keeps its own quieter `debug!`-level carve-out
+        // (see `filesystem_catalog_skips_corrupt_user_registered_manifest_without_aborting_siblings`);
+        // this test only pins that the shared catalog no longer hard-fails.
         let fs = InMemoryBackend::default();
         fs.write_file(
             &VirtualPath::new("/system/extensions/broken/manifest.toml").unwrap(),
@@ -2439,16 +2441,16 @@ url = "http://127.0.0.1:9/mcp"
         .await
         .unwrap();
 
-        let error = AvailableExtensionCatalog::from_filesystem_root(
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
             &VirtualPath::new("/system/extensions").unwrap(),
         )
         .await
-        .expect_err("malformed shared manifest must fail catalog load, not be skipped");
-        assert!(matches!(
-            error,
-            ProductWorkflowError::InvalidBindingRequest { .. }
-        ));
+        .expect("malformed shared manifest must be skipped, not abort catalog load");
+        assert!(
+            catalog.packages.is_empty(),
+            "the broken manifest's entry must be skipped, not surfaced as a package"
+        );
     }
 
     #[test]
