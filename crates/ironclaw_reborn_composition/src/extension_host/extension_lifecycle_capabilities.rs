@@ -868,11 +868,11 @@ id = "channel-ext"
 name = "Channel Ext"
 version = "0.1.0"
 description = "A filesystem-discovered external channel extension."
-trust = "first_party_requested"
+trust = "third_party"
 
 [runtime]
-kind = "first_party"
-service = "channel_ext_host"
+kind = "wasm"
+module = "wasm/channel.wasm"
 
 [[host_api]]
 id = "ironclaw.product_adapter/v1"
