@@ -50,7 +50,10 @@ async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapsho
         PersonalContextPolicy::Excluded
     );
     assert!(snapshot.steering_policy.allow_steering);
-    assert!(!snapshot.steering_policy.allow_driver_specific_nudges);
+    // The interactive profile enables the driver-specific final-answer nudge so a
+    // budget/no-progress-exhausted turn synthesizes a closing answer instead of
+    // ending empty (see resolver.rs / loop_exit::try_final_answer_nudge).
+    assert!(snapshot.steering_policy.allow_driver_specific_nudges);
     assert_eq!(snapshot.provenance.sources.len(), 1);
 
     let wire = serde_json::to_string(&snapshot).unwrap();

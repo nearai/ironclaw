@@ -323,7 +323,12 @@ fn interactive_profile() -> RunProfileDefinition {
         steering_policy: SteeringPolicy {
             allow_steering: true,
             allow_interrupt: true,
-            allow_driver_specific_nudges: false,
+            // Enable the driver-specific final-answer nudge for interactive runs:
+            // when a turn would otherwise end empty (model-call budget exhausted or
+            // no-progress detected), the loop issues one tool-free model call to
+            // synthesize a closing answer from the work done instead of finalizing
+            // an empty/failed turn. See `loop_exit::try_final_answer_nudge`.
+            allow_driver_specific_nudges: true,
         },
         cancellation_policy: CancellationPolicy {
             allow_cancel: true,
