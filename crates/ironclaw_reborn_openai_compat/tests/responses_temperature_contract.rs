@@ -20,16 +20,16 @@ use ironclaw_product_adapters::{
     ProjectionReadRequest, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
-    openai_compat_router_with_state, InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope,
-    OpenAiCompatAuthenticatedCaller, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
-    OpenAiCompatProjectionRef, OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId,
-    OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
-    OpenAiResponseProjection, OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
+    InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow,
+    OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
 use ironclaw_turns::{TurnActor, TurnRunId, TurnScope};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 /// POST `/v1/responses` with `temperature` set must preserve it in the

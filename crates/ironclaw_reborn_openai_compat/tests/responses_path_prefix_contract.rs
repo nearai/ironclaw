@@ -13,22 +13,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{AuthRequirement, FakeProductWorkflow, ProtocolAuthEvidence};
 use ironclaw_reborn_openai_compat::{
-    openai_compat_router_with_state, InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope,
-    OpenAiCompatAuthenticatedCaller, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
-    OpenAiCompatProjectionRef, OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId,
-    OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
-    OpenAiResponseProjection, OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
+    InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow,
+    OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
 use ironclaw_turns::TurnRunId;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const AUTH_TOKEN: &str = "test-responses-api-token";
