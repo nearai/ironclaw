@@ -14,8 +14,21 @@ export function classifyRisk(toolName, description, parameters) {
   if (EXEC_RE.test(name)) return { tone: "warning", key: "tool.riskExec" };
   if (NETWORK_RE.test(name)) return { tone: "info", key: "tool.riskNetwork" };
 
-  if (EXEC_RE.test(context)) return { tone: "warning", key: "tool.riskExec" };
+  if (hasExecContext(context)) return { tone: "warning", key: "tool.riskExec" };
   if (NETWORK_RE.test(context)) return { tone: "info", key: "tool.riskNetwork" };
 
   return { tone: "muted", key: "tool.riskRead" };
+}
+
+// Generic gate copy ("resolve this gate to continue the run") mentions "run",
+// which EXEC_RE matches — but a budget/approval gate is not command execution.
+// Strip that boilerplate before probing the context so a resource gate is not
+// mis-badged as "runs commands".
+function hasExecContext(context) {
+  if (!context) return false;
+  const withoutGenericGateCopy = context
+    .replace(/\bcontinue the run\b/g, "")
+    .replace(/\bcontinue this run\b/g, "")
+    .replace(/\bresolve this (approval )?gate\b/g, "");
+  return EXEC_RE.test(withoutGenericGateCopy);
 }

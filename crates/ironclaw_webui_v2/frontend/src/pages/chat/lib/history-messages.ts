@@ -9,6 +9,10 @@
 import { attachmentKindFromMime, formatBytes } from "./attachments";
 import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel";
 import { attachmentUrl } from "../../../lib/api";
+import {
+  isBusyRejectedStatus,
+  uiStatusFromRecordStatus,
+} from "./message-status";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
@@ -81,9 +85,12 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
     if (seen.has(id)) continue;
     seen.add(id);
     const role = roleForRecord(record);
-    const isBusyRejected =
-      role === "user" &&
-      (record.status === "rejected_busy" || record.status === "deferred_busy");
+    // Normalize busy outcomes through the same mapper `useChat.send` uses on
+    // the optimistic path, so a message renders identically live and after a
+    // reload. A deferred-busy message was accepted-and-queued (renders
+    // queued); only a rejected-busy message was dropped (renders error and
+    // carries the durable resend copy).
+    const isBusyRejected = role === "user" && isBusyRejectedStatus(record.status);
     const attachments = attachmentsFromRecord(record, threadId);
     const content =
       role === "user" &&
@@ -98,7 +105,8 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
       attachments,
       timestamp: timestampForRecord(record),
       kind: record.kind,
-      status: isBusyRejected ? "error" : record.status,
+      status:
+        role === "user" ? uiStatusFromRecordStatus(record.status) : record.status,
       ...(isBusyRejected && {
         error:
           "This message wasn't sent because Ironclaw was busy. Resend it to try again.",

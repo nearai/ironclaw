@@ -389,6 +389,10 @@ export function ChatInput({
 
   const hasPayload = text.trim() || attachments.length > 0;
   const isSubmitDisabled = disabled || sendDisabled;
+  // While a run is active the composer shows a cancel button, but as soon as
+  // the user types a new message we swap it for send so the follow-up can be
+  // queued behind the running turn instead of forcing a cancel first.
+  const showCancelOnly = canCancel && !hasPayload;
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -530,7 +534,7 @@ export function ChatInput({
             >
               <Icon name="plus" className="h-5 w-5" />
             </button>
-            {canCancel
+            {showCancelOnly
               ? (
                 <Button
                   type="button"

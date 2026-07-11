@@ -4,6 +4,7 @@ import React from "react";
 import { useT } from "../../lib/i18n";
 import { AgentTab } from "./components/agent-tab";
 import { AppearanceTab } from "./components/appearance-tab";
+import { BudgetTab } from "./components/budget-tab";
 import { ChannelsTab } from "./components/channels-tab";
 import { InferenceTab } from "./components/inference-tab";
 import { LanguageTab } from "./components/language-tab";
@@ -73,6 +74,7 @@ export function SettingsPage() {
       isLoading={isLoading}
       searchQuery={searchQuery}
     />),
+    usage: (<BudgetTab searchQuery={searchQuery} />),
     skills: (<SkillsTab searchQuery={searchQuery} />),
     traces: (<TraceCommonsTab searchQuery={searchQuery} />),
     users: (<UsersTab searchQuery={searchQuery} />),
@@ -84,6 +86,11 @@ export function SettingsPage() {
   const visibleTabIds = Object.keys(tabContent).filter((id) => isAdmin || !isOperatorTab(id));
   const defaultTabIsVisible = tabContentHas(defaultTab) && visibleTabIds.includes(defaultTab);
   const redirectTab = defaultTabIsVisible ? defaultTab : visibleTabIds[0] || "language";
+
+  // The usage tab was previously routed as `budget`; keep old links working.
+  if (tab === "budget") {
+    return (<Navigate to="/settings/usage" replace />);
+  }
 
   if (!tabContentHas(tab) || (!isAdmin && isOperatorTab(tab))) {
     return (<Navigate to={`/settings/${redirectTab}`} replace />);

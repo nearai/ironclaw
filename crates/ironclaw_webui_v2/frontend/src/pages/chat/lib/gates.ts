@@ -3,6 +3,7 @@
 // `WebChatV2Event::AuthRequired { prompt: AuthPromptView }`. The
 // browser must hold `run_id` + `gate_ref` so a follow-up
 // `resolve_gate` call can fill them into the v2 path params.
+import { GATE_KIND } from "./gate-kinds";
 
 // Challenge kinds describe the interaction modality, not the provider:
 // `manual_token` covers a GitHub PAT / API key AND a channel pairing code
@@ -41,9 +42,14 @@ export function gateFromEvent(eventType, prompt) {
 
   if (eventType === "gate") {
     const approvalContext = prompt.approval_context || null;
+    // Preserve the wire `gate_kind` (e.g. "resource" for a budget gate) so the
+    // approval card can pick its title/layout; only default to approval when
+    // the prompt does not carry one.
+    const gateKind = prompt.gate_kind || GATE_KIND.APPROVAL;
+    const details = Array.isArray(prompt.details) ? prompt.details : [];
     const gate = {
       kind: "gate",
-      gateKind: "approval",
+      gateKind,
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
       invocationId: prompt.invocation_id || null,
@@ -51,12 +57,12 @@ export function gateFromEvent(eventType, prompt) {
       body: prompt.body,
       allowAlways: prompt.allow_always === true,
     };
-    return gateWithApprovalContext(gate, approvalContext, prompt.body);
+    return gateWithApprovalContext(gate, approvalContext, prompt.body, details);
   }
   if (eventType === "auth_required") {
     return {
       kind: "auth_required",
-      gateKind: "auth",
+      gateKind: GATE_KIND.AUTH,
       // Legacy auth_required prompts predate challenge_kind and are paste-a-secret
       // prompts. Explicit unknown/other challenge kinds still route to the neutral
       // auth card in chat.js.
@@ -96,7 +102,7 @@ export function gateFromEvent(eventType, prompt) {
 
 export function gateFromProjectionGate(gate) {
   if (!gate?.run_id || !gate.gate_ref) return null;
-  const gateKind = gate.gate_kind || "generic";
+  const gateKind = gate.gate_kind || GATE_KIND.GENERIC;
   const base = {
     gateKind,
     runId: gate.run_id,
@@ -106,7 +112,7 @@ export function gateFromProjectionGate(gate) {
     body: gate.body || "",
     allowAlways: gate.allow_always === true,
   };
-  if (gateKind === "auth") {
+  if (gateKind === GATE_KIND.AUTH) {
     const authContext = gate.auth_context || {};
     return {
       ...base,
@@ -126,9 +132,16 @@ export function gateFromProjectionGate(gate) {
   };
 }
 
-function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {
-  if (!approvalContext) return gate;
-  const approvalDetails = approvalDetailsFromContext(approvalContext);
+function gateWithApprovalContext(gate, approvalContext, fallbackDescription, details = []) {
+  if (!approvalContext) {
+    // No approval context (e.g. a resource/budget gate): carry any structured
+    // top-level `details` through as approvalDetails so the card can render
+    // them. The gate is otherwise returned unchanged.
+    return details.length ? { ...gate, approvalDetails: details } : gate;
+  }
+  // Merge the structured top-level `details` after the rows derived from the
+  // approval context so neither source is dropped from the card.
+  const approvalDetails = [...approvalDetailsFromContext(approvalContext), ...details];
   return {
     ...gate,
     toolName: approvalContext.tool_name || null,
