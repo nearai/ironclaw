@@ -33,7 +33,7 @@ use ironclaw_product_workflow::{
     RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
-    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornCancelRunResponse,
+    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornBudgetSettingsResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
@@ -1788,6 +1788,16 @@ pub async fn set_settings_tool_permission(
         )
         .await?;
     validate_settings_tool_config_response(&response)?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/settings/usage`
+pub async fn get_settings_usage(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornBudgetSettingsResponse>, WebUiV2HttpError> {
+    let response = state.services().get_budget_settings(caller).await?;
     Ok(Json(response))
 }
 

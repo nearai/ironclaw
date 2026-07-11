@@ -54,9 +54,10 @@ use ironclaw_product_workflow::{
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, LoopGateRef, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -185,8 +186,36 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         panic!("cancel_run is not used by product workflow contract tests")
     }
 
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        panic!("get_run_state is not used by product workflow contract tests")
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        // The busy-run steering enqueue path (`steering::enqueue_busy_steering`)
+        // reads the active run's state to recover its turn id before queueing.
+        // Return a minimal running-run state keyed to the requested scope/run so
+        // the enqueue step is exercised rather than panicking here.
+        Ok(TurnRunState {
+            scope: request.scope,
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: TurnStatus::Running,
+            accepted_message_ref: AcceptedMessageRef::new("msg:active-run")
+                .expect("accepted message ref"),
+            source_binding_ref: SourceBindingRef::new("src:active-run")
+                .expect("source binding ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:active-run")
+                .expect("reply target binding ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+        })
     }
 }
 

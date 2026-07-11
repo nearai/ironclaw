@@ -3102,14 +3102,16 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::RejectedBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. }
+        | RebornSubmitTurnResponse::DeferredBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::RejectedBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. }
+        | RebornSubmitTurnResponse::DeferredBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
