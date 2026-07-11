@@ -795,8 +795,12 @@ jobs:
     name: Reborn WebUI v2 Live QA (${{ matrix.shard_name }})
     needs: prepare-reborn-webui-v2-live-qa
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      always() &&
+      needs.prepare-reborn-webui-v2-live-qa.result == 'success' &&
+      (
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
