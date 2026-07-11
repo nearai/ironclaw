@@ -1,6 +1,59 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { test, vi } from "vitest";
+
+import { CHAT_MESSAGE_ROLES } from "../lib/message-types";
+
+vi.mock("./markdown-renderer", async () => {
+  const { createElement } = await import("react");
+  return {
+    MarkdownRenderer: ({ content, className }) =>
+      createElement("div", { className, "data-testid": "markdown" }, content),
+  };
+});
+
+vi.mock("./tool-activity", async () => {
+  const { createElement } = await import("react");
+  return {
+    ToolActivity: () => createElement("div", { "data-testid": "tool-activity" }),
+  };
+});
+
+vi.mock("../../../design-system/icons", async () => {
+  const { createElement } = await import("react");
+  return {
+    Icon: ({ name, className }) =>
+      createElement("span", { className, "data-icon": name }),
+  };
+});
+
+vi.mock("../../../lib/toast", () => ({ toast: () => {} }));
+vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
+
+vi.mock("./project-file-chips", async () => {
+  const { createElement } = await import("react");
+  return {
+    ProjectFileChips: () =>
+      createElement("div", { "data-testid": "project-file-chips" }),
+  };
+});
+
+vi.mock("./attachment-chip", async () => {
+  const { createElement } = await import("react");
+  return {
+    AttachmentChip: () => createElement("div", { "data-testid": "attachment-chip" }),
+  };
+});
+
+vi.mock("./attachment-preview", async () => {
+  const { createElement } = await import("react");
+  return {
+    AttachmentPreviewModal: () =>
+      createElement("div", { "data-testid": "attachment-preview" }),
+  };
+});
 
 const messageBubbleSource = readFileSync(
   new URL("./message-bubble.tsx", import.meta.url),
@@ -21,6 +74,19 @@ test("conversation message bubbles use readable typography", () => {
     messageBubbleSource,
     /['"`]text-sm\s+leading-6['"`]/,
     "chat message content should not regress to the compact body size",
+  );
+});
+
+test("assistant bubbles expose final reply state for live QA", () => {
+  assert.match(
+    messageBubbleSource,
+    /const finalReplyState =[\s\S]*message\.isFinalReply/,
+    "assistant messages should derive a DOM-readable final reply state",
+  );
+  assert.match(
+    messageBubbleSource,
+    /data-final-reply=\{finalReplyState\}/,
+    "live QA should be able to distinguish streaming text from the final answer",
   );
 });
 
@@ -105,10 +171,48 @@ test("conversation bubbles use mobile-safe shared widths and wrap long user toke
   );
 });
 
+test("error messages render as inline chat bubbles, not centered notices", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "err-1",
+        role: CHAT_MESSAGE_ROLES.ERROR,
+        content: "Provider unavailable",
+        timestamp: "2026-06-02T00:00:00.000Z",
+      },
+      onRetry: () => {},
+      threadId: "thread-1",
+    }),
+  );
+
+  assert.match(
+    html,
+    /data-testid="msg-error"/,
+    "error role should render through the message bubble path",
+  );
+  assert.match(
+    html,
+    /mr-auto[^"]*v2-chat-readable-width/,
+    "error bubbles should use a compact readable-width bubble instead of a full-width centered notice",
+  );
+  assert.match(
+    html,
+    /mr-auto[^"]*text-left text-red-200/,
+    "error role should align with the assistant-side chat stream",
+  );
+  assert.doesNotMatch(
+    html,
+    /mx-auto[^"]*text-center/,
+    "error role must not regress to the old centered banner styling",
+  );
+  assert.match(html, /Provider unavailable/);
+});
+
 test("message timestamp and actions share a hover-only meta row", () => {
   assert.match(
     messageBubbleSource,
-    /const showActions = role === "user" \|\| \(role === "assistant" && !isOptimistic\);/,
+    /const showActions =[\s\S]*CHAT_MESSAGE_ROLES\.USER[\s\S]*CHAT_MESSAGE_ROLES\.ASSISTANT/,
     "optimistic user messages should keep the copy action while the assistant reply is pending",
   );
   assert.match(

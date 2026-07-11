@@ -37,8 +37,7 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
-// Durable filesystem-backed idempotency ledger (folded in from the former
-// `ironclaw_product_workflow_storage` crate). Gated behind `storage` so the
+// Durable filesystem-backed idempotency ledger. Gated behind `storage` so the
 // facade surface stays free of the `ironclaw_filesystem` dependency unless a
 // consumer opts into a durable backend.
 #[cfg(feature = "storage")]
@@ -100,8 +99,8 @@ pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductInstallationKey, ProductInstallationScope, StaticProductActorUserResolver,
-    StaticProductInstallationResolver,
+    ProductInstallationKey, ProductInstallationScope, ResolvedProductActorUser,
+    StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 #[cfg(any(test, feature = "test-support"))]
@@ -125,12 +124,12 @@ pub use lifecycle::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleCommandKind,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstallScope,
+    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+    LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.

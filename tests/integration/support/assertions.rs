@@ -19,6 +19,7 @@
 
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
+use ironclaw_turns::run_profile::LoopHostMilestoneKind;
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
@@ -384,6 +385,43 @@ impl RebornIntegrationHarness {
         }
         let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
         Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert a `LoopHostMilestoneKind::CompactionFailed` milestone was
+    /// recorded whose `reason_kind` equals `reason_kind`, scoped to the
+    /// milestones recorded SINCE `baseline` (a value from
+    /// [`RebornIntegrationHarness::milestone_len`] captured at the start of
+    /// the turn under test) — proves forced compaction failed safety
+    /// validation for that turn specifically, not a stale milestone from an
+    /// earlier turn on a multi-turn harness (mirrors the `_since` pattern
+    /// used by the tool-error and history assertions).
+    pub async fn assert_compaction_failed_since(
+        &self,
+        baseline: usize,
+        reason_kind: &str,
+    ) -> HarnessResult<()> {
+        let milestones = self.loop_milestones();
+        let Some(since) = milestones.get(baseline..) else {
+            return Err(format!(
+                "milestone baseline {baseline} exceeds current milestone count {} — stale baseline",
+                milestones.len()
+            )
+            .into());
+        };
+        if since.iter().any(|milestone| {
+            matches!(
+                &milestone.kind,
+                LoopHostMilestoneKind::CompactionFailed { reason_kind: actual, .. }
+                    if actual.as_str() == reason_kind
+            )
+        }) {
+            return Ok(());
+        }
+        let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
+        Err(format!(
+            "no CompactionFailed milestone with reason_kind {reason_kind:?} since baseline {baseline}; saw {seen:?}"
+        )
+        .into())
     }
 
     /// Assert a captured model request carried a multimodal `data:` image part
@@ -908,6 +946,20 @@ impl RebornIntegrationHarness {
         needle: &str,
     ) -> HarnessResult<()> {
         self.conversation_history_contains_impl(0, Some(kind), needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_role_contains`], scoped to the
+    /// `[baseline..]` slice (a [`history_len`] value from the start of the
+    /// turn under test) — the multi-turn variant, mirroring
+    /// [`assert_conversation_history_contains_since`].
+    pub async fn assert_conversation_history_role_contains_since(
+        &self,
+        baseline: usize,
+        kind: ironclaw_threads::MessageKind,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(baseline, Some(kind), needle)
             .await
     }
 }

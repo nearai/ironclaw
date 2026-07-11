@@ -3,7 +3,7 @@
 //! This module is the "later slice" the crate-level docstring promises:
 //! product-level wiring on top of the substrate facades exposed by
 //! `build_reborn_services`. It is the **only** place in the workspace where
-//! `ironclaw_reborn` (drivers, host factory, model gateway bridge),
+//! `ironclaw_runner` (drivers, host factory, model gateway bridge),
 //! `ironclaw_threads` (session thread service), and (under the
 //! `root-llm-provider` feature) `ironclaw_llm` are composed into a running
 //! agent.
@@ -60,27 +60,27 @@ use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, PersistentApprovalGranteeResolver,
     RunStateApprovalInteractionReadModel,
 };
-use ironclaw_reborn::loop_exit_applier::{
+use ironclaw_runner::loop_exit_applier::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
-use ironclaw_reborn::milestone_events::{
+use ironclaw_runner::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
 };
-use ironclaw_reborn::runtime::{
+use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     RuntimeSubagentGoalStore, RuntimeTurnStateStore, ToolDisclosureMode,
     build_default_planned_runtime,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn::subagent::await_edge::{
+use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
     store::FilesystemAwaitEdgeStore,
 };
-use ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver;
+use ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
+use ironclaw_runner::subagent::goal_store::FilesystemSubagentGoalStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
+use ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -479,7 +479,7 @@ fn enforce_runtime_cutover_gate(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn check_production_scheduler_wake_wiring(
     profile: RebornCompositionProfile,
-    wiring: &Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
+    wiring: &Option<ironclaw_runner::runtime::SchedulerWakeWiring>,
 ) -> Result<(), RebornRuntimeError> {
     if wiring.is_none()
         && matches!(
@@ -1054,7 +1054,7 @@ struct LocalDevApprovalGateEvidence {
 #[cfg(feature = "test-support")]
 pub(crate) fn build_local_dev_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
+) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
     std::sync::Arc::new(LocalDevApprovalGateEvidence { approval_requests })
 }
 
@@ -1149,6 +1149,22 @@ pub(crate) fn wrap_outbound_delivery_capabilities_for_test(
     ironclaw_turns::run_profile::AgentLoopHostError,
 > {
     local_dev::wrap_outbound_delivery_capabilities_for_test(inner, parts)
+}
+
+/// Test-support forwarder (harness-port-seam P1 seam) for
+/// `create_refreshing_local_dev_capability_port`
+/// (`refreshing_capability_port.rs:75`), production's sole capability-port
+/// factory. Bridges the private `local_dev` module to `test_support`; mirrors
+/// the `outbound_delivery` forwarder above. For tests only -- gated behind
+/// `test-support`, ships zero bytes in production builds.
+#[cfg(feature = "test-support")]
+pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
+    parts: crate::test_support::RefreshingLocalDevCapabilityPortTestParts,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    ironclaw_turns::run_profile::AgentLoopHostError,
+> {
+    local_dev::create_refreshing_local_dev_capability_port_for_test(parts).await
 }
 
 #[async_trait::async_trait]
@@ -1400,6 +1416,31 @@ impl RebornRuntime {
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
     pub fn services(&self) -> &RebornServices {
         &self.services
+    }
+
+    /// Seed a bare `secret_handle` secret for an owner scope so keyed
+    /// capabilities (network + `use_secret`) can resolve their
+    /// `InjectSecretOnce` obligation. `serve` uses this to write the value of
+    /// an `IRONCLAW_REBORN_DEV_SECRET__<handle>` env var into the tenant-shared
+    /// admin-managed scope, so one operator-provisioned key serves every user of
+    /// the tenant (SSO users included) without per-user provisioning. The secret
+    /// store is composition-private, so this is the single narrow write seam.
+    pub async fn seed_local_dev_secret(
+        &self,
+        owner: ResourceScope,
+        handle: ironclaw_host_api::SecretHandle,
+        secret_value: String,
+    ) -> Result<(), ironclaw_secrets::SecretStoreError> {
+        self.services
+            .secret_store()
+            .put(
+                owner,
+                handle,
+                ironclaw_secrets::SecretMaterial::from(secret_value),
+                None,
+            )
+            .await
+            .map(|_| ())
     }
 
     pub(crate) fn webui_tenant_id(&self) -> &TenantId {
@@ -3134,7 +3175,7 @@ pub async fn build_reborn_runtime(
         wiring
     };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
+    let production_scheduler_wake: Option<ironclaw_runner::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev
@@ -3206,6 +3247,22 @@ pub async fn build_reborn_runtime(
                     &validated_identity.tenant_id,
                     regex_skill_activation_enabled,
                 )?;
+                let skill_warm_scope = ResourceScope {
+                    tenant_id: validated_identity.tenant_id.clone(),
+                    user_id: actor_user_id.clone(),
+                    agent_id: Some(validated_identity.agent_id.clone()),
+                    project_id: default_project_id.clone(),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                };
+                local_dev_skills
+                    .bundle_source
+                    .warm_system_root_descriptor_cache(&skill_warm_scope)
+                    .await
+                    .map_err(|error| RebornRuntimeError::InvalidArgument {
+                        reason: format!("first-party skills warmup: {error}"),
+                    })?;
                 (
                     Some(local_dev_skills.source),
                     Some(local_dev_skills.activation_source),
@@ -3415,8 +3472,11 @@ pub async fn build_reborn_runtime(
             )
             .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
     }
+    // The registry is created with the local-runtime services (one instance
+    // per runtime) so the trigger-create hook validates per-trigger delivery
+    // targets against the same registry product hosts register into.
     let outbound_delivery_target_registry =
-        local_runtime.map(|_| Arc::new(MutableOutboundDeliveryTargetRegistry::default()));
+        local_runtime.map(|local_runtime| Arc::clone(&local_runtime.outbound_delivery_targets));
     let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
         match (local_runtime, &outbound_delivery_target_registry) {
             (Some(local_runtime), Some(registry)) => {
@@ -3584,7 +3644,7 @@ pub async fn build_reborn_runtime(
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
-        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> = Arc::new(
+        let inference: Arc<dyn ironclaw_skills::learning::SkillInferencePort> = Arc::new(
             crate::extension_host::skill_learning::SkillLearningInferenceAdapter::new(
                 learning_provider,
                 learning_model,
@@ -4132,6 +4192,7 @@ async fn append_trusted_laptop_access_audit(
 }
 
 struct LocalDevSkillContextSource {
+    bundle_source: Arc<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
     source: Arc<dyn HostSkillContextSource>,
     activation_source: Arc<LocalDevSelectableSkillContextSource>,
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
@@ -4219,10 +4280,12 @@ fn local_dev_filesystem_skill_context_source(
         Arc::clone(&local_runtime.workspace_filesystem),
         Arc::clone(&local_runtime.skill_auto_activate_learned),
     );
+    let bundle_source = extension.bundle_source();
     Ok(LocalDevSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
         activation_source: selectable_skills.activation_source(),
         execution_adapter: selectable_skills.execution_adapter(),
+        bundle_source,
     })
 }
 
@@ -4440,7 +4503,7 @@ struct LlmGatewayBundle {
     /// Policy used to derive the budget accountant's cost table — kept
     /// alongside the gateway so the composer doesn't re-derive the
     /// `ModelProfileId → provider-model` mapping in two places.
-    policy: ironclaw_reborn::model_gateway::LlmModelProfilePolicy,
+    policy: ironclaw_runner::model_gateway::LlmModelProfilePolicy,
     /// Hot-swap handle + session for the live-reload path. The model gateway
     /// wraps a [`SwappableLlmProvider`], so the settings service can rebuild
     /// the provider chain from updated config and atomically swap the inner
@@ -4505,7 +4568,7 @@ fn wrap_swappable_gateway(
     provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
-    use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+    use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
 
     let swappable = Arc::new(SwappableLlmProvider::new(raw));
@@ -5563,9 +5626,48 @@ output_schema_ref = "schemas/write.output.json"
     }
 
     #[cfg(feature = "root-llm-provider")]
+    const NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES: usize = 50 * 1024 * 1024;
+    #[cfg(feature = "root-llm-provider")]
+    const NEARAI_AUTH_CAPTURE_IO_TIMEOUT: Duration = Duration::from_secs(5);
+    #[cfg(feature = "root-llm-provider")]
+    const NEARAI_AUTH_CAPTURE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[cfg(feature = "root-llm-provider")]
+    async fn write_nearai_auth_capture_bytes(
+        stream: &mut tokio::net::TcpStream,
+        response: &[u8],
+    ) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+
+        match tokio::time::timeout(NEARAI_AUTH_CAPTURE_IO_TIMEOUT, stream.write_all(response)).await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("write auth capture response failed: {error}")),
+            Err(_) => Err(format!(
+                "write auth capture response timed out after {:?}",
+                NEARAI_AUTH_CAPTURE_IO_TIMEOUT
+            )),
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    async fn write_nearai_auth_capture_response(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<(), String> {
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        write_nearai_auth_capture_bytes(stream, response.as_bytes()).await
+    }
+
+    #[cfg(feature = "root-llm-provider")]
     async fn start_nearai_auth_capture_server() -> (String, tokio::sync::oneshot::Receiver<String>)
     {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncReadExt;
         use tokio::net::TcpSocket;
 
         let socket = TcpSocket::new_v4().expect("test server socket");
@@ -5578,24 +5680,189 @@ output_schema_ref = "schemas/write.output.json"
 
         tokio::spawn(async move {
             let mut auth_tx = Some(auth_tx);
-            loop {
-                let (mut stream, _) = listener.accept().await.expect("accept test request");
+            'connections: loop {
+                let (mut stream, _) =
+                    match tokio::time::timeout(NEARAI_AUTH_CAPTURE_IDLE_TIMEOUT, listener.accept())
+                        .await
+                    {
+                        Ok(Ok(accepted)) => accepted,
+                        Ok(Err(error)) => panic!("accept test request: {error}"),
+                        Err(_) => break,
+                    };
                 let mut buffer = Vec::new();
+                let mut header_end = None;
                 loop {
                     let mut chunk = [0_u8; 1024];
-                    let read = stream.read(&mut chunk).await.expect("read test request");
+                    let read = match tokio::time::timeout(
+                        NEARAI_AUTH_CAPTURE_IO_TIMEOUT,
+                        stream.read(&mut chunk),
+                    )
+                    .await
+                    {
+                        Ok(Ok(read)) => read,
+                        Ok(Err(error)) => panic!("read test request: {error}"),
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "408 Request Timeout",
+                                "text/plain",
+                                "request read timed out",
+                            )
+                            .await
+                            .expect("write auth capture read timeout response");
+                            continue 'connections;
+                        }
+                    };
                     if read == 0 {
                         break;
                     }
+                    if buffer.len().saturating_add(read) > NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES {
+                        write_nearai_auth_capture_response(
+                            &mut stream,
+                            "413 Payload Too Large",
+                            "text/plain",
+                            "request too large",
+                        )
+                        .await
+                        .expect("write auth capture oversized request response");
+                        continue 'connections;
+                    }
                     buffer.extend_from_slice(&chunk[..read]);
-                    if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                    if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        header_end = Some(index + 4);
                         break;
                     }
                 }
 
-                let request = String::from_utf8_lossy(&buffer);
-                let request_line = request.lines().next().unwrap_or_default();
-                let auth_header = request
+                let Some(header_end) = header_end else {
+                    write_nearai_auth_capture_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        "text/plain",
+                        "incomplete request headers",
+                    )
+                    .await
+                    .expect("write auth capture incomplete headers response");
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+                let content_length = match headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                {
+                    Some((_, value)) => match value.trim().parse::<usize>() {
+                        Ok(length) => length,
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "400 Bad Request",
+                                "text/plain",
+                                "invalid content-length",
+                            )
+                            .await
+                            .expect("write auth capture invalid content-length response");
+                            continue;
+                        }
+                    },
+                    None => {
+                        write_nearai_auth_capture_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "missing content-length",
+                        )
+                        .await
+                        .expect("write auth capture missing content-length response");
+                        continue;
+                    }
+                };
+                let Some(request_len) = header_end.checked_add(content_length) else {
+                    write_nearai_auth_capture_response(
+                        &mut stream,
+                        "413 Payload Too Large",
+                        "text/plain",
+                        "request too large",
+                    )
+                    .await
+                    .expect("write auth capture overflow response");
+                    continue;
+                };
+                if request_len > NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES {
+                    write_nearai_auth_capture_response(
+                        &mut stream,
+                        "413 Payload Too Large",
+                        "text/plain",
+                        "request too large",
+                    )
+                    .await
+                    .expect("write auth capture oversized content-length response");
+                    continue;
+                }
+                while buffer.len() < request_len {
+                    let mut chunk = [0_u8; 1024];
+                    let read = match tokio::time::timeout(
+                        NEARAI_AUTH_CAPTURE_IO_TIMEOUT,
+                        stream.read(&mut chunk),
+                    )
+                    .await
+                    {
+                        Ok(Ok(read)) => read,
+                        Ok(Err(error)) => panic!("read test body: {error}"),
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "408 Request Timeout",
+                                "text/plain",
+                                "request body read timed out",
+                            )
+                            .await
+                            .expect("write auth capture body timeout response");
+                            continue 'connections;
+                        }
+                    };
+                    if read == 0 {
+                        write_nearai_auth_capture_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "incomplete request body",
+                        )
+                        .await
+                        .expect("write auth capture incomplete body response");
+                        continue 'connections;
+                    }
+                    let remaining = request_len - buffer.len();
+                    buffer.extend_from_slice(&chunk[..read.min(remaining)]);
+                }
+
+                let body = &buffer[header_end..request_len];
+                let request_json = if body.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_slice::<serde_json::Value>(body) {
+                        Ok(value) => Some(value),
+                        Err(_) => {
+                            write_nearai_auth_capture_response(
+                                &mut stream,
+                                "400 Bad Request",
+                                "text/plain",
+                                "invalid json body",
+                            )
+                            .await
+                            .expect("write auth capture invalid json response");
+                            continue;
+                        }
+                    }
+                };
+                let wants_stream = request_json
+                    .as_ref()
+                    .and_then(|value| value.get("stream"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let request_line = headers.lines().next().unwrap_or_default();
+                let auth_header = headers
                     .lines()
                     .filter_map(|line| line.split_once(':'))
                     .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
@@ -5603,23 +5870,39 @@ output_schema_ref = "schemas/write.output.json"
                     .unwrap_or_default()
                     .to_string();
                 let is_chat_completion = request_line.contains("/v1/chat/completions");
-                let body = if is_chat_completion {
-                    r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                if is_chat_completion && wants_stream {
+                    let body = concat!(
+                        r#"data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                        "\n\n",
+                        "data: [DONE]\n\n"
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n{}",
+                        body
+                    );
+                    write_nearai_auth_capture_bytes(&mut stream, response.as_bytes())
+                        .await
+                        .expect("write test streaming response");
                 } else {
-                    r#"{"data":[]}"#
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write test response");
+                    let body = if is_chat_completion {
+                        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    } else {
+                        r#"{"data":[]}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    write_nearai_auth_capture_bytes(&mut stream, response.as_bytes())
+                        .await
+                        .expect("write test response");
+                }
 
                 if is_chat_completion {
                     if let Some(auth_tx) = auth_tx.take() {
+                        #[allow(clippy::let_underscore_must_use)]
+                        // oneshot send; dropped receiver is expected
                         let _ = auth_tx.send(auth_header);
                     }
                     break;
@@ -5628,6 +5911,86 @@ output_schema_ref = "schemas/write.output.json"
         });
 
         (base_url, auth_rx)
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    async fn send_nearai_auth_capture_raw_request(base_url: &str, request: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let address = base_url
+            .strip_prefix("http://")
+            .expect("capture server URL has http prefix");
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to capture server");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write raw capture request");
+        stream.shutdown().await.expect("finish raw capture request");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("read raw capture response");
+        response
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn nearai_auth_capture_server_rejects_incomplete_body() {
+        let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
+        let response = send_nearai_auth_capture_raw_request(
+            &base_url,
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\ncontent-length: 32\r\n\r\n{\"stream\":true"
+                .to_string(),
+        )
+        .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected incomplete body to be rejected, got: {response:?}"
+        );
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn nearai_auth_capture_server_rejects_oversized_content_length() {
+        let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
+        let response = send_nearai_auth_capture_raw_request(
+            &base_url,
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n",
+                NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES + 1
+            ),
+        )
+        .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 413 Payload Too Large"),
+            "expected oversized body to be rejected, got: {response:?}"
+        );
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn nearai_auth_capture_server_rejects_missing_content_length() {
+        let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
+        let response = send_nearai_auth_capture_raw_request(
+            &base_url,
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\n\r\n{}".to_string(),
+        )
+        .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected missing content-length to be rejected, got: {response:?}"
+        );
+        assert!(
+            response.contains("missing content-length"),
+            "expected missing content-length diagnostic, got: {response:?}"
+        );
     }
 
     #[cfg(feature = "root-llm-provider")]
@@ -5949,7 +6312,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6054,7 +6420,10 @@ output_schema_ref = "schemas/write.output.json"
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6453,6 +6822,8 @@ output_schema_ref = "schemas/write.output.json"
         // First model call routes through the instrumentation wrapper. The dead
         // endpoint makes the underlying call error, but the wrapper counts before
         // delegating, so the result is irrelevant — only that it was observed.
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -6472,6 +6843,8 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("live reload rebuilds the provider chain");
 
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -7019,15 +7392,12 @@ output_schema_ref = "schemas/write.output.json"
             reply: "trigger invalid config".to_string(),
             requests: Arc::new(StdMutex::new(Vec::new())),
         });
-        let trigger_poller = TriggerPollerSettings {
-            enabled: true,
-            worker: ironclaw_triggers::TriggerPollerWorkerConfig {
-                poll_interval: Duration::ZERO,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-        .with_tenant_scoped_authorizer_for_test();
+        let trigger_poller = TriggerPollerSettings::enabled()
+            .with_worker_config(
+                ironclaw_triggers::TriggerPollerWorkerConfig::default()
+                    .set_poll_interval(Duration::ZERO),
+            )
+            .with_tenant_scoped_authorizer_for_test();
 
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev(
@@ -7281,16 +7651,14 @@ output_schema_ref = "schemas/write.output.json"
         // later read the queue) under `trace_scope_key(tenant, owner)`, not the
         // bare owner id.
         let scope = trace_contribution::trace_scope_key("runtime-trace-capture-tenant", &owner);
-        let policy = trace_contribution::StandingTraceContributionPolicy {
-            enabled: true,
-            // Closed loopback port: the immediate flush fails fast and
-            // locally; no traffic leaves the machine.
-            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
-            min_submission_score: 0.0,
-            require_manual_approval_when_pii_detected: false,
-            auto_submit_high_value_traces: true,
-            ..trace_contribution::StandingTraceContributionPolicy::default()
-        };
+        // Closed loopback port: the immediate flush fails fast and locally; no
+        // traffic leaves the machine.
+        let policy = trace_contribution::StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://127.0.0.1:1/v1/traces")
+            .set_min_submission_score(0.0)
+            .set_require_manual_approval_when_pii_detected(false)
+            .set_auto_submit_high_value_traces(true);
         trace_contribution::write_trace_policy_for_scope(Some(&scope), &policy)
             .expect("write trace policy");
 
@@ -7378,6 +7746,7 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(envelope["outcome"]["task_success"], "success");
 
         runtime.shutdown().await.expect("runtime shutdown");
+        #[allow(clippy::let_underscore_must_use)] // best-effort per-test scope dir cleanup
         let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
             Some(&scope),
         ));
@@ -7583,7 +7952,10 @@ output_schema_ref = "schemas/write.output.json"
         let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
             .expect("valid notion ref");
         extension_management
-            .install(notion_ref.clone())
+            .install(
+                notion_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Notion MCP");
         extension_management
@@ -10399,9 +10771,12 @@ output_schema_ref = "schemas/write.output.json"
                 let package_ref =
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                         .expect("valid github ref");
+                // #5459 P1: act as the runtime owner (the tenant operator) so
+                // the install is tenant-shared and visible to the run's
+                // surface user — a non-operator install would now be private.
                 let ctx = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
                     tenant_id: TenantId::new("tenant-multi-tool-surface").expect("tenant id"),
-                    user_id: UserId::new("user-multi-tool-surface").expect("user id"),
+                    user_id: UserId::new("runtime-multi-tool-surface-owner").expect("user id"),
                     agent_id: None,
                     project_id: None,
                 });

@@ -69,7 +69,7 @@ pub fn failure_lane(category: &str, retryable: bool) -> FailureLane {
 ///
 /// `unknown_failure` is deliberately excluded — it IS the generic fallback.
 pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
-    // Driver / scheduler / lifecycle (ironclaw_reborn planned_driver/turn_runner)
+    // Driver / scheduler / lifecycle (ironclaw_runner planned_driver/turn_runner)
     "driver_not_found",
     "driver_unavailable",
     "driver_failed",

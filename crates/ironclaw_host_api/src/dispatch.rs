@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
     ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -21,6 +22,7 @@ use crate::{
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -353,8 +355,15 @@ pub enum DispatchError {
     Mcp { kind: RuntimeDispatchErrorKind },
     #[error("script dispatch failed: {kind}")]
     Script { kind: RuntimeDispatchErrorKind },
+    /// WASM guest dispatch failure. `safe_summary` carries the stable,
+    /// host-sanitized error code a structured guest error declared (e.g. a
+    /// Slack `channel_not_found`), so the model-visible failure keeps its
+    /// actionable cause instead of collapsing to the kind's generic sentence.
     #[error("WASM dispatch failed: {kind}")]
-    Wasm { kind: RuntimeDispatchErrorKind },
+    Wasm {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty {
         kind: RuntimeDispatchErrorKind,
@@ -423,7 +432,7 @@ impl fmt::Debug for DispatchError {
                 .finish(),
             Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
             Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
-            Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
+            Self::Wasm { kind, .. } => f.debug_struct("Wasm").field("kind", kind).finish(),
             Self::FirstParty { kind, .. } => {
                 f.debug_struct("FirstParty").field("kind", kind).finish()
             }
@@ -455,7 +464,7 @@ impl DispatchError {
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Mcp { kind }
             | Self::Script { kind }
-            | Self::Wasm { kind }
+            | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
     }
@@ -474,7 +483,7 @@ impl DispatchError {
             Self::AuthRequired { .. } => "auth_required",
             Self::Mcp { kind }
             | Self::Script { kind }
-            | Self::Wasm { kind }
+            | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => kind.event_kind(),
         }
     }

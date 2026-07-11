@@ -52,7 +52,7 @@ pub(crate) fn init_tracing() {
     // guarded from third-party debug floods unless those targets are explicit.
     let stderr_filter = reborn_env_filter(
         "IRONCLAW_REBORN_LOG",
-        "info,ironclaw_reborn=info,ironclaw_reborn_composition=info",
+        "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
     );
     // Operator Logs buffer: captures run diagnostics at `debug` for the
     // ironclaw run-path crates so the scoped (thread/run) Logs panel is
@@ -62,7 +62,7 @@ pub(crate) fn init_tracing() {
     // so the browser log buffer is not filled by low-level protocol crates.
     let operator_filter = reborn_env_filter(
         "IRONCLAW_REBORN_OPERATOR_LOG",
-        "info,ironclaw_reborn=debug,ironclaw_host_runtime=debug",
+        "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",
     );
     let _ = tracing_subscriber::registry()
         .with(
@@ -1104,7 +1104,7 @@ fn resolve_worker_count(
 /// path resolves to `None` (sized to exactly `MAX_PERMITS`, which tokio
 /// accepts), so the unlimited sentinel stays the way to ask for "no bound".
 ///
-/// `ironclaw_reborn`'s `scheduler_permit_count` additionally saturates at the
+/// `ironclaw_runner`'s `scheduler_permit_count` additionally saturates at the
 /// ceiling as an infallible backstop for direct composition callers; this gate
 /// is the operator-facing fail-loud half of that defense.
 fn ensure_worker_count_within_ceiling(
@@ -1224,7 +1224,7 @@ fn runner_settings(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::MutexGuard};
 
     use ironclaw_reborn_composition::{
         CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
@@ -1234,7 +1234,7 @@ mod tests {
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::test_env::{EnvGuard, lock_runtime_env};
+    use super::test_env::EnvGuard;
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
@@ -1247,6 +1247,25 @@ mod tests {
     #[cfg(feature = "libsql")]
     use super::local_runtime_storage_root;
     use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+
+    struct RuntimeEnvGuard {
+        // Fields drop in declaration order: restore the env before releasing
+        // the process-wide lock.
+        _resource_governor_singleton: EnvGuard,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    fn lock_runtime_env() -> RuntimeEnvGuard {
+        let lock = super::test_env::lock_runtime_env();
+        let resource_governor_singleton = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
+            "true",
+        );
+        RuntimeEnvGuard {
+            _resource_governor_singleton: resource_governor_singleton,
+            _lock: lock,
+        }
+    }
 
     fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
         ironclaw_reborn_config::RebornConfigFile::parse_text(

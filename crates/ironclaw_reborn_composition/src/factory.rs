@@ -53,8 +53,18 @@ use ironclaw_filesystem::{
     MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+#[cfg(feature = "test-support")]
+use ironclaw_first_party_extensions::{
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
+    WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
+};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
+};
+#[cfg(feature = "test-support")]
+use ironclaw_host_api::{
+    CapabilityGrant, CapabilityGrantId, GrantConstraints, NetworkPolicy, NetworkTargetPattern,
+    Principal,
 };
 use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId,
@@ -117,11 +127,14 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+#[cfg(feature = "test-support")]
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 #[cfg(all(
     feature = "inmemory-turn-state",
     any(feature = "libsql", feature = "postgres")
 ))]
 use ironclaw_turns::FilesystemTurnStateBlockPersistence;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStoreKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
@@ -452,7 +465,7 @@ pub struct RebornServices {
     /// via `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the scheduler
     /// loop driven by that function shares the exact same channel.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub(crate) production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
+    pub(crate) production_scheduler_wake: Option<ironclaw_runner::runtime::SchedulerWakeWiring>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
@@ -754,6 +767,146 @@ impl RebornServices {
                 .publish(package),
         )
     }
+
+    /// Test-support authority snapshot for active local-dev extensions.
+    ///
+    /// Binary-E2E harnesses build capability ports at the host-runtime boundary
+    /// instead of going through `LocalDevLoopCapabilityPortFactory`, so they need
+    /// the same active-extension grants and provider trust that production
+    /// local-dev recomputes whenever the model-visible surface is refreshed.
+    #[cfg(feature = "test-support")]
+    pub async fn local_dev_active_extension_authority_for_test(
+        &self,
+        grantee: &ExtensionId,
+    ) -> Option<
+        Result<
+            LocalDevActiveExtensionAuthorityForTest,
+            ironclaw_product_workflow::ProductWorkflowError,
+        >,
+    > {
+        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
+        Some(active_extension_authority_for_test(extension_management, grantee).await)
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub struct LocalDevActiveExtensionAuthorityForTest {
+    pub grants: Vec<CapabilityGrant>,
+    pub provider_trust: Vec<(ExtensionId, TrustDecision)>,
+}
+
+#[cfg(feature = "test-support")]
+async fn active_extension_authority_for_test(
+    extension_management: &RebornLocalExtensionManagementPort,
+    grantee: &ExtensionId,
+) -> Result<LocalDevActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError>
+{
+    let active_capabilities = extension_management
+        .active_model_visible_capabilities()
+        .await?;
+    let grants = active_capabilities
+        .iter()
+        .map(|capability| CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: capability.id.clone(),
+            grantee: Principal::Extension(grantee.clone()),
+            issued_by: Principal::HostRuntime,
+            constraints: active_extension_grant_constraints_for_test(capability),
+        })
+        .collect();
+    let mut effects_by_provider: std::collections::BTreeMap<ExtensionId, Vec<EffectKind>> =
+        std::collections::BTreeMap::new();
+    for capability in &active_capabilities {
+        let effects = effects_by_provider
+            .entry(capability.provider.clone())
+            .or_default();
+        for effect in &capability.effects {
+            if !effects.contains(effect) {
+                effects.push(*effect);
+            }
+        }
+    }
+    let provider_trust = effects_by_provider
+        .into_iter()
+        .map(|(provider, allowed_effects)| {
+            (
+                provider,
+                TrustDecision {
+                    effective_trust: EffectiveTrustClass::user_trusted(),
+                    authority_ceiling: AuthorityCeiling {
+                        allowed_effects,
+                        max_resource_ceiling: None,
+                    },
+                    provenance: TrustProvenance::AdminConfig,
+                    evaluated_at: chrono::Utc::now(),
+                },
+            )
+        })
+        .collect();
+    Ok(LocalDevActiveExtensionAuthorityForTest {
+        grants,
+        provider_trust,
+    })
+}
+
+#[cfg(feature = "test-support")]
+fn active_extension_grant_constraints_for_test(
+    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+) -> GrantConstraints {
+    GrantConstraints {
+        allowed_effects: capability.effects.clone(),
+        mounts: MountView::default(),
+        network: active_extension_network_policy_for_test(capability),
+        secrets: {
+            let mut handles = Vec::new();
+            for credential in &capability.runtime_credentials {
+                if !handles.contains(&credential.handle) {
+                    handles.push(credential.handle.clone());
+                }
+            }
+            handles
+        },
+        resource_ceiling: None,
+        expires_at: None,
+        max_invocations: None,
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn active_extension_network_policy_for_test(
+    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
+) -> NetworkPolicy {
+    if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
+        return policy;
+    }
+
+    let mut targets = Vec::new();
+    for credential in &capability.runtime_credentials {
+        if !targets.contains(&credential.audience) {
+            targets.push(credential.audience.clone());
+        }
+    }
+    let is_web_access_exa_mcp = capability.provider.as_str() == WEB_ACCESS_EXTENSION_ID
+        && matches!(
+            capability.id.as_str(),
+            WEB_SEARCH_CAPABILITY_ID | WEB_GET_CONTENT_CAPABILITY_ID
+        );
+    if is_web_access_exa_mcp
+        && !targets
+            .iter()
+            .any(|target| target.host_pattern == EXA_MCP_HOST)
+    {
+        targets.push(NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+            host_pattern: EXA_MCP_HOST.to_string(),
+            port: None,
+        });
+    }
+    NetworkPolicy {
+        allowed_targets: targets,
+        deny_private_ip_ranges: true,
+        max_egress_bytes: is_web_access_exa_mcp.then_some(NETWORK_EGRESS_LIMIT),
+    }
 }
 
 /// Bundle returned by [`RebornServices::local_dev_attachment_test_support_for_test`]
@@ -796,6 +949,14 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// modules wire the access-controlled service, never the substrate repo.
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// The one mutable outbound delivery target registry for this runtime.
+    /// Runtime composition wraps it into the outbound preferences facade and
+    /// product hosts (Slack host beta) register their providers into it; the
+    /// trigger-create hook validates per-trigger `delivery_target_id`s against
+    /// the same instance, so an id accepted at creation is one the delivery
+    /// layer can resolve at fire time.
+    pub(crate) outbound_delivery_targets:
+        Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     /// Global default criteria-based skill auto-activation master switch,
     /// shared by reference between the skill activation selector (reads it per
     /// turn) and the WebUI skills facade (toggles it). Defaults to `true`; a
@@ -1661,14 +1822,22 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
-    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        extension_filesystem,
-        available_extensions,
-        extension_installation_store,
-        extension_lifecycle_service,
-        active_extensions,
-        Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
-    ));
+    let extension_management = Arc::new(
+        RebornLocalExtensionManagementPort::new(
+            extension_filesystem,
+            available_extensions,
+            extension_installation_store,
+            extension_lifecycle_service,
+            active_extensions,
+            Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
+            // #5459 P1: the base owner is the tenant operator in local-dev —
+            // their installs are tenant-shared, everyone else's are private.
+            nearai_mcp_owner_scope.user_id.clone(),
+        )
+        .with_channel_connection_facade_slot(Arc::clone(
+            &store_graph.local_runtime.channel_connection_facade_slot,
+        )),
+    );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
@@ -1723,7 +1892,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         &mut first_party_registry,
         extension_management,
         product_auth.runtime_credential_account_selection_service(),
-        Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
@@ -2158,6 +2326,7 @@ async fn build_local_dev_store_graph(
     }
     let resource_governor = FilesystemResourceGovernor::new(Arc::clone(&scoped_filesystem))
         .with_event_sink(Arc::clone(&budget_event_sink));
+    resource_governor.warm_authority()?;
     let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(resource_governor);
     let skill_mounts =
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
@@ -2210,6 +2379,9 @@ async fn build_local_dev_store_graph(
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
+        outbound_delivery_targets: Arc::new(
+            crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
+        ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
@@ -2363,6 +2535,9 @@ async fn build_local_dev_store_graph(
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
+        outbound_delivery_targets: Arc::new(
+            crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
+        ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
@@ -2468,18 +2643,83 @@ fn local_dev_trigger_create_hook(
     {
         Arc::new(InMemoryTriggerCreatorPairingHook {
             conversations: local_runtime.trigger_conversation_services.clone(),
+            outbound_delivery_targets: Arc::clone(&local_runtime.outbound_delivery_targets),
         })
+    }
+}
+
+/// Validate a per-trigger delivery target against the runtime's outbound
+/// delivery target registry: the id must resolve for the trigger creator (the
+/// same ownership check the delivery layer applies at fire time). Fails
+/// closed when no provider is registered or the id is unknown/foreign.
+async fn validate_trigger_delivery_target_against_registry(
+    registry: &crate::outbound::MutableOutboundDeliveryTargetRegistry,
+    scope: &ironclaw_host_api::ResourceScope,
+    target: &ironclaw_triggers::TriggerDeliveryTargetId,
+) -> Result<(), TriggerError> {
+    let invalid = |reason: String| TriggerError::InvalidRecord {
+        kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
+        reason,
+    };
+    let target_id = ironclaw_product_workflow::RebornOutboundDeliveryTargetId::new(target.as_str())
+        .map_err(|error| {
+            tracing::debug!(
+                target = "ironclaw::reborn::trigger_create",
+                %error,
+                "per-trigger delivery target id failed outbound target id validation"
+            );
+            invalid("delivery target id is not a valid outbound target id".to_string())
+        })?;
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+    );
+    use crate::outbound::OutboundDeliveryTargetProvider as _;
+    match registry
+        .resolve_outbound_delivery_target(&caller, &target_id)
+        .await
+    {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(invalid(
+            "delivery target is not available to this caller".to_string(),
+        )),
+        Err(error) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::trigger_create",
+                %error,
+                "outbound delivery target lookup failed during trigger create validation"
+            );
+            Err(TriggerError::Backend {
+                reason: "outbound delivery target lookup unavailable".to_string(),
+            })
+        }
     }
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 struct InMemoryTriggerCreatorPairingHook {
     conversations: InMemoryConversationServices,
+    outbound_delivery_targets: Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 #[async_trait::async_trait]
 impl TriggerCreateHook for InMemoryTriggerCreatorPairingHook {
+    async fn validate_delivery_target(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        validate_trigger_delivery_target_against_registry(
+            &self.outbound_delivery_targets,
+            scope,
+            target,
+        )
+        .await
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         pair_trigger_creator(&self.conversations, record).await
     }
@@ -2493,6 +2733,19 @@ struct LocalRuntimeTriggerCreatorPairingHook {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
 impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
+    async fn validate_delivery_target(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        validate_trigger_delivery_target_against_registry(
+            &self.runtime.outbound_delivery_targets,
+            scope,
+            target,
+        )
+        .await
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let conversations = self
             .runtime
@@ -3882,7 +4135,7 @@ async fn build_production_shaped(
             //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
             //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
-            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
+            let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
@@ -3929,7 +4182,7 @@ async fn build_production_shaped(
             //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
             //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
-            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
+            let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
@@ -3998,14 +4251,14 @@ struct RebornProductionBuildContext {
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
-    scheduler_wake_wiring: ironclaw_reborn::runtime::SchedulerWakeWiring,
+    scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
-    turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
+    turn_run_wake_notifier: Arc<ironclaw_runner::turn_scheduler::SchedulerTurnRunWakeNotifier>,
     runtime_process_binding: RebornRuntimeProcessBinding,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
@@ -4039,7 +4292,7 @@ fn validate_production_process_binding(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, RebornBuildError> {
     Ok(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver().map_err(
+        ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver().map_err(
             |error| RebornBuildError::PlannedRunProfileResolver {
                 reason: error.to_string(),
             },
@@ -4212,6 +4465,40 @@ fn ensure_postgres_event_store_config(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_with_error<F, E, J>(
+    resource_governor: FilesystemResourceGovernor<F>,
+    map_join_error: J,
+) -> Result<FilesystemResourceGovernor<F>, E>
+where
+    F: RootFilesystem + 'static,
+    E: From<ironclaw_resources::ResourceError>,
+    J: FnOnce(tokio::task::JoinError) -> E,
+{
+    let resource_governor = tokio::task::spawn_blocking(move || {
+        resource_governor.warm_authority()?;
+        Ok::<_, ironclaw_resources::ResourceError>(resource_governor)
+    })
+    .await
+    .map_err(map_join_error)??;
+    Ok(resource_governor)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_for_composition<F>(
+    resource_governor: FilesystemResourceGovernor<F>,
+) -> Result<FilesystemResourceGovernor<F>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
+    warm_resource_governor_with_error(resource_governor, |error| {
+        crate::RebornCompositionError::InvalidConfig {
+            reason: format!("resource governor warm-up task failed: {error}"),
+        }
+    })
+    .await
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
     input: FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake>,
 ) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
@@ -4246,6 +4533,7 @@ where
         secret_master_key,
     )
     .await?;
+    let resource_governor = warm_resource_governor_for_composition(resource_governor).await?;
     let governor = Arc::new(resource_governor);
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
@@ -4274,7 +4562,7 @@ where
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_turn_state_and_transition_port(turn_state)
     .with_run_profile_resolver(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
+        ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
     let services = match event_store {
         #[cfg(feature = "libsql")]
@@ -4399,7 +4687,7 @@ impl<F> ProductionStoreBundle<F>
 where
     F: RootFilesystem + 'static,
 {
-    fn new(
+    async fn new(
         filesystem: Arc<F>,
         resource_governor: FilesystemResourceGovernor<F>,
         secret_master_key: ironclaw_secrets::SecretMaterial,
@@ -4416,6 +4704,7 @@ where
             Arc::clone(&scoped_filesystem),
             secret_master_key,
         )?;
+        let resource_governor = warm_resource_governor_for_build(resource_governor).await?;
 
         Ok(Self {
             filesystem,
@@ -4427,6 +4716,19 @@ where
             event_store,
         })
     }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_for_build<F>(
+    resource_governor: FilesystemResourceGovernor<F>,
+) -> Result<FilesystemResourceGovernor<F>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    warm_resource_governor_with_error(resource_governor, |error| RebornBuildError::InvalidConfig {
+        reason: format!("resource governor warm-up task failed: {error}"),
+    })
+    .await
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -4637,11 +4939,10 @@ where
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
-        // No blocked-auth fan-out here yet: this builder's turn state is the
-        // generic filesystem store, not the local-dev alias the snapshot
-        // source is implemented for. Completions resume only their own run,
-        // exactly this builder's prior behavior.
-        None,
+        Some(Arc::clone(&turn_state)
+            as Arc<
+                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+            >),
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),
@@ -4746,7 +5047,8 @@ async fn build_libsql_production(
             path_or_url,
             auth_token,
         },
-    )?;
+    )
+    .await?;
 
     build_backend_production(
         context,
@@ -4804,7 +5106,8 @@ async fn build_postgres_production(
         resource_governor,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
-    )?;
+    )
+    .await?;
 
     build_backend_production(
         context,
@@ -4956,23 +5259,11 @@ mod tests {
 
         let reservation = local_runtime
             .resource_governor
-            .reserve(
-                scope,
-                ResourceEstimate {
-                    usd: Some(dec!(0.10)),
-                    ..ResourceEstimate::default()
-                },
-            )
+            .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
             .expect("reservation");
         local_runtime
             .resource_governor
-            .reconcile(
-                reservation.id,
-                ResourceUsage {
-                    usd: dec!(0.10),
-                    ..ResourceUsage::default()
-                },
-            )
+            .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
             .expect("reconcile");
 
         assert_eq!(
@@ -5049,6 +5340,48 @@ mod tests {
                 reason: "raw durable store error".to_string(),
             })
         }
+
+        async fn pair_external_actor_with_epoch(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+            _binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
+        async fn unpair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+
+        async fn unpair_external_actor_if_owned_by(
+            &self,
+            _tenant_id: &TenantId,
+            _adapter_kind: &AdapterKind,
+            _adapter_installation_id: &AdapterInstallationId,
+            _external_actor_ref: &ExternalActorRef,
+            _expected: &ironclaw_conversations::ExpectedExternalActorOwner,
+        ) -> Result<
+            ironclaw_conversations::ConditionalUnpairOutcome,
+            ironclaw_conversations::InboundTurnError,
+        > {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -5077,6 +5410,99 @@ mod tests {
         }
     }
 
+    /// Per-trigger delivery targets validate against the SAME registry the
+    /// outbound target surface publishes from: an id a provider resolves for
+    /// the caller is accepted; an unknown id (or an empty registry) fails
+    /// closed as `DeliveryTargetInvalid`.
+    #[tokio::test]
+    async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
+        use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+        use crate::outbound::{
+            MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
+        };
+        use ironclaw_product_workflow::{
+            RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+            RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
+        };
+
+        struct OneTargetProvider {
+            entry: OutboundDeliveryTargetEntry,
+        }
+
+        #[async_trait::async_trait]
+        impl OutboundDeliveryTargetProvider for OneTargetProvider {
+            async fn list_outbound_delivery_targets(
+                &self,
+                _caller: &WebUiAuthenticatedCaller,
+            ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+                Ok(vec![OutboundDeliveryTargetEntry {
+                    summary: self.entry.summary.clone(),
+                    capabilities: self.entry.capabilities.clone(),
+                    reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
+                }])
+            }
+        }
+
+        let scope = ironclaw_host_api::ResourceScope {
+            tenant_id: TenantId::new("registry-validation-tenant").expect("tenant"),
+            user_id: UserId::new("registry-validation-user").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        let target = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:me")
+            .expect("target id");
+
+        let registry = MutableOutboundDeliveryTargetRegistry::default();
+        // Empty registry → fail closed.
+        let rejected =
+            validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
+                .await
+                .expect_err("empty registry must reject");
+        assert!(matches!(
+            rejected,
+            TriggerError::InvalidRecord {
+                kind: ironclaw_triggers::TriggerRecordValidationKind::DeliveryTargetInvalid,
+                ..
+            }
+        ));
+
+        // Registered provider that resolves the id for the caller → accept.
+        let entry = OutboundDeliveryTargetEntry {
+            summary: RebornOutboundDeliveryTargetSummary::new(
+                RebornOutboundDeliveryTargetId::new("slack:personal-dm:T1:me").expect("id"),
+                "slack",
+                "Slack DM".to_string(),
+                None,
+            )
+            .expect("summary"),
+            capabilities: RebornOutboundDeliveryTargetCapabilities {
+                final_replies: true,
+                gate_prompts: true,
+                auth_prompts: true,
+            },
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:registry-validation",
+            )
+            .expect("binding ref"),
+        };
+        registry
+            .register_provider("test", Arc::new(OneTargetProvider { entry }))
+            .expect("register");
+        validate_trigger_delivery_target_against_registry(&registry, &scope, &target)
+            .await
+            .expect("registered target must validate");
+
+        // A different id still fails closed.
+        let other = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:other")
+            .expect("target id");
+        validate_trigger_delivery_target_against_registry(&registry, &scope, &other)
+            .await
+            .expect_err("unknown target must reject");
+    }
+
     fn trigger_record_for_pairing_test() -> TriggerRecord {
         TriggerRecord {
             trigger_id: ironclaw_triggers::TriggerId::new(),
@@ -5089,6 +5515,7 @@ mod tests {
             schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")
                 .expect("valid cron expression"),
             prompt: "pairing test prompt".to_string(),
+            delivery_target: None,
             state: ironclaw_triggers::TriggerState::Scheduled,
             next_run_at: chrono::Utc::now(),
             last_run_at: None,
@@ -5154,6 +5581,7 @@ mod tests {
             capability_policy: Arc::clone(&base_runtime.capability_policy),
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
+            outbound_delivery_targets: Arc::clone(&base_runtime.outbound_delivery_targets),
             auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
@@ -5805,7 +6233,10 @@ mod tests {
                 .expect("valid ref");
 
         extension_management
-            .install(gmail_ref.clone())
+            .install(
+                gmail_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Gmail");
         extension_management
@@ -5816,7 +6247,10 @@ mod tests {
             .await
             .expect("activate Gmail");
         extension_management
-            .install(calendar_ref.clone())
+            .install(
+                calendar_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Google Calendar");
         extension_management
@@ -5943,7 +6377,10 @@ mod tests {
         assert!(capability_ids.contains(&"notion.notion-get-self"));
 
         extension_management
-            .install(notion_ref.clone())
+            .install(
+                notion_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Notion MCP");
         extension_management
@@ -5999,7 +6436,10 @@ mod tests {
                 .expect("valid ref");
 
         extension_management
-            .install(web_access_ref.clone())
+            .install(
+                web_access_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("install Web Access");
         extension_management
@@ -6431,7 +6871,10 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);
@@ -6546,7 +6989,10 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Discovered);
@@ -6680,14 +7126,16 @@ mod tests {
             .extension_management
             .as_ref()
             .expect("extension management");
+        let removal_scope = ironclaw_host_api::ResourceScope::local_default(
+            ironclaw_host_api::UserId::new(owner).expect("valid user"),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("valid scope");
         extension_management
             .remove(
                 nearai_ref.clone(),
-                &ironclaw_host_api::ResourceScope::local_default(
-                    ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
-                    ironclaw_host_api::InvocationId::new(),
-                )
-                .expect("valid scope"),
+                &removal_scope,
+                Some(&removal_scope.user_id),
             )
             .await
             .expect("disable NEAR AI MCP extension");
@@ -6711,7 +7159,10 @@ mod tests {
             crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
         );
         let projection = extension_management
-            .project(nearai_ref)
+            .project(
+                nearai_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
             .await
             .expect("NEAR AI MCP projected");
         assert_eq!(projection.phase, LifecyclePhase::Active);

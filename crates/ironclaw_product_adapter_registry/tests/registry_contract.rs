@@ -6,7 +6,7 @@ use ironclaw_extensions::{
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    MANIFEST_SCHEMA_VERSION, ManifestSource,
+    InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
 use ironclaw_product_adapter_registry::{
@@ -82,6 +82,7 @@ fn installation(state: ExtensionActivationState) -> ExtensionInstallation {
             SecretHandle::new("secret_telegram_bot_token").unwrap(),
         )],
         Utc::now(),
+        InstallationOwner::Tenant,
     )
     .unwrap()
 }
@@ -163,6 +164,7 @@ prompt_doc_ref = "prompts/do.md"
         ExtensionManifestRef::new(plain_id, Some(manifest_hash("sha256:plain"))),
         vec![],
         Utc::now(),
+        InstallationOwner::Tenant,
     )
     .unwrap();
 
@@ -195,6 +197,7 @@ async fn credential_binding_must_reference_declared_manifest_handle() {
             SecretHandle::new("secret_slack_bot_token").unwrap(),
         )],
         Utc::now(),
+        InstallationOwner::Tenant,
     )
     .unwrap();
 
@@ -289,6 +292,7 @@ fn duplicate_credential_bindings_rejected_at_construction() {
             ),
         ],
         Utc::now(),
+        InstallationOwner::Tenant,
     )
     .unwrap_err();
     assert!(
@@ -441,6 +445,7 @@ handle = "outbound_token"
             ),
         ],
         Utc::now(),
+        InstallationOwner::Tenant,
     )
     .unwrap();
 

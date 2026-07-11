@@ -23,6 +23,8 @@ pub enum AuthErrorCode {
     BackendUnavailable,
     #[error("provider_identity_already_connected")]
     ProviderIdentityAlreadyConnected,
+    #[error("connection_conflict")]
+    ConnectionConflict,
     #[error("malformed_config")]
     MalformedConfig,
     #[error("malformed_callback")]

@@ -7,18 +7,33 @@ import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
+import {
+  CHAT_MESSAGE_ROLES,
+  type ChatAttachment,
+  type ChatMessage,
+} from "../lib/message-types";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
-   system / error stay as centered tinted notices. Reasoning ("thinking")
-   renders as a collapsible disclosure (see ThinkingDisclosure). */
+   system stays as a centered notice, and error renders as an inline
+   assistant-side alert. Reasoning ("thinking") renders as a collapsible
+   disclosure (see ThinkingDisclosure). */
 const ROLE_STYLES = {
-  user: "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
-  assistant: "mr-auto px-1 text-iron-100",
-  system: "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
-  error: "mx-auto rounded-[18px] border border-red-400/20 bg-red-500/10 px-4 py-3 text-center text-red-200",
+  [CHAT_MESSAGE_ROLES.USER]:
+    "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
+  [CHAT_MESSAGE_ROLES.ASSISTANT]: "mr-auto px-1 text-iron-100",
+  [CHAT_MESSAGE_ROLES.SYSTEM]:
+    "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
+  [CHAT_MESSAGE_ROLES.ERROR]:
+    "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
 };
 
-function formatTimestamp(value) {
+type MessageBubbleProps = {
+  message: ChatMessage;
+  onRetry?: (message: ChatMessage) => void;
+  threadId?: string | null;
+};
+
+function formatTimestamp(value?: string) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -28,7 +43,7 @@ function formatTimestamp(value) {
 /* Collapsible provider-reasoning summary. Collapsed by default so the
    thread stays clean; expands to the full reasoning markdown. Data comes
    from the `thinking` projection item (PR #4230). */
-function ThinkingDisclosure({ content }) {
+function ThinkingDisclosure({ content }: { content?: string }) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   if (!content) return null;
@@ -57,13 +72,19 @@ function ThinkingDisclosure({ content }) {
   );
 }
 
-function MessageBubbleImpl({ message, onRetry, threadId }) {
+function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
-  const isUser = role === "user";
+  const isUser = role === CHAT_MESSAGE_ROLES.USER;
+  const finalReplyState =
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    typeof message.isFinalReply === "boolean"
+      ? String(message.isFinalReply)
+      : undefined;
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
-  const [previewAttachment, setPreviewAttachment] = React.useState(null);
+  const [previewAttachment, setPreviewAttachment] =
+    React.useState<ChatAttachment | null>(null);
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -81,7 +102,10 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
     }
   }, [content, t]);
 
-  if (role === "tool_activity" || (toolCalls && toolCalls.length > 0)) {
+  if (
+    role === CHAT_MESSAGE_ROLES.TOOL_ACTIVITY ||
+    (toolCalls && toolCalls.length > 0)
+  ) {
     const activity = (toolCalls && toolCalls.length > 0)
       ? {
           id: message.id,
@@ -91,11 +115,11 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
     return (<ToolActivity activity={activity} />);
   }
 
-  if (role === "thinking") {
+  if (role === CHAT_MESSAGE_ROLES.THINKING) {
     return (<ThinkingDisclosure content={content} />);
   }
 
-  if (role === "image") {
+  if (role === CHAT_MESSAGE_ROLES.IMAGE) {
     const imgs = generatedImages || [];
     return (
       <div className="flex">
@@ -116,21 +140,31 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   }
 
   const timeLabel = formatTimestamp(timestamp);
-  const showActions = role === "user" || (role === "assistant" && !isOptimistic);
-  const isNotice = role === "system" || role === "error";
+  const showActions =
+    role === CHAT_MESSAGE_ROLES.USER ||
+    (role === CHAT_MESSAGE_ROLES.ASSISTANT && !isOptimistic);
+  const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
+  const isError = role === CHAT_MESSAGE_ROLES.ERROR;
   const bubbleWidthClass = isUser
     ? "v2-chat-readable-width"
     : isNotice
     ? "mx-auto v2-chat-readable-width"
+    : isError
+    ? "mr-auto v2-chat-readable-width"
     : "w-full v2-chat-readable-width";
-  const contentWidthClass = isUser ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
+  const contentWidthClass =
+    isUser || isError ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
   const contentOpacityClass = isOptimistic ? "opacity-70" : "";
+  const roleStyle =
+    ROLE_STYLES[role as keyof typeof ROLE_STYLES] ||
+    ROLE_STYLES[CHAT_MESSAGE_ROLES.ASSISTANT];
 
   return (
     <div
       data-testid={`msg-${role}`}
+      data-final-reply={finalReplyState}
       className={["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
       <div className={["flex min-w-0 flex-col", bubbleWidthClass].join(" ")}>
@@ -138,10 +172,12 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
           className={[
             "text-base leading-7",
             contentWidthClass,
-            ROLE_STYLES[role] || ROLE_STYLES.assistant,
+            roleStyle,
           ].join(" ")}
         >
-          {role === "assistant" || role === "system" || role === "error"
+          {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
+          role === CHAT_MESSAGE_ROLES.SYSTEM ||
+          role === CHAT_MESSAGE_ROLES.ERROR
             ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} /></div>)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
@@ -173,7 +209,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             </>
           )}
 
-          {role === "assistant" &&
+          {role === CHAT_MESSAGE_ROLES.ASSISTANT &&
           (<ProjectFileChips
             threadId={threadId}
             content={typeof content === "string" ? content : ""}
@@ -185,7 +221,11 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
         <div
           className={[
             "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
-            isUser ? "self-end justify-end" : isNotice ? "self-center justify-center" : "self-start justify-start",
+            isUser
+              ? "self-end justify-end"
+              : isNotice
+              ? "self-center justify-center"
+              : "self-start justify-start",
           ].join(" ")}
         >
           {timeLabel && (<time dateTime={timestamp} className="shrink-0 font-mono text-[11px] text-iron-500">{timeLabel}</time>)}
@@ -205,7 +245,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             {showRetryAction && (
               <button
                 type="button"
-                onClick={() => onRetry(message)}
+                onClick={() => onRetry?.(message)}
                 title={t("chat.retryMessage")}
                 aria-label={t("chat.retryMessage")}
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 hover:text-red-200"

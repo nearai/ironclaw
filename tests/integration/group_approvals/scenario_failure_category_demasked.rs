@@ -4,7 +4,7 @@
 //! `RebornIntegrationGroupBuilder::into_group` (`tests/integration/support/group.rs`
 //! ~line 472) wires `.with_checkpoint_state_store(..)` onto the group-level
 //! `ThreadCheckpointLoopExitEvidencePort` -- the de-mask fix. Without it,
-//! `verify_failure_evidence` (`crates/ironclaw_reborn/src/loop_exit_applier.rs`)
+//! `verify_failure_evidence` (`crates/ironclaw_runner/src/loop_exit_applier.rs`)
 //! short-circuits `Ok(false)` on a `None` store, so `validate_failed_exit`
 //! (`crates/ironclaw_turns/src/loop_exit.rs`) rewrites every `Failed` exit to
 //! the opaque `"driver_protocol_violation"` category. With the store wired, a
