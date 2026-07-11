@@ -97,9 +97,10 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 ))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
+#[cfg(any(feature = "slack-v2-host-beta", test))]
+use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher,
-    ProjectService,
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -155,6 +156,8 @@ use crate::RebornProductAuthServicePorts;
 use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::extension_removal_cleanup::SlackPersonalConnectionCleanupAdapter;
 use crate::extension_host::lifecycle::{
     RebornLocalLifecycleFacade, RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
@@ -173,10 +176,7 @@ use crate::extension_host::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
-    extension_removal_cleanup::{
-        ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry,
-        SlackPersonalConnectionCleanupAdapter,
-    },
+    extension_removal_cleanup::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry},
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
@@ -1066,6 +1066,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// deployments without a connectable channel, in which case the handler
     /// fails closed (blocks) for any channel that declares a connection
     /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
+    #[cfg(any(feature = "slack-v2-host-beta", test))]
     pub(crate) channel_connection_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -1866,12 +1867,15 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
-    let removal_cleanup_adapter: Arc<dyn ExtensionRemovalCleanupAdapter> =
-        Arc::new(SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
-            &store_graph.local_runtime.channel_connection_facade_slot,
-        )));
+    #[cfg(feature = "slack-v2-host-beta")]
+    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> =
+        vec![Arc::new(SlackPersonalConnectionCleanupAdapter::new(
+            Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
+        ))];
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    let removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
     let removal_cleanup = Arc::new(
-        ExtensionRemovalCleanupRegistry::try_from_adapters(vec![removal_cleanup_adapter]).map_err(
+        ExtensionRemovalCleanupRegistry::try_from_adapters(removal_cleanup_adapters).map_err(
             |error| RebornBuildError::InvalidConfig {
                 reason: format!("extension removal cleanup registry could not be built: {error}"),
             },
@@ -2471,6 +2475,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        #[cfg(any(feature = "slack-v2-host-beta", test))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -2627,6 +2632,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        #[cfg(any(feature = "slack-v2-host-beta", test))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -5675,6 +5681,7 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
+            #[cfg(any(feature = "slack-v2-host-beta", test))]
             channel_connection_facade_slot: Arc::clone(
                 &base_runtime.channel_connection_facade_slot,
             ),
