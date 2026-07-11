@@ -1457,6 +1457,20 @@ mod tests {
         let tenant_id = TenantId::new("trigger-binding-failure-tenant").expect("tenant id");
         let agent_id = AgentId::new("trigger-binding-failure-agent").expect("agent id");
         let creator_user_id = UserId::new("trigger-binding-failure-user").expect("user id");
+        conversations
+            .pair_external_actor(
+                tenant_id.clone(),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
+                UserId::new("trigger-binding-failure-other-user").expect("user id"),
+            )
+            .await;
         let trigger_id = TriggerId::new();
         let fire_slot = Utc::now();
         repo.upsert_trigger(test_trigger_record(TestTriggerRecordInput {
