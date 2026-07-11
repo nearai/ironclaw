@@ -28,7 +28,7 @@ use ironclaw_host_api::{
 use ironclaw_secrets::SecretStore;
 use thiserror::Error;
 
-use crate::{ExecutionPlan, RuntimeProcessPort, RuntimeSecretMaterialStager};
+use crate::{ExecutionPlan, PostEditCheckConfig, RuntimeProcessPort, RuntimeSecretMaterialStager};
 
 /// Concrete host API bindings for an already-authorized invocation.
 ///
@@ -53,6 +53,11 @@ pub struct InvocationServices {
     pub secret_store: Option<Arc<dyn SecretStore>>,
     pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
+    /// Operator-configured post-edit check appended to successful
+    /// `builtin.write_file` / `builtin.apply_patch` output. Resolved once at
+    /// composition time (never from env in per-call handlers); `None` keeps
+    /// the feature off.
+    pub post_edit_check: Option<PostEditCheckConfig>,
 }
 
 impl fmt::Debug for InvocationServices {
@@ -87,6 +92,10 @@ impl fmt::Debug for InvocationServices {
             .field(
                 "unsafe_raw_diagnostics_allowed",
                 &self.unsafe_raw_diagnostics_allowed,
+            )
+            .field(
+                "post_edit_check",
+                &self.post_edit_check.as_ref().map(|_| "[CONFIGURED]"),
             )
             .finish()
     }
@@ -167,6 +176,7 @@ pub struct LocalInvocationServicesResolver {
     tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    post_edit_check: Option<PostEditCheckConfig>,
 }
 
 impl LocalInvocationServicesResolver {
@@ -185,6 +195,7 @@ impl LocalInvocationServicesResolver {
             tenant_sandbox_process: None,
             secret_store,
             audit_sink: None,
+            post_edit_check: None,
         }
     }
 
@@ -219,6 +230,11 @@ impl LocalInvocationServicesResolver {
 
     pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = Some(audit_sink);
+        self
+    }
+
+    pub fn with_post_edit_check(mut self, post_edit_check: PostEditCheckConfig) -> Self {
+        self.post_edit_check = Some(post_edit_check);
         self
     }
 }
@@ -286,6 +302,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 plan.deployment,
                 plan.resolved_profile,
             ),
+            post_edit_check: self.post_edit_check.clone(),
         })
     }
 }

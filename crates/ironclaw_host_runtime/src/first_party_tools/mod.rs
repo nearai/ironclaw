@@ -462,6 +462,45 @@ fn first_party_capability_manifest(
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
     memory_state: memory::MemoryCapabilityState,
+    post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
+}
+
+impl BuiltinFirstPartyTools {
+    /// Run the operator-configured post-edit check after a SUCCESSFUL
+    /// `write_file` / `apply_patch` and append the advisory `post_edit_check`
+    /// value to the edit's model-visible output. Read-only coding tools never
+    /// trigger it, and it never fails the edit — the edit already succeeded
+    /// when this runs.
+    async fn append_post_edit_check(
+        &self,
+        kind: CodingCapabilityKind,
+        request: &FirstPartyCapabilityRequest,
+        output: &mut serde_json::Value,
+    ) {
+        if !matches!(
+            kind,
+            CodingCapabilityKind::WriteFile | CodingCapabilityKind::ApplyPatch
+        ) {
+            return;
+        }
+        let Some(config) = &request.services.post_edit_check else {
+            return;
+        };
+        let Some(check) = crate::post_edit_check::run_post_edit_check(
+            &self.post_edit_check_seen,
+            request.services.process.as_ref(),
+            &request.scope,
+            request.mounts.as_ref(),
+            config,
+        )
+        .await
+        else {
+            return;
+        };
+        if let Some(object) = output.as_object_mut() {
+            object.insert("post_edit_check".to_string(), check);
+        }
+    }
 }
 
 #[async_trait]
@@ -552,7 +591,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                         RuntimeDispatchErrorKind::UndeclaredCapability,
                     ));
                 };
-                let request = CodingCapabilityRequest::new(
+                let coding_request = CodingCapabilityRequest::new(
                     &request.capability_id,
                     metadata.kind,
                     &request.scope,
@@ -561,11 +600,13 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     Arc::clone(&request.services.filesystem),
                     &request.input,
                 );
-                let result = self
+                let mut result = self
                     .coding_state
-                    .dispatch(&request)
+                    .dispatch(&coding_request)
                     .await
                     .map_err(coding_error)?;
+                self.append_post_edit_check(metadata.kind, &request, &mut result.output)
+                    .await;
                 (result.output, result.display_preview)
             }
         };
