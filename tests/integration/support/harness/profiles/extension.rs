@@ -27,11 +27,12 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
     capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
     // Hermetic guard: without a test egress, `build_local_runtime` defaults to
     // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
-    // bundled extension capability post-activation, which crosses HTTP.
-    let network_egress: Arc<dyn NetworkHttpEgress> =
-        Arc::new(RecordingNetworkHttpEgress::with_body(
-            br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec(),
-        ));
+    // bundled extension capability post-activation, which crosses HTTP. The
+    // typed recorder is retained so tests can assert on the recorded wire
+    // (`captured_network_requests`).
+    let network_egress = Arc::new(RecordingNetworkHttpEgress::with_body(
+        br#"{"ok":true,"messages":[],"resultSizeEstimate":0}"#.to_vec(),
+    ));
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
@@ -42,7 +43,7 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
             )?),
         )
         .with_seed_extension_credentials()
-        .with_network_http_egress_for_test(network_egress),
+        .with_recording_network_egress(network_egress),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
@@ -275,4 +276,136 @@ fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegist
         ))
         .expect("register capability provider contract");
     contracts
+}
+
+// ── Invented-vendor fixture (extension-runtime P2, overview §8) ─────────────
+
+/// The fixture's native `runtime.service` id, from
+/// `tests/fixtures/extensions/acme-messenger/manifest.toml`.
+pub(crate) const ACME_FIXTURE_SERVICE: &str = "acme-messenger.extension/v1";
+pub(crate) const ACME_SEND_NOTE_CAPABILITY_ID: &str = "acme-messenger.send_note";
+
+fn acme_fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/extensions/acme-messenger")
+}
+
+/// The binary-assembled native factory for the fixture: binds the tool
+/// adapter (routes `send_note`) plus the scripted channel adapter the
+/// binding rule requires for the declared `[channel]`.
+struct AcmeFixtureFactory;
+
+impl ironclaw_extension_host::NativeExtensionFactory for AcmeFixtureFactory {
+    fn service(&self) -> &str {
+        ACME_FIXTURE_SERVICE
+    }
+
+    fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(AcmeFixtureEntrypoint))
+    }
+}
+
+struct AcmeFixtureEntrypoint;
+
+impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            tools: Some(Arc::new(AcmeFixtureToolAdapter)),
+            channel: Some(Arc::new(
+                ironclaw_extension_host::test_support::FakeChannelAdapter::default(),
+            )),
+        })
+    }
+}
+
+struct AcmeFixtureToolAdapter;
+
+#[async_trait::async_trait]
+impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
+    async fn invoke(
+        &self,
+        call: ironclaw_host_api::ToolCall,
+        _ports: &ironclaw_host_api::ToolPorts<'_>,
+    ) -> Result<ironclaw_host_api::ToolResult, ironclaw_host_api::ToolError> {
+        match call.capability_id.as_str() {
+            ACME_SEND_NOTE_CAPABILITY_ID => {
+                let text = call
+                    .input
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let output =
+                    serde_json::json!({"delivered": true, "note_id": "note-1", "text": text});
+                let output_bytes = serde_json::to_vec(&output)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or_default();
+                Ok(ironclaw_host_api::ToolResult {
+                    output,
+                    display_preview: None,
+                    output_bytes,
+                })
+            }
+            _ => Err(ironclaw_host_api::ToolError::Failed {
+                kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
+                safe_summary: None,
+            }),
+        }
+    }
+}
+
+/// The extension-lifecycle profile extended with the invented-vendor fixture:
+/// its assets copied into the storage root pre-build (the catalog discovers
+/// them), its native factory assembled into the composition input, its tool
+/// granted, and its provider trusted — the acme lifecycle then runs through
+/// the REAL facade (install → activate → dispatch-from-snapshot → remove).
+pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = extension_lifecycle_tools_profile()?;
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::CapabilityId::new(
+            ACME_SEND_NOTE_CAPABILITY_ID,
+        )?);
+    // The real Slack package's five tools (TOOL-7 drives them through the
+    // generic dispatcher post-activation).
+    for slack_tool in [
+        "slack.search_messages",
+        "slack.list_conversations",
+        "slack.get_conversation_history",
+        "slack.get_user_info",
+        "slack.send_message",
+    ] {
+        profile
+            .capability_ids
+            .push(ironclaw_host_api::CapabilityId::new(slack_tool)?);
+    }
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ExtensionId::new("acme-messenger")?,
+            local_dev_all_effects(),
+        ));
+        trust.push((
+            ironclaw_host_api::ExtensionId::new("slack")?,
+            local_dev_all_effects(),
+        ));
+    }
+    profile.options = profile
+        .options
+        .with_fixture_extension_dir(acme_fixture_dir(), "acme-messenger")
+        .with_native_extension_factory(Arc::new(AcmeFixtureFactory));
+    Ok(profile)
+}
+
+pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+    extension_runtime_acme_tools_profile()?.build().await
 }

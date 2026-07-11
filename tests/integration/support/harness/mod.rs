@@ -489,12 +489,21 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_facade,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
+            fixture_extension_dirs,
+            native_extension_factories,
+            recording_network_egress,
             project_service_fault_injection,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        // Fixture extensions land on disk before composition builds so the
+        // available-extension catalog discovers them.
+        for (source, extension_id) in &fixture_extension_dirs {
+            let target = storage_root.join("system/extensions").join(extension_id);
+            copy_dir_recursive(source, &target)?;
+        }
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {
@@ -517,6 +526,9 @@ impl HostRuntimeCapabilityHarness {
         }
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
+        }
+        if !native_extension_factories.is_empty() {
+            input = input.with_native_extension_factories(native_extension_factories);
         }
         let services = build_reborn_services(input).await?;
         if seed_extension_credentials {
@@ -647,7 +659,7 @@ impl HostRuntimeCapabilityHarness {
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
-            network_egress: None,
+            network_egress: recording_network_egress,
             real_egress_transport: None,
             process_port: None,
             profile_filesystem,

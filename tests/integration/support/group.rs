@@ -160,9 +160,10 @@ pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) struct GroupSharedStorage {
     /// Thread history + turn state composite, shared across all threads.
     pub(crate) composite: Arc<CompositeRootFilesystem>,
-    /// Path to the on-disk SQLite file for `StorageMode::LibSql`; `None` for
-    /// `StorageMode::InMemory`. Used by `assert_reply_persists_after_reopen`.
-    pub(crate) libsql_db_path: Option<PathBuf>,
+    /// Fresh-connection reopen handle per storage mode (SQLite file path /
+    /// Postgres URL + live container). Used by
+    /// `assert_reply_persists_after_reopen`.
+    pub(crate) storage_reopen: super::builder::StorageReopen,
     /// Durable root TempDir: keeps the composite's on-disk files alive for
     /// the group's lifetime. `Drop` deletes the directory (req 3).
     pub(crate) turn_root: Arc<tempfile::TempDir>,
@@ -484,7 +485,7 @@ impl RebornIntegrationGroup {
 struct GroupBaseData {
     product_harness: RebornProductWorkflowHarness,
     composite: Arc<CompositeRootFilesystem>,
-    libsql_db_path: Option<PathBuf>,
+    storage_reopen: super::builder::StorageReopen,
     turn_root: Arc<tempfile::TempDir>,
     /// A throwaway probe binding resolved once at group construction, used
     /// ONLY to derive the group-level shared turn store path and the
@@ -580,7 +581,7 @@ impl RebornIntegrationGroupBuilder {
         );
         let product_harness = RebornProductWorkflowHarness::filesystem_temp(scope)?;
         let turn_root = Arc::new(tempfile::tempdir()?);
-        let (composite, libsql_db_path) =
+        let (composite, storage_reopen) =
             build_storage_composite(self.storage, turn_root.path()).await?;
 
         // Resolve the group-canonical binding ONCE here so `into_group` can
@@ -609,7 +610,7 @@ impl RebornIntegrationGroupBuilder {
         Ok(GroupBaseData {
             product_harness,
             composite,
-            libsql_db_path,
+            storage_reopen,
             turn_root,
             canonical_binding,
         })
@@ -897,7 +898,7 @@ impl RebornIntegrationGroupBuilder {
         Ok(RebornIntegrationGroup {
             shared: Arc::new(GroupSharedStorage {
                 composite: base.composite,
-                libsql_db_path: base.libsql_db_path,
+                storage_reopen: base.storage_reopen,
                 turn_root: base.turn_root,
                 product_harness: base.product_harness,
                 capability,

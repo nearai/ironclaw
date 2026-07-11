@@ -59,6 +59,14 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Extension-lifecycle group extended with the invented-vendor fixture
+    /// (native factory + on-disk assets): drives the full generic runtime
+    /// path — install → activate → dispatch-from-snapshot → remove — with
+    /// no real product (extension-runtime P2).
+    pub async fn extension_runtime_acme() -> HarnessResult<Self> {
+        Self::builder().extension_runtime_acme().await
+    }
+
     /// Group with the two-capability visibility-probe fixture published into
     /// the active registry and BOTH capabilities granted, so tests can pin
     /// that only the manifest `visibility` value keeps the `host_internal`
@@ -252,6 +260,15 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::extension::extension_lifecycle_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build the invented-vendor fixture group. See
+    /// [`RebornIntegrationGroup::extension_runtime_acme`].
+    pub async fn extension_runtime_acme(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            super::super::harness::profiles::extension::extension_runtime_acme_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

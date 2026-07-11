@@ -90,6 +90,27 @@ pub enum StorageMode {
     /// Real SQLite on a per-test `TempDir`: full SQL + migrations + CAS.
     /// Enables `assert_reply_persists_after_reopen`.
     LibSql,
+    /// Real PostgreSQL in a per-`build()` testcontainer: full SQL +
+    /// migrations. Requires a reachable Docker daemon — provisioning
+    /// failure FAILS the test (REL-3: a Postgres skip is a failure, not a
+    /// pass; locally run `colima start` / start Docker first).
+    Postgres,
+}
+
+/// How a reopen assertion gets a genuinely fresh storage connection, per
+/// [`StorageMode`]. Postgres keeps the container handle alive for the
+/// group's lifetime (dropping it kills the database).
+pub(crate) enum StorageReopen {
+    None,
+    LibSql {
+        db_path: PathBuf,
+    },
+    Postgres {
+        database_url: String,
+        _container: testcontainers_modules::testcontainers::ContainerAsync<
+            testcontainers_modules::postgres::Postgres,
+        >,
+    },
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -864,7 +885,33 @@ impl RebornIntegrationHarness {
     /// re-instantiates the service over the same in-process handle — asserts
     /// re-instantiation only, not durability (nothing on disk to read back).
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
-        if let Some(db_path) = &self._shared.libsql_db_path {
+        if let StorageReopen::Postgres { database_url, .. } = &self._shared.storage_reopen {
+            // A genuinely fresh pool + composite over the same database —
+            // independent of the live `Arc` (migrations are idempotent and
+            // dedup per schema key).
+            let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+                postgres_pool(database_url)?,
+            ));
+            filesystem
+                .run_migrations()
+                .await
+                .map_err(|error| format!("Postgres reopen migrations failed: {error}"))?;
+            let mut fresh_composite = CompositeRootFilesystem::new();
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut fresh_composite,
+                filesystem,
+            )?;
+            let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
+                self.thread_harness.scope.clone(),
+                Arc::new(fresh_composite),
+                Arc::clone(&self._shared.turn_root),
+            )?;
+            return fresh_harness
+                .assert_final_reply(self.binding.thread_id.clone(), text)
+                .await
+                .map_err(Into::into);
+        }
+        if let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen {
             // Open a fresh composite — independent of the live one.
             // `libsql::Builder::new_local` opens (or creates) the file at `db_path`;
             // under the M1 mutation (LibSql → InMemory) the file does not exist and
@@ -901,11 +948,9 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         expected_gate_ref: &GateRef,
     ) -> HarnessResult<()> {
-        let db_path = self
-            ._shared
-            .libsql_db_path
-            .as_ref()
-            .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
+        let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen else {
+            return Err("assert_gate_survives_reopen requires StorageMode::LibSql".into());
+        };
         let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
         let fresh_turn_store = FilesystemTurnStateStore::new(scoped_turns_fs_composite(
             fresh_composite,
@@ -1132,6 +1177,13 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
         let mut all = self.capability_recorder.network_http_requests();
         all.split_off(self.baseline_network_count)
+    }
+
+    /// Test-visible twin of [`Self::captured_network_requests`] for suites
+    /// asserting raw recorded wire requests (vendor host + injected
+    /// credential), baseline-sliced per thread like every other seam.
+    pub(crate) fn captured_network_requests_for_test(&self) -> Vec<NetworkHttpRequest> {
+        self.captured_network_requests()
     }
 
     /// S1 seam: every request that reached the real-egress-pipeline's
@@ -1682,15 +1734,15 @@ async fn reopen_fresh_libsql_composite(
 pub(crate) async fn build_storage_composite(
     mode: StorageMode,
     dir: &Path,
-) -> HarnessResult<(Arc<CompositeRootFilesystem>, Option<PathBuf>)> {
+) -> HarnessResult<(Arc<CompositeRootFilesystem>, StorageReopen)> {
     let mut composite = CompositeRootFilesystem::new();
-    let db_path = match mode {
+    let reopen = match mode {
         StorageMode::InMemory => {
             ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
-            None
+            StorageReopen::None
         }
         StorageMode::LibSql => {
             ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
@@ -1699,10 +1751,85 @@ pub(crate) async fn build_storage_composite(
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
-            Some(dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME))
+            StorageReopen::LibSql {
+                db_path: dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME),
+            }
+        }
+        StorageMode::Postgres => {
+            let (container, database_url) = start_postgres_testcontainer().await?;
+            let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+                postgres_pool(&database_url)?,
+            ));
+            filesystem
+                .run_migrations()
+                .await
+                .map_err(|error| format!("Postgres migrations failed: {error}"))?;
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut composite,
+                filesystem,
+            )?;
+            StorageReopen::Postgres {
+                database_url,
+                _container: container,
+            }
         }
     };
-    Ok((Arc::new(composite), db_path))
+    Ok((Arc::new(composite), reopen))
+}
+
+/// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
+/// a test failure (REL-3): in CI it panics with the docker context; locally
+/// the message names the fix.
+async fn start_postgres_testcontainer() -> HarnessResult<(
+    testcontainers_modules::testcontainers::ContainerAsync<
+        testcontainers_modules::postgres::Postgres,
+    >,
+    String,
+)> {
+    use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+    let image = testcontainers_modules::postgres::Postgres::default()
+        .with_db_name("ironclaw_test")
+        .with_user("postgres")
+        .with_password("postgres")
+        .with_tag("16-alpine");
+    let unavailable = |error: String| -> String {
+        if std::env::var("CI").is_ok() {
+            panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");
+        }
+        format!(
+            "StorageMode::Postgres requires a reachable Docker daemon \
+             (locally: `colima start` or start Docker Desktop; a Postgres \
+             skip is a failure per REL-3): {error}"
+        )
+    };
+    let container = image
+        .start()
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    let host = container
+        .get_host()
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    Ok((
+        container,
+        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+    ))
+}
+
+pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
+    let config: tokio_postgres::Config = database_url
+        .parse()
+        .map_err(|error| format!("testcontainer database URL must parse: {error}"))?;
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .map_err(|error| format!("Postgres pool must build: {error}").into())
 }
 
 /// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for

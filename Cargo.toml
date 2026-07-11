@@ -282,7 +282,10 @@ ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
 ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0" }
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
-ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
+# Extension-runtime P2: the invented-vendor fixture factory the integration
+# harness registers (`NativeExtensionFactory`), plus scripted channel fakes.
+ironclaw_extension_host = { path = "crates/ironclaw_extension_host", version = "0.1.0", features = ["test-support"] }
+ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0", features = ["postgres"] }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 # W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
@@ -464,6 +467,10 @@ path = "tests/integration/comm_context.rs"
 [[test]]
 name = "reborn_integration_durable"
 path = "tests/integration/durable.rs"
+
+[[test]]
+name = "reborn_integration_extension_runtime"
+path = "tests/integration/extension_runtime.rs"
 
 [[test]]
 name = "reborn_integration_extension_visibility"
