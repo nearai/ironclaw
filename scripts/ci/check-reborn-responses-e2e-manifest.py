@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 
@@ -21,7 +22,7 @@ def test_names(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
         node.name
-        for node in ast.walk(tree)
+        for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name.startswith("test_")
     }
@@ -58,8 +59,13 @@ def main() -> int:
     expected = expected_node_ids()
 
     errors: list[str] = []
-    if len(manifest) != len(manifest_set):
-        errors.append("manifest contains duplicate node ids")
+    duplicates = sorted(
+        selector for selector, count in Counter(manifest).items() if count > 1
+    )
+    if duplicates:
+        errors.append(
+            "manifest contains duplicate node ids:\n  " + "\n  ".join(duplicates)
+        )
 
     missing = sorted(expected - manifest_set)
     extra = sorted(manifest_set - expected)
