@@ -480,6 +480,106 @@ async fn terminal_turn_events_wait_for_next_live_text_projection() {
 }
 
 #[tokio::test]
+async fn webui_event_subscription_terminal_turn_waits_for_live_text_projection() {
+    let tenant_id = TenantId::new("webui-subscription-terminal-live-tenant").unwrap();
+    let user_id = UserId::new("webui-subscription-terminal-live-user").unwrap();
+    let agent_id = AgentId::new("webui-subscription-terminal-live-agent").unwrap();
+    let thread_id = ThreadId::new("webui-subscription-terminal-live-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let mut completed_state = turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1));
+    completed_state.status = TurnStatus::Completed;
+    completed_state.gate_ref = None;
+    let completed_event =
+        TurnLifecycleEvent::from_run_state(&completed_state, TurnEventKind::Completed, None);
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-subscription-terminal-live-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![completed_event],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: completed_state,
+        }),
+    );
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(user_id.clone()),
+    );
+    let live_scope = scope.clone();
+    let live_user_id = user_id.clone();
+    let publish_live_text = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        sink.publish_loop_milestone(LoopHostMilestone {
+            scope: live_scope,
+            actor: Some(TurnActor::new(live_user_id)),
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::ModelTextDelta {
+                safe_text: "subscription terminal waited for live text".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut subscription = services
+        .webui_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_millis(250), subscription.next())
+        .await
+        .expect("subscription should emit live text before terminal turn")
+        .expect("subscription should stay open")
+        .expect("first projection event should succeed");
+    let second = tokio::time::timeout(Duration::from_millis(250), subscription.next())
+        .await
+        .expect("subscription should emit terminal turn after live text")
+        .expect("subscription should stay open")
+        .expect("second projection event should succeed");
+    publish_live_text.await.unwrap();
+
+    assert!(
+        matches!(
+            first.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Text { body, .. }
+                        if body == "subscription terminal waited for live text"
+                ))
+        ),
+        "live text projection must be emitted before terminal turn status: {first:#?}"
+    );
+    assert!(
+        matches!(
+            second.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::RunStatus { status, .. }
+                        if status == "completed"
+                ))
+        ),
+        "terminal turn status must follow live text projection: {second:#?}"
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_drains_capability_activity_from_projection() {
     let tenant_id = TenantId::new("webui-activity-tenant").unwrap();
     let user_id = UserId::new("webui-activity-user").unwrap();

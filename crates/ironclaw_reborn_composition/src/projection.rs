@@ -410,7 +410,10 @@ impl WebuiRuntimeProjectionStream {
         let mut turn_wakes = self.turn_event_wake_source.subscribe();
         if !is_resuming_runtime_payloads {
             let mut batch = WebuiProjectionBatch::new(cursor.clone());
-            if let Err(error) = self.append_turn_events(&mut batch, None, &request).await {
+            if let Err(error) = self
+                .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                .await
+            {
                 send_projection_subscription_error(&sender, error).await;
                 return;
             }
@@ -442,21 +445,25 @@ impl WebuiRuntimeProjectionStream {
                     }
 
                     let mut batch = WebuiProjectionBatch::new(cursor.clone());
-                    let keep_consuming = match consume_buffered_runtime_items(
-                        &mut subscription,
-                        &mut batch,
-                        &request.scope,
-                        self.display_previews.as_ref(),
-                    )
-                    .await
-                    {
+                    let buffered_result =
+                        consume_buffered_runtime_items_preserving_initial_order(
+                            &mut subscription,
+                            &mut batch,
+                            &request.scope,
+                            self.display_previews.as_ref(),
+                        )
+                        .await;
+                    let keep_consuming = match buffered_result {
                         Ok(keep_consuming) => keep_consuming,
                         Err(error) => {
                             send_projection_subscription_error(&sender, error).await;
                             return;
                         }
                     };
-                    if let Err(error) = self.append_turn_events(&mut batch, None, &request).await {
+                    if let Err(error) = self
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .await
+                    {
                         send_projection_subscription_error(&sender, error).await;
                         return;
                     }
@@ -473,19 +480,30 @@ impl WebuiRuntimeProjectionStream {
             }
         };
         let mut batch = WebuiProjectionBatch::new(cursor.clone());
-        let buffered = if is_resuming_runtime_payloads {
-            Vec::new()
-        } else {
+        let order_as_initial_runtime = batch.needs_initial_runtime_ordering();
+        let buffered = if order_as_initial_runtime {
             collect_buffered_runtime_items(&mut subscription)
+        } else {
+            Vec::new()
         };
-        let first_result = push_ordered_initial_runtime_items(
-            &mut batch,
-            first,
-            buffered,
-            &request.scope,
-            self.display_previews.as_ref(),
-        )
-        .await;
+        let first_result = if order_as_initial_runtime {
+            push_ordered_initial_runtime_items(
+                &mut batch,
+                first,
+                buffered,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await
+        } else {
+            push_runtime_item(
+                &mut batch,
+                first,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await
+        };
         let mut keep_consuming = match first_result {
             Ok(keep_consuming) => keep_consuming,
             Err(error) => {
@@ -493,7 +511,7 @@ impl WebuiRuntimeProjectionStream {
                 return;
             }
         };
-        if keep_consuming && !is_resuming_runtime_payloads {
+        if keep_consuming && order_as_initial_runtime {
             keep_consuming = match consume_buffered_runtime_items(
                 &mut subscription,
                 &mut batch,
@@ -767,7 +785,17 @@ async fn drain_runtime_items_before_terminal_turn(
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
 ) -> Result<(), ProductAdapterError> {
-    consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
+    if batch.needs_initial_runtime_ordering() {
+        consume_buffered_runtime_items_preserving_initial_order(
+            subscription,
+            batch,
+            scope,
+            display_previews,
+        )
+        .await?;
+    } else {
+        consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
+    }
     if !batch.has_runtime_payload_capacity() {
         return Ok(());
     }
@@ -776,12 +804,40 @@ async fn drain_runtime_items_before_terminal_turn(
         .ok()
         .flatten();
     if let Some(item) = item {
-        let keep_consuming = push_runtime_item(batch, item, scope, display_previews).await?;
+        let keep_consuming = if batch.needs_initial_runtime_ordering() {
+            let buffered = collect_buffered_runtime_items(subscription);
+            push_ordered_initial_runtime_items(batch, item, buffered, scope, display_previews)
+                .await?
+        } else {
+            push_runtime_item(batch, item, scope, display_previews).await?
+        };
         if keep_consuming {
             consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
         }
     }
     Ok(())
+}
+
+async fn consume_buffered_runtime_items_preserving_initial_order(
+    subscription: &mut EventProjectionSubscription,
+    batch: &mut WebuiProjectionBatch,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<bool, ProductAdapterError> {
+    if !batch.needs_initial_runtime_ordering() {
+        return consume_buffered_runtime_items(subscription, batch, scope, display_previews).await;
+    }
+    let Some(first) = subscription.try_next_buffered() else {
+        return Ok(true);
+    };
+    let buffered = collect_buffered_runtime_items(subscription);
+    let keep_consuming =
+        push_ordered_initial_runtime_items(batch, first, buffered, scope, display_previews).await?;
+    if keep_consuming {
+        consume_buffered_runtime_items(subscription, batch, scope, display_previews).await
+    } else {
+        Ok(false)
+    }
 }
 
 async fn push_ordered_initial_runtime_items(
@@ -931,6 +987,15 @@ impl WebuiProjectionBatch {
 
     fn cursor(&self) -> &WebuiProjectionCursor {
         &self.cursor
+    }
+
+    fn needs_initial_runtime_ordering(&self) -> bool {
+        self.runtime_payloads_pushed == 0
+            && self.pending_runtime_cursor_advance.is_none()
+            && self.cursor.runtime.is_none()
+            && self.cursor.live.is_none()
+            && self.cursor.runtime_item.is_none()
+            && self.cursor.runtime_payloads_delivered == 0
     }
 
     fn push_durable_runtime_payloads(
