@@ -862,6 +862,10 @@ registerPack("zh-CN", {
   "ext.registry.emptyDesc": "所有可用扩展已安装，或未配置注册表。",
   "ext.registry.availableTitle": "可用扩展",
   "ext.registry.noMatch": "没有扩展符合筛选条件。",
+  "ext.registry.import": "导入",
+  "ext.registry.importing": "正在导入…",
+  "ext.registry.importSuccess": "工具已导入 — 请从注册表安装。",
+  "ext.registry.importFailed": "导入失败",
 
   // Chat — history
   "chat.history.loading": "加载中...",
@@ -1075,6 +1079,13 @@ registerPack("zh-CN", {
   "admin.dashboard.jobs": "任务",
   "admin.dashboard.lastActive": "最后活跃",
 
+  // Admin — relative time
+  "admin.relative.never": "从未",
+  "admin.relative.justNow": "刚刚",
+  "admin.relative.minutesAgo": "{count} 分钟前",
+  "admin.relative.hoursAgo": "{count} 小时前",
+  "admin.relative.daysAgo": "{count} 天前",
+
   // Admin — users list
   "admin.users.user": "用户",
   "admin.users.userFallback": "用户",
@@ -1085,6 +1096,8 @@ registerPack("zh-CN", {
   "admin.users.filter.active": "活跃",
   "admin.users.filter.suspended": "已停用",
   "admin.users.filter.admins": "管理员",
+  "admin.users.status.active": "活跃",
+  "admin.users.status.suspended": "已停用",
   "admin.users.newUser": "新建用户",
   "admin.users.createUser": "创建用户",
   "admin.users.creating": "创建中…",
@@ -1199,6 +1212,8 @@ registerPack("zh-CN", {
   "extensions.reconfigure": "重新配置",
   "extensions.configureName": "配置 {name}",
   "extensions.allInstalled": "所有已安装扩展",
+  "extensions.scope.shared": "共享",
+  "extensions.scope.private": "我的",
   "mcp.installed": "已安装的 MCP 服务",
   "extensions.oneCapability": "1 个能力",
   "extensions.pluralCapabilities": "{count} 个能力",

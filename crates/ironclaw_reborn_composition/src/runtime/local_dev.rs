@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex as StdMutex},
 };
 
@@ -81,6 +81,8 @@ pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use project_create::wrap_project_create_capability_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use refreshing_capability_port::create_refreshing_local_dev_capability_port_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
@@ -248,6 +250,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
             external_tool_catalog: Arc::clone(&self.external_tool_catalog),
+            // Test-support-only knobs (see each field's doc-comment on
+            // `RefreshingLocalDevCapabilityPortConfig`): always empty here.
+            capability_execution_mount_overrides: HashMap::new(),
+            additional_provider_trust: BTreeMap::new(),
+            capability_id_filter: HashSet::new(),
         })
         .await
     }
@@ -987,6 +994,14 @@ fn local_dev_visible_capability_request(
     inputs: LocalDevVisibleCapabilityInputs<'_>,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
+    // Resolved BEFORE grant minting: extension grants are filtered per caller
+    // (#5459 P1 — user-private installs mint grants only for their owner).
+    let user_id = run_context
+        .scope
+        .explicit_owner_user_id()
+        .cloned()
+        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
+        .unwrap_or_else(|| fallback_user_id.clone());
     let mut grants = inputs.policy.builtin_grants(
         &extension_id,
         inputs.workspace_mounts,
@@ -996,13 +1011,7 @@ fn local_dev_visible_capability_request(
     );
     grants
         .grants
-        .extend(inputs.extension_surface.grants(&extension_id));
-    let user_id = run_context
-        .scope
-        .explicit_owner_user_id()
-        .cloned()
-        .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
-        .unwrap_or_else(|| fallback_user_id.clone());
+        .extend(inputs.extension_surface.grants(&extension_id, &user_id));
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
@@ -1037,7 +1046,7 @@ fn local_dev_visible_capability_request(
             evaluated_at: Utc::now(),
         },
     );
-    provider_trust.extend(inputs.extension_surface.provider_trust());
+    provider_trust.extend(inputs.extension_surface.provider_trust(&context.user_id));
 
     Ok(HostVisibleCapabilityRequest::new(
         context,

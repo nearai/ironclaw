@@ -219,7 +219,7 @@ has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
-  "crates/ironclaw_reborn/CLAUDE.md" \
+  "crates/ironclaw_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

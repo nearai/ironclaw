@@ -262,6 +262,10 @@ async def test_reborn_legacy_sse_error_reconnect_resumes_after_last_cursor(
             if (typeof stream.onerror !== "function") {
               throw new Error("EventSource has no error handler");
             }
+            // Model a terminal EventSource failure so useSSE exercises its
+            // explicit fresh-stream fallback, rather than the browser-native
+            // reconnect watchdog path.
+            stream.readyState = 2;
             stream.onerror(new Event("error"));
           };
         })();

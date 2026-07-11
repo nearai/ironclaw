@@ -42,6 +42,12 @@ SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
     "AUTH_LIVE_SLACK_USER_TOKEN",
     "REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN",
 ]
+# Optional SECOND human identity (a dedicated canary user, distinct from the
+# connected personal account AND from the bot). Arms that strictly need a
+# second HUMAN actor must assert this env and fail loudly when it is absent —
+# never silently skip. Today no default-wired case hard-requires it; the bot
+# token is actor B wherever a bot can act.
+SLACK_SECOND_USER_TOKEN_ENV = "AUTH_LIVE_SLACK_SECOND_USER_TOKEN"
 SLACK_PERSONAL_OAUTH_SCOPES = [
     "search:read",
     "channels:history",

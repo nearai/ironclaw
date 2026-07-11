@@ -1,5 +1,7 @@
 //! Caller-level tests for Reborn WebUI v2 product-auth OAuth routes.
 
+// arch-exempt: large_file, caller-level product-auth route regression coverage, plan #5905
+
 #![cfg(feature = "webui-v2-beta")]
 
 use std::net::SocketAddr;
@@ -2061,7 +2063,10 @@ async fn product_auth_callback_malformed_flow_id_uses_sanitized_error() {
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_oauth_serve {
     use super::*;
-    use ironclaw_reborn_composition::{OAuthRedirectUri, SlackPersonalSetupServiceSlot};
+    use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_reborn_composition::{
+        OAuthRedirectUri, SlackPersonalOAuthBindingConfig, SlackPersonalSetupServiceSlot,
+    };
 
     const SLACK_PERSONAL_CALLBACK_PATH: &str =
         "/api/reborn/product-auth/oauth/slack_personal/callback";
@@ -2090,6 +2095,11 @@ mod slack_personal_oauth_serve {
             product_auth: Some(product_auth),
             readiness: RebornReadiness::disabled(),
         };
+        let binding = SlackPersonalOAuthBindingConfig::in_memory_for_tests(
+            TenantId::new(TENANT).expect("tenant"),
+            AdapterInstallationId::new("install-test").expect("installation"),
+        )
+        .expect("in-memory Slack OAuth binding config");
         let config = WebuiServeConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             Arc::new(OnlyValidToken),
@@ -2097,7 +2107,8 @@ mod slack_personal_oauth_serve {
         )
         .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
         .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-        .with_slack_personal_oauth(slack_personal_slot().await);
+        .with_slack_personal_oauth(slack_personal_slot().await)
+        .with_slack_personal_oauth_binding(binding);
         webui_v2_app(bundle, config).expect("webui v2 app")
     }
 
@@ -2136,8 +2147,13 @@ mod slack_personal_oauth_serve {
 
         let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
 
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
         let body = read_body_string(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected OAuth start body: {body}"
+        );
         let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
         let authorization_url = json["authorization_url"]
             .as_str()
