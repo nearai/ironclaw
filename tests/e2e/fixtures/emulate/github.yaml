@@ -4,12 +4,20 @@ tokens:
     scopes:
       - repo
       - user
+  ghp_emulate_github_secondary_token:
+    login: reborn-reviewer
+    scopes:
+      - repo
+      - user
 
 github:
   users:
     - login: reborn-dev
       name: Reborn Dev
       email: reborn-dev@example.com
+    - login: reborn-reviewer
+      name: Reborn Reviewer
+      email: reborn-reviewer@example.com
   orgs:
     - login: nearai
       name: NEAR AI

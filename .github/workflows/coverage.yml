@@ -305,8 +305,29 @@ jobs:
     if: always()
     needs: [coverage, e2e-coverage]
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - run: |
-          if [[ "${{ needs.coverage.result }}" != "success" || "${{ needs.e2e-coverage.result }}" != "success" ]]; then
+          # shellcheck disable=SC1091
+          if ! source .github/scripts/ci-job-result-ok.sh; then
+            echo "Unable to source .github/scripts/ci-job-result-ok.sh"
+            exit 1
+          fi
+
+          failures=0
+
+          if ! job_result_ok "coverage" "${{ needs.coverage.result }}" false "superseded_only"; then
+            echo "Coverage job failed: ${{ needs.coverage.result }}"
+            failures=$((failures + 1))
+          fi
+          if ! job_result_ok "e2e-coverage" "${{ needs.e2e-coverage.result }}" false "superseded_only"; then
+            echo "E2E coverage job failed: ${{ needs.e2e-coverage.result }}"
+            failures=$((failures + 1))
+          fi
+
+          if [[ "${failures}" -gt 0 ]]; then
             echo "One or more coverage jobs failed"
             exit 1
           fi
