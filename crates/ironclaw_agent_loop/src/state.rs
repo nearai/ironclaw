@@ -55,12 +55,6 @@ pub struct LoopExecutionState {
     pub result_refs: Vec<LoopResultRef>,
     pub last_gate: Option<LoopGateRef>,
     pub input_cursor: LoopInputCursor,
-    /// Cursor to use for the next prompt context after draining queued
-    /// user-facing input. This intentionally lags behind `input_cursor` so the
-    /// message can be acked without disappearing from the prompt bundle's
-    /// `after` window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_context_cursor: Option<LoopInputCursor>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
 
     // executor-observed (populated by executor; read-only to strategies)
@@ -264,7 +258,6 @@ impl LoopExecutionState {
             result_refs: Vec::new(),
             last_gate: None,
             input_cursor: LoopInputCursor::origin_for_run(context),
-            prompt_context_cursor: None,
             surface_version: None,
             recent_call_signatures: BoundedRing::new(),
             seen_capability_output_digests: BoundedRing::new(),

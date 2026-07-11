@@ -59,11 +59,6 @@ pub(super) async fn try_final_answer_nudge(
     // `None`s) is what actually forces a tool-free provider call. See the comment
     // on `LoopModelRequest.capability_view` construction further down.
     let context_plan = ctx.planner.context().plan_context_request(state).await;
-    // Consume the prompt-context handoff once, mirroring the main prompt-build
-    // path (`BuiltPromptBundle`). This nudge builds its own prompt bundle from
-    // the plan, so the lagging cursor must be cleared here too — otherwise it
-    // would persist in the checkpointed final state.
-    state.prompt_context_cursor = None;
     let mut request = context_plan.request;
     request.surface_version = None;
     request.capability_view = None;

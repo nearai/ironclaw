@@ -111,7 +111,6 @@ impl BuiltPromptBundle {
         let bundle =
             build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view, None)
                 .await?;
-        state.prompt_context_cursor = None;
         refresh_compaction_prompt_from_index(state, &bundle.compaction_message_index);
         Ok(bundle)
     }
@@ -120,7 +119,6 @@ impl BuiltPromptBundle {
         self,
         state: &mut LoopExecutionState,
     ) -> Vec<LoopModelMessage> {
-        state.prompt_context_cursor = None;
         refresh_compaction_prompt_from_index(state, &self.compaction_message_index);
         self.messages
     }
