@@ -41,24 +41,9 @@ pub(crate) struct ArgsParseError {
 /// accepted — `Ok` is returned. Callers decide whether a non-object shape
 /// should be rejected. Only a parse failure produces `Err`.
 pub(crate) fn parse_tool_call_args(raw: &str) -> Result<Value, ArgsParseError> {
-    // Some tool-capable reasoning models append a stray token after a complete
-    // JSON arguments object (`{...}` + junk). A strict `from_str` rejects that as
-    // "trailing characters". On the streaming tool-call path
-    // (`NearAiStreamingToolCallState::into_tool_call`), `parse_tool_call_args_lossy`
-    // then collapses the arguments to an empty `{}` (recording an
-    // `arguments_parse_error`), so the tool is invoked with the model's real
-    // arguments silently dropped. Take the first complete JSON value and ignore
-    // any trailing content; only empty or genuinely malformed input errors.
-    let mut values = serde_json::Deserializer::from_str(raw).into_iter::<Value>();
-    match values.next() {
-        Some(Ok(value)) => Ok(value),
-        Some(Err(error)) => Err(ArgsParseError {
-            reason: format!("failed to parse tool-call arguments JSON: {error}"),
-        }),
-        None => Err(ArgsParseError {
-            reason: "failed to parse tool-call arguments JSON: empty input".to_owned(),
-        }),
-    }
+    serde_json::from_str(raw).map_err(|e| ArgsParseError {
+        reason: format!("failed to parse tool-call arguments JSON: {e}"),
+    })
 }
 
 /// Migration helper: silent-`{}` fallback with error capture.
@@ -82,6 +67,36 @@ pub(crate) fn parse_tool_call_args_lossy(raw: &str) -> (Value, Option<String>) {
     match parse_tool_call_args(raw) {
         Ok(v) => (v, None),
         Err(ArgsParseError { reason }) => (Value::Object(serde_json::Map::new()), Some(reason)),
+    }
+}
+
+/// Streaming-salvage variant of [`parse_tool_call_args_lossy`].
+///
+/// Some streaming providers (e.g. NearAI reasoning models like DeepSeek) append
+/// a stray token after a complete arguments object (`{...}` + junk). This parses
+/// the **first** complete JSON value and ignores any trailing content, then
+/// falls back to the same silent-`{}` + captured-`reason` behavior as
+/// [`parse_tool_call_args_lossy`] on empty or genuinely malformed input.
+///
+/// Kept as a separate, explicitly-named helper so this permissive "ignore
+/// trailing junk" behavior stays scoped to the streaming path and does **not**
+/// loosen the shared, fail-loud [`parse_tool_call_args`] boundary that other
+/// providers rely on.
+pub(crate) fn parse_tool_call_args_allow_trailing_lossy(raw: &str) -> (Value, Option<String>) {
+    // A clean parse (no trailing junk) is handled by the shared lossy helper.
+    let lossy = parse_tool_call_args_lossy(raw);
+    if lossy.1.is_none() {
+        return lossy;
+    }
+    // The strict parse rejected the input. If it is a valid JSON value followed
+    // by a stray trailing token (streaming reasoning models do this), recover the
+    // leading value; otherwise keep the lossy `{}` + captured reason.
+    match serde_json::Deserializer::from_str(raw)
+        .into_iter::<Value>()
+        .next()
+    {
+        Some(Ok(value)) => (value, None),
+        _ => lossy,
     }
 }
 
@@ -154,19 +169,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_ignores_trailing_content_after_first_value() {
-        // Regression: reasoning models stream a valid arguments object followed
-        // by a stray token. The leading object must be recovered, not rejected
-        // as "trailing characters" (which otherwise silently dropped the args
-        // to `{}` on the streaming path).
-        let result = parse_tool_call_args(r#"{"a": 2} x"#).expect("leading object should parse");
-        assert_eq!(result["a"], 2);
-
-        // And through the lossy wrapper: the real arguments survive with no
-        // captured parse error, rather than collapsing to `{}`.
-        let (val, err) = parse_tool_call_args_lossy(r#"{"query": "test"}trailing"#);
+    fn allow_trailing_lossy_recovers_first_value() {
+        // The streaming salvage helper recovers the leading object when a
+        // reasoning model appends a stray token after it, instead of dropping
+        // the arguments to `{}`.
+        let (val, err) = parse_tool_call_args_allow_trailing_lossy(r#"{"query": "test"}trailing"#);
         assert_eq!(val["query"], "test");
         assert!(err.is_none());
+
+        // Genuinely malformed input still fails closed to `{}` + a captured reason.
+        let (val, err) = parse_tool_call_args_allow_trailing_lossy(r#"{not valid"#);
+        assert!(val.as_object().expect("object").is_empty());
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn parse_tool_call_args_stays_strict_on_trailing_content() {
+        // The shared, fail-loud primitive must NOT accept concatenated or
+        // trailing output — only the streaming salvage helper tolerates it.
+        // Guards against loosening the canonical boundary for other providers.
+        assert!(parse_tool_call_args(r#"{"a": 2} x"#).is_err());
+        assert!(parse_tool_call_args(r#"{}{}"#).is_err());
     }
 
     #[test]

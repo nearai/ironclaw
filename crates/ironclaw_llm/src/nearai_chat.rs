@@ -26,7 +26,7 @@ use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::tool_args::parse_tool_call_args_lossy;
+use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
 #[path = "nearai_tool_message_flattening.rs"]
 mod nearai_tool_message_flattening;
@@ -1604,7 +1604,7 @@ impl NearAiStreamingToolCallState {
             if raw_arguments.is_empty() && !arguments_delta_seen {
                 (serde_json::Value::Object(Default::default()), None)
             } else {
-                parse_tool_call_args_lossy(&raw_arguments)
+                parse_tool_call_args_allow_trailing_lossy(&raw_arguments)
             };
         let arguments_parse_error = arguments_parse_error.map(|parse_error| {
             format!(
