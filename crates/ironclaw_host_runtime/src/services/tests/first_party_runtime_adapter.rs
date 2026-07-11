@@ -1,13 +1,97 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
     DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId,
 };
 use serde_json::json;
 
 use super::*;
+
+#[tokio::test]
+async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_scope() {
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
+    let recorded = Arc::new(Mutex::new(None));
+    let registry = Arc::new(FirstPartyCapabilityRegistry::new().with_handler(
+        descriptor.id.clone(),
+        Arc::new(RecordingActorFirstPartyHandler {
+            recorded: Arc::clone(&recorded),
+        }),
+    ));
+    let adapter = FirstPartyRuntimeAdapter::from_registry(
+        registry,
+        Arc::new(LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(LocalHostProcessPort::new()),
+            None,
+        )),
+    );
+    let filesystem = LocalFilesystem::new();
+    let governor = InMemoryResourceGovernor::new();
+    let mut scope = sample_scope();
+    scope.user_id = UserId::new("shared-subject").expect("valid subject user id");
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+
+    adapter
+        .dispatch_json(RuntimeAdapterRequest {
+            package: &package,
+            descriptor: &descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &descriptor.id,
+            scope,
+            authenticated_actor_user_id: Some(
+                UserId::new("slack-alice").expect("valid authenticated actor user id"),
+            ),
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        })
+        .await
+        .expect("first-party dispatch succeeds");
+
+    let recorded = recorded
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .expect("handler recorded the request");
+    assert_eq!(recorded.0.user_id.as_str(), "shared-subject");
+    assert_eq!(recorded.1.as_ref().map(UserId::as_str), Some("slack-alice"));
+}
+
+type RecordedActorRequest = (ironclaw_host_api::ResourceScope, Option<UserId>);
+
+struct RecordingActorFirstPartyHandler {
+    recorded: Arc<Mutex<Option<RecordedActorRequest>>>,
+}
+
+#[async_trait]
+impl crate::FirstPartyCapabilityHandler for RecordingActorFirstPartyHandler {
+    async fn dispatch(
+        &self,
+        request: crate::FirstPartyCapabilityRequest,
+    ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
+        *self
+            .recorded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((request.scope, request.authenticated_actor_user_id));
+        Ok(crate::FirstPartyCapabilityResult::new(
+            json!({"ok": true}),
+            ironclaw_host_api::ResourceUsage::default(),
+        ))
+    }
+}
 
 #[tokio::test]
 async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_required() {
@@ -45,6 +129,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -107,6 +192,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -161,6 +247,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -224,6 +311,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -279,6 +367,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -464,6 +553,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -563,6 +653,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
         runtime_policy: &policy,
         capability_id: &descriptor.id,
         scope,
+        authenticated_actor_user_id: None,
         estimate,
         mounts: None,
         resource_reservation: None,
@@ -674,6 +765,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
             runtime_policy: &policy,
             capability_id: &descriptor.id,
             scope,
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,

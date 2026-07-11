@@ -20,6 +20,15 @@ pub enum GateResumeDisposition {
     Denied,
 }
 
+impl GateResumeDisposition {
+    /// Stable snake_case value shared with the serde wire representation.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeTurnPrecondition {
@@ -171,7 +180,8 @@ mod tests {
     fn gate_resume_disposition_denied_round_trips() {
         let disposition = GateResumeDisposition::Denied;
         let json = serde_json::to_string(&disposition).expect("serialize");
-        assert!(json.contains("denied"), "wire value is snake_case: {json}");
+        assert_eq!(disposition.as_str(), "denied");
+        assert_eq!(json, format!("\"{}\"", disposition.as_str()));
         let decoded: GateResumeDisposition = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(disposition, decoded);
     }

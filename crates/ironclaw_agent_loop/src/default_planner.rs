@@ -326,7 +326,7 @@ mod tests {
         let planner = DefaultPlanner::compose_default();
         let state = LoopExecutionState::initial_for_run(&test_run_context());
 
-        assert_eq!(planner.budget().iteration_limit(&state), 32);
+        assert_eq!(planner.budget().iteration_limit(&state), 256);
         assert_eq!(planner.batch().policy(&state, &[]), BatchPolicy::Parallel);
 
         let filter = planner.capability().filter(&state).await;

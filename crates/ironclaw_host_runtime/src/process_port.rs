@@ -353,8 +353,12 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
             let _ = kill(-(pid as i32), SIGKILL);
         }
     }
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    if let Err(error) = child.kill().await {
+        tracing::debug!(?error, "best-effort child termination failed");
+    }
+    if let Err(error) = child.wait().await {
+        tracing::debug!(?error, "best-effort reap of terminated child failed");
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +557,8 @@ mod tests {
         .expect("command succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = std::fs::read_to_string(&saved_output.path).expect("saved output readable");
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
         let _ = std::fs::remove_file(&saved_output.path);
 
         assert_eq!(exit_code, 0);

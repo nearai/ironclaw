@@ -813,6 +813,7 @@ mod tests {
             agent_id: Some(agent()),
             project_id: Some(project()),
             prompt: "test trigger prompt".to_string(),
+            delivery_target: None,
         };
         let content_ref =
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
@@ -1061,6 +1062,7 @@ mod tests {
             resolution: ConversationBindingResolution {
                 tenant_id: tenant_id.clone(),
                 actor: actor.clone(),
+                binding_epoch: None,
                 turn_scope: TurnScope::new(
                     tenant_id.clone(),
                     Some(agent()),

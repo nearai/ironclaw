@@ -15,9 +15,9 @@ use ironclaw_turns::{
         LoopCompactionOutcome, LoopCompactionResponse, LoopContextCompactionKind, LoopInput,
         LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef,
         LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
-        ObservationTrust, ParentLoopOutput, ProcessHandleSummary, PromptMode,
-        ProviderToolCallReplay, SameCallRetryConstraint, ToolObservationDetail,
-        ToolObservationStatus, VisibleCapabilityRequest,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ObservationTrust, ParentLoopOutput,
+        ProcessHandleSummary, PromptMode, ProviderToolCallReplay, SameCallRetryConstraint,
+        ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
     },
 };
 
@@ -646,18 +646,20 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_timeout_returns_failed_exit() {
+async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path() {
+    // Simulates the inner `ModelGatewayBackedSystemInferencePort` deadline
+    // firing: it surfaces as `LoopCompactionError::InferenceFailed`, not as
+    // a separate outer race in the executor (that duplicate timeout was
+    // removed — see `await_compaction_with_cancellation`).
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
             LoopContextCompactionKind::User,
             10,
         )])
-        .with_compaction_result(Ok(LoopCompactionResponse {
-            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
-            compression_ratio_ppm: 250_000,
-        }))
-        .with_compaction_delay(std::time::Duration::from_millis(25));
+        .with_compaction_result(Err(LoopCompactionError::InferenceFailed {
+            safe_summary: LoopSafeSummary::new("compaction deadline exceeded").unwrap(),
+        }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
         ..Default::default()
@@ -680,26 +682,43 @@ async fn prompt_stage_compaction_timeout_returns_failed_exit() {
         .await
         .expect("prompt stage");
 
-    match step {
-        PromptStep::Exit(LoopExit::Failed(failed)) => {
-            assert!(failed.checkpoint_id.is_some());
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
+            panic!("unexpected resume step")
         }
-        _ => panic!("expected failed exit"),
-    }
-    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+    };
+    assert_eq!(
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert!(host.checkpoint_kinds().is_empty());
     assert_eq!(
         host.progress_event_names(),
         vec![
             "prompt_bundle_built",
             "compaction_started",
             "compaction_failed",
-            "checkpoint_written",
         ]
     );
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
+async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_path() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
@@ -731,32 +750,41 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
         .await
         .expect("prompt stage");
 
-    match step {
-        PromptStep::Exit(LoopExit::Failed(failed)) => {
-            assert!(failed.checkpoint_id.is_some());
-        }
-        PromptStep::Prepared(_) => panic!("security rejection should end the run"),
+    let output = match step {
+        PromptStep::Prepared(output) => output,
         PromptStep::ResumeApproval(_)
         | PromptStep::ResumeAuth(_)
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
-    }
+    };
+    assert_eq!(
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
     assert_eq!(
         host.prompt_requests().len(),
-        2,
-        "compaction failure should request a best-effort explanation prompt"
+        1,
+        "compaction failure should continue with the existing prompt candidate"
     );
-    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert!(host.checkpoint_kinds().is_empty());
     assert_eq!(
         host.progress_event_names(),
         vec![
             "prompt_bundle_built",
             "compaction_started",
             "compaction_failed",
-            "checkpoint_written",
         ]
     );
 }
@@ -813,6 +841,22 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
         host.prompt_requests().len(),
         1,
         "compaction cancellation should not request a failure explanation prompt"
+    );
+
+    // The Final checkpoint must persist the deferred watermark set by the
+    // failure-fallback path, not just the in-memory Cancelled exit.
+    let final_state = final_staged_state(&host);
+    assert!(
+        !final_state.compaction_state.force_compact_on_next_iteration,
+        "force_compact_on_next_iteration must be cleared before the Final checkpoint"
+    );
+    assert_eq!(
+        final_state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: final_state.compaction_prompt.fingerprint(),
+        }),
+        "deferred watermark must persist through the cancellation checkpoint"
     );
 }
 
@@ -2916,7 +2960,15 @@ async fn capability_abort_finalizes_explanation_and_failed_exit_refs_partial_fir
     );
     let requests = host.model_requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].capability_view.is_none());
+    let explanation_capability_view = requests[1]
+        .capability_view
+        .as_ref()
+        .expect("failure explanation model request must suppress tools");
+    assert!(
+        explanation_capability_view
+            .visible_capability_ids
+            .is_empty()
+    );
     assert!(requests[1].surface_version.is_none());
     assert!(requests[1].model_preference.is_none());
 }
@@ -3423,11 +3475,12 @@ async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result(
 #[tokio::test]
 async fn completed_provider_call_appends_provider_replay_metadata() {
     let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
+    let safe_summary = "a".repeat(300);
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {
             outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: result_ref.clone(),
-                safe_summary: "provider call completed".to_string(),
+                safe_summary: safe_summary.clone(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
@@ -3464,6 +3517,29 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
     );
     assert_eq!(provider_call.reasoning.as_deref(), Some("call reasoning"));
     assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
+    let model_observation = appended[0]
+        .model_observation
+        .as_ref()
+        .expect("model-visible observation");
+    assert_eq!(
+        model_observation.schema_version,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION
+    );
+    assert_eq!(model_observation.status, ToolObservationStatus::Success);
+    assert_eq!(model_observation.summary, safe_summary);
+    assert!(matches!(
+        &model_observation.detail,
+        ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail: None,
+        } if failure_kind.as_str() == "none"
+    ));
+    assert!(model_observation.artifacts.is_empty());
+    assert!(model_observation.recovery.is_none());
+    assert_eq!(
+        model_observation.trust,
+        ObservationTrust::UntrustedToolOutput
+    );
 }
 
 #[tokio::test]
@@ -4596,6 +4672,58 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         final_state.stop_state.turns_completed, 3,
         "turns_completed must be 3 (D-A: CompactionOnly turns count per \
          observe_completed_turn's unconditional increment)"
+    );
+}
+
+#[tokio::test]
+async fn executor_continues_after_forced_compaction_rejection_from_tool_result_overflow() {
+    let host = MockHost::new(vec![
+        calls_response(),
+        reply_response_with_text("final answer"),
+    ])
+    .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+        outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: LoopResultRef::new("result:big-compaction-rejected").expect("valid"),
+            safe_summary: "large search result".to_string(),
+            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+            byte_len: 33_001,
+            output_digest: None,
+        })],
+        stopped_on_suspension: false,
+    }])
+    .with_prompt_compaction_indexes(vec![active_task_preserving_compaction_index(), vec![]])
+    .with_compaction_outcome(Err(LoopCompactionError::SecurityRejected {
+        safe_summary: LoopSafeSummary::new("injection detected").unwrap(),
+    }));
+
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "compaction rejection after successful tool execution must not fail the run: {exit:?}"
+    );
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "the loop should continue to the post-tool reply model turn"
+    );
+    let progress_events = host.progress_event_names();
+    assert!(
+        progress_events.contains(&"compaction_failed"),
+        "the failed compaction should still be reported: {progress_events:?}"
+    );
+    assert!(
+        host.finalized_assistant_messages()
+            .iter()
+            .any(|message| message.contains("final answer")),
+        "the post-tool assistant reply should still finalize"
     );
 }
 
