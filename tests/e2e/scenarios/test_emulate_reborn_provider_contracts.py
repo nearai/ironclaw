@@ -743,8 +743,12 @@ async def test_emulate_google_keeps_seeded_accounts_isolated(emulate_google_serv
         )
         primary_messages.raise_for_status()
         secondary_messages.raise_for_status()
-        primary_ids = {item["id"] for item in primary_messages.json()["messages"]}
-        secondary_ids = {item["id"] for item in secondary_messages.json()["messages"]}
+        primary_ids = {
+            item["id"] for item in primary_messages.json().get("messages", [])
+        }
+        secondary_ids = {
+            item["id"] for item in secondary_messages.json().get("messages", [])
+        }
         assert "msg_emulate_secondary_private" not in primary_ids
         assert "msg_emulate_secondary_private" in secondary_ids
         assert "msg_emulate_unread" in primary_ids
@@ -760,8 +764,12 @@ async def test_emulate_google_keeps_seeded_accounts_isolated(emulate_google_serv
         )
         primary_events.raise_for_status()
         secondary_events.raise_for_status()
-        primary_event_ids = {item["id"] for item in primary_events.json()["items"]}
-        secondary_event_ids = {item["id"] for item in secondary_events.json()["items"]}
+        primary_event_ids = {
+            item["id"] for item in primary_events.json().get("items", [])
+        }
+        secondary_event_ids = {
+            item["id"] for item in secondary_events.json().get("items", [])
+        }
         assert "evt_secondary_private" not in primary_event_ids
         assert "evt_secondary_private" in secondary_event_ids
 
@@ -775,8 +783,12 @@ async def test_emulate_google_keeps_seeded_accounts_isolated(emulate_google_serv
         )
         primary_files.raise_for_status()
         secondary_files.raise_for_status()
-        primary_file_ids = {item["id"] for item in primary_files.json()["files"]}
-        secondary_file_ids = {item["id"] for item in secondary_files.json()["files"]}
+        primary_file_ids = {
+            item["id"] for item in primary_files.json().get("files", [])
+        }
+        secondary_file_ids = {
+            item["id"] for item in secondary_files.json().get("files", [])
+        }
         assert "drv_secondary_private" not in primary_file_ids
         assert "drv_secondary_private" in secondary_file_ids
 
@@ -797,7 +809,7 @@ async def test_emulate_slack_covers_qa9_and_qa10_provider_shapes(
     base_url = emulate_slack_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
         users = await slack_post(client, base_url, "users.list")
-        by_name = {member["name"]: member for member in users["members"]}
+        by_name = {member["name"]: member for member in users.get("members", [])}
         reviewer = by_name["qa-reviewer"]
         no_email_user = by_name["no-email-user"]
 
@@ -815,7 +827,7 @@ async def test_emulate_slack_covers_qa9_and_qa10_provider_shapes(
             "users.info",
             {"user": no_email_user["id"]},
         )
-        assert not no_email["user"].get("profile", {}).get("email")
+        assert not no_email.get("user", {}).get("profile", {}).get("email")
 
         channels = await slack_post(
             client,
@@ -824,7 +836,9 @@ async def test_emulate_slack_covers_qa9_and_qa10_provider_shapes(
             {"types": "public_channel"},
         )
         alerts = next(
-            item for item in channels["channels"] if item["name"] == "reborn-alerts"
+            item
+            for item in channels.get("channels", [])
+            if item["name"] == "reborn-alerts"
         )
 
         missing_scope = await slack_post(
@@ -906,7 +920,7 @@ async def test_emulate_slack_covers_qa9_and_qa10_provider_shapes(
             "conversations.replies",
             {"channel": alerts["id"], "ts": root["ts"]},
         )
-        assert [message["text"] for message in replies["messages"]].count(
+        assert [message["text"] for message in replies.get("messages", [])].count(
             "QA10 visible thread reply"
         ) == 1
 
@@ -985,8 +999,36 @@ async def test_emulate_google_drive_update_roundtrips(emulate_google_server):
     """Pin Drive update semantics in addition to create/read coverage."""
     base_url = emulate_google_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
+        boundary = "reborn-e2e-drive-update"
+        drive_metadata = {
+            "name": "Reborn QA Update Fixture",
+            "mimeType": "text/plain",
+            "parents": ["root"],
+        }
+        multipart_body = (
+            f"--{boundary}\r\n"
+            "Content-Type: application/json; charset=UTF-8\r\n"
+            "\r\n"
+            f"{json.dumps(drive_metadata)}\r\n"
+            f"--{boundary}\r\n"
+            "Content-Type: text/plain\r\n"
+            "\r\n"
+            "Drive update fixture content\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+        created = await client.post(
+            f"{base_url}/upload/drive/v3/files",
+            headers={
+                **google_headers(),
+                "Content-Type": f"multipart/related; boundary={boundary}",
+            },
+            content=multipart_body,
+        )
+        created.raise_for_status()
+        file_id = created.json()["id"]
+
         renamed = await client.patch(
-            f"{base_url}/drive/v3/files/drv_reborn_qa_brief",
+            f"{base_url}/drive/v3/files/{file_id}",
             headers=google_headers(),
             json={"name": "Reborn QA Brief Updated"},
         )
@@ -994,7 +1036,7 @@ async def test_emulate_google_drive_update_roundtrips(emulate_google_server):
         assert renamed.json()["name"] == "Reborn QA Brief Updated"
 
         readback = await client.get(
-            f"{base_url}/drive/v3/files/drv_reborn_qa_brief",
+            f"{base_url}/drive/v3/files/{file_id}",
             headers=google_headers(),
         )
         readback.raise_for_status()
@@ -1064,13 +1106,15 @@ async def test_emulate_github_covers_identity_and_negative_results(
     base_url = emulate_github_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
         primary = await github_json(client, base_url, "GET", "/user")
-        secondary = await client.get(
-            f"{base_url}/user",
-            headers=github_headers(EMULATE_GITHUB_SECONDARY_BEARER),
+        secondary = await github_json(
+            client,
+            base_url,
+            "GET",
+            "/user",
+            token=EMULATE_GITHUB_SECONDARY_BEARER,
         )
-        secondary.raise_for_status()
         assert primary["login"] == "reborn-dev"
-        assert secondary.json()["login"] == "reborn-reviewer"
+        assert secondary["login"] == "reborn-reviewer"
 
         missing = await client.get(
             f"{base_url}/repos/nearai/does-not-exist",

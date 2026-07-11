@@ -71,11 +71,12 @@ async def github_json(
     payload: dict | None = None,
     params: dict | None = None,
     expected_status: int = 200,
+    token: str = EMULATE_GITHUB_BEARER,
 ) -> dict | list:
     response = await client.request(
         method,
         f"{base_url}{path}",
-        headers=github_headers(),
+        headers=github_headers(token),
         json=payload,
         params=params,
     )

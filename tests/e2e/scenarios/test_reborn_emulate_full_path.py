@@ -265,7 +265,7 @@ async def test_reborn_gmail_lifecycle_mutates_emulate(
     readback.raise_for_status()
     message = readback.json()
     assert gmail_header(message, "Subject") == subject
-    assert "TRASH" in message["labelIds"]
+    assert "TRASH" in message.get("labelIds", [])
 
 
 async def test_reborn_slack_delivery_and_github_release_cross_provider_path(
