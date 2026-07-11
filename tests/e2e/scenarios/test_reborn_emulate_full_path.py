@@ -4,7 +4,7 @@ import uuid
 
 import httpx
 
-from emulate_provider import github_json, google_headers
+from emulate_provider import github_json, gmail_header, google_headers
 from reborn_emulate_harness import (
     complete_oauth_setup,
     completed_tool_results,
@@ -209,3 +209,54 @@ async def test_reborn_google_drive_lifecycle_mutates_emulate(
     media.raise_for_status()
     assert metadata.json()["name"] == title
     assert media.text == expected_content
+
+
+async def test_reborn_gmail_lifecycle_mutates_emulate(
+    hosted_google_emulate_server,
+):
+    """Drive the real extension caller through send, readback, and cleanup."""
+    server = hosted_google_emulate_server["base_url"]
+    emulate_google_url = hosted_google_emulate_server["emulate_google_url"]
+
+    await install_extension(server, "gmail")
+    await complete_oauth_setup(server, "gmail", code="mock_auth_code")
+
+    gmail = await get_extension(server, "gmail")
+    assert gmail is not None, (
+        "gmail should be installed; "
+        f"available extensions: {await extension_names(server)}"
+    )
+    assert gmail["authenticated"] is True, gmail
+    assert "gmail" in gmail.get("tools", []), gmail
+
+    subject = f"[canary] reborn-emulate-gmail-{uuid.uuid4().hex[:8]}"
+    thread_id = await new_thread(server)
+    await send_chat(
+        server,
+        thread_id,
+        f"send an email to e2e.google@example.com with subject '{subject}'",
+    )
+
+    history = await wait_for_response_containing(
+        server,
+        thread_id,
+        "gmail roundtrip complete",
+        timeout=90,
+    )
+    tool_results = completed_tool_results(history, "gmail")
+    assert len(tool_results) >= 3, [tool_result_text(result) for result in tool_results]
+
+    sent = tool_result_json(tool_results[0])
+    sent_message = sent.get("message", sent)
+    message_id = sent_message["id"]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        readback = await client.get(
+            f"{emulate_google_url}/gmail/v1/users/me/messages/{message_id}",
+            headers=google_headers(),
+            params={"format": "full"},
+        )
+    readback.raise_for_status()
+    message = readback.json()
+    assert gmail_header(message, "Subject") == subject
+    assert "TRASH" in message["labelIds"]

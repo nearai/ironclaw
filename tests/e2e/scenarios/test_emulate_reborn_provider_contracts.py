@@ -12,10 +12,16 @@ import httpx
 
 from emulate_provider import (
     github_json,
+    github_headers,
     gmail_header,
     google_headers,
     raw_mime,
     slack_post,
+)
+from helpers import (
+    EMULATE_GITHUB_SECONDARY_BEARER,
+    EMULATE_GOOGLE_SECONDARY_BEARER,
+    EMULATE_SLACK_LIMITED_BEARER,
 )
 
 
@@ -718,3 +724,219 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             "/repos/nearai/ironclaw/actions/workflows",
         )
         assert workflows["workflows"] == []
+
+
+async def test_emulate_google_keeps_seeded_accounts_isolated(emulate_google_server):
+    """Provider fixtures must not make cross-account reads pass vacuously."""
+    base_url = emulate_google_server["url"]
+    primary = google_headers()
+    secondary = google_headers(EMULATE_GOOGLE_SECONDARY_BEARER)
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        primary_messages = await client.get(
+            f"{base_url}/gmail/v1/users/me/messages",
+            headers=primary,
+        )
+        secondary_messages = await client.get(
+            f"{base_url}/gmail/v1/users/me/messages",
+            headers=secondary,
+        )
+        primary_messages.raise_for_status()
+        secondary_messages.raise_for_status()
+        primary_ids = {item["id"] for item in primary_messages.json()["messages"]}
+        secondary_ids = {item["id"] for item in secondary_messages.json()["messages"]}
+        assert "msg_emulate_secondary_private" not in primary_ids
+        assert "msg_emulate_secondary_private" in secondary_ids
+        assert "msg_emulate_unread" in primary_ids
+        assert "msg_emulate_unread" not in secondary_ids
+
+        primary_events = await client.get(
+            f"{base_url}/calendar/v3/calendars/primary/events",
+            headers=primary,
+        )
+        secondary_events = await client.get(
+            f"{base_url}/calendar/v3/calendars/primary/events",
+            headers=secondary,
+        )
+        primary_events.raise_for_status()
+        secondary_events.raise_for_status()
+        primary_event_ids = {item["id"] for item in primary_events.json()["items"]}
+        secondary_event_ids = {item["id"] for item in secondary_events.json()["items"]}
+        assert "evt_secondary_private" not in primary_event_ids
+        assert "evt_secondary_private" in secondary_event_ids
+
+        primary_files = await client.get(
+            f"{base_url}/drive/v3/files",
+            headers=primary,
+        )
+        secondary_files = await client.get(
+            f"{base_url}/drive/v3/files",
+            headers=secondary,
+        )
+        primary_files.raise_for_status()
+        secondary_files.raise_for_status()
+        primary_file_ids = {item["id"] for item in primary_files.json()["files"]}
+        secondary_file_ids = {item["id"] for item in secondary_files.json()["files"]}
+        assert "drv_secondary_private" not in primary_file_ids
+        assert "drv_secondary_private" in secondary_file_ids
+
+
+async def test_emulate_google_covers_missing_resource_errors(emulate_google_server):
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            f"{emulate_google_server['url']}/gmail/v1/users/me/messages/missing-message",
+            headers=google_headers(),
+        )
+    assert response.status_code == 404, response.text
+
+
+async def test_emulate_slack_covers_qa9_and_qa10_provider_shapes(
+    emulate_slack_server,
+):
+    """Pin the stateful Slack shapes used by the live QA 9/10 assertions."""
+    base_url = emulate_slack_server["url"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        users = await slack_post(client, base_url, "users.list")
+        by_name = {member["name"]: member for member in users["members"]}
+        reviewer = by_name["qa-reviewer"]
+        no_email_user = by_name["no-email-user"]
+
+        profile = await slack_post(
+            client,
+            base_url,
+            "users.profile.get",
+            {"user": reviewer["id"]},
+        )
+        assert profile["profile"]["status_text"] == "Reviewing the release candidate"
+
+        no_email = await slack_post(
+            client,
+            base_url,
+            "users.info",
+            {"user": no_email_user["id"]},
+        )
+        assert not no_email["user"].get("profile", {}).get("email")
+
+        channels = await slack_post(
+            client,
+            base_url,
+            "conversations.list",
+            {"types": "public_channel"},
+        )
+        alerts = next(
+            item for item in channels["channels"] if item["name"] == "reborn-alerts"
+        )
+
+        missing_scope = await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {"channel": alerts["id"], "text": "must be denied"},
+            token=EMULATE_SLACK_LIMITED_BEARER,
+            expect_ok=False,
+        )
+        assert missing_scope["ok"] is False
+        assert missing_scope["error"] == "missing_scope"
+        assert "chat:write" in missing_scope["needed"]
+
+        dm_channels: dict[str, str] = {}
+        markers = {
+            "qa-reviewer": "QA9 delivery target reviewer",
+            "no-email-user": "QA9 delivery target no-email-user",
+        }
+        for user_name, marker in markers.items():
+            opened = await slack_post(
+                client,
+                base_url,
+                "conversations.open",
+                {"users": by_name[user_name]["id"], "return_im": True},
+            )
+            dm_channel = opened["channel"]["id"]
+            dm_channels[user_name] = dm_channel
+            await slack_post(
+                client,
+                base_url,
+                "chat.postMessage",
+                {"channel": dm_channel, "text": marker},
+            )
+
+        for user_name, marker in markers.items():
+            history = await slack_post(
+                client,
+                base_url,
+                "conversations.history",
+                {"channel": dm_channels[user_name]},
+            )
+            texts = [message["text"] for message in history["messages"]]
+            assert texts.count(marker) == 1
+            assert all(
+                other_marker not in texts
+                for other_marker in markers.values()
+                if other_marker != marker
+            )
+
+        mention_text = f"Release review requested from <@{reviewer['id']}>"
+        mention = await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {"channel": alerts["id"], "text": mention_text},
+        )
+        assert mention["message"]["text"] == mention_text
+
+        root = await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {"channel": alerts["id"], "text": "QA10 thread root"},
+        )
+        await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {
+                "channel": alerts["id"],
+                "thread_ts": root["ts"],
+                "text": "QA10 visible thread reply",
+            },
+        )
+        replies = await slack_post(
+            client,
+            base_url,
+            "conversations.replies",
+            {"channel": alerts["id"], "ts": root["ts"]},
+        )
+        assert [message["text"] for message in replies["messages"]].count(
+            "QA10 visible thread reply"
+        ) == 1
+
+
+async def test_emulate_github_covers_identity_and_negative_results(
+    emulate_github_server,
+):
+    base_url = emulate_github_server["url"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        primary = await github_json(client, base_url, "GET", "/user")
+        secondary = await client.get(
+            f"{base_url}/user",
+            headers=github_headers(EMULATE_GITHUB_SECONDARY_BEARER),
+        )
+        secondary.raise_for_status()
+        assert primary["login"] == "reborn-dev"
+        assert secondary.json()["login"] == "reborn-reviewer"
+
+        missing = await client.get(
+            f"{base_url}/repos/nearai/does-not-exist",
+            headers=github_headers(),
+        )
+        assert missing.status_code == 404
+
+        empty_search = await github_json(
+            client,
+            base_url,
+            "GET",
+            "/search/issues",
+            params={"q": "repo:nearai/ironclaw no-such-emulate-result"},
+        )
+        assert empty_search["total_count"] == 0
+        assert empty_search["items"] == []
