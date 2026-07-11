@@ -192,6 +192,8 @@ pub struct ProductAuthProviderRuntimePorts {
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
     secret_store: Arc<dyn SecretStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    network_policy_store: Arc<NetworkObligationPolicyStore>,
+    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
 /// Alias for [`RuntimeSecretStageError`], which re-exports
@@ -204,12 +206,16 @@ impl ProductAuthProviderRuntimePorts {
         obligation_handler: Arc<dyn CapabilityObligationHandler>,
         secret_store: Arc<dyn SecretStore>,
         secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+        network_policy_store: Arc<NetworkObligationPolicyStore>,
+        credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
     ) -> Self {
         Self {
             runtime_http_egress,
             obligation_handler,
             secret_store,
             secret_injection_store,
+            network_policy_store,
+            credential_account_resolver,
         }
     }
 
@@ -238,9 +244,79 @@ impl ProductAuthProviderRuntimePorts {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
     ) -> Result<(), ProductAuthCredentialStageError> {
+        self.stage_material_once(source_scope, handle, target_scope, capability_id, handle)
+            .await
+    }
+
+    /// Stage one declared credential requirement for a host-driven call that
+    /// bypasses the dispatch obligation pipeline (hosted-MCP discovery runs
+    /// at activation, not through a capability invocation, so nothing else
+    /// stages its connection credential). Product-auth accounts resolve
+    /// through the same resolver and AuthRequired classification the
+    /// obligation lane uses.
+    pub async fn stage_credential_requirement_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        requirement: &ironclaw_host_api::RuntimeCredentialRequirement,
+        requester_extension: &ironclaw_host_api::ExtensionId,
+    ) -> Result<(), ProductAuthCredentialStageError> {
+        use ironclaw_host_api::RuntimeCredentialRequirementSource;
+        match &requirement.source {
+            RuntimeCredentialRequirementSource::SecretHandle => {
+                self.stage_secret_once(scope, capability_id, &requirement.handle)
+                    .await
+            }
+            RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } => {
+                let resolver = self
+                    .credential_account_resolver
+                    .as_ref()
+                    .ok_or(ProductAuthCredentialStageError::Backend)?;
+                let access_secret = resolver
+                    .resolve_access_secret(crate::obligations::RuntimeCredentialAccountRequest {
+                        scope,
+                        provider,
+                        setup,
+                        provider_scopes: &requirement.provider_scopes,
+                        requester_extension,
+                    })
+                    .await?;
+                self.stage_material_once(
+                    &access_secret.scope,
+                    &access_secret.handle,
+                    scope,
+                    capability_id,
+                    &requirement.handle,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Stage the network policy for a host-driven call that bypasses the
+    /// dispatch obligation pipeline (see
+    /// [`Self::stage_credential_requirement_once`]).
+    pub fn stage_network_policy_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        policy: ironclaw_host_api::NetworkPolicy,
+    ) {
+        self.network_policy_store
+            .insert(scope, capability_id, policy);
+    }
+
+    async fn stage_material_once(
+        &self,
+        source_scope: &ResourceScope,
+        source_handle: &SecretHandle,
+        target_scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        target_handle: &SecretHandle,
+    ) -> Result<(), ProductAuthCredentialStageError> {
         let lease = self
             .secret_store
-            .lease_once(source_scope, handle)
+            .lease_once(source_scope, source_handle)
             .await
             .map_err(stage_secret_error)?;
         let secret = self
@@ -249,7 +325,7 @@ impl ProductAuthProviderRuntimePorts {
             .await
             .map_err(stage_secret_error)?;
         self.secret_injection_store
-            .insert(target_scope, capability_id, handle, secret)
+            .insert(target_scope, capability_id, target_handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
     }
 }
@@ -566,6 +642,8 @@ where
             self.obligation_handler(),
             secret_store,
             Arc::clone(&self.secret_injection_store),
+            Arc::clone(&self.network_policy_store),
+            self.runtime_credential_account_resolver.clone(),
         ))
     }
 

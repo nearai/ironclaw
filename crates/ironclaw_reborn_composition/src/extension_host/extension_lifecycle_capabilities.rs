@@ -1148,24 +1148,27 @@ mod tests {
         assert!(!active.iter().any(|id| id == "github.search_issues"));
     }
 
-    /// Runtime-dispatched hosted-MCP activation: the discovery attempt is
-    /// routed through runtime egress, but nothing on this path stages the
-    /// template capability's network policy/credential obligations, so
-    /// `tools/list` fails as transient and activation falls back — Active
-    /// with the host-internal connection template and zero model-visible
-    /// tools. (Under manifest v2 this test passed vacuously: the fallback
-    /// republished placeholder static tools while the scripted MCP server
-    /// captured zero requests.) The extension-runtime P2 MCP loader owns
-    /// staging the discovery plan and proving live discovery end-to-end
-    /// (checklist TOOL-9, MAN-6).
+    /// Runtime-dispatched hosted-MCP activation with the P2 staging fix:
+    /// activation stages the connection-template capability's network policy
+    /// and product-auth credential under the discovery scope, so live
+    /// `tools/list` runs through the REAL host egress pipeline (the scripted
+    /// double sits at the network transport, under staged-policy checks and
+    /// staged-credential injection) and the ceiling-validated discovered
+    /// tools publish as model-visible capabilities. Before this fix nothing
+    /// staged the discovery plan — the request keyed on the dispatch-minted
+    /// invocation scope found no policy/credential, failed transient, and
+    /// fell back to the bundled manifest with zero model-visible tools.
     #[tokio::test]
-    async fn local_dev_extension_activate_hosted_mcp_without_staged_discovery_falls_back() {
+    async fn local_dev_extension_activate_hosted_mcp_stages_discovery_and_publishes_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-tools-hosted-mcp-owner",
-            storage_root.clone(),
-        ))
+        let discovery_script = std::sync::Arc::new(
+            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search"),
+        );
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev("extension-tools-hosted-mcp-owner", storage_root.clone())
+                .with_network_http_egress_for_test(discovery_script.clone()),
+        )
         .await
         .expect("local-dev services build");
         let extension_management = services
@@ -1186,6 +1189,23 @@ mod tests {
         .expect("install succeeds");
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account(&services, &activate_context.resource_scope, "notion").await;
+        // The account's access token must exist as real material: discovery
+        // staging leases it from the secret store into the one-shot
+        // injection store.
+        let owner_scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &activate_context.resource_scope,
+            ironclaw_auth::AuthSurface::Api,
+        );
+        services
+            .secret_store()
+            .put(
+                owner_scope.resource.clone(),
+                SecretHandle::new("notion-test-token").expect("handle"),
+                ironclaw_secrets::SecretMaterial::from("notion-access-token"),
+                None,
+            )
+            .await
+            .expect("seed access-token material");
 
         let activate = invoke_json(
             &services,
@@ -1196,14 +1216,24 @@ mod tests {
         .expect("hosted MCP activation succeeds");
         assert_eq!(activate["payload"]["activated"], true);
 
-        // The model-visible surface is empty: no tools exist before discovery
-        // succeeds (the host-internal `notion.mcp_server` template is
-        // published but never model-visible — pinned in
-        // `extension_lifecycle::tests::hosted_mcp_activation_falls_back_*`).
+        // Live discovery ran through the staged pipeline: the discovered
+        // tool is model-visible.
         let active = active_extension_capability_ids(&extension_management).await;
         assert!(
-            active.iter().all(|id| !id.starts_with("notion.")),
-            "no model-visible notion capability exists before discovery succeeds; got {active:?}"
+            active.iter().any(|id| id == "notion.notion-search"),
+            "discovered hosted-MCP tool must be model-visible after staged discovery; got {active:?}"
+        );
+        // The staged connection credential reached the vendor wire on every
+        // discovery call (initialize → notifications/initialized →
+        // tools/list), through the real egress pipeline's injection.
+        let calls = discovery_script.authorized_methods();
+        assert!(
+            calls.iter().any(|(method, _)| method == "tools/list"),
+            "discovery must reach tools/list; calls: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|(_, authorized)| *authorized),
+            "every discovery call must carry the staged credential; calls: {calls:?}"
         );
         assert!(
             storage_root

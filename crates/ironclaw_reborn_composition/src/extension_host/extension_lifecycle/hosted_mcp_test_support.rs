@@ -161,3 +161,99 @@ fn runtime_json_response(
         redaction_applied: false,
     })
 }
+
+/// Transport-level variant of the discovery script: a scripted
+/// [`ironclaw_network::NetworkHttpEgress`] that sits under the REAL host
+/// egress pipeline (staged network policy, staged credential injection,
+/// redaction), so a test through this seam proves discovery authority was
+/// staged — not merely that discovery was reachable. Records whether each
+/// JSON-RPC call carried an `authorization` header on the wire.
+pub(crate) struct HostedMcpDiscoveryNetworkScript {
+    tool_name: String,
+    authorized_methods: std::sync::Mutex<Vec<(String, bool)>>,
+}
+
+impl HostedMcpDiscoveryNetworkScript {
+    pub(crate) fn with_tool_name(tool_name: &str) -> Self {
+        Self {
+            tool_name: tool_name.to_string(),
+            authorized_methods: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `(json_rpc_method, authorization_header_present)` per call, in order.
+    pub(crate) fn authorized_methods(&self) -> Vec<(String, bool)> {
+        self.authorized_methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ironclaw_network::NetworkHttpEgress for HostedMcpDiscoveryNetworkScript {
+    async fn execute(
+        &self,
+        request: ironclaw_network::NetworkHttpRequest,
+    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
+        let invalid = |reason: &str| ironclaw_network::NetworkHttpError::Transport {
+            reason: reason.to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        };
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).map_err(|_| invalid("invalid_json_rpc_body"))?;
+        let method = body
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid("missing_json_rpc_method"))?
+            .to_string();
+        let authorized = request
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("authorization") && !value.is_empty());
+        self.authorized_methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((method.clone(), authorized));
+        let result = match method.as_str() {
+            "initialize" => serde_json::json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "hosted-mcp-test", "version": "1.0.0"}
+            }),
+            "notifications/initialized" => serde_json::json!({}),
+            "tools/list" => serde_json::json!({
+                "tools": [{
+                    "name": self.tool_name,
+                    "description": format!("Scripted hosted MCP tool {}", self.tool_name),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    },
+                    "annotations": {"readOnlyHint": true}
+                }]
+            }),
+            _ => return Err(invalid("unexpected_json_rpc_method")),
+        };
+        let response_body = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": body["id"].as_u64(),
+            "result": result,
+        }))
+        .map_err(|_| invalid("serialize_json_rpc_response"))?;
+        Ok(ironclaw_network::NetworkHttpResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("Mcp-Session-Id".to_string(), "session-1".to_string()),
+            ],
+            usage: ironclaw_network::NetworkUsage {
+                request_bytes: request.body.len() as u64,
+                ..ironclaw_network::NetworkUsage::default()
+            },
+            body: response_body,
+        })
+    }
+}

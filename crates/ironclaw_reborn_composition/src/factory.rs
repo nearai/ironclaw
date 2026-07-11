@@ -1748,6 +1748,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         .await?;
         if let Some(management) = store_graph.local_runtime.extension_management.as_ref() {
             management.attach_generic_host(Arc::clone(&generic.host));
+            // A fresh ports handle: the one built earlier predates the
+            // credential-account resolver wiring, and discovery staging
+            // needs the resolver.
+            if let Some(ports) = services.product_auth_provider_runtime_ports() {
+                management.attach_discovery_runtime_ports(ports);
+            }
         }
         services.set_extension_tool_resolver(generic.resolver);
     }

@@ -112,6 +112,14 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     // the dispatch chain resolves extensions from the host's active snapshot;
     // unattached compositions (focused tests) keep registry-only dispatch.
     generic_host: std::sync::OnceLock<Arc<ironclaw_extension_host::ExtensionHost>>,
+    // Late-attached with `generic_host` (both need the fully wired host
+    // runtime): stages hosted-MCP discovery authority — the connection
+    // credential and the server network policy — under the discovery scope.
+    // Discovery runs at activation, outside the dispatch obligation
+    // pipeline, so nothing else stages these (the pre-P2 gap that made
+    // live `tools/list` always fail transient and fall back).
+    discovery_runtime_ports:
+        std::sync::OnceLock<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +270,52 @@ impl RebornLocalExtensionManagementPort {
             operation_lock: Arc::new(Mutex::new(())),
             credential_cleanup,
             generic_host: std::sync::OnceLock::new(),
+            discovery_runtime_ports: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach the staging ports hosted-MCP discovery uses to make its
+    /// authority available under the discovery scope.
+    pub(crate) fn attach_discovery_runtime_ports(
+        &self,
+        ports: ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
+    ) {
+        let _ = self.discovery_runtime_ports.set(ports);
+    }
+
+    /// Stage the hosted-MCP connection credential and server network policy
+    /// for the discovery call. Best-effort by design: a staging failure
+    /// leaves discovery to fail transient and fall back to the bundled
+    /// manifest — exactly the pre-staging behavior — while a successful
+    /// stage lets live `tools/list` run with the same injected authority a
+    /// dispatched invocation would carry.
+    async fn stage_hosted_mcp_discovery_authority(
+        &self,
+        scope: &ResourceScope,
+        package: &ExtensionPackage,
+    ) {
+        let Some(ports) = self.discovery_runtime_ports.get() else {
+            return;
+        };
+        let Some(descriptor) = package.capabilities.first() else {
+            return;
+        };
+        if let Some(policy) = hosted_mcp_discovery_network_policy(package) {
+            ports.stage_network_policy_once(scope, &descriptor.id, policy);
+        }
+        for requirement in &descriptor.runtime_credentials {
+            if let Err(error) = ports
+                .stage_credential_requirement_once(scope, &descriptor.id, requirement, &package.id)
+                .await
+            {
+                tracing::debug!(
+                    extension_id = package.id.as_str(),
+                    capability_id = descriptor.id.as_str(),
+                    required = requirement.required,
+                    error = ?error,
+                    "hosted MCP discovery credential staging failed; discovery will fall back"
+                );
+            }
         }
     }
 
@@ -330,7 +384,7 @@ impl RebornLocalExtensionManagementPort {
             Err(error) => {
                 tracing::warn!(
                     extension_id = extension_id.as_str(),
-                    error = %error,
+                    error = ?error,
                     "generic extension host could not unpublish extension"
                 );
             }
@@ -703,6 +757,8 @@ impl RebornLocalExtensionManagementPort {
             }
         };
 
+        self.stage_hosted_mcp_discovery_authority(&discovery.scope, &discovery.base_package)
+            .await;
         let active_package = match discover_hosted_mcp_package(
             &discovery.base_package,
             discovery.scope,
@@ -1649,6 +1705,30 @@ fn activation_success_message(
 // backend mounts the generic proof-code redeem route — the first non-Slack
 // inbound channel must mount one alongside this requirement or its submit
 // will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
+/// The discovery call's network authority: the declared hosted-MCP server
+/// host only (the same ceiling the dispatch pipeline derives for the
+/// connection-template capability).
+fn hosted_mcp_discovery_network_policy(
+    package: &ExtensionPackage,
+) -> Option<ironclaw_host_api::NetworkPolicy> {
+    let ironclaw_extensions::ExtensionRuntime::Mcp { url: Some(url), .. } =
+        &package.manifest.runtime
+    else {
+        return None;
+    };
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    Some(ironclaw_host_api::NetworkPolicy {
+        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+            host_pattern: host.to_string(),
+            port: parsed.port(),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: None,
+    })
+}
+
 fn generic_host_error(error: ironclaw_extension_host::LifecycleError) -> ProductWorkflowError {
     ProductWorkflowError::InvalidBindingRequest {
         reason: format!("generic extension host rejected the activation: {error}"),
