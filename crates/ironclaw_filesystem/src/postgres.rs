@@ -1687,15 +1687,15 @@ async fn postgres_delete_if_version_with_client(
     if was_deleted {
         return Ok(());
     }
-    let locked_version: Option<i64> = row.get("locked_version");
-    if let Some(raw) = locked_version {
-        return Err(FilesystemError::VersionMismatch {
-            path: path.clone(),
-            expected: Some(expected_version),
-            found: Some(record_version_from_i64(path, raw)?),
-        });
-    }
-    Err(not_found(path.clone(), FilesystemOperation::Delete))
+    let Some(locked_version_raw) = row.get::<_, Option<i64>>("locked_version") else {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
+    };
+
+    Err(FilesystemError::VersionMismatch {
+        path: path.clone(),
+        expected: Some(expected_version),
+        found: Some(record_version_from_i64(path, locked_version_raw)?),
+    })
 }
 
 #[cfg(feature = "postgres")]
