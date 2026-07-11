@@ -402,11 +402,11 @@ mod reborn_support_tests {
         ToolResultSafeSummary,
     };
     use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
-        RetryTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
-        ThreadBusy, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus,
+        RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+        SubmitTurnResponse, ThreadBusy, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState,
+        TurnScope, TurnStatus,
         events::EventCursor,
         run_profile::{
             CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
@@ -2594,9 +2594,36 @@ mod reborn_support_tests {
 
         async fn get_run_state(
             &self,
-            _request: GetRunStateRequest,
+            request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
-            panic!("get_run_state is not used by reborn support tests")
+            // The busy-run steering enqueue path reads the active run's state to
+            // recover its turn id before queueing. Return a minimal running-run
+            // state keyed to the requested scope/run rather than panicking.
+            Ok(TurnRunState {
+                scope: request.scope,
+                actor: None,
+                turn_id: TurnId::new(),
+                run_id: request.run_id,
+                status: TurnStatus::Running,
+                accepted_message_ref: AcceptedMessageRef::new("msg:active-run")
+                    .expect("accepted message ref"),
+                source_binding_ref: SourceBindingRef::new("src:active-run")
+                    .expect("source binding ref"),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:active-run")
+                    .expect("reply target binding ref"),
+                resolved_run_profile_id: RunProfileId::default_profile(),
+                resolved_run_profile_version: RunProfileVersion::new(1),
+                resolved_model_route: None,
+                received_at: chrono::Utc::now(),
+                checkpoint_id: None,
+                gate_ref: None,
+                blocked_activity_id: None,
+                credential_requirements: Vec::new(),
+                failure: None,
+                event_cursor: EventCursor::default(),
+                product_context: None,
+                resume_disposition: None,
+            })
         }
     }
 }
