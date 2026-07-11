@@ -406,6 +406,7 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
                 kind: RuntimeFailureKind::InvalidInput,
                 message: Some("invalid input".to_string()),
                 detail: None,
+                model_visible_cause: None,
             }),
             CapabilityFailureKind::InvalidInput,
         ),

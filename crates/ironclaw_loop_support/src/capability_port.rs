@@ -2777,7 +2777,14 @@ fn runtime_failure_diagnostic_detail(
     if failure.detail.is_some() {
         return None;
     }
-    let raw = failure.safe_summary()?;
+    // Prefer the private in-process cause channel: the public `message` fails
+    // closed (kind-only for wild raw causes), so the full descriptive cause
+    // rides `model_visible_cause` and only becomes model-visible through this
+    // scrub (full registry + injection fencing).
+    let raw = failure
+        .model_visible_cause
+        .clone()
+        .or_else(|| failure.safe_summary())?;
     let scrubbed = crate::scrub_model_visible_detail(raw);
     if scrubbed.trim().is_empty() {
         return None;
@@ -4967,6 +4974,7 @@ mod tests {
                     kind: RuntimeFailureKind::InvalidInput,
                     message: Some("invalid JSON: expected value at line 1 column 1".to_string()),
                     detail: None,
+                    model_visible_cause: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
                 Some("invalid JSON: expected value at line 1 column 1"),
@@ -4977,6 +4985,7 @@ mod tests {
                     kind: RuntimeFailureKind::InvalidInput,
                     message: Some("invalid JSON: expected value near {invalid".to_string()),
                     detail: None,
+                    model_visible_cause: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
@@ -4987,6 +4996,7 @@ mod tests {
                     kind: RuntimeFailureKind::InvalidInput,
                     message: None,
                     detail: None,
+                    model_visible_cause: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
                 Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),

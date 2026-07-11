@@ -2254,6 +2254,7 @@ fn failure_from(
     capability_id: CapabilityId,
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
+    let raw_cause = raw_failure_cause(&error);
     let message = sanitized_failure_message(&error);
     let detail = match error {
         CapabilityInvocationError::Dispatch { detail, .. } => detail,
@@ -2263,7 +2264,24 @@ fn failure_from(
     if let Some(detail) = detail {
         failure = failure.with_detail(detail);
     }
+    if let Some(raw_cause) = raw_cause {
+        // Registry-scrubbed here (belt); the loop-support Diagnostic seam
+        // re-scrubs and injection-fences fail-closed (suspenders). Never
+        // rendered in Debug, run-state rows, or runtime events.
+        let (scrubbed, _) = ironclaw_safety::LeakDetector::new().redact_all_secrets(&raw_cause);
+        failure = failure.with_model_visible_cause(scrubbed);
+    }
     failure
+}
+
+/// The raw descriptive cause for the model-visible Diagnostic channel, before
+/// any public-surface gating.
+fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
+    use CapabilityInvocationError::Dispatch;
+    match error {
+        Dispatch { safe_summary, .. } => safe_summary.clone(),
+        _ => None,
+    }
 }
 
 /// Returns the failure message carried toward the loop-support boundary.
@@ -2305,18 +2323,19 @@ fn dispatch_failure_message(
     safe_summary: Option<&str>,
     kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
-    // Preserve the descriptive cause, but display-scrub it here: this message
-    // is persisted into run-state rows and published on the runtime event sink
-    // BEFORE any downstream validation, so host paths, URLs, and
-    // credential-shaped tokens must be redacted at this choke point
+    // This message is the PUBLIC label: persisted into run-state rows and
+    // published on the runtime event sink before any downstream validation
     // (reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces
-    // pins it). Strict summary validation would still be wrong here — it
-    // discards the whole cause; display redaction keeps the descriptive text
-    // and error codes the model needs, and the loop-side Diagnostic seam
-    // (`runtime_failure_diagnostic_detail`) re-scrubs secret values
-    // fail-closed.
+    // pins the boundary). It fails closed: only summaries that pass the strict
+    // loop-summary validation (host-authored sentences, sanitized guest error
+    // codes) pass through; wild raw causes degrade to the kind's fixed
+    // sentence. The full descriptive cause is NOT lost — it rides the private
+    // `model_visible_cause` channel to the model-visible Diagnostic seam.
     safe_summary
-        .map(ironclaw_safety::sanitize_display_text)
+        .and_then(|summary| {
+            ironclaw_turns::run_profile::LoopSafeSummary::new(summary.to_string()).ok()
+        })
+        .map(|summary| summary.as_str().to_string())
         .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
@@ -2848,31 +2867,50 @@ output_schema_ref = "schemas/test.output.json"
 
     #[test]
     fn sanitized_failure_message_retains_dispatch_cause_for_detail_consumer() {
-        // The dispatch cause must survive DESCRIPTIVELY at this layer so the
-        // downstream Diagnostic channel keeps it — but this message is also
-        // persisted into run-state rows and published on the runtime event
-        // sink, so host paths and credential-shaped tokens are display-scrubbed
-        // here (the reborn_e2e_gate public-surface test pins that boundary).
+        // The public message fails CLOSED: it is persisted into run-state rows
+        // and published on the runtime event sink, so a wild raw cause (paths,
+        // tokens) degrades to the kind's fixed sentence. The descriptive cause
+        // is not lost — failure_from carries it (registry-scrubbed) on the
+        // in-process-only model_visible_cause channel for the Diagnostic seam.
+        let raw = "read_file failed at /workspace/config using sk-live-token";
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            safe_summary: Some(
-                "read_file failed at /workspace/config using sk-live-token".to_string(),
-            ),
+            safe_summary: Some(raw.to_string()),
             detail: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        assert!(
-            message.contains("read_file failed"),
-            "descriptive cause must survive: {message}"
+        assert_eq!(
+            message,
+            RuntimeDispatchErrorKind::OperationFailed.human_summary(),
+            "wild raw cause must degrade the public message to the kind sentence"
         );
+
+        let failure = failure_from(error, CapabilityId::new("demo.read_file").unwrap());
+        let cause = failure
+            .model_visible_cause
+            .as_deref()
+            .expect("raw cause must ride the model-visible channel");
         assert!(
-            !message.contains("/workspace/config"),
-            "host path must be display-redacted: {message}"
+            cause.contains("read_file failed at /workspace/config"),
+            "descriptive cause (paths included) must survive for the model: {cause}"
         );
+        let rendered = format!("{failure:?}");
         assert!(
-            !message.contains("sk-live-token"),
-            "credential-shaped token must be display-redacted: {message}"
+            !rendered.contains("/workspace/config"),
+            "Debug must not render the model-visible cause: {rendered}"
+        );
+
+        // A host-authored, validation-clean summary still passes through to
+        // the public message unchanged.
+        let clean = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("trigger_create input failed validation".to_string()),
+            detail: None,
+        };
+        assert_eq!(
+            sanitized_failure_message(&clean).as_deref(),
+            Some("trigger_create input failed validation")
         );
     }
 

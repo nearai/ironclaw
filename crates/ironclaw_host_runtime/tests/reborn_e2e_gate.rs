@@ -433,6 +433,17 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
                 );
             }
             assert!(failure.message.is_some());
+            // The descriptive cause is NOT lost: it rides the in-process-only
+            // `model_visible_cause` channel (absent from Debug/rows/events)
+            // toward the model-visible Diagnostic seam, registry-scrubbed.
+            let cause = failure
+                .model_visible_cause
+                .as_deref()
+                .expect("backend cause must survive on the model-visible channel");
+            assert!(
+                cause.contains("BACKEND_PROVIDER_ERROR_SECRET_3067"),
+                "descriptive cause must survive for the model: {cause}"
+            );
         }
         other => panic!("expected sanitized backend failure, got {other:?}"),
     }

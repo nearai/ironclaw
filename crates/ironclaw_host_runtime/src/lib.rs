@@ -575,12 +575,38 @@ pub struct RuntimeProcessHandle {
 }
 
 /// Sanitized capability failure outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `message` is the public label: it is persisted into run-state rows,
+/// published on the runtime event sink, and rendered by product surfaces, so
+/// producers keep it host-authored/strict-validated (wild raw causes degrade
+/// to the kind's fixed sentence). The raw descriptive cause rides
+/// `model_visible_cause` instead — an in-process-only channel.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
     pub detail: Option<DispatchFailureDetail>,
+    /// Registry-scrubbed descriptive cause for the model-visible Diagnostic
+    /// channel ONLY. Deliberately absent from `Debug` (log lines) and never
+    /// persisted or published by run-state/event writers — the loop-support
+    /// seam (`runtime_failure_diagnostic_detail`) re-scrubs and injection-
+    /// fences it before it reaches the model.
+    pub model_visible_cause: Option<String>,
+}
+
+impl fmt::Debug for RuntimeCapabilityFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `model_visible_cause` is intentionally omitted: Debug renders flow
+        // into tracing logs and test/public assertions, and the cause may
+        // carry backend paths or provider text.
+        f.debug_struct("RuntimeCapabilityFailure")
+            .field("capability_id", &self.capability_id)
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .field("detail", &self.detail)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Explicit fallback for outcome categories that the loop adapter cannot handle
@@ -765,11 +791,20 @@ impl RuntimeCapabilityFailure {
             kind,
             message,
             detail: None,
+            model_visible_cause: None,
         }
     }
 
     pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
         self.detail = Some(detail);
+        self
+    }
+
+    /// Attach the registry-scrubbed descriptive cause for the model-visible
+    /// Diagnostic channel. Never rendered in `Debug`, run-state rows, or
+    /// runtime events.
+    pub fn with_model_visible_cause(mut self, cause: impl Into<String>) -> Self {
+        self.model_visible_cause = Some(cause.into());
         self
     }
 
