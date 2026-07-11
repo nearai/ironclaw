@@ -5,6 +5,7 @@
 mod adapter;
 pub mod auth;
 pub mod capabilities;
+mod channel_adapter;
 mod egress;
 mod error;
 pub mod external;
@@ -27,6 +28,12 @@ pub use auth::{
     mark_shared_secret_header_verified_for_tenant,
 };
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
+pub use channel_adapter::{
+    AttachmentRef, ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, ImmediateResponse,
+    InboundOutcome, MAX_IMMEDIATE_RESPONSE_BYTES, MAX_REPLY_CONTEXT_BYTES,
+    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+    TargetCandidate, TargetQuery, VerifiedInbound,
+};
 pub use egress::{
     DeclaredEgressHost, DeclaredEgressTarget, DeliveryAttemptId, DeliveryStatus,
     EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse,

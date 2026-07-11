@@ -465,7 +465,14 @@ fn is_test_source_path(path: &Path) -> bool {
         .components()
         .map(|component| component.as_os_str().to_string_lossy().to_string());
     if components.any(|component| {
-        component == "tests" || component == "__tests__" || component == "test-utils"
+        component == "tests"
+            || component == "__tests__"
+            || component == "test-utils"
+            // `test_support` modules are feature-gated fixtures/scripted
+            // doubles, not product code; tests may name concrete products
+            // (overview §8), and the fixtures they build (acme-*) legitimately
+            // do.
+            || component == "test_support"
     }) {
         return true;
     }
@@ -474,6 +481,7 @@ fn is_test_source_path(path: &Path) -> bool {
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
     name == "tests.rs"
+        || name == "test_support.rs"
         || name.ends_with("_tests.rs")
         || name.contains(".test.")
         || name.contains(".spec.")
@@ -1263,18 +1271,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/slack/slack_setup.rs",
         "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/test_support/mod.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/test_support/oauth_product_auth.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/test_support/oauth_product_auth.rs",
-        "oauth2.googleapis.com",
     ),
     (
         "crates/ironclaw_reborn_composition/src/web_access.rs",

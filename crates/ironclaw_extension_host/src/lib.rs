@@ -1,0 +1,39 @@
+//! Generic extension lifecycle host for IronClaw Reborn.
+//!
+//! This crate owns the extension model's generic core (overview.md §4–§6):
+//! the [`entrypoint`] contract and binding rule, the two standard state
+//! machines ([`state`]), the immutable [`active`] snapshot and its resolver
+//! views, the loader ports ([`loaders`]), the installation-record
+//! persistence port ([`store`]), and [`ExtensionHost`] — the only writer of
+//! installation state and the active snapshot ([`lifecycle`]).
+//!
+//! It contains no concrete product name, protocol type, route, or behavior
+//! branch: concrete extensions implement the [`ironclaw_host_api::ToolAdapter`]
+//! and [`ironclaw_product_adapters::ChannelAdapter`] traits and are assembled
+//! by the binary, never linked here.
+
+pub mod active;
+pub mod entrypoint;
+pub mod lifecycle;
+pub mod loaders;
+pub mod state;
+pub mod store;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
+pub use active::{
+    ActiveExtension, ActiveSnapshot, Generation, ResolvedToolBinding, SnapshotConflict,
+};
+pub use entrypoint::{
+    BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, check_binding,
+};
+pub use lifecycle::{
+    DrainController, EgressFactory, ExtensionHost, ExtensionHostDeps, HookError, LifecycleError,
+    RemovalContext, RemovalHooks, RestoreReport,
+};
+pub use loaders::{ExtensionLoader, LoadContext};
+pub use state::{AuthAccountState, InstallationState};
+pub use store::{
+    InMemoryInstallationRecordStore, InstallationRecord, InstallationRecordStore, StoreError,
+};

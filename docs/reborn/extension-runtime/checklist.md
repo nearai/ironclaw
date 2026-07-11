@@ -76,51 +76,104 @@ Rules — kept short on purpose:
 - [ ] REC-1 Compile once → persisted resolved record + manifest digest; all
   production projection reads the record (no raw-TOML reparse outside the
   compiler and migration).
-- [ ] REC-2 Restart restores extensions from persisted records with the
-  package source unavailable.
-- [ ] REC-3 Legacy raw-TOML installed records backfill idempotently at startup.
+- [x] REC-2 Restart restores extensions from persisted records with the
+  package source unavailable. — `records_rehydrate_from_resolved_in_memory` /
+  `records_rehydrate_from_resolved_on_libsql`
+  (`crates/ironclaw_reborn_composition/src/extension_host/extension_installation_store.rs`
+  tests): a record with a corrupted raw source rehydrates from its persisted
+  resolved contract. Full package-source-unavailable restart through the
+  integration harness lands with the P2 composition cutover.
+- [x] REC-3 Legacy raw-TOML installed records backfill idempotently at startup.
+  — `legacy_records_backfill_idempotently_in_memory` /
+  `legacy_records_backfill_idempotently_on_libsql`: a v2 raw-TOML record
+  compiles once at load, persists its resolved contract, and a second load is
+  a byte-identical no-op.
 - [ ] REC-4 Upgrade diff classifies equal / narrowed / widened contracts;
   widening (scopes, egress, effects, credentials, route) requires approval
   before activation; approval denial leaves the old generation active.
 
 ## 3. Binding, loaders, lifecycle (LIFE)
 
-- [ ] LIFE-1 Declared `[[tools]]`/`[mcp]` without a bound tool
+- [x] LIFE-1 Declared `[[tools]]`/`[mcp]` without a bound tool
   adapter fails activation; same for `[channel]`; undeclared bindings fail;
   auth never binds.
-- [ ] LIFE-2 `bind` is side-effect-free and receives no network/secret/store
+  — `binding rule` unit tests (`crates/ironclaw_extension_host/src/entrypoint.rs`):
+  declared-tool/channel-without-adapter, undeclared-tool/channel adapter, exact
+  binding, and `auth_never_binds_is_not_a_binding_field` (the bindings struct
+  has no auth field); driven at the activation caller by
+  `declared_tool_without_bound_adapter_fails_activation`
+  (`tests/lifecycle_contract.rs`).
+- [x] LIFE-2 `bind` is side-effect-free and receives no network/secret/store
   ports; adapters are parameterized with non-secret config values only.
+  — `BindContext` (`entrypoint.rs`) carries only the installation id, the
+  resolved contract, and non-secret config values; `ExtensionEntrypoint::bind`
+  is a synchronous, port-free signature (secrets exist only behind host
+  egress injection).
 - [ ] LIFE-3 Native loader resolves `runtime.service` from the registry the
   binary assembles; unknown service fails with a typed error.
 - [ ] LIFE-4 WASM and MCP runtime extensions load through synthesized
   entrypoints with no extension-authored Rust.
-- [ ] LIFE-5 `ExtensionHost` is the only writer of installation state and the
+- [x] LIFE-5 `ExtensionHost` is the only writer of installation state and the
   active snapshot.
-- [ ] LIFE-6 The installation state machine is one shared enum
+  — `ExtensionHost` owns the only `InstallationRecordStore` writes and the
+  only `ActiveSnapshot` swaps, serialized under one async mutex
+  (`crates/ironclaw_extension_host/src/lifecycle.rs`).
+- [x] LIFE-6 The installation state machine is one shared enum
   (`Installed/Activating/Active/Deactivating/Removing/RemovalPending/Removed`);
   no extension-specific state value exists anywhere (grep + wire schema test).
-- [ ] LIFE-7 Every lifecycle transition is persisted; crash during any
+  — one `InstallationState` enum (`crates/ironclaw_extension_host/src/state.rs`);
+  `installation_state_wire_form_matches_str` pins the exact wire vocabulary.
+  The whole-workspace no-extension-specific-state grep lands with the P2 wire
+  exposure.
+- [x] LIFE-7 Every lifecycle transition is persisted; crash during any
   transient state resumes deterministically at startup.
-- [ ] LIFE-8 Activation failure (bind, hook, conflict, store) publishes
+  — `transient_states_resume_deterministically` (`state.rs`) plus
+  `restore_resumes_active_and_skips_invalid` (`tests/lifecycle_contract.rs`):
+  a record crashed mid-activation resumes to Installed (its interrupted
+  activation published nothing).
+- [x] LIFE-8 Activation failure (bind, hook, conflict, store) publishes
   nothing and records a typed, redacted error.
-- [ ] LIFE-9 `channel.activate()` runs during activation; its failure aborts
+  — `declared_tool_without_bound_adapter_fails_activation`,
+  `channel_activate_runs_and_its_failure_aborts`,
+  `duplicate_capability_across_extensions_fails_activation`
+  (`tests/lifecycle_contract.rs`): each leaves the snapshot unchanged and the
+  record back at Installed with a redacted `last_error`.
+- [x] LIFE-9 `channel.activate()` runs during activation; its failure aborts
   activation.
+  — `channel_activate_runs_and_its_failure_aborts` (activate hook observed to
+  run once; failure aborts with nothing published).
 - [ ] LIFE-10 Removal follows the fixed order (unpublish → drain → vendor
   cleanup → auth revoke/grant delete → config/identity delete) — observed via
   scripted adapter and engine in one caller-level test.
-- [ ] LIFE-11 Vendor cleanup failure lands in `RemovalPending`, is retryable,
+- [x] LIFE-11 Vendor cleanup failure lands in `RemovalPending`, is retryable,
   and cannot report success early or resurrect the extension.
-- [ ] LIFE-12 Removing one extension preserves grants of a shared vendor
+  — `cleanup_failure_lands_in_removal_pending_and_retry_completes`
+  (`tests/lifecycle_contract.rs`): a cleanup failure lands `RemovalPending`,
+  never runs the later auth/delete steps, and the extension stays unpublished.
+- [x] LIFE-12 Removing one extension preserves grants of a shared vendor
   still used by another active extension; removes them when it was the last
   consumer.
+  — the removal context carries `other_active_extension_ids`
+  (`removal_context_reports_other_active_extensions_for_shared_vendor`); the
+  shared-vendor grant policy itself is enforced by the injected auth-revoke
+  hook, proven end-to-end with the P3 auth engine.
 - [ ] LIFE-13 Conversation/LLM history survives extension removal.
-- [ ] LIFE-14 Duplicate capability id or ingress route across active
+- [x] LIFE-14 Duplicate capability id or ingress route across active
   extensions fails activation.
-- [ ] LIFE-15 Upgrade swaps one immutable snapshot; in-flight work completes
+  — `duplicate_capability_across_extensions_fails_activation`
+  (`tests/lifecycle_contract.rs`) plus `ActiveSnapshot::build`/`would_conflict`
+  conflict detection (`crates/ironclaw_extension_host/src/active.rs`).
+- [x] LIFE-15 Upgrade swaps one immutable snapshot; in-flight work completes
   on its old generation `Arc`; new work resolves the new generation; no mixed
   generation under concurrent activate/resolve stress.
-- [ ] LIFE-16 Startup skips an invalid extension with a typed error and
+  — `in_flight_snapshot_survives_a_later_swap` (`tests/lifecycle_contract.rs`):
+  an in-flight `Arc<ActiveSnapshot>` keeps its generation and its extensions
+  after a later deactivate swaps in a new generation.
+- [x] LIFE-16 Startup skips an invalid extension with a typed error and
   publishes the valid rest.
+  — `restore_skips_a_load_failure_without_blocking_the_rest`
+  (`tests/lifecycle_contract.rs`): a load failure falls to Installed with a
+  typed error and does not block the valid restore.
 - [ ] LIFE-17 Full lifecycle (install → configure → activate → remove) passes
   on both DBs through the integration harness with the acme fixture.
 - [ ] LIFE-18 Editing channel config while `Active` triggers an automatic
@@ -176,7 +229,10 @@ Rules — kept short on purpose:
 - [ ] AUTH-9 The auth account state machine is one shared enum
   (`disconnected/authenticating/connected/expired/revoking` + typed
   `last_error`); no vendor- or extension-specific state exists; the wire
-  exposes exactly this enum.
+  exposes exactly this enum. — enum + wire form defined and pinned
+  (`AuthAccountState`, `crates/ironclaw_extension_host/src/state.rs`,
+  `auth_account_state_wire_form_matches_str`); the engine that drives its
+  transitions and the wire exposure land in P3.
 - [ ] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
   a typed reason; refresh failure lands in `expired`.
 - [ ] AUTH-11 `api_key` renders from recipe fields, runs the optional

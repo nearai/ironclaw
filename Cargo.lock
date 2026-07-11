@@ -4277,6 +4277,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_extension_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_extensions",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_extensions"
 version = "0.1.0"
 dependencies = [

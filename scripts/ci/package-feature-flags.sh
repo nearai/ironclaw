@@ -87,6 +87,11 @@ case "${package}" in
     # former ironclaw_reborn_openai_compat_storage crate (enables `storage`).
     printf '%s\n' "--features libsql"
     ;;
+  ironclaw_extension_host)
+    # The lifecycle contract test (`lifecycle_contract`) uses the crate's
+    # in-crate fixtures/scripted adapters, gated behind `test-support`.
+    printf '%s\n' "--features test-support"
+    ;;
   ironclaw_architecture | \
   ironclaw_product_adapter_registry | \
   ironclaw_product_context | \
