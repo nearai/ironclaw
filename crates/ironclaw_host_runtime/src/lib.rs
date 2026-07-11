@@ -581,14 +581,14 @@ pub struct RuntimeProcessHandle {
 /// producers keep it host-authored/strict-validated (wild raw causes degrade
 /// to the kind's fixed sentence). The raw descriptive cause rides
 /// `model_visible_cause` instead — an in-process-only channel.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Eq)]
 pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
     pub detail: Option<DispatchFailureDetail>,
     /// Registry-scrubbed descriptive cause for the model-visible Diagnostic
-    /// channel ONLY. Deliberately absent from `Debug` (log lines) and never
+    /// channel ONLY. Deliberately absent from `Debug`/`PartialEq` and never
     /// persisted or published by run-state/event writers — the loop-support
     /// seam (`runtime_failure_diagnostic_detail`) re-scrubs and injection-
     /// fences it before it reaches the model.
@@ -606,6 +606,19 @@ impl fmt::Debug for RuntimeCapabilityFailure {
             .field("message", &self.message)
             .field("detail", &self.detail)
             .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimeCapabilityFailure {
+    fn eq(&self, other: &Self) -> bool {
+        // Mirror the `Debug` exclusion: `model_visible_cause` is a private
+        // diagnostic channel, so equality compares only the public fields.
+        // Otherwise two failures differing only in the hidden cause would fail
+        // `assert_eq!` while their `Debug` diffs print identical.
+        self.capability_id == other.capability_id
+            && self.kind == other.kind
+            && self.message == other.message
+            && self.detail == other.detail
     }
 }
 

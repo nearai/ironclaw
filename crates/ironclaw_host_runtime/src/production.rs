@@ -2249,6 +2249,15 @@ fn host_runtime_spawn_input_for_capability(
     Ok(SpawnInputPreparation::Ready(value))
 }
 
+/// Shared default leak detector for the model-visible-cause belt. Building one
+/// compiles the registry regex set + prefix matcher, so it is memoized rather
+/// than rebuilt on every failure (retry storms would otherwise pay it per call).
+fn model_visible_cause_scrubber() -> &'static ironclaw_safety::LeakDetector {
+    static DETECTOR: std::sync::LazyLock<ironclaw_safety::LeakDetector> =
+        std::sync::LazyLock::new(ironclaw_safety::LeakDetector::new);
+    &DETECTOR
+}
+
 fn failure_from(
     error: CapabilityInvocationError,
     capability_id: CapabilityId,
@@ -2268,7 +2277,7 @@ fn failure_from(
         // Registry-scrubbed here (belt); the loop-support Diagnostic seam
         // re-scrubs and injection-fences fail-closed (suspenders). Never
         // rendered in Debug, run-state rows, or runtime events.
-        let (scrubbed, _) = ironclaw_safety::LeakDetector::new().redact_all_secrets(&raw_cause);
+        let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
         failure = failure.with_model_visible_cause(scrubbed);
     }
     failure
@@ -2872,10 +2881,11 @@ output_schema_ref = "schemas/test.output.json"
         // tokens) degrades to the kind's fixed sentence. The descriptive cause
         // is not lost — failure_from carries it (registry-scrubbed) on the
         // in-process-only model_visible_cause channel for the Diagnostic seam.
-        let raw = "read_file failed at /workspace/config using sk-live-token";
+        let secret = concat!("ghp_", "012345678901234567890123456789012345");
+        let raw = format!("read_file failed at /workspace/config using {secret}");
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            safe_summary: Some(raw.to_string()),
+            safe_summary: Some(raw),
             detail: None,
         };
 
@@ -2895,9 +2905,13 @@ output_schema_ref = "schemas/test.output.json"
             cause.contains("read_file failed at /workspace/config"),
             "descriptive cause (paths included) must survive for the model: {cause}"
         );
+        assert!(
+            !cause.contains(secret),
+            "registry secret must be scrubbed from the model-visible cause: {cause}"
+        );
         let rendered = format!("{failure:?}");
         assert!(
-            !rendered.contains("/workspace/config"),
+            !rendered.contains("/workspace/config") && !rendered.contains(secret),
             "Debug must not render the model-visible cause: {rendered}"
         );
 

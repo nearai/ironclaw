@@ -404,6 +404,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let input_sentinel = "BACKEND_FAILURE_INPUT_SENTINEL_3067";
+    let backend_registry_token = concat!("ghp_", "012345678901234567890123456789012345");
     let backend_secret = "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live";
 
     let outcome = runtime
@@ -424,6 +425,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
             for forbidden in [
                 input_sentinel,
                 backend_secret,
+                backend_registry_token,
                 "/private/tmp/backend-path",
                 "sk-live",
             ] {
@@ -444,6 +446,14 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
                 cause.contains("BACKEND_PROVIDER_ERROR_SECRET_3067"),
                 "descriptive cause must survive for the model: {cause}"
             );
+            // The registry belt scrubs credential-shaped tokens out of the
+            // cause before it can reach the model (the loop seam re-scrubs
+            // `sk-`-prefixed shapes and injection-fences on top). A path is
+            // deliberately NOT scrubbed here — the model needs it to recover.
+            assert!(
+                !cause.contains(backend_registry_token),
+                "registry credential must be scrubbed from the model-visible cause: {cause}"
+            );
         }
         other => panic!("expected sanitized backend failure, got {other:?}"),
     }
@@ -456,6 +466,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     for forbidden in [
         input_sentinel,
         backend_secret,
+        backend_registry_token,
         "/private/tmp/backend-path",
         "sk-live",
     ] {
@@ -801,7 +812,10 @@ struct FailingScriptBackend;
 
 impl ScriptBackend for FailingScriptBackend {
     fn execute(&self, _request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
-        Err("BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live".to_string())
+        Err(format!(
+            "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live {}",
+            concat!("ghp_", "012345678901234567890123456789012345")
+        ))
     }
 }
 
