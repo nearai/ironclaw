@@ -13,6 +13,8 @@ import {
   truncateId,
   statusTone,
   roleTone,
+  formatUserRole,
+  formatUserStatus,
 } from "../lib/admin-presenters";
 
 function DetailRow({ label, children }) {
@@ -93,8 +95,8 @@ export function UserDetail({ userId, onBack }) {
           <div>
             <h2 className="text-2xl font-semibold tracking-tight text-white">{user.display_name || user.id}</h2>
             <div className="mt-2 flex items-center gap-2">
-              <StatusPill tone={roleTone(user.role)} label={user.role || "member"} />
-              <StatusPill tone={statusTone(user.status)} label={user.status || "active"} />
+              <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
+              <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -136,8 +138,8 @@ export function UserDetail({ userId, onBack }) {
             <span className="font-mono text-xs">{user.id}</span>
           </DetailRow>
           <DetailRow label={t("admin.user.email")}>{user.email || t("admin.user.notSet")}</DetailRow>
-          <DetailRow label={t("admin.user.created")}>{formatRelativeTime(user.created_at)}</DetailRow>
-          <DetailRow label={t("admin.user.lastLogin")}>{formatRelativeTime(user.last_login_at)}</DetailRow>
+          <DetailRow label={t("admin.user.created")}>{formatRelativeTime(user.created_at, t)}</DetailRow>
+          <DetailRow label={t("admin.user.lastLogin")}>{formatRelativeTime(user.last_login_at, t)}</DetailRow>
           {user.created_by && (
             <DetailRow label={t("admin.user.createdBy")}>
               <span className="font-mono text-xs">{truncateId(user.created_by)}</span>
@@ -149,7 +151,7 @@ export function UserDetail({ userId, onBack }) {
           <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.summary")}</h3>
           <DetailRow label={t("admin.user.jobs")}>{user.job_count ?? 0}</DetailRow>
           <DetailRow label={t("admin.user.totalCost")}>{formatCost(user.total_cost)}</DetailRow>
-          <DetailRow label={t("admin.user.lastActive")}>{formatRelativeTime(user.last_active_at)}</DetailRow>
+          <DetailRow label={t("admin.user.lastActive")}>{formatRelativeTime(user.last_active_at, t)}</DetailRow>
         </Panel>
       </div>
 

@@ -57,6 +57,7 @@ fn make_record(trigger_id: TriggerId, caller: &ProductAgentBoundCaller) -> Trigg
             timezone: "UTC".to_string(),
         },
         prompt: "run the daily task".to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: now(),
         last_run_at: None,

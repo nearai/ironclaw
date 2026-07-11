@@ -18,6 +18,12 @@ on `push` to main, the merge queue must run it in the same shape first
 instead). External/live checks (canaries, deploys, releases, benchmark
 thresholds) are exempt: they stay out of the queue by design.
 
+The WASM WIT compatibility lane uses two risk scopes. Pull requests run it only
+for direct WIT, WASM host, extension, compatibility-test, or lane-workflow
+changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
+they run the lane in the merge queue, before landing, without adding the full
+WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
+
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted `all-features`/`default`/`libsql-only`, so
 feature-gated dead code (e.g. a `#[cfg(feature = "postgres")]`-constructed enum

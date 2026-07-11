@@ -41,6 +41,9 @@ static SECONDARY_FALLBACK: OnceLock<EnvFallback> = OnceLock::new();
 
 /// Install a secondary env lookup. Idempotent: subsequent calls are ignored.
 pub fn register_secondary_fallback(f: impl Fn(&str) -> Option<String> + Send + Sync + 'static) {
+    // Idempotent by contract: `set` returns `Err` only when the fallback is
+    // already installed, in which case subsequent registrations are ignored.
+    #[allow(clippy::let_underscore_must_use)]
     let _ = SECONDARY_FALLBACK.set(Box::new(f));
 }
 

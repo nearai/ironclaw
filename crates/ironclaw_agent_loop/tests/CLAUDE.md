@@ -23,6 +23,6 @@ behavior.
 ## Common mistakes
 
 - Do not test only helper functions when the bug is in executor behavior.
-- Do not duplicate `ironclaw_reborn` driver-adapter coverage here.
+- Do not duplicate `ironclaw_runner` driver-adapter coverage here.
 - Do not assert on raw prompt/model/tool payloads; framework state should carry
   refs and summaries only.

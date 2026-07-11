@@ -53,6 +53,11 @@ Run commands from the repository root.
 
 - `reborn-webui-v2-live-qa`
 
+PR-targeted runs execute the reviewed PR binary with live integration secrets.
+They must pass the `reborn-live-canary-pr` GitHub environment gate and have an
+approving review for the exact PR head commit from a collaborator with write
+access. Scheduled and manual default-branch runs do not require this PR gate.
+
 ## Local Commands
 
 Run the public live smoke lane:

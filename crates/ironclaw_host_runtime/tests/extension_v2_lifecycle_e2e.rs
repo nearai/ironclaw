@@ -101,6 +101,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
         .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope: scope.clone(),
+            authenticated_actor_user_id: None,
             estimate: estimate.clone(),
             mounts: None,
             resource_reservation: Some(reservation),
@@ -526,7 +527,10 @@ fn dispatch_error_for_runtime(
 ) -> DispatchError {
     match runtime {
         RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            safe_summary: None,
+        },
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
             capability: CapabilityId::new("system.unsupported").unwrap(),

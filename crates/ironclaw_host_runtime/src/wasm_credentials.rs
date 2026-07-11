@@ -324,6 +324,8 @@ where
     let restage = runtime.spawn(future);
     runtime.spawn(async move {
         let result = restage.await.unwrap_or(Err(CredentialStageError::Backend));
+        #[allow(clippy::let_underscore_must_use)]
+        // receiver may have dropped after recv timeout; nothing to signal
         let _ = sender.send(result);
     });
     receiver.recv().map_err(|_| CredentialStageError::Backend)?

@@ -57,7 +57,6 @@ use std::time::Duration;
 
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ResourceScope, UserId};
-use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
@@ -70,16 +69,22 @@ use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
-use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_reborn::loop_exit_applier::{
+use ironclaw_reborn_composition::build_default_budget_accountant;
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::{
+    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
+    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
+};
+use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_runner::loop_exit_applier::{
     LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
 };
-use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-use ironclaw_reborn::runtime::{
+use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
     ToolDisclosureMode, build_default_planned_runtime,
 };
-use ironclaw_reborn::subagent::{
+use ironclaw_runner::subagent::{
     await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
@@ -87,12 +92,7 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
-use ironclaw_reborn_composition::build_default_budget_accountant;
-use ironclaw_reborn_config::BudgetDefaults;
-use ironclaw_resources::{
-    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
-    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
-};
+use ironclaw_runner::turn_scheduler::TurnRunSchedulerHandle;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
@@ -220,6 +220,10 @@ pub(crate) struct GroupSharedStorage {
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
     pub(crate) security_audit_sink: Arc<RecordingSecurityAuditSink>,
+    /// The exact loop milestone sink wired into the group's ONE planned runtime.
+    /// Retained so integration tests can assert production loop milestones
+    /// without adding event-specific hooks to the runtime path.
+    pub(crate) milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     /// Enabler (c): the `trace_scope_key(tenant, owner)` the production
     /// trace-capture sink was seeded with when `.with_trace_capture()` opted
     /// in; `None` otherwise. Recorded at wiring time so a test asserts against
@@ -723,7 +727,7 @@ impl RebornIntegrationGroupBuilder {
             turn_state_for_evidence,
             Arc::clone(&loop_checkpoint_store),
             Arc::clone(&await_edge_store)
-                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             group_thread_scope.clone(),
         )
         .with_checkpoint_state_store(checkpoint_state_store.clone());
@@ -819,6 +823,7 @@ impl RebornIntegrationGroupBuilder {
         // shape this group's runtime is built from — the only place this
         // struct value exists before `build_default_planned_runtime` takes it
         // by value.
+        let milestone_sink_for_assertions = Arc::clone(&milestone_sink);
         let parts = DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -836,7 +841,7 @@ impl RebornIntegrationGroupBuilder {
             subagent_await_edge_settler: await_edge_resolver
                 as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
-                as Arc<dyn ironclaw_reborn::loop_exit_applier::AwaitDependentRunEvidenceStore>,
+                as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
@@ -920,6 +925,7 @@ impl RebornIntegrationGroupBuilder {
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
                 security_audit_sink,
+                milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
                 budget_account,
@@ -1179,6 +1185,7 @@ impl<'g> RebornThreadBuilder<'g> {
             .as_ref()
             .map(|sink| sink.events().len())
             .unwrap_or(0);
+        let baseline_milestone_count = shared.milestone_sink.milestones().len();
 
         // --- per-thread workflow over the SHARED coordinator --------------------
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -1268,6 +1275,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_network_count,
             baseline_security_audit_count,
             baseline_turn_event_count,
+            baseline_milestone_count,
         })
     }
 }
