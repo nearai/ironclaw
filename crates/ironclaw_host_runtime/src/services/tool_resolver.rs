@@ -9,7 +9,7 @@
 //! runtime backend — are preserved as error bindings so the error surface and
 //! the prepared-reservation release semantics are unchanged (TOOL-3).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use async_trait::async_trait;
@@ -39,6 +39,11 @@ where
     filesystem: Arc<F>,
     governor: Arc<G>,
     runtime_policy: EffectiveRuntimePolicy,
+    /// When set, only these providers' capabilities resolve here (the
+    /// built-in restriction once extension dispatch comes from the active
+    /// snapshot). `None` serves the whole registry — compositions without an
+    /// extension host.
+    provider_allowlist: Option<BTreeSet<ExtensionId>>,
     cache: RwLock<CachedBindings>,
 }
 
@@ -58,6 +63,7 @@ where
         filesystem: Arc<F>,
         governor: Arc<G>,
         runtime_policy: EffectiveRuntimePolicy,
+        provider_allowlist: Option<BTreeSet<ExtensionId>>,
     ) -> Self {
         Self {
             registry,
@@ -65,6 +71,7 @@ where
             filesystem,
             governor,
             runtime_policy,
+            provider_allowlist,
             cache: RwLock::new(CachedBindings {
                 version: None,
                 bindings: Arc::new(HashMap::new()),
@@ -95,6 +102,11 @@ where
         let mut packages: HashMap<ExtensionId, Arc<ExtensionPackage>> = HashMap::new();
         let mut bindings = HashMap::new();
         for descriptor in snapshot.capabilities() {
+            if let Some(allowlist) = &self.provider_allowlist
+                && !allowlist.contains(&descriptor.provider)
+            {
+                continue;
+            }
             let adapter = self.bind_capability(snapshot, descriptor, &mut packages);
             bindings.insert(
                 descriptor.id.clone(),

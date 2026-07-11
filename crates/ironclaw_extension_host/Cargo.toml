@@ -21,6 +21,7 @@ test-support = []
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }

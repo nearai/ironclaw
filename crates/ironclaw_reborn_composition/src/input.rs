@@ -198,6 +198,12 @@ pub struct RebornBuildInput {
     pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    /// `first_party`-runtime extension factories the binary assembles
+    /// (extension-runtime P2). Empty until concrete extension crates extract
+    /// in P6; integration tests register the invented-vendor fixture factory
+    /// here.
+    pub(crate) native_extension_factories:
+        Vec<std::sync::Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
@@ -634,6 +640,14 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_native_extension_factories(
+        mut self,
+        factories: Vec<std::sync::Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    ) -> Self {
+        self.native_extension_factories = factories;
+        self
+    }
+
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
         config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
@@ -800,6 +814,7 @@ impl RebornBuildInput {
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth_lazy_slot: None,
             nearai_mcp_bootstrap_config: None,
+            native_extension_factories: Vec::new(),
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }
     }

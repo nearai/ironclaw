@@ -183,4 +183,11 @@ pub enum SnapshotConflict {
         first: String,
         second: String,
     },
+    #[error(
+        "capability id `{capability_id}` declared by `{extension_id}` collides with a host built-in"
+    )]
+    ReservedCapability {
+        capability_id: String,
+        extension_id: String,
+    },
 }

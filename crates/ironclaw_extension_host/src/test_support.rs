@@ -23,7 +23,7 @@ use ironclaw_product_adapters::{
 
 use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntrypoint};
 use crate::lifecycle::{DrainController, EgressFactory, HookError, RemovalContext, RemovalHooks};
-use crate::loaders::{ExtensionLoader, LoadContext};
+use crate::loaders::{ExtensionLoader, LoadContext, LoadedExtension};
 
 const MCP_MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v3"
@@ -303,16 +303,16 @@ pub struct FakeLoader {
 
 #[async_trait]
 impl ExtensionLoader for FakeLoader {
-    async fn load(&self, _ctx: &LoadContext) -> Result<Box<dyn ExtensionEntrypoint>, BindError> {
+    async fn load(&self, _ctx: &LoadContext) -> Result<LoadedExtension, BindError> {
         self.load_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_load {
             return Err(BindError::Load {
                 reason: "scripted load failure".to_string(),
             });
         }
-        Ok(Box::new(FakeEntrypoint {
+        Ok(LoadedExtension::new(Box::new(FakeEntrypoint {
             bindings: self.bindings.clone(),
-        }))
+        })))
     }
 }
 

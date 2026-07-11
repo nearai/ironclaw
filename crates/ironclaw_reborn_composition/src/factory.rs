@@ -1146,6 +1146,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config,
+        native_extension_factories,
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
@@ -1714,6 +1715,42 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
+
+    // Generic extension host (extension-runtime P2): loaders over the fully
+    // configured runtime lanes, hydrated from the facade's durable state.
+    // From here extension dispatch resolves from the host's active snapshot;
+    // the registry lane serves built-ins only.
+    {
+        let reserved_capability_ids: std::collections::BTreeSet<_> = services
+            .shared_extension_registry()
+            .snapshot()
+            .capabilities()
+            .filter(|descriptor| {
+                descriptor.provider.as_str() == ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER
+            })
+            .map(|descriptor| descriptor.id.clone())
+            .collect();
+        let generic = crate::extension_host::generic_host::build_generic_extension_host(
+            services.extension_lane_tool_binder(),
+            native_extension_factories,
+            store_graph
+                .local_runtime
+                .extension_management
+                .as_ref()
+                .map(|management| management.installation_store_handle())
+                .ok_or_else(|| RebornBuildError::InvalidConfig {
+                    reason: "generic extension host requires extension management".to_string(),
+                })?,
+            Arc::clone(&store_graph.resource_governor)
+                as Arc<dyn ironclaw_resources::ResourceGovernor>,
+            reserved_capability_ids,
+        )
+        .await?;
+        if let Some(management) = store_graph.local_runtime.extension_management.as_ref() {
+            management.attach_generic_host(Arc::clone(&generic.host));
+        }
+        services.set_extension_tool_resolver(generic.resolver);
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     let local_dev_wasm_runtime_credential_provider_captured =
@@ -3795,6 +3832,7 @@ async fn build_production_shaped(
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config: _,
+        native_extension_factories: _,
         turn_state_store_limits,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]

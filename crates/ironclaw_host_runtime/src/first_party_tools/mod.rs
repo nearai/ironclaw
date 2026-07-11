@@ -73,6 +73,18 @@ pub use trigger_management::{
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
+
+/// The registry-lane provider allowlist once activated extension dispatch
+/// resolves from the extension host's active snapshot: only the synthetic
+/// built-in package keeps resolving through the registry.
+pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<ExtensionId> {
+    let mut allowlist = std::collections::BTreeSet::new();
+    if let Ok(builtin) = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER) {
+        allowlist.insert(builtin);
+    }
+    allowlist
+}
+
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
 pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
 pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";

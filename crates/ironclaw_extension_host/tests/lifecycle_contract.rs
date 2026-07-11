@@ -56,6 +56,7 @@ async fn harness_full(
         removal_hooks: Arc::clone(&hooks) as Arc<_>,
         drain: Arc::clone(&drain) as Arc<_>,
         egress: Arc::new(FakeEgressFactory),
+        reserved_capability_ids: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
@@ -350,6 +351,7 @@ async fn restore_resumes_active_and_skips_invalid() {
         removal_hooks: Arc::new(RecordingRemovalHooks::default()),
         drain: Arc::new(RecordingDrain::default()),
         egress: Arc::new(FakeEgressFactory),
+        reserved_capability_ids: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
@@ -388,6 +390,7 @@ async fn restore_skips_a_load_failure_without_blocking_the_rest() {
         removal_hooks: Arc::new(RecordingRemovalHooks::default()),
         drain: Arc::new(RecordingDrain::default()),
         egress: Arc::new(FakeEgressFactory),
+        reserved_capability_ids: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
@@ -433,4 +436,185 @@ async fn in_flight_snapshot_survives_a_later_swap() {
     // The in-flight Arc still sees acme at its own generation.
     assert!(in_flight.extension("acme").is_some());
     assert_eq!(in_flight.generation(), generation_before);
+}
+
+// ── Snapshot resolution at the dispatch seam (TOOL-1 snapshot side, TOOL-10) ──
+
+#[tokio::test]
+async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
+    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_host_api::CapabilityId;
+
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = harness_with(
+        tool_and_channel_bindings(Arc::clone(&channel)),
+        Arc::clone(&channel),
+    )
+    .await;
+    let resolver = ironclaw_extension_host::SnapshotToolResolver::new(h.host.snapshot_watch());
+    let ping = CapabilityId::new("acme.ping").unwrap();
+
+    assert!(
+        resolver.resolve(&ping).is_none(),
+        "nothing resolves before activation"
+    );
+
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    h.host.activate("acme").await.unwrap();
+
+    let resolved = resolver.resolve(&ping).expect("activated tool resolves");
+    assert_eq!(resolved.provider.as_str(), "acme");
+    assert_eq!(resolved.runtime, ironclaw_host_api::RuntimeKind::Wasm);
+
+    // An in-flight binding keeps working across the deactivation swap; new
+    // resolution stops.
+    let in_flight = resolver.resolve(&ping).expect("binding before swap");
+    h.host.deactivate("acme").await.unwrap();
+    assert!(
+        resolver.resolve(&ping).is_none(),
+        "deactivated tool must not resolve"
+    );
+    let outcome = in_flight
+        .adapter
+        .dispatch_json(ironclaw_dispatcher::BoundCapabilityRequest {
+            capability_id: ping.clone(),
+            scope: sample_scope(),
+            estimate: ironclaw_host_api::ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: serde_json::json!({"message": "in flight"}),
+        })
+        .await
+        .expect("in-flight binding dispatches");
+    assert_eq!(outcome.output, serde_json::json!({"ok": true}));
+    assert!(outcome.output_bytes > 0);
+}
+
+#[tokio::test]
+async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
+    use ironclaw_dispatcher::ToolResolver;
+    use ironclaw_host_api::{
+        CapabilityId, DispatchError, SecretHandle, ToolAdapter, ToolCall, ToolError, ToolPorts,
+        ToolResult,
+    };
+
+    struct AuthGatingAdapter;
+
+    #[async_trait::async_trait]
+    impl ToolAdapter for AuthGatingAdapter {
+        async fn invoke(
+            &self,
+            _call: ToolCall,
+            _ports: &ToolPorts<'_>,
+        ) -> Result<ToolResult, ToolError> {
+            Err(ToolError::AuthRequired {
+                required_secrets: vec![SecretHandle::new("acme_token").unwrap()],
+                credential_requirements: Vec::new(),
+            })
+        }
+    }
+
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = harness_with(
+        ExtensionBindings {
+            tools: Some(Arc::new(AuthGatingAdapter)),
+            channel: Some(Arc::clone(&channel) as Arc<dyn ChannelAdapter>),
+        },
+        channel,
+    )
+    .await;
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    h.host.activate("acme").await.unwrap();
+
+    let resolver = ironclaw_extension_host::SnapshotToolResolver::new(h.host.snapshot_watch());
+    let resolved = resolver
+        .resolve(&CapabilityId::new("acme.ping").unwrap())
+        .expect("resolves");
+    let err = resolved
+        .adapter
+        .dispatch_json(ironclaw_dispatcher::BoundCapabilityRequest {
+            capability_id: CapabilityId::new("acme.ping").unwrap(),
+            scope: sample_scope(),
+            estimate: ironclaw_host_api::ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: serde_json::json!({}),
+        })
+        .await
+        .unwrap_err();
+
+    // The gate payload survives the ABI so the standard blocked-turn re-auth
+    // flow drives it (TOOL-5's dispatch leg).
+    match err {
+        DispatchError::AuthRequired {
+            capability,
+            required_secrets,
+            ..
+        } => {
+            assert_eq!(capability.as_str(), "acme.ping");
+            assert_eq!(required_secrets.len(), 1);
+        }
+        other => panic!("expected AuthRequired, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
+    use ironclaw_host_api::CapabilityId;
+
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let store = Arc::new(InMemoryInstallationRecordStore::default());
+    let deps = ExtensionHostDeps {
+        store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
+        loader: Arc::new(FakeLoader {
+            bindings: tool_and_channel_bindings(channel),
+            load_calls: Arc::new(AtomicUsize::new(0)),
+            fail_load: false,
+        }),
+        removal_hooks: Arc::new(RecordingRemovalHooks::default()),
+        drain: Arc::new(RecordingDrain::default()),
+        egress: Arc::new(FakeEgressFactory),
+        reserved_capability_ids: [CapabilityId::new("acme.ping").unwrap()]
+            .into_iter()
+            .collect(),
+        hook_deadline: Duration::from_secs(5),
+    };
+    let host = ExtensionHost::new(deps).await;
+    host.install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+
+    let err = host.activate("acme").await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            LifecycleError::Conflict(
+                ironclaw_extension_host::SnapshotConflict::ReservedCapability { capability_id, .. }
+            ) if capability_id == "acme.ping"
+        ),
+        "expected reserved-capability conflict, got {err:?}"
+    );
+    // Nothing published; the record fell back to Installed with a typed error.
+    assert!(host.snapshot().await.extension("acme").is_none());
+    let stored = store.get("acme").await.unwrap().unwrap();
+    assert_eq!(stored.state, InstallationState::Installed);
+    assert!(stored.last_error.is_some());
+}
+
+fn sample_scope() -> ironclaw_host_api::ResourceScope {
+    ironclaw_host_api::ResourceScope {
+        tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
+        user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: ironclaw_host_api::InvocationId::new(),
+    }
 }

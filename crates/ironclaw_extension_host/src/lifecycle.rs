@@ -7,11 +7,12 @@
 //! operations (single serving process assumption). The removal order is
 //! fixed (§6.2) and identical for every extension.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::RestrictedEgress;
+use ironclaw_host_api::{CapabilityId, RestrictedEgress};
 use tokio::sync::Mutex;
 
 use crate::active::{ActiveExtension, ActiveSnapshot, Generation, SnapshotConflict};
@@ -74,6 +75,9 @@ pub struct ExtensionHostDeps {
     pub removal_hooks: Arc<dyn RemovalHooks>,
     pub drain: Arc<dyn DrainController>,
     pub egress: Arc<dyn EgressFactory>,
+    /// Host-owned capability ids (the built-in registry). An extension
+    /// declaring any of these fails activation with a conflict (TOOL-10).
+    pub reserved_capability_ids: BTreeSet<CapabilityId>,
     /// Bounded deadline for adapter hooks and drains.
     pub hook_deadline: Duration,
 }
@@ -83,11 +87,35 @@ pub struct ExtensionHost {
     deps: ExtensionHostDeps,
     /// Serializes every lifecycle operation (single serving process).
     lifecycle_lock: Mutex<LifecycleState>,
+    /// Lock-free mirror of the current snapshot for synchronous readers
+    /// (the dispatch-time tool resolver). Written only under
+    /// `lifecycle_lock`, so readers observe exactly the published
+    /// generations in order.
+    snapshot_cell: Arc<RwLock<Arc<ActiveSnapshot>>>,
 }
 
 struct LifecycleState {
     snapshot: Arc<ActiveSnapshot>,
     generation: u64,
+}
+
+/// A cloneable, synchronous view of the current active snapshot.
+#[derive(Clone)]
+pub struct SnapshotWatch {
+    cell: Arc<RwLock<Arc<ActiveSnapshot>>>,
+}
+
+impl SnapshotWatch {
+    /// The currently published generation. In-flight readers keep the `Arc`
+    /// they resolved.
+    pub fn current(&self) -> Arc<ActiveSnapshot> {
+        match self.cell.read() {
+            Ok(guard) => Arc::clone(&guard),
+            // A poisoned mirror still holds the last published snapshot;
+            // resolution staying available beats propagating the panic.
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        }
+    }
 }
 
 /// Typed lifecycle failures.
@@ -119,6 +147,7 @@ impl ExtensionHost {
                 snapshot: ActiveSnapshot::empty(),
                 generation: 0,
             }),
+            snapshot_cell: Arc::new(RwLock::new(ActiveSnapshot::empty())),
         }
     }
 
@@ -126,6 +155,22 @@ impl ExtensionHost {
     /// their own `Arc`).
     pub async fn snapshot(&self) -> Arc<ActiveSnapshot> {
         Arc::clone(&self.lifecycle_lock.lock().await.snapshot)
+    }
+
+    /// A synchronous watch over the published snapshot, for dispatch-time
+    /// resolvers.
+    pub fn snapshot_watch(&self) -> SnapshotWatch {
+        SnapshotWatch {
+            cell: Arc::clone(&self.snapshot_cell),
+        }
+    }
+
+    fn mirror_snapshot(&self, snapshot: &Arc<ActiveSnapshot>) {
+        let mut cell = match self.snapshot_cell.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *cell = Arc::clone(snapshot);
     }
 
     /// Install a resolved extension in `Installed` state (idempotent upsert).
@@ -306,6 +351,18 @@ impl ExtensionHost {
         self.remove(extension_id).await
     }
 
+    /// Drop an installation record without running the removal pipeline.
+    ///
+    /// Transitional (facade era): removal side effects are still owned by
+    /// the lifecycle facade, which unpublishes via [`Self::deactivate`] and
+    /// then drops the mirrored record here. Deleted when the facade
+    /// collapses and [`Self::remove`] becomes the production removal path.
+    pub async fn remove_record(&self, extension_id: &str) -> Result<(), LifecycleError> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.deps.store.delete(extension_id).await?;
+        Ok(())
+    }
+
     /// Restore all enabled generations at startup and publish once. An
     /// invalid extension is skipped with a typed error and does not block the
     /// valid rest.
@@ -350,6 +407,7 @@ impl ExtensionHost {
                 .collect(),
         )?;
         guard.snapshot = snapshot;
+        self.mirror_snapshot(&guard.snapshot);
 
         Ok(RestoreReport {
             restored: restored.into_iter().map(|(id, _)| id).collect(),
@@ -374,7 +432,7 @@ impl ExtensionHost {
         &self,
         record: &InstallationRecord,
     ) -> Result<ActiveExtension, LifecycleError> {
-        let entrypoint = self
+        let loaded = self
             .deps
             .loader
             .load(&LoadContext {
@@ -383,16 +441,31 @@ impl ExtensionHost {
                 resolved: Arc::clone(&record.resolved),
             })
             .await?;
-        let bindings = entrypoint.bind(crate::entrypoint::BindContext {
+        // A discovery-owning loader publishes its effective contract; static
+        // loads bind against the persisted declaration.
+        let resolved = loaded
+            .effective_resolved
+            .unwrap_or_else(|| Arc::clone(&record.resolved));
+        let bindings = loaded.entrypoint.bind(crate::entrypoint::BindContext {
             installation_id: record.installation_id.clone(),
-            resolved: Arc::clone(&record.resolved),
+            resolved: Arc::clone(&resolved),
             config: record.config.clone(),
         })?;
-        check_binding(&record.resolved, &bindings)?;
+        check_binding(&resolved, &bindings)?;
+        for tool in &resolved.tools {
+            if self.deps.reserved_capability_ids.contains(&tool.id) {
+                return Err(LifecycleError::Conflict(
+                    SnapshotConflict::ReservedCapability {
+                        capability_id: tool.id.as_str().to_string(),
+                        extension_id: record.extension_id.clone(),
+                    },
+                ));
+            }
+        }
         Ok(ActiveExtension {
             extension_id: record.extension_id.clone(),
             installation_id: record.installation_id.clone(),
-            resolved: Arc::clone(&record.resolved),
+            resolved,
             tools: bindings.tools,
             channel: bindings.channel,
         })
@@ -453,6 +526,7 @@ impl ExtensionHost {
         }
         guard.generation += 1;
         guard.snapshot = ActiveSnapshot::build(Generation(guard.generation), extensions)?;
+        self.mirror_snapshot(&guard.snapshot);
         Ok(())
     }
 }

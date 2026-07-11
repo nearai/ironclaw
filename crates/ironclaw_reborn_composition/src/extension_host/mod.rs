@@ -21,6 +21,7 @@ pub(crate) mod extension_lifecycle_capabilities;
 #[cfg(test)]
 pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
+pub(crate) mod generic_host;
 pub(crate) mod gsuite;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;

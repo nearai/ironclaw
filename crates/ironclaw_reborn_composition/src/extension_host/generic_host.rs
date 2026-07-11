@@ -1,0 +1,429 @@
+//! Composition of the generic [`ExtensionHost`] (extension-runtime P2).
+//!
+//! Assembly only: this module constructs the generic lifecycle host with
+//! concrete loaders over the host-runtime lanes and injects its snapshot
+//! resolver into the dispatch chain. The lifecycle facade
+//! (`extension_lifecycle.rs`) remains the durable-lifecycle owner and the
+//! production caller — it drives the host at its choke points
+//! (activation commit, removal, boot restore), so the active snapshot always
+//! mirrors what the facade published. Durable seven-state ownership and the
+//! host-owned removal order move here when the facade collapses (P6).
+//!
+//! Loader dispatch, by the resolved contract's runtime kind:
+//! - `first_party` with a binary-assembled [`NativeExtensionFactory`] → the
+//!   factory's entrypoint, with its tool adapter wrapped in the host-side
+//!   reservation-settling decorator;
+//! - `first_party` without a factory → the host-runtime first-party registry
+//!   lane, bridged per package (the bundled registry-handler extensions,
+//!   until their crates extract);
+//! - `wasm` / `mcp` / `script` → the host-runtime lane binder (the lane owns
+//!   reservation settlement).
+//!
+//! A channel-declaring extension whose channel is still served by the host
+//! graph (until the P4 ingress / P5 delivery cutovers) binds the
+//! transitional [`HostServedChannelBridge`] so the binding rule holds; the
+//! bridge routes nothing and is deleted when the real channel adapters land.
+
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use ironclaw_extension_host::{
+    BindError, DrainController, EgressFactory, ExtensionBindings, ExtensionEntrypoint,
+    ExtensionHost, ExtensionHostDeps, ExtensionLoader, HookError, InMemoryInstallationRecordStore,
+    InstallationRecord, InstallationState, LoadContext, LoadedExtension, NativeExtensionFactory,
+    RemovalContext, RemovalHooks, SnapshotToolResolver,
+};
+use ironclaw_extensions::{
+    ExtensionActivationState, ExtensionInstallationStore, ExtensionManifest, ExtensionPackage,
+    ResolvedExtensionManifest,
+};
+use ironclaw_host_api::{
+    CapabilityId, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
+    RestrictedEgressResponse, ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult, VirtualPath,
+};
+use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
+use ironclaw_product_adapters::{
+    ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
+    VerifiedInbound,
+};
+use ironclaw_resources::ResourceGovernor;
+
+/// The composed generic host plus the resolver handle composition injects
+/// into the dispatch chain.
+pub(crate) struct GenericExtensionHost {
+    pub(crate) host: Arc<ExtensionHost>,
+    pub(crate) resolver: Arc<SnapshotToolResolver>,
+}
+
+/// Construct the generic extension host over the host-runtime lanes and
+/// hydrate it from the facade's durable installation state (every `Enabled`
+/// installation activates into the first published generation).
+pub(crate) async fn build_generic_extension_host(
+    binder: ExtensionLaneToolBinder,
+    native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
+    installation_store: Arc<dyn ExtensionInstallationStore>,
+    governor: Arc<dyn ResourceGovernor>,
+    reserved_capability_ids: BTreeSet<CapabilityId>,
+) -> Result<GenericExtensionHost, crate::RebornBuildError> {
+    let factories: HashMap<String, Arc<dyn NativeExtensionFactory>> = native_factories
+        .into_iter()
+        .map(|factory| (factory.service().to_string(), factory))
+        .collect();
+    let loader = Arc::new(CompositionExtensionLoader {
+        binder,
+        factories,
+        governor,
+        installation_store: Arc::clone(&installation_store),
+    });
+    let host = Arc::new(
+        ExtensionHost::new(ExtensionHostDeps {
+            // The facade owns durable lifecycle state in P2b; this store is
+            // the host's working set, rehydrated below from the facade's
+            // durable records at every boot.
+            store: Arc::new(InMemoryInstallationRecordStore::default()),
+            loader,
+            removal_hooks: Arc::new(FacadeOwnedRemovalHooks),
+            drain: Arc::new(GenerationDrain),
+            egress: Arc::new(DenyAllEgressFactory),
+            reserved_capability_ids,
+            hook_deadline: Duration::from_secs(30),
+        })
+        .await,
+    );
+
+    // Hydrate: every Enabled installation the facade restored activates into
+    // the snapshot. A failure falls back to Installed inside the host and
+    // must not block boot (same skip-invalid rule as the facade restore).
+    for installation in installation_store
+        .list_installations()
+        .await
+        .map_err(|error| crate::RebornBuildError::InvalidConfig {
+            reason: format!("extension installations could not be listed: {error}"),
+        })?
+    {
+        if installation.activation_state() != ExtensionActivationState::Enabled {
+            continue;
+        }
+        let extension_id = installation.extension_id().clone();
+        let Some(manifest_record) = installation_store
+            .get_manifest(&extension_id)
+            .await
+            .map_err(|error| crate::RebornBuildError::InvalidConfig {
+                reason: format!("extension manifest could not be loaded: {error}"),
+            })?
+        else {
+            continue;
+        };
+        let record = InstallationRecord {
+            extension_id: extension_id.as_str().to_string(),
+            installation_id: installation.installation_id().as_str().to_string(),
+            state: InstallationState::Installed,
+            resolved: Arc::new(manifest_record.resolved().clone()),
+            config: Vec::new(),
+            last_error: None,
+        };
+        if let Err(error) = host.install(record).await {
+            tracing::warn!(
+                extension_id = extension_id.as_str(),
+                error = %error,
+                "generic extension host could not stage installation at boot"
+            );
+            continue;
+        }
+        if let Err(error) = host.activate(extension_id.as_str()).await {
+            tracing::warn!(
+                extension_id = extension_id.as_str(),
+                error = %error,
+                "generic extension host could not activate installation at boot"
+            );
+        }
+    }
+
+    let resolver = Arc::new(SnapshotToolResolver::new(host.snapshot_watch()));
+    Ok(GenericExtensionHost { host, resolver })
+}
+
+/// The effective contract an activation publishes: the persisted declaration
+/// with the tool set replaced by the package actually being published
+/// (identical for static manifests; the ceiling-validated discovered set for
+/// hosted MCP).
+pub(crate) fn effective_resolved_for_package(
+    base: &ResolvedExtensionManifest,
+    package: &ExtensionPackage,
+) -> ResolvedExtensionManifest {
+    ResolvedExtensionManifest {
+        tools: package.manifest.capabilities.clone(),
+        ..base.clone()
+    }
+}
+
+/// Loader over the host-runtime lanes and the binary-assembled native
+/// factory set.
+struct CompositionExtensionLoader {
+    binder: ExtensionLaneToolBinder,
+    factories: HashMap<String, Arc<dyn NativeExtensionFactory>>,
+    governor: Arc<dyn ResourceGovernor>,
+    installation_store: Arc<dyn ExtensionInstallationStore>,
+}
+
+#[async_trait]
+impl ExtensionLoader for CompositionExtensionLoader {
+    async fn load(&self, ctx: &LoadContext) -> Result<LoadedExtension, BindError> {
+        // Rebuild the validated package from the resolved contract — no TOML
+        // reparse; the manifest source re-checks come from the persisted
+        // record.
+        let extension_id = ironclaw_host_api::ExtensionId::new(&ctx.extension_id)
+            .map_err(|error| load_error(format!("invalid extension id: {error}")))?;
+        let source = self
+            .installation_store
+            .get_manifest(&extension_id)
+            .await
+            .map_err(|error| load_error(format!("manifest record unavailable: {error}")))?
+            .ok_or_else(|| load_error("manifest record is not installed".to_string()))?
+            .manifest()
+            .source;
+        let manifest_v2 = ctx
+            .resolved
+            .to_internal(source)
+            .map_err(|error| load_error(format!("resolved contract rebuild failed: {error}")))?;
+        let declares_channel = ctx.resolved.channel.is_some();
+
+        if let ironclaw_extensions::ExtensionRuntimeV2::FirstParty { service } =
+            &ctx.resolved.runtime
+            && let Some(factory) = self.factories.get(service)
+        {
+            let entrypoint = factory.load(ctx)?;
+            return Ok(LoadedExtension::new(Box::new(SettlingEntrypoint {
+                inner: entrypoint,
+                governor: Arc::clone(&self.governor),
+            })));
+        }
+
+        let manifest = ExtensionManifest::try_from(manifest_v2)
+            .map_err(|error| load_error(format!("manifest rebuild failed: {error}")))?;
+        let root = VirtualPath::new(format!("/system/extensions/{}", ctx.extension_id))
+            .map_err(|error| load_error(format!("extension root invalid: {error}")))?;
+        let package = ExtensionPackage::from_manifest(manifest, root)
+            .map_err(|error| load_error(format!("package rebuild failed: {error}")))?;
+        let adapter = self
+            .binder
+            .bind_package(Arc::new(package))
+            .map_err(|error| match error {
+                ExtensionToolBindError::MissingRuntimeBackend { runtime } => load_error(format!(
+                    "no runtime backend is configured for {runtime:?} extensions"
+                )),
+            })?;
+        Ok(LoadedExtension::new(Box::new(LaneEntrypoint {
+            adapter,
+            // A channel declared while its serve graph is still host-owned
+            // (until the P4/P5 cutovers) binds the transitional bridge so
+            // the binding rule holds.
+            channel: declares_channel
+                .then(|| Arc::new(HostServedChannelBridge) as Arc<dyn ChannelAdapter>),
+        })))
+    }
+}
+
+fn load_error(reason: String) -> BindError {
+    BindError::Load { reason }
+}
+
+/// Entrypoint over a lane-bound tool adapter (wasm / mcp / script /
+/// first-party-registry packages).
+struct LaneEntrypoint {
+    adapter: Arc<dyn ToolAdapter>,
+    channel: Option<Arc<dyn ChannelAdapter>>,
+}
+
+impl ExtensionEntrypoint for LaneEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ExtensionBindings, BindError> {
+        Ok(ExtensionBindings {
+            tools: Some(Arc::clone(&self.adapter)),
+            channel: self.channel.clone(),
+        })
+    }
+}
+
+/// Wraps a native factory's entrypoint so its tool adapter settles forwarded
+/// reservations (native adapters are behavior-only; the settle legs are
+/// host-side).
+struct SettlingEntrypoint {
+    inner: Box<dyn ExtensionEntrypoint>,
+    governor: Arc<dyn ResourceGovernor>,
+}
+
+impl ExtensionEntrypoint for SettlingEntrypoint {
+    fn bind(
+        &self,
+        ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ExtensionBindings, BindError> {
+        let bindings = self.inner.bind(ctx)?;
+        Ok(ExtensionBindings {
+            tools: bindings.tools.map(|inner| {
+                Arc::new(SettlingToolAdapter {
+                    inner,
+                    governor: Arc::clone(&self.governor),
+                }) as Arc<dyn ToolAdapter>
+            }),
+            channel: bindings.channel,
+        })
+    }
+}
+
+/// Reservation settlement for native adapters: reconcile-or-release the
+/// prepared reservation (or reserve fresh) around the behavior-only invoke —
+/// the same legs the runtime lanes own internally.
+struct SettlingToolAdapter {
+    inner: Arc<dyn ToolAdapter>,
+    governor: Arc<dyn ResourceGovernor>,
+}
+
+#[async_trait]
+impl ToolAdapter for SettlingToolAdapter {
+    async fn invoke(
+        &self,
+        mut call: ToolCall,
+        ports: &ToolPorts<'_>,
+    ) -> Result<ToolResult, ToolError> {
+        let scope = call.scope.clone();
+        let estimate = call.resources.estimate.clone();
+        let reservation = call.resources.reservation.take();
+        let reservation = match reservation {
+            Some(reservation) => reservation,
+            None => self
+                .governor
+                .reserve(scope, estimate)
+                .map_err(|_| ToolError::Failed {
+                    kind: ironclaw_host_api::RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
+                })?,
+        };
+        match self.inner.invoke(call, ports).await {
+            Ok(result) => {
+                let usage = ironclaw_host_api::ResourceUsage {
+                    output_bytes: result.output_bytes,
+                    ..ironclaw_host_api::ResourceUsage::default()
+                };
+                if self.governor.reconcile(reservation.id, usage).is_err() {
+                    release_reservation(self.governor.as_ref(), reservation.id);
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                release_reservation(self.governor.as_ref(), reservation.id);
+                Err(error)
+            }
+        }
+    }
+}
+
+fn release_reservation(
+    governor: &dyn ResourceGovernor,
+    reservation_id: ironclaw_host_api::ResourceReservationId,
+) {
+    if let Err(error) = governor.release(reservation_id) {
+        tracing::warn!(
+            reservation_id = %reservation_id,
+            error = %error,
+            "failed to release native extension tool reservation"
+        );
+    }
+}
+
+/// Transitional channel binding for extensions whose channel surface is
+/// still served by the host graph (until the P4 ingress / P5 delivery
+/// cutovers). Routes nothing; deleted when the real channel adapters bind.
+struct HostServedChannelBridge;
+
+#[async_trait]
+impl ChannelAdapter for HostServedChannelBridge {
+    async fn activate(
+        &self,
+        _ctx: &ChannelContext<'_>,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    async fn cleanup(
+        &self,
+        _ctx: &ChannelContext<'_>,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+
+    async fn deliver(
+        &self,
+        _envelope: OutboundEnvelope,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+}
+
+/// Removal side effects (credential revoke, integration-state delete) stay
+/// facade-owned in P2b; the host's removal pipeline is not production-driven
+/// until the facade collapses (P6). The facade calls
+/// [`ExtensionHost::deactivate`] to unpublish.
+struct FacadeOwnedRemovalHooks;
+
+#[async_trait]
+impl RemovalHooks for FacadeOwnedRemovalHooks {
+    async fn revoke_and_delete_grants(&self, ctx: &RemovalContext<'_>) -> Result<(), HookError> {
+        tracing::debug!(
+            extension_id = ctx.extension_id,
+            "extension removal grants are facade-owned until the P6 extraction"
+        );
+        Ok(())
+    }
+
+    async fn delete_integration_state(&self, ctx: &RemovalContext<'_>) -> Result<(), HookError> {
+        tracing::debug!(
+            extension_id = ctx.extension_id,
+            "extension integration state is facade-owned until the P6 extraction"
+        );
+        Ok(())
+    }
+}
+
+/// In-flight work completes on the generation `Arc` it resolved; there is no
+/// additional drain source until the delivery coordinator (P5).
+struct GenerationDrain;
+
+#[async_trait]
+impl DrainController for GenerationDrain {
+    async fn drain(&self, _extension_id: &str, _deadline: Duration) -> Result<(), HookError> {
+        Ok(())
+    }
+}
+
+/// Channel hooks have no production egress consumer until P4/P5; fail closed.
+struct DenyAllEgressFactory;
+
+impl EgressFactory for DenyAllEgressFactory {
+    fn egress_for(&self, _extension_id: &str) -> Arc<dyn RestrictedEgress> {
+        Arc::new(DenyAllRestrictedEgress)
+    }
+}
+
+struct DenyAllRestrictedEgress;
+
+#[async_trait]
+impl RestrictedEgress for DenyAllRestrictedEgress {
+    async fn send(
+        &self,
+        _request: RestrictedEgressRequest,
+    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        Err(RestrictedEgressError::PolicyDenied)
+    }
+}

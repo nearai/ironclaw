@@ -107,6 +107,11 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     // product auth cannot have minted a reusable OAuth credential, so there is
     // nothing to revoke on removal.
     credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+    // Late-attached by `build_local_runtime` after the host-runtime lanes are
+    // configured (the generic host's loaders bind through them). Attached ⟺
+    // the dispatch chain resolves extensions from the host's active snapshot;
+    // unattached compositions (focused tests) keep registry-only dispatch.
+    generic_host: std::sync::OnceLock<Arc<ironclaw_extension_host::ExtensionHost>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -256,6 +261,88 @@ impl RebornLocalExtensionManagementPort {
             active_extensions,
             operation_lock: Arc::new(Mutex::new(())),
             credential_cleanup,
+            generic_host: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The durable installation store handle (the generic host hydrates its
+    /// working set from it at boot).
+    pub(crate) fn installation_store_handle(&self) -> Arc<dyn ExtensionInstallationStore> {
+        Arc::clone(&self.installation_store)
+    }
+
+    /// Attach the generic extension host so lifecycle mutations publish the
+    /// active snapshot the dispatch chain resolves from.
+    pub(crate) fn attach_generic_host(&self, host: Arc<ironclaw_extension_host::ExtensionHost>) {
+        let _ = self.generic_host.set(host);
+    }
+
+    /// Mirror an activation into the generic host's snapshot. Runs after the
+    /// registry publish succeeded; a failure here fails the activation (the
+    /// caller compensates) — extension dispatch resolves from the snapshot,
+    /// so an unmirrored activation would produce undispatchable tools.
+    async fn publish_to_generic_host(
+        &self,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+        active_package: &ExtensionPackage,
+    ) -> Result<(), ProductWorkflowError> {
+        let Some(host) = self.generic_host.get() else {
+            return Ok(());
+        };
+        let base = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} manifest is not installed",
+                    extension_id.as_str()
+                ),
+            })?;
+        let effective = crate::extension_host::generic_host::effective_resolved_for_package(
+            base.resolved(),
+            active_package,
+        );
+        let record = ironclaw_extension_host::InstallationRecord {
+            extension_id: extension_id.as_str().to_string(),
+            installation_id: installation_id.as_str().to_string(),
+            state: ironclaw_extension_host::InstallationState::Installed,
+            resolved: Arc::new(effective),
+            config: Vec::new(),
+            last_error: None,
+        };
+        host.install(record).await.map_err(generic_host_error)?;
+        host.activate(extension_id.as_str())
+            .await
+            .map_err(generic_host_error)
+    }
+
+    /// Mirror an unpublish into the generic host's snapshot (deactivation is
+    /// tolerant: a not-installed record is already unpublished).
+    async fn unpublish_from_generic_host(&self, extension_id: &ExtensionId) {
+        let Some(host) = self.generic_host.get() else {
+            return;
+        };
+        match host.deactivate(extension_id.as_str()).await {
+            Ok(()) | Err(ironclaw_extension_host::LifecycleError::NotInstalled { .. }) => {}
+            Err(error) => {
+                tracing::warn!(
+                    extension_id = extension_id.as_str(),
+                    error = %error,
+                    "generic extension host could not unpublish extension"
+                );
+            }
+        }
+        if let Some(host) = self.generic_host.get()
+            && let Err(error) = host.remove_record(extension_id.as_str()).await
+        {
+            tracing::debug!(
+                extension_id = extension_id.as_str(),
+                error = %error,
+                "generic extension host record cleanup failed"
+            );
         }
     }
 
@@ -694,6 +781,36 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
+        if let Err(error) = self
+            .publish_to_generic_host(extension_id, installation_id, &active_package)
+            .await
+        {
+            // Snapshot publication failed: the activation must not report
+            // success (its tools would be undispatchable). Unwind the
+            // registry publish and activation state.
+            if let Err(cleanup_error) = self.active_extensions.unpublish(&active_package) {
+                return Err(compensation_failure(
+                    "extension activation failed to publish the dispatch snapshot and registry unpublish failed",
+                    error,
+                    cleanup_error,
+                ));
+            }
+            if previous_state != ExtensionActivationState::Enabled {
+                self.disable_lifecycle_package(extension_id).await;
+            }
+            if let Err(cleanup_error) = self
+                .installation_store
+                .set_activation_state(installation_id, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension activation failed to publish the dispatch snapshot and activation restore failed",
+                    error,
+                    map_extension_installation_error(cleanup_error),
+                ));
+            }
+            return Err(error);
+        }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
         let message =
@@ -945,6 +1062,7 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
+        self.unpublish_from_generic_host(&extension_id).await;
         if let Err(error) = self.active_extensions.unpublish(&lifecycle_package) {
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
@@ -1531,6 +1649,12 @@ fn activation_success_message(
 // backend mounts the generic proof-code redeem route — the first non-Slack
 // inbound channel must mount one alongside this requirement or its submit
 // will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
+fn generic_host_error(error: ironclaw_extension_host::LifecycleError) -> ProductWorkflowError {
+    ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("generic extension host rejected the activation: {error}"),
+    }
+}
+
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,

@@ -42,6 +42,7 @@ fn resolver_with_lanes(
             NetworkMode::DirectLogged,
             SecretMode::ScrubbedEnv,
         ),
+        None,
     )
 }
 

@@ -16,6 +16,7 @@ pub mod active;
 pub mod entrypoint;
 pub mod lifecycle;
 pub mod loaders;
+pub mod resolver;
 pub mod state;
 pub mod store;
 
@@ -30,9 +31,10 @@ pub use entrypoint::{
 };
 pub use lifecycle::{
     DrainController, EgressFactory, ExtensionHost, ExtensionHostDeps, HookError, LifecycleError,
-    RemovalContext, RemovalHooks, RestoreReport,
+    RemovalContext, RemovalHooks, RestoreReport, SnapshotWatch,
 };
-pub use loaders::{ExtensionLoader, LoadContext};
+pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
+pub use resolver::SnapshotToolResolver;
 pub use state::{AuthAccountState, InstallationState};
 pub use store::{
     InMemoryInstallationRecordStore, InstallationRecord, InstallationRecordStore, StoreError,

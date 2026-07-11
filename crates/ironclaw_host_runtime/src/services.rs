@@ -91,6 +91,7 @@ type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
 type SharedToolCallHttpEgress = Arc<Mutex<Option<Arc<dyn ToolCallHttpEgress>>>>;
 
 mod builder;
+mod extension_tool_binder;
 mod production_services;
 mod production_wiring;
 mod runtime_adapters;
@@ -111,6 +112,10 @@ use runtime_adapters::{
     ScriptRuntimeAdapter, ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
 };
 use tool_resolver::RegistryLaneToolResolver;
+
+use extension_tool_binder::ServiceLanePackageBinder;
+pub use extension_tool_binder::{ExtensionLaneToolBinder, ExtensionToolBindError};
+use ironclaw_dispatcher::ChainToolResolver;
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
 ///
@@ -168,6 +173,11 @@ where
     run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
+    /// Late-installed extension-host snapshot resolver (composition builds
+    /// the extension host after these services; same slot pattern as the
+    /// egress ports). Present ⇒ the registry-lane resolver serves built-ins
+    /// only.
+    extension_tool_resolver: Arc<Mutex<Option<Arc<dyn ToolResolver>>>>,
     component_types: ProductionComponentTypes,
 }
 
@@ -339,6 +349,7 @@ where
             run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
+            extension_tool_resolver: Arc::new(Mutex::new(None)),
             component_types: ProductionComponentTypes {
                 trust_policy: None,
                 trust_policy_verified: false,
@@ -384,12 +395,20 @@ where
             .wasm_runtime_credential_provider_captured
     }
 
-    /// Builds a runtime dispatcher over the registry-lane resolver.
+    /// Builds a runtime dispatcher over the resolver chain: the
+    /// extension-host snapshot resolver when composition installed one,
+    /// falling through to the registry-lane resolver.
     fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, G> {
-        let mut dispatcher = RuntimeDispatcher::from_arcs(
-            self.registry_lane_tool_resolver(),
-            Arc::clone(&self.governor),
-        );
+        let registry_resolver = self.registry_lane_tool_resolver();
+        let resolver: Arc<dyn ToolResolver> =
+            match extension_tool_resolver(&self.extension_tool_resolver) {
+                Some(extension_resolver) => Arc::new(ChainToolResolver::new(vec![
+                    extension_resolver,
+                    registry_resolver,
+                ])),
+                None => registry_resolver,
+            };
+        let mut dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&self.governor));
         if let Some(event_sink) = &self.event_sink {
             dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
         }
@@ -397,10 +416,57 @@ where
         dispatcher
     }
 
+    /// Installs the extension-host snapshot resolver ahead of the registry
+    /// lookup in the dispatch chain. From this point the registry-lane
+    /// resolver serves only host built-ins — activated extension
+    /// capabilities must resolve from the active snapshot (the cutover has
+    /// no fallback). Must be called before the host runtime facade is built.
+    pub fn set_extension_tool_resolver(&self, resolver: Arc<dyn ToolResolver>) {
+        let mut slot = match self.extension_tool_resolver.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(resolver);
+    }
+
+    /// The binder the extension host's loaders use to prebind WASM / hosted
+    /// MCP / first-party-registry packages to their runtime lanes as
+    /// [`ironclaw_host_api::ToolAdapter`]s. The lanes stay host-private.
+    pub fn extension_lane_tool_binder(&self) -> ExtensionLaneToolBinder {
+        ExtensionLaneToolBinder::new(Arc::new(ServiceLanePackageBinder {
+            lanes: self.runtime_lanes(),
+            filesystem: Arc::clone(&self.filesystem),
+            governor: Arc::clone(&self.governor),
+            runtime_policy: self
+                .runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
+        }))
+    }
+
     /// Builds the registry-backed [`ToolResolver`]: every configured runtime
     /// lane, prebound per capability whenever the shared registry publishes a
-    /// new version.
+    /// new version. When composition installs an extension resolver, this
+    /// resolver is restricted to the host's built-in provider.
     fn registry_lane_tool_resolver(&self) -> Arc<dyn ToolResolver> {
+        let provider_allowlist = extension_tool_resolver(&self.extension_tool_resolver)
+            .is_some()
+            .then(crate::first_party_tools::builtin_provider_allowlist);
+        Arc::new(RegistryLaneToolResolver::new(
+            Arc::clone(&self.registry),
+            self.runtime_lanes(),
+            Arc::clone(&self.filesystem),
+            Arc::clone(&self.governor),
+            self.runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
+            provider_allowlist,
+        ))
+    }
+
+    /// The configured runtime lanes, keyed by kind (shared by the registry
+    /// resolver and the extension tool binder).
+    fn runtime_lanes(&self) -> HashMap<RuntimeKind, Arc<dyn RuntimeAdapter<F, G>>> {
         let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
             Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
             runtime_http_egress(&self.runtime_http_egress),
@@ -457,16 +523,7 @@ where
                 )),
             );
         }
-
-        Arc::new(RegistryLaneToolResolver::new(
-            Arc::clone(&self.registry),
-            lanes,
-            Arc::clone(&self.filesystem),
-            Arc::clone(&self.governor),
-            self.runtime_policy
-                .clone()
-                .unwrap_or_else(local_testing_runtime_policy),
-        ))
+        lanes
     }
 
     /// Builds the upper facade without production validation.
@@ -753,6 +810,15 @@ fn set_tool_call_http_egress(
         Err(poisoned) => {
             *poisoned.into_inner() = Some(tool_call_http_egress);
         }
+    }
+}
+
+fn extension_tool_resolver(
+    slot: &Arc<Mutex<Option<Arc<dyn ToolResolver>>>>,
+) -> Option<Arc<dyn ToolResolver>> {
+    match slot.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 
