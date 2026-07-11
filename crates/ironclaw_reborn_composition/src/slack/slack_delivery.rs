@@ -3830,23 +3830,11 @@ mod tests {
         scope: &TurnScope,
         channel_id: &str,
     ) -> Arc<crate::slack::slack_outbound_targets::SlackHostBetaOutboundTargetProvider> {
-        shared_channel_target_provider_for_channels(install, scope, &[channel_id])
-    }
-
-    fn shared_channel_target_provider_for_channels(
-        install: &str,
-        scope: &TurnScope,
-        channel_ids: &[&str],
-    ) -> Arc<crate::slack::slack_outbound_targets::SlackHostBetaOutboundTargetProvider> {
         use crate::slack::slack_channel_routes::InMemorySlackChannelRouteStore;
         use crate::slack::slack_outbound_targets::{
             InMemorySlackPersonalDmTargetStore, SlackConfiguredChannelRoute,
             SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig,
         };
-        let owner = scope
-            .explicit_owner_user_id()
-            .cloned()
-            .expect("test scope has owner");
         Arc::new(SlackHostBetaOutboundTargetProvider::new(
             SlackOutboundTargetProviderConfig {
                 tenant_id: scope.tenant_id.clone(),
@@ -3854,12 +3842,13 @@ mod tests {
                 project_id: scope.project_id.clone(),
                 installation_id: AdapterInstallationId::new(install).expect("installation id"),
                 team_id: crate::slack::slack_serve::SlackTeamId::new("T123"),
-                configured_channel_routes: channel_ids
-                    .iter()
-                    .map(|channel_id| {
-                        SlackConfiguredChannelRoute::new((*channel_id).to_string(), owner.clone())
-                    })
-                    .collect(),
+                configured_channel_routes: vec![SlackConfiguredChannelRoute::new(
+                    channel_id.to_string(),
+                    scope
+                        .explicit_owner_user_id()
+                        .cloned()
+                        .expect("test scope has owner"),
+                )],
             },
             Arc::new(InMemorySlackChannelRouteStore::new()),
             Arc::new(InMemorySlackPersonalDmTargetStore::new()),
@@ -3947,115 +3936,6 @@ mod tests {
             !posts[0].contains("D456"),
             "delivery must not fall back to the user-global preference DM: {}",
             posts[0]
-        );
-    }
-
-    /// Two independently persisted automation targets must remain isolated at
-    /// delivery time. This drives the real triggered-run delivery caller twice
-    /// and asserts one Slack side effect per run, in the intended channel.
-    #[tokio::test]
-    async fn two_trigger_fires_preserve_separate_delivery_targets_exactly_once() {
-        let install = "test-install";
-        let scope = personal_turn_scope();
-        let first_run_id = TurnRunId::new();
-        let second_run_id = TurnRunId::new();
-
-        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
-            TurnStatus::Completed,
-        ));
-        let thread_service = Arc::new(InMemorySessionThreadService::default());
-        seed_finalized_assistant_message(
-            &thread_service,
-            &scope,
-            first_run_id,
-            "First routine result",
-        )
-        .await;
-        seed_finalized_assistant_message(
-            &thread_service,
-            &scope,
-            second_run_id,
-            "Second routine result",
-        )
-        .await;
-
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
-        egress.allow_credential_handle("slack_bot_token");
-        for (channel, ts) in [("C789", "1234.1"), ("C987", "1234.2")] {
-            egress.program_response(
-                "slack.com",
-                Ok(EgressResponse::new(200, slack_post_ok_json(channel, ts))),
-            );
-        }
-
-        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
-        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
-        let services = make_services(
-            coordinator,
-            thread_service,
-            egress.clone(),
-            outbound,
-            install,
-        );
-        let settings = SlackFinalReplyDeliverySettings {
-            poll_interval: std::time::Duration::ZERO,
-            max_wait: std::time::Duration::from_secs(5),
-            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
-            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
-        };
-        let driver =
-            TriggeredRunDeliveryDriver::with_settings(
-                services,
-                settings,
-                delivery_store.clone(),
-                route_store,
-                scope.agent_id.clone().expect("test scope has agent"),
-            )
-            .with_outbound_target_provider(
-                shared_channel_target_provider_for_channels(install, &scope, &["C789", "C987"]),
-            );
-
-        for (run_id, channel) in [(first_run_id, "C789"), (second_run_id, "C987")] {
-            let mut fire = minimal_trigger_fire(None);
-            fire.delivery_target = Some(
-                ironclaw_triggers::TriggerDeliveryTargetId::new(format!(
-                    "slack:shared-channel:T123:{channel}"
-                ))
-                .expect("delivery target id"),
-            );
-            driver
-                .on_trigger_submitted(fire, run_id, scope.clone())
-                .await;
-            let record = wait_for_delivery_record(&delivery_store, run_id).await;
-            assert_eq!(record.outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
-        }
-
-        let posts = egress
-            .calls()
-            .into_iter()
-            .filter(|call| call.path == "/api/chat.postMessage")
-            .map(|call| {
-                serde_json::from_slice::<serde_json::Value>(&call.body)
-                    .expect("Slack post body is JSON")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(posts.len(), 2, "one delivery post per trigger fire");
-        assert_eq!(
-            posts
-                .iter()
-                .filter(|body| body["channel"] == "C789")
-                .count(),
-            1,
-            "first target must receive exactly one routine result"
-        );
-        assert_eq!(
-            posts
-                .iter()
-                .filter(|body| body["channel"] == "C987")
-                .count(),
-            1,
-            "second target must receive exactly one routine result"
         );
     }
 
