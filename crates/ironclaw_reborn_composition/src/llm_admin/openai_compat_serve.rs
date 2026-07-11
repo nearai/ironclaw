@@ -27,7 +27,7 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    StaticProductInstallationResolver,
+    ResolvedProductActorUser, StaticProductInstallationResolver,
 };
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_product_workflow::{
@@ -386,7 +386,7 @@ impl ProductActorUserResolver for OpenAiCompatActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
         if request.adapter_id.as_str() != OPENAI_COMPAT_ADAPTER_ID
             || request.installation_id.as_str() != OPENAI_COMPAT_INSTALLATION_ID
             || request.external_actor_ref.kind() != OPENAI_COMPAT_ACTOR_KIND
@@ -394,6 +394,7 @@ impl ProductActorUserResolver for OpenAiCompatActorUserResolver {
             return Ok(None);
         }
         UserId::new(request.external_actor_ref.id())
+            .map(ResolvedProductActorUser::new)
             .map(Some)
             .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
                 reason: format!("invalid OpenAI-compatible actor user id: {error}"),

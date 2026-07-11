@@ -1,3 +1,7 @@
+#[cfg(feature = "postgres")]
+#[path = "support/postgres.rs"]
+mod postgres_support;
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -27,11 +31,6 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
-};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
 use ironclaw_reborn_composition::{
@@ -51,6 +50,11 @@ use ironclaw_reborn_composition::{
 #[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
 use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_runner::turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
@@ -61,6 +65,8 @@ use ironclaw_turns::{
     InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
+#[cfg(feature = "postgres")]
+use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 #[cfg(feature = "libsql")]
 use serde_json::Value;
@@ -618,6 +624,7 @@ async fn postgres_pool_or_skip() -> Option<(
     String,
 )> {
     let (container, database_url) = start_postgres_container().await?;
+    assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
         .expect("testcontainer database URL must parse");
@@ -626,10 +633,6 @@ async fn postgres_pool_or_skip() -> Option<(
         .max_size(4)
         .build()
         .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
-        .await
-        .expect("Postgres testcontainer must accept connections");
     Some((container, pool, database_url))
 }
 

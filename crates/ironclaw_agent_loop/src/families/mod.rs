@@ -26,7 +26,7 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
     "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
-    "budget:DefaultBudgetStrategy(iteration_limit=32,wall_clock_limit=none)"
+    "budget:DefaultBudgetStrategy(iteration_limit=256,wall_clock_limit=none)"
 )
 .as_bytes();
 
@@ -35,8 +35,8 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xdd, 0x1f, 0x20, 0xe1, 0x17, 0xde, 0xcb, 0xe2, 0x2d, 0x48, 0x15, 0x8b, 0x05, 0x19, 0x27, 0xc4,
-    0x2f, 0xf6, 0x85, 0xd9, 0x43, 0x27, 0x25, 0x37, 0xe8, 0x38, 0x7c, 0xe6, 0xd1, 0xe5, 0xe7, 0x25,
+    0x64, 0xda, 0x2c, 0x33, 0x7d, 0x86, 0x96, 0x50, 0x4e, 0xde, 0x0a, 0x9e, 0xf1, 0xed, 0xf6, 0x13,
+    0x27, 0xf0, 0x79, 0xaf, 0xf2, 0x8e, 0xed, 0x57, 0x8f, 0xf7, 0x06, 0x08, 0x39, 0x2d, 0xfa, 0xcf,
 ]);
 
 /// The default loop family: the text-tool-use baseline.
@@ -51,7 +51,7 @@ pub fn default() -> LoopFamily {
 /// The default loop family with a caller-supplied iteration limit.
 ///
 /// Intended for test and local harnesses that need to exercise the hard budget
-/// path without waiting for the production default of 32 iterations.
+/// path without waiting for the production default of 256 iterations.
 pub fn default_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
     let planner = DefaultPlanner::compose_default().with_budget(Arc::new(DefaultBudgetStrategy {
         iteration_limit,

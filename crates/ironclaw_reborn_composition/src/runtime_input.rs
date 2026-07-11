@@ -18,7 +18,7 @@
 //!   roots.
 //!
 //! The CLI builds this struct from env vars / config; it does not call into
-//! `ironclaw_reborn` or `ironclaw_llm` directly.
+//! `ironclaw_runner` or `ironclaw_llm` directly.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,13 +28,13 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
-use ironclaw_reborn::runtime::{
-    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
-    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
-};
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_runner::runtime::{
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
+};
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
 use crate::input::RebornBuildInput;

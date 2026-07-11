@@ -177,6 +177,33 @@ TOOL_CALL_PATTERNS = [
         lambda _: {"operation": "now"},
     ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    # Private tool installs (#5459 P1) — the three test-tools/ fixture bundles
+    # (test-tools/README.md). The provider-visible tool name sanitizes the
+    # dotted capability id's "." to "__" (`encode_provider_tool_name` in
+    # ironclaw_reborn::tool_disclosure); the model gateway's provider_tool_name
+    # validator rejects a raw "." outright ("only ASCII letters, digits, '_',
+    # and '-' are allowed"), so the mock LLM must emit the encoded form, not
+    # the dotted capability id.
+    # The combined pattern is checked first so it doesn't get shadowed by the
+    # single-tool "ascii renderer to draw a" pattern below.
+    (
+        re.compile(r"ascii renderer and market data", re.IGNORECASE),
+        "ascii-renderer__draw",
+        lambda _: [
+            {"tool_name": "ascii-renderer__draw", "arguments": {"subject": "robot"}},
+            {"tool_name": "market-data__snp500", "arguments": {}},
+        ],
+    ),
+    (
+        re.compile(r"ascii renderer to draw a (?P<subject>cat|dog|robot)", re.IGNORECASE),
+        "ascii-renderer__draw",
+        lambda m: {"subject": m.group("subject").lower()},
+    ),
+    (
+        re.compile(r"hacker news tool", re.IGNORECASE),
+        "hacker-news__top_stories",
+        lambda _: {},
+    ),
     # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
     # the project workspace. Reborn exposes this first-party tool by capability
     # id; the provider-facing tool name sanitizes dots as "__". After both

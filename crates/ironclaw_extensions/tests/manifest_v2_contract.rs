@@ -220,6 +220,75 @@ default_permission = "allow""#,
 }
 
 #[test]
+fn parses_network_targets_from_capability_declarations() {
+    // The keyless-but-networked case (#5459): a capability declares its egress
+    // allowlist directly via `network_targets`, with NO runtime credential.
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["dispatch_capability", "network"]
+network_targets = [
+  { scheme = "https", host_pattern = "api.example.com" },
+]
+default_permission = "allow""#,
+    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    let cap = &manifest.capabilities[0];
+    assert!(
+        cap.runtime_credentials.is_empty(),
+        "network_targets must not imply a credential"
+    );
+    assert_eq!(
+        cap.network_targets,
+        vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.com".to_string(),
+            port: None,
+        }]
+    );
+}
+
+#[test]
+fn rejects_network_targets_without_network_effect() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["dispatch_capability"]
+network_targets = [
+  { scheme = "https", host_pattern = "api.example.com" },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    assert!(
+        err.to_string().contains("network_targets without network"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_network_targets() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["dispatch_capability", "network"]
+network_targets = [
+  { scheme = "https", host_pattern = "api.example.com" },
+  { scheme = "https", host_pattern = "api.example.com" },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    assert!(
+        err.to_string().contains("duplicate network target"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn rejects_runtime_credentials_with_invalid_target_shape() {
     let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
         r#"default_permission = "allow""#,

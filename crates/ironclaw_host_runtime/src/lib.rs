@@ -55,7 +55,6 @@ mod production;
 mod sandbox_process;
 mod services;
 mod surface;
-mod turn_scheduler;
 mod user_profile_source;
 mod wasm_credentials;
 
@@ -131,11 +130,6 @@ pub use services::{
     RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
-pub use turn_scheduler::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle, TurnRunWakeChannel,
-};
-
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(String);

@@ -3111,7 +3111,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_reborn"
+name = "ironclaw_runner"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3179,7 +3179,7 @@ dependencies = [
  "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_projects",
- "ironclaw_reborn",
+ "ironclaw_runner",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
  "ironclaw_reborn_identity",
