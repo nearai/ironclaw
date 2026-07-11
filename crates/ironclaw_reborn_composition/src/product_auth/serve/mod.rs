@@ -1564,8 +1564,8 @@ mod tests {
     };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        NetworkMethod, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
+        NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
@@ -2184,7 +2184,7 @@ mod tests {
         let run_id = TurnRunId::new();
         let gate_ref = "gate:notion-auth";
         let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("notion").expect("provider"),
+            provider: VendorId::new("notion").expect("provider"),
             setup: Default::default(),
             requester_extension: ExtensionId::new("notion").expect("extension"),
             provider_scopes: Vec::new(),

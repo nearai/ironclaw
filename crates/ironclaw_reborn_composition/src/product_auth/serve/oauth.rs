@@ -1285,9 +1285,7 @@ mod tests {
         InMemoryAuthProductServices, OAuthProviderExchange, OAuthProviderExchangeContext,
         OAuthProviderIdentity, OAuthProviderRefresh, OAuthProviderRefreshRequest,
     };
-    use ironclaw_host_api::{
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, SecretHandle,
-    };
+    use ironclaw_host_api::{RuntimeCredentialAuthRequirement, SecretHandle, VendorId};
     #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_product_adapters::AdapterInstallationId;
     use ironclaw_secrets::{InMemorySecretStore, SecretStore};
@@ -1418,7 +1416,7 @@ mod tests {
         let run_id = TurnRunId::new();
         let gate_ref = "gate:google-auth";
         let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            provider: VendorId::new("google").expect("provider"),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
             },
@@ -1507,7 +1505,7 @@ mod tests {
         );
         let owner_user_id = UserId::new("user-alpha").expect("user");
         let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            provider: VendorId::new("google").expect("provider"),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
             },
@@ -1632,7 +1630,7 @@ mod tests {
         );
         let owner_user_id = UserId::new("user-alpha").expect("user");
         let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            provider: VendorId::new("google").expect("provider"),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
             },

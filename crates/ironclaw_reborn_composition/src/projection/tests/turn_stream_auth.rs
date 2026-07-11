@@ -105,7 +105,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: VendorId::new("github").unwrap(),
         setup: Default::default(),
         requester_extension: ExtensionId::new("github").unwrap(),
         provider_scopes: Vec::new(),
@@ -203,7 +203,7 @@ async fn webui_event_stream_keeps_retired_channel_pairing_requirement_generic() 
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
+        provider: VendorId::new("slack").unwrap(),
         setup: RuntimeCredentialAccountSetup::Retired,
         requester_extension: ExtensionId::new("slack").unwrap(),
         provider_scopes: Vec::new(),
@@ -290,7 +290,7 @@ async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url(
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()],
         },
@@ -457,7 +457,7 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()],
         },
@@ -633,7 +633,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+        provider: VendorId::new("notion").unwrap(),
         setup: Default::default(),
         requester_extension: ExtensionId::new("notion").unwrap(),
         provider_scopes: Vec::new(),

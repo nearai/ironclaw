@@ -7,8 +7,7 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ExtensionId, RuntimeCredentialAccountProviderId,
-    VirtualPath, sha256_digest_token,
+    CapabilityId, CapabilitySurfaceKind, ExtensionId, VendorId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_product_workflow::{
@@ -370,7 +369,7 @@ fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCrede
 
 struct CredentialRequirementGroup {
     handle: String,
-    provider: RuntimeCredentialAccountProviderId,
+    provider: VendorId,
     required: bool,
     setup: LifecycleExtensionCredentialSetup,
 }
@@ -1885,12 +1884,14 @@ mod tests {
                     capability.id,
                     capability.input_schema_ref.as_str()
                 );
-                assert!(
-                    assets.contains(capability.output_schema_ref.as_str()),
-                    "{extension_id} capability {} missing output schema asset {}",
-                    capability.id,
-                    capability.output_schema_ref.as_str()
-                );
+                if let Some(output_schema_ref) = &capability.output_schema_ref {
+                    assert!(
+                        assets.contains(output_schema_ref.as_str()),
+                        "{extension_id} capability {} missing output schema asset {}",
+                        capability.id,
+                        output_schema_ref.as_str()
+                    );
+                }
                 if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
                     assert!(
                         assets.contains(prompt_doc_ref.as_str()),

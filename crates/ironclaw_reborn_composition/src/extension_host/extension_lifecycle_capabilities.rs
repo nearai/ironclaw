@@ -109,9 +109,9 @@ fn lifecycle_manifest(
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
+        output_schema_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.output.v1.json"
-        ))?,
+        ))?),
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),

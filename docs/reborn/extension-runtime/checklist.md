@@ -17,17 +17,31 @@ Rules — kept short on purpose:
 
 - [ ] MAN-1 Extension is the only installable product object; tools/channels/
   auth cannot be installed or removed independently.
-- [ ] MAN-2 One v3 manifest declares tools, at most one channel, and auth
-  recipes; parsing is a single entry point shared with normalized v2.
+- [x] MAN-2 One v3 manifest declares tools, at most one channel, and auth
+  recipes; parsing is a single entry point shared with normalized v2. —
+  `acme_fixture_parses_through_the_single_entry_point`,
+  `v2_and_v3_rewrites_resolve_identically`
+  (`crates/ironclaw_extensions/tests/manifest_v3_contract.rs`); both schemas
+  dispatch through `ExtensionManifestRecord::from_toml`.
 - [ ] MAN-3 A v2 manifest and its v3 rewrite resolve to identical surfaces,
   capability ids, scopes, and credentials (projection-equality test over all
   11 first-party packages; the two hosted-MCP packages instead assert their
   `[mcp]` ceiling plus the discovered set, since their placeholder static
   tools intentionally become discovery).
-- [ ] MAN-4 Unknown manifest fields fail closed with a path-qualified error.
-- [ ] MAN-5 Recipe validation rejects: non-https endpoints, reserved authorize
+- [x] MAN-4 Unknown manifest fields fail closed with a path-qualified error.
+  — `unknown_top_level_fields_fail_closed_with_path_context`
+  (`manifest_v3_contract.rs`); `unknown_recipe_fields_fail_closed`,
+  `unknown_channel_fields_fail_closed`
+  (`crates/ironclaw_host_api/src/{recipe,channel}.rs`).
+- [x] MAN-5 Recipe validation rejects: non-https endpoints, reserved authorize
   params in `extra_authorize_params`, invalid/deep/wildcard JSON pointers,
-  wildcard egress hosts, multi-segment `route_suffix`.
+  wildcard egress hosts, multi-segment `route_suffix`. —
+  `non_https_recipe_endpoints_are_rejected`,
+  `reserved_authorize_params_are_rejected`,
+  `wildcard_or_deep_json_pointers_are_rejected`,
+  `wildcard_egress_hosts_are_rejected`, `wildcard_tool_audience_hosts_are_rejected`,
+  `multi_segment_route_suffixes_are_rejected` (`manifest_v3_contract.rs`) plus
+  the host_api unit suites.
 - [ ] MAN-6 Exactly one of `[runtime]` or `[mcp]` declares the implementation;
   `[mcp]` is mutually exclusive with `[[tools]]` and `[channel]`; discovered
   tools outside the namespace/count/schema-size/effects ceiling are rejected;
@@ -42,10 +56,14 @@ Rules — kept short on purpose:
 - [ ] MAN-10 `[channel].conversation_model` is required and validated;
   conversation binding honors the declared model through a caller-level
   workflow test; the WebUI's internal channel uses the same enum.
-- [ ] MAN-11 The credential-authority type is `VendorId` end to end; the v3
+- [x] MAN-11 The credential-authority type is `VendorId` end to end; the v3
   field is `vendor` (v2 `provider` maps in normalization); stored vendor id
   strings are unchanged; the old type name survives only as a deprecation
-  alias, deleted by P7.
+  alias, deleted by P7. — workspace-wide rename
+  (`crates/ironclaw_host_api/src/ids.rs`; alias documented for P7 deletion);
+  `v2_and_v3_rewrites_resolve_identically` pins the `provider` → `vendor`
+  mapping; the serde wire field stays `provider` (persisted turn-state
+  compatibility).
 
 ## 2. Resolved record (REC)
 

@@ -6,9 +6,8 @@ use ironclaw_auth::{
 };
 use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
 use ironclaw_host_api::{
-    AgentId, ExtensionId, ProjectId, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
+    AgentId, ExtensionId, ProjectId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId, VendorId,
 };
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_turns::{TurnRunId, TurnScope};
@@ -45,7 +44,7 @@ async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
         .as_auth_challenge_provider()
         .expect("challenge provider");
     let requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("notion".to_string()).unwrap(),
+        provider: VendorId::new("notion".to_string()).unwrap(),
         setup: Default::default(),
         provider_scopes: Vec::new(),
         requester_extension: ExtensionId::new("notion-mcp".to_string()).unwrap(),
@@ -109,7 +108,7 @@ async fn dcr_registry_returns_none_for_zero_and_multiple_requirements() {
     let run_id = TurnRunId::new();
     let gate_ref = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
     let notion = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("notion".to_string()).unwrap(),
+        provider: VendorId::new("notion".to_string()).unwrap(),
         setup: Default::default(),
         provider_scopes: Vec::new(),
         requester_extension: ExtensionId::new("notion-mcp".to_string()).unwrap(),

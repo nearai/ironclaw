@@ -2394,8 +2394,8 @@ mod tests {
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
         CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog, PackageSource,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-        RuntimeDispatchErrorKind, SecretHandle, VirtualPath, sha256_digest_token,
+        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, VendorId,
+        VirtualPath, sha256_digest_token,
     };
 
     fn cap() -> CapabilityId {
@@ -2412,7 +2412,7 @@ mod tests {
 
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            provider: VendorId::new("notion").unwrap(),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
             },

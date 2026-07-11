@@ -32,7 +32,7 @@ use support::*;
 // ---------------------------------------------------------------------------
 
 struct CredentialObligationAuthorizer {
-    provider: RuntimeCredentialAccountProviderId,
+    provider: VendorId,
     setup: RuntimeCredentialAccountSetup,
     requester_extension: ExtensionId,
 }
@@ -105,7 +105,7 @@ impl CapabilityDispatcher for AuthRequiredDispatcher {
 #[tokio::test]
 async fn invoke_json_enriches_auth_required_credential_requirements_from_obligations() {
     let registry = registry_with_echo_capability();
-    let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+    let provider = VendorId::new("github").unwrap();
     let requester = ExtensionId::new("github").unwrap();
     let authorizer = CredentialObligationAuthorizer {
         provider: provider.clone(),
@@ -171,7 +171,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
             &self,
             request: CapabilityDispatchRequest,
         ) -> Result<CapabilityDispatchResult, DispatchError> {
-            let mcp_provider = RuntimeCredentialAccountProviderId::new("mcp_provider").unwrap();
+            let mcp_provider = VendorId::new("mcp_provider").unwrap();
             let mcp_ext = ExtensionId::new("mcp_ext").unwrap();
             Err(DispatchError::AuthRequired {
                 capability: request.capability_id,
@@ -187,7 +187,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
     }
 
     let registry = registry_with_echo_capability();
-    let obligation_provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+    let obligation_provider = VendorId::new("github").unwrap();
     let requester = ExtensionId::new("github").unwrap();
     let authorizer = CredentialObligationAuthorizer {
         provider: obligation_provider,
@@ -229,7 +229,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
     // not the one from the obligation (github).
     assert_eq!(
         credential_requirements[0].provider,
-        RuntimeCredentialAccountProviderId::new("mcp_provider").unwrap(),
+        VendorId::new("mcp_provider").unwrap(),
     );
 }
 
@@ -267,7 +267,7 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
     }
 
     let registry = registry_with_echo_capability();
-    let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+    let provider = VendorId::new("github").unwrap();
     let requester = ExtensionId::new("github").unwrap();
     let authorizer = CredentialObligationAuthorizer {
         provider: provider.clone(),
@@ -373,14 +373,14 @@ async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declar
                 obligations: Obligations::new(vec![
                     Obligation::InjectCredentialAccountOnce {
                         handle: SecretHandle::new("github_pat").unwrap(),
-                        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                        provider: VendorId::new("github").unwrap(),
                         setup: RuntimeCredentialAccountSetup::ManualToken,
                         provider_scopes: Vec::new(),
                         requester_extension: ExtensionId::new("github").unwrap(),
                     },
                     Obligation::InjectCredentialAccountOnce {
                         handle: SecretHandle::new("gitlab_pat").unwrap(),
-                        provider: RuntimeCredentialAccountProviderId::new("gitlab").unwrap(),
+                        provider: VendorId::new("gitlab").unwrap(),
                         setup: RuntimeCredentialAccountSetup::ManualToken,
                         provider_scopes: Vec::new(),
                         requester_extension: ExtensionId::new("gitlab").unwrap(),
@@ -463,7 +463,7 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
     }
 
     let registry = registry_with_echo_capability();
-    let obligation_provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+    let obligation_provider = VendorId::new("github").unwrap();
     let requester = ExtensionId::new("github").unwrap();
     // Authorizer declares an InjectCredentialAccountOnce obligation — enrichment
     // WOULD fire on an empty gate, but must be suppressed here because

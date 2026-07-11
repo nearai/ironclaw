@@ -517,9 +517,7 @@ mod tests {
         AuthFlowStatus, GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices,
         OAuthAuthorizationUrl,
     };
-    use ironclaw_host_api::{
-        AgentId, ExtensionId, RuntimeCredentialAccountProviderId, TenantId, ThreadId, UserId,
-    };
+    use ironclaw_host_api::{AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorId};
     use ironclaw_secrets::InMemorySecretStore;
 
     #[tokio::test]
@@ -601,7 +599,7 @@ mod tests {
         let fixture = GateFixture::new(None);
         let registry = OAuthGateProviderRegistry::new(vec![Arc::new(fixture.driver.clone())]);
         let unsupported_requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: Default::default(),
             requester_extension: ExtensionId::new("github").unwrap(),
             provider_scopes: Vec::new(),
@@ -651,7 +649,7 @@ mod tests {
         let registry =
             OAuthGateProviderRegistry::new(vec![slack_driver, Arc::new(fixture.driver.clone())]);
         let slack_requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
+            provider: VendorId::new("slack").unwrap(),
             setup: Default::default(),
             requester_extension: ExtensionId::new("slack").unwrap(),
             provider_scopes: Vec::new(),
@@ -722,7 +720,7 @@ mod tests {
                 run_id: TurnRunId::new(),
                 gate_ref: AuthGateRef::new("gate:google-auth").unwrap(),
                 requirement: RuntimeCredentialAuthRequirement {
-                    provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                    provider: VendorId::new("google").unwrap(),
                     setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                         scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
                     },

@@ -396,7 +396,9 @@ mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
 mod registry;
+pub mod resolved;
 pub mod v2;
+pub mod v3;
 
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
@@ -404,6 +406,10 @@ pub use host_api::capability_provider::{
 pub use hosted_mcp_discovery::{
     HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
     package_with_discovered_hosted_mcp_tools,
+};
+pub use resolved::{
+    ContractDelta, ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef,
+    ResolvedMcpDeclaration, ResolvedSectionSurface, WideningReason, diff_resolved_contracts,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
@@ -413,6 +419,7 @@ pub use v2::{
     MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath,
     ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
 };
+pub use v3::{MANIFEST_SCHEMA_VERSION_V3, ManifestV3Error};
 
 pub type CapabilityManifest = CapabilityDeclV2;
 

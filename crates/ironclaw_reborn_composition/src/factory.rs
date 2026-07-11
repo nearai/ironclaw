@@ -4848,8 +4848,7 @@ mod tests {
     };
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_host_api::{
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-        RuntimeCredentialRequirementSource,
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorId,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -6434,7 +6433,7 @@ mod tests {
         assert_eq!(
             search.runtime_credentials[0].source,
             RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                provider: VendorId::new("nearai").unwrap(),
                 setup: Default::default(),
             }
         );
@@ -6492,7 +6491,7 @@ mod tests {
         let resolved = resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &sso_scope,
-                provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                provider: &VendorId::new("nearai").unwrap(),
                 setup: &RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: &[],
                 requester_extension: &ExtensionId::new("nearai").unwrap(),

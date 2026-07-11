@@ -319,7 +319,10 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     capability.effects.clone(),
                     capability.default_permission,
                     capability.input_schema_ref.as_str().to_string(),
-                    capability.output_schema_ref.as_str().to_string(),
+                    capability
+                        .output_schema_ref
+                        .as_ref()
+                        .map(|output| output.as_str().to_string()),
                     capability
                         .prompt_doc_ref
                         .as_ref()
@@ -370,10 +373,10 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "schemas/{}/{}.input.v1.json",
                         spec.schema_prefix, capability.short_name
                     ),
-                    format!(
+                    Some(format!(
                         "schemas/{}/{}.output.v1.json",
                         spec.schema_prefix, capability.short_name
-                    ),
+                    )),
                     Some(format!(
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name

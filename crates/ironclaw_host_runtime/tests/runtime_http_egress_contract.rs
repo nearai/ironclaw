@@ -7,11 +7,10 @@ use ironclaw_host_api::{
     AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
     ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
     MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeHttpSaveTarget, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
-    VirtualPath,
+    ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
+    ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -2491,7 +2490,7 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
                 },
                 Obligation::InjectCredentialAccountOnce {
                     handle: runtime_slot_handle.clone(),
-                    provider: RuntimeCredentialAccountProviderId::new("mcp").unwrap(),
+                    provider: VendorId::new("mcp").unwrap(),
                     setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("mcp").unwrap(),

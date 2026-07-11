@@ -372,9 +372,9 @@ mod tests {
     };
     use ironclaw_capabilities::{CapabilityObligationError, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        AgentId, ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialAuthRequirement, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId,
+        AgentId, ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAuthRequirement,
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
+        TenantId, ThreadId, UserId, VendorId,
     };
     use ironclaw_product_adapters::AuthPromptChallengeKind;
     use ironclaw_secrets::{InMemorySecretStore, SecretStore};
@@ -487,7 +487,7 @@ mod tests {
         let run_id = TurnRunId::new();
         let gate_ref = AuthGateRef::new("gate:google-auth").unwrap();
         let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: VendorId::new("google").unwrap(),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
             },

@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
+use crate::resolved::ResolvedExtensionManifest;
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -39,16 +40,31 @@ impl<'de> Deserialize<'de> for ManifestHash {
 
 /// Product-agnostic extension manifest record.
 ///
-/// Domain crates can project their own host-api sections from `raw_toml` and
-/// `manifest`; installation state itself stays in `ironclaw_extensions`.
+/// Compiled once per install/upgrade: the raw source is kept for diagnostics
+/// and recompilation only; production projection reads the
+/// [`ResolvedExtensionManifest`] (checklist REC-1). v2 records may still be
+/// reprojected from `raw_toml` by domain crates until their cutover phases
+/// land.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionManifestRecord {
     raw_toml: String,
     manifest: ExtensionManifestV2,
+    resolved: ResolvedExtensionManifest,
     manifest_hash: Option<ManifestHash>,
 }
 
+/// Minimal probe used to dispatch the single parse entry point on the
+/// declared schema version (checklist MAN-2).
+#[derive(Deserialize)]
+struct SchemaVersionProbe {
+    #[serde(default)]
+    schema_version: String,
+}
+
 impl ExtensionManifestRecord {
+    /// The single manifest parse entry point: dispatches on the declared
+    /// `schema_version` (v2 or v3) and normalizes both into the same
+    /// resolved model.
     pub fn from_toml(
         raw_toml: impl Into<String>,
         source: ManifestSource,
@@ -57,16 +73,57 @@ impl ExtensionManifestRecord {
         contracts: &HostApiContractRegistry,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
-        let manifest = ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
+        let probe: SchemaVersionProbe = toml::from_str(&raw_toml).map_err(|error| {
+            ExtensionInstallationError::InvalidManifest {
+                reason: format!("failed to parse extension manifest: {error}"),
+            }
+        })?;
+        let (manifest, resolved) = if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3
+        {
+            crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
+                ExtensionInstallationError::InvalidManifest {
+                    reason: error.to_string(),
+                }
+            })?
+        } else {
+            let manifest =
+                ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
+            let resolved = ResolvedExtensionManifest::from_v2(&manifest);
+            (manifest, resolved)
+        };
         Ok(Self {
             raw_toml,
             manifest,
+            resolved,
+            manifest_hash,
+        })
+    }
+
+    /// Rebuild a record from its persisted resolved contract — no TOML
+    /// reparse; the raw source is carried for diagnostics only (checklist
+    /// REC-2).
+    pub fn from_resolved(
+        raw_toml: impl Into<String>,
+        source: ManifestSource,
+        resolved: ResolvedExtensionManifest,
+        manifest_hash: Option<ManifestHash>,
+    ) -> Result<Self, ExtensionInstallationError> {
+        let manifest = resolved.to_internal(source)?;
+        Ok(Self {
+            raw_toml: raw_toml.into(),
+            manifest,
+            resolved,
             manifest_hash,
         })
     }
 
     pub fn manifest(&self) -> &ExtensionManifestV2 {
         &self.manifest
+    }
+
+    /// The persisted resolved contract this record was compiled into.
+    pub fn resolved(&self) -> &ResolvedExtensionManifest {
+        &self.resolved
     }
 
     pub fn raw_toml(&self) -> &str {
@@ -877,6 +934,8 @@ output_schema_ref = "schemas/read.output.json"
 pub enum ExtensionInstallationError {
     #[error(transparent)]
     Manifest(#[from] ManifestV2Error),
+    #[error("invalid extension manifest: {reason}")]
+    InvalidManifest { reason: String },
     #[error("invalid {field}: {reason}")]
     InvalidValue { field: &'static str, reason: String },
     #[error("installation references unknown extension manifest {extension_id}")]

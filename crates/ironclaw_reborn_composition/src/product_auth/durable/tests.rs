@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
-    RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, UserId, VirtualPath,
+    ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions, SecretHandle, ThreadId,
+    UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::RuntimeCredentialAccountRequest;
 use ironclaw_host_runtime::RuntimeCredentialAccountResolver;
@@ -301,7 +301,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),

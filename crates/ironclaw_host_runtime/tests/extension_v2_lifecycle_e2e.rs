@@ -16,9 +16,8 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
     NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TenantId, UserId, VirtualPath,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialRequirementSource,
+    RuntimeCredentialTarget, RuntimeKind, SecretHandle, TenantId, UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -293,7 +292,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             assert_eq!(
                 credential.source,
                 RuntimeCredentialRequirementSource::ProductAuthAccount {
-                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                    provider: VendorId::new("github").unwrap(),
                     setup: Default::default(),
                 }
             );
