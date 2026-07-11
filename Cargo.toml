@@ -598,6 +598,10 @@ name = "reborn_integration_wiring_parity"
 path = "tests/integration/wiring_parity.rs"
 
 [[test]]
+name = "reborn_authenticated_actor_dispatch_parity"
+path = "tests/reborn_authenticated_actor_dispatch_parity.rs"
+
+[[test]]
 name = "e2e_thread_scheduling"
 required-features = ["libsql", "integration"]
 

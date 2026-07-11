@@ -235,21 +235,6 @@ pub use slack::slack_host_beta::{
     build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_binding_serve::{
-    SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
-    SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
-    SlackPersonalBindingOAuthError, SlackPersonalBindingOAuthIdentity,
-    SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
-    SlackPersonalBindingStartResponse,
-};
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve::{
@@ -273,10 +258,12 @@ pub use webui::webui_serve::{
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose
-/// facade-shaped handles only"; these four newtypes are the host-identity
-/// facade.
+/// facade-shaped handles only"; these host-api identity types are the
+/// host-identity facade.
 pub mod host_api {
-    pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    pub use ironclaw_host_api::{
+        AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    };
 }
 
 #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]

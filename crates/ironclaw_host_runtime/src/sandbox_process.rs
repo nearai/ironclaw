@@ -374,7 +374,7 @@ impl RebornScopedSandboxCommandTransport {
             Ok(result) => result,
             Err(_) => Err(RuntimeProcessError::Timeout(timeout)),
         };
-        let _ = self
+        if let Err(error) = self
             .docker
             .remove_container(
                 &container_id,
@@ -383,7 +383,10 @@ impl RebornScopedSandboxCommandTransport {
                     ..Default::default()
                 }),
             )
-            .await;
+            .await
+        {
+            tracing::debug!(?error, "best-effort removal of sandbox container failed");
+        }
         result
     }
 

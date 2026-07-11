@@ -22,14 +22,21 @@ pub(crate) trait BudgetStrategy: Send + Sync {
 #[allow(dead_code)]
 fn assert_budget_strategy_object_safe(_: &dyn BudgetStrategy) {}
 
-/// Reference baseline `BudgetStrategy`: 32-iteration cap with no wall-clock
+/// Reference baseline `BudgetStrategy`: 256-iteration cap with no wall-clock
 /// limit.
 ///
-/// The 32-iteration ceiling is the first safety net. Loop families that need
+/// The iteration ceiling is the first safety net. Loop families that need
 /// shorter or longer budgets construct this struct directly.
+///
+/// Default is `256`. The prior `32` was too low for legitimately tool-heavy
+/// turns — e.g. reading a large document/log in chunks and then computing over
+/// it — which exhausted the cap mid-task and fail-closed with no final answer.
+/// 256 leaves ample headroom for such turns while still bounding a runaway loop;
+/// it is a ceiling, so well-behaved turns (the vast majority, which finish in a
+/// handful of iterations) are unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefaultBudgetStrategy {
-    /// Hard ceiling on iteration count. Default `32`.
+    /// Hard ceiling on iteration count. Default `256`.
     pub iteration_limit: u32,
     /// Optional wall-clock cap. Default `None` (no limit).
     pub wall_clock_limit: Option<Duration>,
@@ -38,7 +45,7 @@ pub struct DefaultBudgetStrategy {
 impl Default for DefaultBudgetStrategy {
     fn default() -> Self {
         Self {
-            iteration_limit: 32,
+            iteration_limit: 256,
             wall_clock_limit: None,
         }
     }
@@ -85,16 +92,16 @@ mod tests {
                 strategy.iteration_limit(&state),
                 strategy.wall_clock_limit(&state)
             ),
-            (32, None)
+            (256, None)
         );
     }
 
     #[test]
-    fn default_budget_strategy_returns_32_iterations_no_wall_clock() {
+    fn default_budget_strategy_returns_256_iterations_no_wall_clock() {
         let strategy = DefaultBudgetStrategy::default();
         let state = LoopExecutionState::initial_for_run(&test_run_context());
 
-        assert_eq!(strategy.iteration_limit(&state), 32);
+        assert_eq!(strategy.iteration_limit(&state), 256);
         assert_eq!(strategy.wall_clock_limit(&state), None);
     }
 

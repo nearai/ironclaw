@@ -1,13 +1,15 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use ironclaw_authorization::CapabilityLeaseStore;
-use ironclaw_host_api::{MountView, UserId};
+use ironclaw_host_api::{CapabilityId, ExtensionId, MountView, UserId};
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_support::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
@@ -34,7 +36,7 @@ use super::{
     local_dev_visible_capability_request,
 };
 
-pub(super) struct RefreshingLocalDevCapabilityPortConfig {
+pub(crate) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) runtime: Arc<dyn HostRuntime>,
     pub(super) run_context: LoopRunContext,
     pub(super) fallback_user_id: UserId,
@@ -56,9 +58,30 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
     pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
     pub(super) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
+    /// Per-capability mount overrides, merged via `with_capability_execution_mount`.
+    /// Always empty at the sole production call site (`local_dev.rs`'s `create_capability_port`);
+    /// populated only by the `test-support` constructor.
+    pub(super) capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
+    /// Extra provider-trust entries merged into the visible request's
+    /// provider-trust map. Always empty at the sole production call site
+    /// (`local_dev.rs`'s `create_capability_port`); populated only by the `test-support` constructor.
+    pub(super) additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
+    /// Narrows the FULL granted-capability set -- builtin grants AND any
+    /// activated extension grants `local_dev_visible_capability_request`
+    /// appended -- to this id set (empty = no filtering, production's
+    /// value). Applied in `build_inner` as a single `retain` AFTER
+    /// extension grants are appended, so callers that want an extension
+    /// capability visible must list its id explicitly; there is no
+    /// separate builtin-only carve-out (see the harness-port-seam plan's
+    /// "one narrowing input at the grants layer" design: this field is the
+    /// only narrowing surface, and it narrows everything a run could see).
+    /// Always empty at the sole production call site (`local_dev.rs`'s
+    /// `create_capability_port`); populated only by the `test-support`
+    /// constructor.
+    pub(super) capability_id_filter: HashSet<CapabilityId>,
 }
 
-pub(super) async fn create_refreshing_local_dev_capability_port(
+pub(crate) async fn create_refreshing_local_dev_capability_port(
     config: RefreshingLocalDevCapabilityPortConfig,
 ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
     let port = Arc::new(RefreshingLocalDevCapabilityPort {
@@ -84,6 +107,9 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
         external_tool_catalog: config.external_tool_catalog,
+        capability_execution_mount_overrides: config.capability_execution_mount_overrides,
+        additional_provider_trust: config.additional_provider_trust,
+        capability_id_filter: config.capability_id_filter,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
     });
@@ -116,6 +142,9 @@ struct RefreshingLocalDevCapabilityPort {
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
+    capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
+    additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
+    capability_id_filter: HashSet<CapabilityId>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
 }
@@ -127,7 +156,7 @@ impl RefreshingLocalDevCapabilityPort {
             .snapshot()
             .await
             .map_err(host_api_agent_loop_error)?;
-        let visible_request = local_dev_visible_capability_request(
+        let mut visible_request = local_dev_visible_capability_request(
             &self.run_context,
             &self.fallback_user_id,
             LocalDevVisibleCapabilityInputs {
@@ -139,6 +168,27 @@ impl RefreshingLocalDevCapabilityPort {
                 extension_surface: &extension_surface,
             },
         )?;
+        // Test-support-only narrowing (empty in production, see the config
+        // field doc-comment): restrict the FULL granted capability set --
+        // builtin grants plus any activated extension grants the call above
+        // just appended -- to `capability_id_filter`. Callers must list
+        // extension capability ids explicitly to keep them visible.
+        if !self.capability_id_filter.is_empty() {
+            visible_request
+                .context
+                .grants
+                .grants
+                .retain(|grant| self.capability_id_filter.contains(&grant.capability));
+        }
+        // Test-support-only extra provider-trust entries (empty in production,
+        // see the config field doc-comment): merge after the canonical helper
+        // has built the base provider-trust map, so the production helper
+        // stays byte-identical to the pre-seam version.
+        if !self.additional_provider_trust.is_empty() {
+            visible_request
+                .provider_trust
+                .extend(self.additional_provider_trust.clone());
+        }
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
             visible_request,
@@ -168,6 +218,13 @@ impl RefreshingLocalDevCapabilityPort {
                 capability_id.clone(),
                 self.system_extensions_lifecycle_mounts.clone(),
             );
+        }
+        // Test-support-only overrides (empty in production, see the config
+        // field doc-comment): the factory bakes mounts in at construction, so
+        // this is the only seam that can reach per-capability test mounts.
+        for (capability_id, mounts) in &self.capability_execution_mount_overrides {
+            factory =
+                factory.with_capability_execution_mount(capability_id.clone(), mounts.clone());
         }
         let port = factory.for_run_context(self.run_context.clone());
         let mut synthetic_capabilities = match &self.skill_activation_source {
@@ -321,4 +378,87 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
             .invoke_capability_batch(request)
             .await
     }
+}
+
+/// Test-support constructor (harness-port-seam P1 seam): assembles a
+/// [`RefreshingLocalDevCapabilityPortConfig`] from the harness's injectable
+/// parts and drives the REAL [`create_refreshing_local_dev_capability_port`]
+/// above, so the harness exercises every wrap layer `build_inner` applies.
+/// Parts the harness has no opinion on get the same no-op production types
+/// the sole call site (`local_dev.rs`'s `create_capability_port`) passes -- never `capability_wiring`'s
+/// `RebornServices`-entangled defaults. For tests only -- gated behind
+/// `test-support`, ships zero bytes in production builds.
+#[cfg(feature = "test-support")]
+pub(crate) async fn create_refreshing_local_dev_capability_port_for_test(
+    parts: crate::test_support::RefreshingLocalDevCapabilityPortTestParts,
+) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+    let crate::test_support::RefreshingLocalDevCapabilityPortTestParts {
+        runtime,
+        run_context,
+        fallback_user_id,
+        workspace_mounts,
+        skill_mounts,
+        memory_mounts,
+        system_extensions_lifecycle_mounts,
+        input_resolver,
+        result_writer,
+        milestone_sink,
+        skill_activation_source,
+        project_service,
+        trajectory_observer,
+        outbound_preferences_facade,
+        outbound_delivery_target_set_requires_approval,
+        tool_permission_overrides,
+        auto_approve_settings,
+        persistent_approval_policies,
+        approval_requests,
+        capability_leases,
+        capability_execution_mount_overrides,
+        additional_provider_trust,
+        capability_id_filter,
+    } = parts;
+
+    let policy = Arc::new(
+        crate::local_dev_capability_policy::local_dev_capability_policy()
+            .map_err(host_api_agent_loop_error)?,
+    );
+    let approval_settings: Arc<dyn ApprovalSettingsProvider> = Arc::new(
+        crate::local_dev_authorization::StoreApprovalSettingsProvider::new(
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+        ),
+    );
+    // Recover the crate-private `LocalDevSelectableSkillContextSource` from
+    // the opaque `SkillActivationTestSource` handle the harness passed in
+    // (see the field's doc-comment on `RefreshingLocalDevCapabilityPortTestParts`).
+    let skill_activation_source = skill_activation_source.map(|handle| handle.activation_source());
+
+    create_refreshing_local_dev_capability_port(RefreshingLocalDevCapabilityPortConfig {
+        runtime,
+        run_context,
+        fallback_user_id,
+        policy,
+        workspace_mounts,
+        skill_mounts,
+        memory_mounts,
+        system_extensions_lifecycle_mounts,
+        extension_surface_source: LocalDevExtensionSurfaceSource::new(None),
+        input_resolver,
+        result_writer,
+        milestone_sink,
+        skill_activation_source,
+        project_service,
+        trajectory_observer,
+        outbound_preferences_facade,
+        outbound_delivery_target_set_requires_approval,
+        approval_settings,
+        approval_requests,
+        capability_leases,
+        external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+        capability_execution_mount_overrides,
+        additional_provider_trust,
+        capability_id_filter,
+    })
+    .await
 }

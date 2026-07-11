@@ -431,7 +431,12 @@ async fn atomic_write_file(
                 io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
             }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = tokio::fs::remove_file(&temp).await;
+                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                    tracing::debug!(
+                        error = ?cleanup_error,
+                        "best-effort cleanup of write temp file failed after CAS conflict"
+                    );
+                }
                 Err(FilesystemError::VersionMismatch {
                     path: virtual_path.clone(),
                     expected: None,
@@ -439,7 +444,12 @@ async fn atomic_write_file(
                 })
             }
             Err(error) => {
-                let _ = tokio::fs::remove_file(&temp).await;
+                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                    tracing::debug!(
+                        error = ?cleanup_error,
+                        "best-effort cleanup of write temp file failed after hard-link error"
+                    );
+                }
                 Err(io_error(
                     virtual_path.clone(),
                     FilesystemOperation::WriteFile,

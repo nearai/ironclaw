@@ -45,9 +45,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
     ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
-    ExternalActorRef, ExternalConversationIdentity, InMemoryConversationServices, InboundTurnError,
+    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
+    ExternalConversationIdentity, InMemoryConversationServices, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
     ResolveConversationRequest, SessionThreadService, ThreadMessageRecord,
     ValidateReplyTargetRequest,
@@ -111,6 +112,8 @@ where
 struct StoredConversationState {
     revision: i64,
     pairings: Vec<(ActorKey, UserId)>,
+    #[serde(default)]
+    pairing_epochs: Vec<(ActorKey, ExternalActorBindingEpoch)>,
     bindings: Vec<(BindingKey, BindingRecord)>,
     source_bindings: HashMap<String, BindingRecord>,
     reply_targets: HashMap<String, ReplyTargetRecord>,
@@ -129,6 +132,11 @@ impl StoredConversationState {
             revision,
             pairings: state
                 .pairings
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            pairing_epochs: state
+                .pairing_epochs
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
@@ -177,6 +185,7 @@ impl StoredConversationState {
         InMemoryState {
             persistence_revision: 0,
             pairings: self.pairings.into_iter().collect(),
+            pairing_epochs: self.pairing_epochs.into_iter().collect(),
             bindings: self.bindings.into_iter().collect(),
             source_bindings: self.source_bindings,
             reply_targets: self.reply_targets,
@@ -468,6 +477,46 @@ impl RebornFilesystemConversationServices {
             )
             .await
     }
+
+    pub async fn pair_external_actor_with_epoch(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: ironclaw_host_api::UserId,
+        binding_epoch: ExternalActorBindingEpoch,
+    ) -> Result<(), InboundTurnError> {
+        self.inner
+            .pair_external_actor_with_epoch(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+                user_id,
+                binding_epoch,
+            )
+            .await
+    }
+
+    pub async fn unpair_external_actor_if_owned_by(
+        &self,
+        tenant_id: &ironclaw_host_api::TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+        expected: &ExpectedExternalActorOwner,
+    ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
+        self.inner
+            .unpair_external_actor_if_owned_by(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+                expected,
+            )
+            .await
+    }
 }
 
 #[async_trait]
@@ -487,6 +536,63 @@ impl ConversationActorPairingService for RebornFilesystemConversationServices {
                 adapter_installation_id,
                 external_actor_ref,
                 user_id,
+            )
+            .await
+    }
+
+    async fn pair_external_actor_with_epoch(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+        binding_epoch: ExternalActorBindingEpoch,
+    ) -> Result<(), InboundTurnError> {
+        self.inner
+            .pair_external_actor_with_epoch(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+                user_id,
+                binding_epoch,
+            )
+            .await
+    }
+
+    async fn unpair_external_actor(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+    ) -> Result<(), InboundTurnError> {
+        self.inner
+            .try_unpair_external_actor(
+                &tenant_id,
+                &adapter_kind,
+                &adapter_installation_id,
+                &external_actor_ref,
+            )
+            .await
+    }
+
+    async fn unpair_external_actor_if_owned_by(
+        &self,
+        tenant_id: &ironclaw_host_api::TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+        expected: &ExpectedExternalActorOwner,
+    ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
+        self.inner
+            .unpair_external_actor_if_owned_by(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                external_actor_ref,
+                expected,
             )
             .await
     }
