@@ -1,7 +1,7 @@
 //! Composition adapter implementing the product-workflow
 //! [`AdminUserService`](ironclaw_product_workflow::AdminUserService) port over
-//! the Reborn identity user-directory + admin secret provisioner + a token
-//! minter.
+//! the Reborn identity user-directory + runtime-owner-scoped admin secret
+//! provisioner + a token minter.
 //!
 //! This is the one place identity, secrets, and token issuance meet — the
 //! composition root is the only crate allowed to depend on all three, so the

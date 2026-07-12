@@ -5,14 +5,20 @@
 //! encodes agent/project into the path). So provisioning a secret for an
 //! *arbitrary target user* — the admin use case — requires a store whose
 //! `MountView` points at that target user's `/secrets` subtree. This is the
-//! "explicit admin-scoped API" the `ironclaw_secrets` guardrails anticipate
-//! ("no global handle lookup unless an explicit admin-scoped API is introduced
-//! later").
+//! explicit, composition-owned admin API required by the `ironclaw_secrets`
+//! guardrails; the underlying store still provides no global handle lookup.
 //!
 //! We build a fresh per-target-user `FilesystemSecretStore` on demand from the
 //! shared root filesystem + the SAME `SecretsCrypto` the runtime's own store
 //! uses (so material written here decrypts under the user's own store and vice
-//! versa). Construction is cheap (an `Arc` clone + a fixed `MountView`).
+//! versa). The authenticated caller's host-stamped agent/project defaults are
+//! retained so writes match capability runtime scope. Construction is cheap
+//! (an `Arc` clone + a fixed `MountView`).
+//!
+//! Compatibility is handle-local and target-user scoped: list merges unique
+//! metadata from the earlier user-only namespace, put writes the current
+//! runtime namespace and removes a same-named legacy entry, and delete checks
+//! both. No operation performs a global lookup or crosses tenant/user mounts.
 
 use std::sync::Arc;
 
@@ -25,9 +31,10 @@ use ironclaw_secrets::{
     SecretsCrypto,
 };
 
-/// Admin provisioning of per-user secrets for an arbitrary target `(tenant,
-/// user)`. Implemented over the filesystem secret substrate; a `dyn` port so
-/// the runtime can retain it without carrying the backend generic.
+/// Admin provisioning of secrets for an arbitrary target user under a trusted
+/// `(tenant, user, agent, project)` owner scope. Implemented over the filesystem
+/// secret substrate; a `dyn` port so the runtime can retain it without carrying
+/// the backend generic.
 #[async_trait]
 pub(crate) trait AdminSecretProvisioner: Send + Sync {
     async fn list(
@@ -50,7 +57,8 @@ pub(crate) trait AdminSecretProvisioner: Send + Sync {
 }
 
 /// Filesystem-backed admin secret provisioner: holds the shared raw root + the
-/// shared crypto and mints a per-target-user store per call.
+/// shared crypto and mints a per-target-user, runtime-owner-scoped store per
+/// call.
 pub(crate) struct FilesystemAdminSecretProvisioner<F>
 where
     F: RootFilesystem + 'static,

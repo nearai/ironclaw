@@ -140,6 +140,7 @@ pub struct AdminUserSecretScope {
 }
 
 impl AdminUserSecretScope {
+    /// Build the complete trusted owner scope for one admin secret operation.
     pub fn new(
         tenant_id: TenantId,
         user_id: UserId,
