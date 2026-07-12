@@ -120,7 +120,7 @@ fn check_llm_readiness(
     loaded_config: &LoadedDoctorConfig,
 ) -> DoctorCheck {
     let config = match loaded_config {
-        LoadedDoctorConfig::Loaded(config) => config,
+        LoadedDoctorConfig::Loaded(config) => config.as_ref(),
         LoadedDoctorConfig::Invalid(error) => {
             return dependency_check(
                 "llm_provider",
@@ -334,14 +334,14 @@ fn dependency_check(name: &str, outcome: CheckOutcome, detail: String) -> Doctor
 }
 
 enum LoadedDoctorConfig {
-    Loaded(Option<RebornConfigFile>),
+    Loaded(Box<Option<RebornConfigFile>>),
     Invalid(String),
 }
 
 impl LoadedDoctorConfig {
     fn load(path: &std::path::Path) -> Self {
         match RebornConfigFile::load(path) {
-            Ok(config) => Self::Loaded(config),
+            Ok(config) => Self::Loaded(Box::new(config)),
             Err(error) => Self::Invalid(error.to_string()),
         }
     }
@@ -349,13 +349,13 @@ impl LoadedDoctorConfig {
 
 fn check_config_file(loaded_config: &LoadedDoctorConfig) -> DoctorCheck {
     match loaded_config {
-        LoadedDoctorConfig::Loaded(Some(_)) => DoctorCheck {
+        LoadedDoctorConfig::Loaded(config) if config.is_some() => DoctorCheck {
             name: "config_file".to_string(),
             category: CheckCategory::Core,
             outcome: CheckOutcome::Pass,
             detail: "valid".to_string(),
         },
-        LoadedDoctorConfig::Loaded(None) => DoctorCheck {
+        LoadedDoctorConfig::Loaded(_) => DoctorCheck {
             name: "config_file".to_string(),
             category: CheckCategory::Core,
             outcome: CheckOutcome::Skip,
