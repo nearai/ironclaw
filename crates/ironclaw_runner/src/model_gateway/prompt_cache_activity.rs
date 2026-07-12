@@ -167,7 +167,9 @@ impl PromptCacheActivityLog {
             system_prompt_changed,
         } = observation
         {
-            tracing::warn!(
+            // Internal diagnostics stay at debug!: info!/warn! render in the
+            // REPL/TUI and would corrupt the interactive display.
+            debug!(
                 run_id = %run_id,
                 prev_cache_read = previous_cache_read_tokens,
                 cache_read = usage.cache_read_input_tokens,
@@ -297,6 +299,17 @@ mod tests {
                 previous_cache_read_tokens: 200_000,
                 tool_definitions_changed: true,
                 system_prompt_changed: false,
+            }
+        );
+        // Cache collapses again with the tool surface now stable but the
+        // system prompt changed: break attributed to the system prompt.
+        let changed_prompt = system_prompt_cache_signature(&[ChatMessage::system("sys v2")]);
+        assert_eq!(
+            log.observe_model_call(run_id, cache_usage(10_000), changed_tools, changed_prompt),
+            PromptCacheObservation::Break {
+                previous_cache_read_tokens: 50_000,
+                tool_definitions_changed: false,
+                system_prompt_changed: true,
             }
         );
     }
