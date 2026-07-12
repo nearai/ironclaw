@@ -1219,12 +1219,14 @@ def _is_blocking_failure(result: ProbeResult) -> bool:
     return not result.success and bool(result.details.get("blocking", True))
 
 
-def _is_provider_unavailable(result: ProbeResult) -> bool:
+def _is_provider_incident(result: ProbeResult) -> bool:
     if result.success:
         return False
     return result.details.get("failure_category") in {
         "model_unavailable",
+        "model_transient",
         "provider_unavailable",
+        "provider_transient",
     }
 
 
@@ -1288,6 +1290,7 @@ async def _live_chat_case(
     routine_follow_up_timezone_instruction: str | None = None,
     expose_full_reply_text: bool = False,
     enforce_marker: bool = True,
+    capture_submission_identity: bool = False,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1297,6 +1300,56 @@ async def _live_chat_case(
         observed["extensions"] = [
             str(extension["package_id"]) for extension in extensions
         ]
+
+    def is_matching_submission_response(response: object) -> bool:
+        try:
+            request = response.request  # type: ignore[attr-defined]
+            if request.method != "POST":
+                return False
+            if not re.search(
+                r"/api/webchat/v2/threads/[^/]+/messages$",
+                str(response.url),  # type: ignore[attr-defined]
+            ):
+                return False
+            request_body = request.post_data_json
+            if callable(request_body):
+                request_body = request_body()
+            return isinstance(request_body, dict) and request_body.get("content") == prompt
+        except Exception:
+            return False
+
+    async def submit_prompt(page: object, composer: object) -> None:
+        if not capture_submission_identity:
+            await composer.fill(prompt)  # type: ignore[attr-defined]
+            await composer.press("Enter")  # type: ignore[attr-defined]
+            return
+        async with page.expect_response(  # type: ignore[attr-defined]
+            is_matching_submission_response,
+            timeout=15000,
+        ) as response_info:
+            await composer.fill(prompt)  # type: ignore[attr-defined]
+            await composer.press("Enter")  # type: ignore[attr-defined]
+        response = await response_info.value
+        payload = await response.json()
+        if not isinstance(payload, dict):
+            raise AssertionError("chat submission response was not a JSON object")
+        outcome = str(payload.get("outcome") or "")
+        if outcome == "rejected_busy" and "submission_identity" in observed:
+            return
+        required_fields = (
+            "accepted_message_ref",
+            "thread_id",
+            "turn_id",
+            "run_id",
+        )
+        if outcome != "submitted" or any(not payload.get(field) for field in required_fields):
+            raise AssertionError(
+                "chat submission did not return a fresh submitted turn identity: "
+                f"outcome={outcome!r}"
+            )
+        observed["submission_identity"] = {
+            field: str(payload[field]) for field in required_fields
+        }
 
     async def action(page: object) -> None:
         if extensions:
@@ -1334,8 +1387,7 @@ async def _live_chat_case(
         error_count_before = await page.locator(  # type: ignore[attr-defined]
             "[data-testid='msg-error']"
         ).count()
-        await composer.fill(prompt)
-        await composer.press("Enter")
+        await submit_prompt(page, composer)
         try:
             await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
                 prompt[:80],
@@ -1345,8 +1397,7 @@ async def _live_chat_case(
             if not await _dismiss_visible_connect_action(page):
                 raise
             observed["connect_action_dismissed_after_submit"] = True
-            await composer.fill(prompt)
-            await composer.press("Enter")
+            await submit_prompt(page, composer)
             await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
                 prompt[:80],
                 timeout=15000,
@@ -3048,6 +3099,132 @@ def _completed_capability_counts(
         capability_id: capability_statuses.count("completed")
         for capability_id, capability_statuses in statuses.items()
     }
+
+
+_TERMINAL_CAPABILITY_EVENT_STATUSES = {
+    "capability_activity_succeeded": "completed",
+    "capability_activity_failed": "failed",
+}
+
+
+def _current_turn_capability_evidence(
+    reborn_home: Path,
+    submission_identity: dict[str, object],
+    capability_ids: list[str],
+    allowed_statuses: set[str],
+) -> dict[str, object]:
+    """Bind terminal capability records to one submitted WebUI turn run."""
+    identity = {
+        field: str(submission_identity.get(field) or "")
+        for field in (
+            "accepted_message_ref",
+            "thread_id",
+            "turn_id",
+            "run_id",
+        )
+    }
+    evidence: dict[str, object] = {
+        **identity,
+        "invocation_ids": {capability_id: [] for capability_id in capability_ids},
+        "statuses": {capability_id: [] for capability_id in capability_ids},
+    }
+    if not all(identity.values()):
+        return evidence
+
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        return evidence
+    try:
+        with closing(sqlite3.connect(db_path)) as db:
+            event_rows = db.execute(
+                """
+                SELECT payload
+                FROM root_filesystem_events
+                WHERE path LIKE '/events/runtime/%'
+                """
+            ).fetchall()
+            run_state_rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE '%/run-state/%'
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return evidence
+
+    wanted = set(capability_ids)
+    terminal_events: dict[str, dict[str, str]] = {}
+    for (raw_payload,) in event_rows:
+        try:
+            payload = json.loads(
+                raw_payload.decode("utf-8", errors="replace")
+                if isinstance(raw_payload, bytes)
+                else str(raw_payload)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        capability_id = str(payload.get("capability_id") or "")
+        event_status = _TERMINAL_CAPABILITY_EVENT_STATUSES.get(
+            str(payload.get("kind") or "")
+        )
+        scope = payload.get("scope")
+        if (
+            capability_id not in wanted
+            or event_status not in allowed_statuses
+            or payload.get("parent_invocation_id") != identity["run_id"]
+            or not isinstance(scope, dict)
+            or scope.get("thread_id") != identity["thread_id"]
+        ):
+            continue
+        invocation_id = str(scope.get("invocation_id") or "")
+        if invocation_id:
+            terminal_events[invocation_id] = {
+                "capability_id": capability_id,
+                "status": event_status,
+            }
+
+    matched: dict[str, list[tuple[str, str]]] = {
+        capability_id: [] for capability_id in capability_ids
+    }
+    for (raw_contents,) in run_state_rows:
+        try:
+            payload = json.loads(
+                raw_contents.decode("utf-8", errors="replace")
+                if isinstance(raw_contents, bytes)
+                else str(raw_contents)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        invocation_id = str(payload.get("invocation_id") or "")
+        event = terminal_events.get(invocation_id)
+        scope = payload.get("scope")
+        status = str(payload.get("status") or "unknown")
+        if (
+            event is None
+            or payload.get("capability_id") != event["capability_id"]
+            or status != event["status"]
+            or not isinstance(scope, dict)
+            or scope.get("thread_id") != identity["thread_id"]
+        ):
+            continue
+        matched[event["capability_id"]].append((invocation_id, status))
+
+    evidence["invocation_ids"] = {
+        capability_id: [invocation_id for invocation_id, _ in matched[capability_id]]
+        for capability_id in capability_ids
+    }
+    evidence["statuses"] = {
+        capability_id: [status for _, status in matched[capability_id]]
+        for capability_id in capability_ids
+    }
+    return evidence
 
 
 async def _extension_chat_connect_case(
@@ -5775,6 +5952,7 @@ async def _slack_correctness_chat_reply(
     answer_marker: str,
     extra_details: dict[str, object],
     expected_capability: str | None = None,
+    expected_capability_statuses: tuple[str, ...] = ("completed",),
     timeout: float = 240.0,
 ) -> tuple[ProbeResult, str]:
     """Chat arm shared by the QA-10 Slack tool-correctness probes.
@@ -5789,14 +5967,6 @@ async def _slack_correctness_chat_reply(
     expected_capabilities = (
         [expected_capability] if expected_capability is not None else []
     )
-    statuses_before: dict[str, list[str]] = {}
-    completed_before: dict[str, int] = {}
-    if expected_capability is not None:
-        statuses_before = _capability_run_statuses(
-            ctx.reborn_home,
-            expected_capabilities,
-        )
-        completed_before = _completed_capability_counts(statuses_before)
     chat = await _live_chat_case(
         ctx,
         case_name=case_name,
@@ -5808,6 +5978,7 @@ async def _slack_correctness_chat_reply(
         extra_details=extra_details,
         expose_full_reply_text=True,
         enforce_marker=False,
+        capture_submission_identity=expected_capability is not None,
     )
     reply_text = str(
         chat.details.pop("full_reply_text", None)
@@ -5822,29 +5993,34 @@ async def _slack_correctness_chat_reply(
         return chat, reply_text
 
     if expected_capability is not None:
-        statuses_after = _capability_run_statuses(
+        submission_identity = chat.details.get("submission_identity")
+        evidence = _current_turn_capability_evidence(
             ctx.reborn_home,
+            submission_identity if isinstance(submission_identity, dict) else {},
             expected_capabilities,
+            set(expected_capability_statuses),
         )
-        completed_after = _completed_capability_counts(statuses_after)
         chat.details.update(
             {
                 "expected_capabilities": expected_capabilities,
-                "capability_statuses_before": statuses_before,
-                "capability_statuses_after": statuses_after,
-                "capability_completed_counts_before": completed_before,
-                "capability_completed_counts_after": completed_after,
+                "expected_capability_statuses": list(expected_capability_statuses),
+                "capability_evidence": evidence,
             }
         )
-        if completed_after[expected_capability] <= completed_before[
-            expected_capability
-        ]:
+        statuses = evidence.get("statuses")
+        matching_statuses = (
+            statuses.get(expected_capability, [])
+            if isinstance(statuses, dict)
+            else []
+        )
+        if not matching_statuses:
             chat.success = False
             chat.details.update(
                 {
                     "error": (
-                        "Slack correctness reply did not complete the expected "
-                        f"capability during this chat turn: {expected_capability}"
+                        "Slack correctness reply did not produce current-turn "
+                        "terminal evidence for the expected capability: "
+                        f"{expected_capability}"
                     ),
                     "failure_class": "model_quality",
                     "failure_category": "missing_expected_capability",
@@ -5939,6 +6115,7 @@ async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_conversation_history",
         )
         if not chat.success:
             return chat
@@ -6029,6 +6206,7 @@ async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_user_info",
         )
         if not chat.success:
             return chat
@@ -6127,6 +6305,7 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_thread_replies",
         )
         if not chat.success:
             return chat
@@ -6287,6 +6466,8 @@ async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_conversation_history",
+            expected_capability_statuses=("completed", "failed"),
         )
         if not chat.success:
             return chat
@@ -6350,6 +6531,7 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.send_message",
         )
         if not chat.success:
             return chat
@@ -6569,6 +6751,7 @@ async def case_qa_10h_slack_email_hallucination_guard(
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_user_info",
         )
         if not chat.success:
             return chat
@@ -7511,7 +7694,7 @@ async def run_cases(args: argparse.Namespace) -> int:
                 f"latency_ms={result.latency_ms}",
                 flush=True,
             )
-            if _is_provider_unavailable(result):
+            if _is_provider_incident(result):
                 result.details.update(
                     {
                         "blocking": False,
@@ -7527,8 +7710,8 @@ async def run_cases(args: argparse.Namespace) -> int:
                         time.monotonic(),
                         {
                             "error": (
-                                "case was not run because the model provider became "
-                                f"unavailable during {name}"
+                                "case was not run because the model provider had a "
+                                f"terminal incident during {name}"
                             ),
                             "failure_class": "infrastructure",
                             "failure_category": failure_category,
@@ -7542,7 +7725,7 @@ async def run_cases(args: argparse.Namespace) -> int:
                     print(
                         "[reborn-webui-v2-live-qa] "
                         f"case={remaining_name} success={inconclusive.success} "
-                        f"inconclusive=provider_unavailable source_case={name}",
+                        f"inconclusive=provider_incident source_case={name}",
                         flush=True,
                     )
                 break

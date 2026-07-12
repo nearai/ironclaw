@@ -12,33 +12,10 @@
         "type": "tool_calls",
         "tool_calls": [
           {
-            "id": "call_entity_outbound_targets",
-            "name": "builtin__outbound_delivery_targets_list",
-            "arguments": {
-              "channel": "slack"
-            }
-          },
-          {
             "id": "call_entity_extension_search",
             "name": "builtin__extension_search",
             "arguments": {
               "query": "Slack"
-            }
-          }
-        ],
-        "input_tokens": 0,
-        "output_tokens": 0
-      }
-    },
-    {
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          {
-            "id": "call_entity_extension_activate_initial",
-            "name": "builtin__extension_activate",
-            "arguments": {
-              "extension_id": "slack"
             }
           }
         ],
@@ -86,8 +63,8 @@
             "id": "call_entity_search_conversation",
             "name": "slack.search_messages",
             "arguments": {
-              "count": 20,
-              "query": "in:D0CANARY CANARY_ENTITY_MESSAGE",
+              "count": 1,
+              "query": "CANARY_ENTITY_MESSAGE in:D0CANARY",
               "sort": "timestamp"
             }
           }
@@ -107,6 +84,41 @@
               "count": 20,
               "query": "CANARY_ENTITY_MESSAGE",
               "sort": "timestamp"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_search_marker_fragment",
+            "name": "slack.search_messages",
+            "arguments": {
+              "count": 20,
+              "query": "CANARY_ENTITY",
+              "sort": "timestamp"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_get_history",
+            "name": "slack.get_conversation_history",
+            "arguments": {
+              "channel": "D0CANARY",
+              "limit": 100
             }
           }
         ],

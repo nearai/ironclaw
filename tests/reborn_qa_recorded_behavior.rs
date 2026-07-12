@@ -182,6 +182,14 @@ fn assert_tool_sequence(trace: &LlmTrace, expected: &[&str]) {
     assert_eq!(actual, expected, "recorded tool sequence changed");
 }
 
+fn assert_tool_not_called(trace: &LlmTrace, forbidden: &str) {
+    let calls = recorded_tool_calls(trace);
+    assert!(
+        calls.iter().all(|(name, _)| name != forbidden),
+        "recorded fixture must not call {forbidden}; recorded calls: {calls:#?}"
+    );
+}
+
 fn assert_tool_call_groups(trace: &LlmTrace, expected: &[&[&str]]) {
     let (user_input, model_responses) = trace
         .steps
@@ -359,7 +367,6 @@ async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
             "builtin.extension_install",
             "builtin.extension_activate",
             "slack.whoami",
-            "slack.search_messages",
             "slack.get_conversation_history",
         ],
     );
@@ -370,7 +377,6 @@ async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
             &["builtin.extension_install"][..],
             &["builtin.extension_activate"][..],
             &["slack.whoami"][..],
-            &["slack.search_messages"][..],
             &["slack.get_conversation_history"][..],
         ],
     );
@@ -380,6 +386,8 @@ async fn contract_slack_recent_message_reads_the_synthetic_conversation() {
         "channel",
         "D0CANARY",
     );
+    assert_tool_not_called(&trace, "slack.search_messages");
+    assert_tool_not_called(&trace, "builtin.outbound_delivery_targets_list");
 }
 
 #[tokio::test]
@@ -388,32 +396,37 @@ async fn contract_slack_entity_hygiene_humanizes_the_chained_user_id() {
     assert_tool_sequence(
         &trace,
         &[
-            "builtin.outbound_delivery_targets_list",
             "builtin.extension_search",
-            "builtin.extension_activate",
             "builtin.extension_install",
             "builtin.extension_activate",
             "slack.search_messages",
             "slack.search_messages",
+            "slack.search_messages",
+            "slack.get_conversation_history",
             "slack.get_user_info",
         ],
     );
     assert_tool_call_groups(
         &trace,
         &[
-            &[
-                "builtin.outbound_delivery_targets_list",
-                "builtin.extension_search",
-            ][..],
-            &["builtin.extension_activate"][..],
+            &["builtin.extension_search"][..],
             &["builtin.extension_install"][..],
             &["builtin.extension_activate"][..],
             &["slack.search_messages"][..],
             &["slack.search_messages"][..],
+            &["slack.search_messages"][..],
+            &["slack.get_conversation_history"][..],
             &["slack.get_user_info"][..],
         ],
     );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_history",
+        "channel",
+        "D0CANARY",
+    );
     assert_tool_argument_string_field_eq(&trace, "slack.get_user_info", "user_id", "U0CANARY");
+    assert_tool_not_called(&trace, "builtin.outbound_delivery_targets_list");
 
     let reply = final_text_reply(&trace).expect("entity-hygiene fixture should end in text");
     assert!(

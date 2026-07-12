@@ -74,24 +74,6 @@
         "type": "tool_calls",
         "tool_calls": [
           {
-            "id": "call_recent_search_messages",
-            "name": "slack.search_messages",
-            "arguments": {
-              "count": 20,
-              "query": "from:me",
-              "sort": "timestamp"
-            }
-          }
-        ],
-        "input_tokens": 0,
-        "output_tokens": 0
-      }
-    },
-    {
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          {
             "id": "call_recent_get_history",
             "name": "slack.get_conversation_history",
             "arguments": {
