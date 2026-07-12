@@ -135,7 +135,7 @@ struct SlackPostMessageResponse {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlackDeliveryFailureKind {
+pub(crate) enum SlackDeliveryFailureKind {
     Unauthorized,
     Retryable,
     Permanent,
@@ -154,7 +154,7 @@ impl SlackDeliveryFailureKind {
         }
     }
 
-    fn from_http_status(status: u16) -> Self {
+    pub(crate) fn from_http_status(status: u16) -> Self {
         if status >= 500 || status == 429 || status == 408 {
             Self::Retryable
         } else if status == 401 || status == 403 {
@@ -187,7 +187,7 @@ impl SlackPostMessageFailure {
     }
 }
 
-fn slack_error_kind(error: &str) -> SlackDeliveryFailureKind {
+pub(crate) fn slack_error_kind(error: &str) -> SlackDeliveryFailureKind {
     match error {
         "not_authed"
         | "invalid_auth"

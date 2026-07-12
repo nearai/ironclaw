@@ -136,6 +136,7 @@ pub struct AttachmentRef {
 
 /// A bounded immediate response (returned after verification, before any
 /// enqueue).
+#[derive(Debug, Clone)]
 pub struct ImmediateResponse {
     pub status: u16,
     pub content_type: Option<String>,
@@ -179,11 +180,13 @@ pub enum OutboundPart {
 
 /// Structured per-attempt delivery report. The adapter cannot mark anything
 /// delivered in a store; it only describes what the vendor did.
+#[derive(Debug, Clone)]
 pub struct DeliveryReport {
     pub parts: Vec<PartDeliveryOutcome>,
 }
 
 /// The outcome of delivering one part.
+#[derive(Debug, Clone)]
 pub enum PartDeliveryOutcome {
     /// Delivered; the vendor message reference, when the protocol returns one.
     Sent { vendor_message_ref: Option<String> },

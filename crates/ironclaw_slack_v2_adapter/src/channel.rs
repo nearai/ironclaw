@@ -1,20 +1,35 @@
-//! The Slack [`ChannelAdapter`] (generic ingress cutover, extension-runtime P4).
+//! The Slack [`ChannelAdapter`] (generic ingress cutover P4; delivery
+//! coordinator cutover P5).
 //!
-//! `inbound` is the extension's entire contribution to the inbound pipeline:
-//! parse one HOST-VERIFIED Slack Events API request into a normalized
-//! outcome. Signature verification moved to the host's generic recipe
-//! verifier (the manifest's `[channel.ingress.verification]`); this adapter
-//! never sees signing secrets or verification headers. Outbound delivery
-//! stays on the pre-coordinator path until the P5 cutover, so `deliver`
-//! reports `Unsupported` here.
+//! `inbound` parses one HOST-VERIFIED Slack Events API request into a
+//! normalized outcome (signature verification lives in the host's generic
+//! recipe verifier; this adapter never sees signing secrets). `deliver`
+//! renders one coordinator envelope to Slack mrkdwn, splits oversized text,
+//! posts each message via `chat.postMessage` over restricted egress (the
+//! host injects the bot token by declared handle), and maps vendor errors to
+//! structured per-part outcomes — the adapter has no store and cannot mark
+//! anything delivered.
 
 use async_trait::async_trait;
+use ironclaw_host_api::{
+    NetworkMethod, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, SecretHandle,
+};
 use ironclaw_product_adapters::{
     AdapterInstallationId, AttachmentRef, ChannelAdapter, ChannelError, DeliveryReport,
-    ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, VerifiedInbound,
+    ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
+    PartDeliveryOutcome, VerifiedInbound,
+};
+use serde::Deserialize;
+
+use crate::delivery::{SlackDeliveryFailureKind, slack_error_kind};
+use crate::mrkdwn::{render_slack_mrkdwn, slack_text_chunks};
+use crate::payload::{
+    SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError, normalize_slack_event,
 };
 
-use crate::payload::{SlackInboundEvent, SlackPayloadParseError, normalize_slack_event};
+/// The `[channel.config]` handle carrying the bot token (manifest data; the
+/// host injects the secret at egress time).
+const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 
 /// Stateless Slack channel adapter: pure protocol parsing for the generic
 /// ingress router.
@@ -67,11 +82,158 @@ impl ChannelAdapter for SlackChannelAdapter {
 
     async fn deliver(
         &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
-        // Outbound cutover is extension-runtime P5 (delivery coordinator).
-        Err(ChannelError::Unsupported)
+        if envelope.parts.is_empty() {
+            return Err(ChannelError::Render {
+                reason: "outbound envelope carries no parts".to_string(),
+            });
+        }
+        let credential =
+            SecretHandle::new(SLACK_BOT_TOKEN_HANDLE).map_err(|error| ChannelError::Render {
+                reason: format!("invalid bot token handle: {error}"),
+            })?;
+        let channel = envelope.target.conversation.conversation_id().to_string();
+        // Reply threading: an explicit anchor wins; otherwise thread on the
+        // conversation's topic (the inbound thread the reply belongs to).
+        let thread_ts = envelope
+            .target
+            .thread_anchor
+            .clone()
+            .or_else(|| envelope.target.conversation.topic_id().map(str::to_string));
+
+        let mut parts = Vec::new();
+        'parts: for part in &envelope.parts {
+            match part {
+                OutboundPart::Text(markdown) => {
+                    let rendered = render_slack_mrkdwn(markdown);
+                    for chunk in slack_text_chunks(&rendered) {
+                        let outcome = post_slack_chunk(
+                            egress,
+                            &credential,
+                            &channel,
+                            thread_ts.as_deref(),
+                            &chunk,
+                        )
+                        .await;
+                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                        parts.push(outcome);
+                        if !sent {
+                            // The report describes exactly what the vendor
+                            // accepted; the coordinator owns retry semantics
+                            // (a partial multipart is terminal there).
+                            break 'parts;
+                        }
+                    }
+                }
+                OutboundPart::Attachment(_) => {
+                    parts.push(PartDeliveryOutcome::Permanent {
+                        reason: "slack outbound attachment upload is not supported yet".to_string(),
+                    });
+                    break 'parts;
+                }
+            }
+        }
+        Ok(DeliveryReport { parts })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackChatPostMessageResponse {
+    ok: bool,
+    error: Option<String>,
+    ts: Option<String>,
+}
+
+async fn post_slack_chunk(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+) -> PartDeliveryOutcome {
+    let mut body = serde_json::json!({ "channel": channel, "text": text });
+    if let Some(thread_ts) = thread_ts {
+        body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+    }
+    let body = match serde_json::to_vec(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("chat.postMessage body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/chat.postMessage"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        // A truncated body from a proxy/LB timeout is transient infra.
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("chat.postMessage response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: parsed.ts,
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected chat.postMessage ({error})"),
+    )
+}
+
+fn part_outcome_for_egress_error(error: &RestrictedEgressError) -> PartDeliveryOutcome {
+    match error {
+        RestrictedEgressError::Transport { .. } | RestrictedEgressError::DeadlineExceeded => {
+            PartDeliveryOutcome::Retryable {
+                reason: error.to_string(),
+            }
+        }
+        RestrictedEgressError::AuthRequired { .. }
+        | RestrictedEgressError::UndeclaredCredential { .. } => PartDeliveryOutcome::Unauthorized {
+            reason: error.to_string(),
+        },
+        RestrictedEgressError::UndeclaredHost { .. }
+        | RestrictedEgressError::UndeclaredMethod
+        | RestrictedEgressError::HostOwnedHeader { .. }
+        | RestrictedEgressError::PolicyDenied
+        | RestrictedEgressError::ResponseTooLarge => PartDeliveryOutcome::Permanent {
+            reason: error.to_string(),
+        },
+    }
+}
+
+fn part_outcome_for_kind(kind: SlackDeliveryFailureKind, reason: String) -> PartDeliveryOutcome {
+    match kind {
+        SlackDeliveryFailureKind::Retryable => PartDeliveryOutcome::Retryable { reason },
+        SlackDeliveryFailureKind::Unauthorized => PartDeliveryOutcome::Unauthorized { reason },
+        SlackDeliveryFailureKind::Permanent => PartDeliveryOutcome::Permanent { reason },
     }
 }
 
@@ -247,42 +409,285 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn deliver_is_unsupported_until_the_delivery_coordinator_cutover() {
-        let outcome = SlackChannelAdapter
-            .deliver(
-                OutboundEnvelope {
-                    extension_id: "slack".to_string(),
-                    installation_id: "install_alpha".to_string(),
-                    delivery_attempt_id: "attempt-1".to_string(),
-                    target: ironclaw_product_adapters::OutboundTarget {
-                        conversation: ironclaw_product_adapters::ExternalConversationRef::new(
-                            None, "D123", None, None,
-                        )
-                        .expect("conversation"),
-                        thread_anchor: None,
-                    },
-                    parts: Vec::new(),
-                    reply_context: None,
-                },
-                &DenyAllEgress,
-            )
-            .await;
-        assert!(matches!(outcome, Err(ChannelError::Unsupported)));
+    // ── deliver() (delivery coordinator cutover, extension-runtime P5) ──────
+
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use ironclaw_host_api::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    };
+    use ironclaw_product_adapters::{OutboundPart, PartDeliveryOutcome};
+
+    struct ScriptedEgress {
+        requests: Mutex<Vec<RestrictedEgressRequest>>,
+        responses: Mutex<VecDeque<Result<RestrictedEgressResponse, RestrictedEgressError>>>,
     }
 
-    struct DenyAllEgress;
+    impl ScriptedEgress {
+        fn new(responses: Vec<Result<RestrictedEgressResponse, RestrictedEgressError>>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses.into_iter().collect()),
+            }
+        }
+
+        fn ok(body: &str) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: body.as_bytes().to_vec(),
+            })
+        }
+
+        fn requests(&self) -> Vec<RestrictedEgressRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
 
     #[async_trait]
-    impl ironclaw_host_api::RestrictedEgress for DenyAllEgress {
+    impl RestrictedEgress for ScriptedEgress {
         async fn send(
             &self,
-            _request: ironclaw_host_api::RestrictedEgressRequest,
-        ) -> Result<
-            ironclaw_host_api::RestrictedEgressResponse,
-            ironclaw_host_api::RestrictedEgressError,
-        > {
-            Err(ironclaw_host_api::RestrictedEgressError::PolicyDenied)
+            request: RestrictedEgressRequest,
+        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            self.requests.lock().unwrap().push(request);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Err(RestrictedEgressError::PolicyDenied))
         }
+    }
+
+    fn envelope(parts: Vec<OutboundPart>, thread_anchor: Option<&str>) -> OutboundEnvelope {
+        OutboundEnvelope {
+            extension_id: "slack".to_string(),
+            installation_id: "install_alpha".to_string(),
+            delivery_attempt_id: "attempt-1".to_string(),
+            target: ironclaw_product_adapters::OutboundTarget {
+                conversation: ironclaw_product_adapters::ExternalConversationRef::new(
+                    Some("T-A"),
+                    "D123",
+                    Some("1710000000.000100"),
+                    None,
+                )
+                .expect("conversation"),
+                thread_anchor: thread_anchor.map(str::to_string),
+            },
+            parts,
+            reply_context: None,
+        }
+    }
+
+    fn body_json(request: &RestrictedEgressRequest) -> serde_json::Value {
+        serde_json::from_slice(request.body.as_deref().unwrap_or_default()).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn deliver_posts_one_rendered_message_with_the_bot_token_handle() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"ts":"1710000001.000001"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::Text("**bold** reply".to_string())],
+                    Some("1710000000.000100"),
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert_eq!(report.parts.len(), 1);
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Sent { vendor_message_ref: Some(ts) } if ts == "1710000001.000001"
+        ));
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://slack.com/api/chat.postMessage");
+        assert_eq!(
+            requests[0].credential.as_ref().map(|h| h.as_str()),
+            Some("slack_bot_token"),
+            "auth rides the declared handle; the adapter never sees bytes"
+        );
+        let body = body_json(&requests[0]);
+        assert_eq!(body["channel"], "D123");
+        assert_eq!(body["thread_ts"], "1710000000.000100");
+        assert_eq!(body["text"], "*bold* reply", "markdown renders to mrkdwn");
+    }
+
+    #[tokio::test]
+    async fn deliver_threads_on_the_conversation_topic_when_no_anchor_is_given() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true,"ts":"1"}"#)]);
+        SlackChannelAdapter
+            .deliver(
+                envelope(vec![OutboundPart::Text("hi".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        let body = body_json(&egress.requests()[0]);
+        assert_eq!(
+            body["thread_ts"], "1710000000.000100",
+            "falls back to the conversation's thread topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_splits_oversized_text_into_sequenced_posts() {
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(r#"{"ok":true,"ts":"1"}"#),
+            ScriptedEgress::ok(r#"{"ok":true,"ts":"2"}"#),
+        ]);
+        let long_text = "line\n".repeat(9_000); // 45k chars > the 35k soft limit
+        let report = SlackChannelAdapter
+            .deliver(envelope(vec![OutboundPart::Text(long_text)], None), &egress)
+            .await
+            .expect("deliver drives");
+        assert_eq!(report.parts.len(), 2, "split into two vendor posts");
+        assert!(
+            report
+                .parts
+                .iter()
+                .all(|part| matches!(part, PartDeliveryOutcome::Sent { .. }))
+        );
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 2);
+        let first = body_json(&requests[0]);
+        assert!(
+            first["text"].as_str().unwrap().starts_with("Part 1/2"),
+            "chunks are sequenced"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_maps_vendor_errors_and_stops_after_the_first_failure() {
+        // ratelimited → Retryable; nothing further is attempted.
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"ratelimited"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![
+                        OutboundPart::Text("one".to_string()),
+                        OutboundPart::Text("two".to_string()),
+                    ],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert_eq!(report.parts.len(), 1, "stops at the first failed part");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Retryable { .. }
+        ));
+        assert_eq!(egress.requests().len(), 1);
+
+        // invalid_auth → Unauthorized.
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"invalid_auth"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(vec![OutboundPart::Text("x".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Unauthorized { .. }
+        ));
+
+        // channel_not_found → Permanent.
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"channel_not_found"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(vec![OutboundPart::Text("x".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_maps_egress_failures_without_leaking_details() {
+        let egress = ScriptedEgress::new(vec![Err(RestrictedEgressError::DeadlineExceeded)]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(vec![OutboundPart::Text("x".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Retryable { .. }
+        ));
+
+        let egress = ScriptedEgress::new(vec![Err(RestrictedEgressError::AuthRequired {
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+        })]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(vec![OutboundPart::Text("x".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Unauthorized { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_rejects_empty_envelopes_and_reports_attachments_unsupported() {
+        let egress = ScriptedEgress::new(Vec::new());
+        let error = SlackChannelAdapter
+            .deliver(envelope(Vec::new(), None), &egress)
+            .await
+            .expect_err("empty envelope is a render error");
+        assert!(matches!(error, ChannelError::Render { .. }));
+
+        let egress = ScriptedEgress::new(Vec::new());
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::Attachment(AttachmentRef {
+                        descriptor: ironclaw_product_adapters::ProductAttachmentDescriptor::new(
+                            "file-1",
+                            "image/png",
+                            Some("img.png".to_string()),
+                            Some(10),
+                            ironclaw_product_adapters::ProductAttachmentKind::Image,
+                        )
+                        .expect("descriptor"),
+                        vendor_ref: "file-1".to_string(),
+                        mime_hint: Some("image/png".to_string()),
+                    })],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { .. }
+        ));
+        assert!(egress.requests().is_empty());
     }
 }
