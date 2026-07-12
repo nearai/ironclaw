@@ -112,20 +112,6 @@ fn check_config_file(path: &std::path::Path) -> DoctorCheck {
 
 fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
     match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_json::from_str::<serde::de::IgnoredAny>(&contents) {
-            Ok(_) => DoctorCheck {
-                name: "providers_file".to_string(),
-                category: CheckCategory::Core,
-                outcome: CheckOutcome::Pass,
-                detail: "valid JSON".to_string(),
-            },
-            Err(error) => DoctorCheck {
-                name: "providers_file".to_string(),
-                category: CheckCategory::Core,
-                outcome: CheckOutcome::Fail,
-                detail: format!("invalid JSON: {error}"),
-            },
-        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => DoctorCheck {
             name: "providers_file".to_string(),
             category: CheckCategory::Core,
@@ -136,8 +122,25 @@ fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
             name: "providers_file".to_string(),
             category: CheckCategory::Core,
             outcome: CheckOutcome::Fail,
-            detail: format!("read error: {error}"),
+            detail: format!("failed to read provider catalog: {error}"),
         },
+        Ok(contents) => {
+            match ironclaw_reborn_composition::validate_reborn_provider_catalog_contents(&contents)
+            {
+                Ok(()) => DoctorCheck {
+                    name: "providers_file".to_string(),
+                    category: CheckCategory::Core,
+                    outcome: CheckOutcome::Pass,
+                    detail: "valid provider catalog".to_string(),
+                },
+                Err(error) => DoctorCheck {
+                    name: "providers_file".to_string(),
+                    category: CheckCategory::Core,
+                    outcome: CheckOutcome::Fail,
+                    detail: format!("invalid provider catalog: {error}"),
+                },
+            }
+        }
     }
 }
 
@@ -235,6 +238,26 @@ mod tests {
     }
 
     #[test]
+    fn doctor_well_formed_but_invalid_providers_catalog_is_fail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("providers.json");
+        std::fs::write(&path, "{}").expect("write");
+        let check = check_providers_file(&path);
+        assert_eq!(check.outcome, CheckOutcome::Fail);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_unreadable_providers_file_is_fail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("providers.json");
+        std::fs::create_dir(&path).expect("create directory at providers path");
+        let check = check_providers_file(&path);
+        assert_eq!(check.outcome, CheckOutcome::Fail);
+        assert!(check.detail.contains("failed to read"));
+    }
+
+    #[test]
     fn driver_check_failed_status_produces_fail_outcome() {
         let status = RebornRuntimeComponentStatus::Failed("timeout".to_string());
         let check = driver_check("test_driver", &status);
@@ -246,5 +269,47 @@ mod tests {
             "detail should contain reason: {}",
             check.detail
         );
+    }
+}
+
+use crate::render::{Renderable, terminal_safe_text};
+use std::io::Write;
+// ─── Doctor ────────────────────────────────────────────────────────────────
+
+impl Renderable for DoctorDto {
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        writeln!(w, "IronClaw Reborn doctor")?;
+        writeln!(w)?;
+
+        let mut current_category: Option<CheckCategory> = None;
+        for check in &self.checks {
+            if current_category != Some(check.category) {
+                current_category = Some(check.category);
+                let label = match check.category {
+                    CheckCategory::Core => "Core",
+                    CheckCategory::Drivers => "Drivers",
+                };
+                writeln!(w, "  {label}")?;
+            }
+            let icon = match check.outcome {
+                CheckOutcome::Pass => "\u{2714}",
+                CheckOutcome::Fail => "\u{2718}",
+                CheckOutcome::Skip => "-",
+            };
+            writeln!(
+                w,
+                "  {icon} {:<28} {}",
+                terminal_safe_text(&check.name),
+                terminal_safe_text(&check.detail)
+            )?;
+        }
+
+        writeln!(w)?;
+        writeln!(
+            w,
+            "{} passed, {} failed, {} skipped",
+            self.summary.pass, self.summary.fail, self.summary.skip,
+        )?;
+        Ok(())
     }
 }

@@ -96,3 +96,71 @@ mod tests {
         }
     }
 }
+
+use crate::render::{Renderable, terminal_safe_text};
+use std::io::Write;
+// ─── Status ────────────────────────────────────────────────────────────────
+
+impl Renderable for StatusDto {
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        writeln!(w, "IronClaw Reborn status")?;
+        writeln!(w)?;
+        kv(w, "version", &self.version)?;
+        kv(w, "reborn_home", &self.reborn_home.display().to_string())?;
+        kv(w, "home_source", self.home_source)?;
+        kv(w, "profile", &self.profile)?;
+        kv(
+            w,
+            "config_file",
+            &format!(
+                "{} ({})",
+                self.config_file.path.display(),
+                if self.config_file.present {
+                    "present"
+                } else {
+                    "absent"
+                }
+            ),
+        )?;
+        kv(
+            w,
+            "providers_file",
+            &format!(
+                "{} ({})",
+                self.providers_file.path.display(),
+                if self.providers_file.present {
+                    "present"
+                } else {
+                    "absent"
+                }
+            ),
+        )?;
+        kv(w, "model_slots", &self.model_slots.join(", "))?;
+        writeln!(w)?;
+        writeln!(w, "drivers:")?;
+        driver_line(w, "  text_only", &self.drivers.text_only)?;
+        driver_line(w, "  planned", &self.drivers.planned)?;
+        driver_line(w, "  subagent_planned", &self.drivers.subagent_planned)?;
+        driver_line(
+            w,
+            "  planned_default_profile",
+            &self.drivers.planned_default_profile,
+        )?;
+        Ok(())
+    }
+}
+
+fn driver_line(w: &mut impl Write, label: &str, status: &ComponentStatus) -> std::io::Result<()> {
+    match status {
+        ComponentStatus::Initialized => writeln!(w, "{label}: initialized"),
+        ComponentStatus::Failed { reason } => {
+            writeln!(w, "{label}: unavailable ({})", terminal_safe_text(reason))
+        }
+    }
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+fn kv(w: &mut impl Write, key: &str, value: &str) -> std::io::Result<()> {
+    writeln!(w, "{:<20} {value}", format!("{key}:"))
+}

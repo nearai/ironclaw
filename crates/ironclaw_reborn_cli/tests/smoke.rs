@@ -3184,6 +3184,40 @@ fn status_json_reports_reborn_home_without_touching_v1_state() {
     );
 }
 
+#[test]
+fn status_json_reports_present_config_and_providers_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("create Reborn home");
+    let config_path = reborn_home.join("config.toml");
+    let providers_path = reborn_home.join("providers.json");
+    std::fs::write(&config_path, "").expect("write config");
+    std::fs::write(&providers_path, "[]").expect("write providers");
+
+    let output = Command::new(reborn_bin())
+        .args(["status", "--json"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn status --json should run");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid status JSON");
+    assert_eq!(
+        json["config_file"]["path"],
+        config_path.to_str().expect("utf8")
+    );
+    assert_eq!(json["config_file"]["present"], true);
+    assert_eq!(
+        json["providers_file"]["path"],
+        providers_path.to_str().expect("utf8")
+    );
+    assert_eq!(json["providers_file"]["present"], true);
+}
+
 // ─── config list ──────────────────────────────────────────────────────────
 
 #[test]
@@ -3324,6 +3358,36 @@ fn config_get_unknown_key_exits_nonzero() {
     assert!(
         stderr.contains("unknown config key"),
         "stderr should mention unknown key: {stderr}"
+    );
+}
+
+#[test]
+fn config_list_rejects_malformed_config() {
+    assert_config_read_rejects_malformed(&["config", "list"]);
+}
+
+#[test]
+fn config_get_rejects_malformed_config() {
+    assert_config_read_rejects_malformed(&["config", "get", "boot.profile"]);
+}
+
+fn assert_config_read_rejects_malformed(args: &[&str]) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("create Reborn home");
+    std::fs::write(reborn_home.join("config.toml"), "[boot\nprofile = broken")
+        .expect("write malformed config");
+
+    let output = Command::new(reborn_bin())
+        .args(args)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("config read command should run");
+    assert!(!output.status.success(), "malformed config must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to parse") || stderr.contains("TOML"),
+        "stderr should report parse failure: {stderr}"
     );
 }
 
