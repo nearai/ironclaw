@@ -187,21 +187,11 @@ impl ProductionWiringIssue {
 
 impl fmt::Display for ProductionWiringIssue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.implementation {
-            Some(implementation) => write!(
-                formatter,
-                "{}={} ({})",
-                self.component.as_str(),
-                implementation,
-                self.kind.as_str()
-            ),
-            None => write!(
-                formatter,
-                "{} ({})",
-                self.component.as_str(),
-                self.kind.as_str()
-            ),
+        formatter.write_str(self.component.as_str())?;
+        if let Some(implementation) = self.implementation {
+            write!(formatter, "={implementation}")?;
         }
+        write!(formatter, " ({})", self.kind.as_str())
     }
 }
 
