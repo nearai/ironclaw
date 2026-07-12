@@ -4913,25 +4913,6 @@ mod tests {
             last_run_history = Some(run_history);
         }
 
-        // The trigger row is diagnostic-only. Read it once after a timeout
-        // instead of doubling the database load in the polling loop.
-        let last_trigger_state = if fired_run_id.is_none() {
-            let current = repo
-                .get_trigger(tenant_id.clone(), trigger_id)
-                .await
-                .expect("get_trigger")
-                .expect("record present");
-            Some((
-                current.next_run_at,
-                current.last_run_at,
-                current.last_status,
-                current.active_fire_slot,
-                current.active_run_ref,
-            ))
-        } else {
-            None
-        };
-
         // Read delivery records from the unified outbound store that the
         // production hook writes through.  `local_runtime` is `pub(crate)`
         // — accessible here because this test lives in the same crate.
@@ -4960,7 +4941,7 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within {:?} — hook wiring e2e stalled; last_trigger_state={last_trigger_state:?}; last_run_history={last_run_history:?}",
+            "trigger did not fire within {:?} — hook wiring e2e stalled; last_run_history={last_run_history:?}",
             TRIGGER_HOOK_E2E_FIRE_TIMEOUT
         );
         assert!(
