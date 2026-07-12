@@ -1212,22 +1212,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/slack/slack_delivery.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_delivery.rs",
-        "slack.com",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_dm_open.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_egress.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/slack/slack_host_beta.rs",
         "slack",
     ),
@@ -1240,7 +1224,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/slack/slack_outbound_targets.rs",
+        "crates/ironclaw_reborn_composition/src/slack/slack_preference_targets.rs",
         "slack",
     ),
     (

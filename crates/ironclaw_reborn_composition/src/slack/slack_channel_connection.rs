@@ -23,7 +23,7 @@ use crate::{
     provider_identity::RebornUserIdentityBindingDeleteStore,
     provider_identity::RebornUserIdentityLookup,
     slack::slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
-    slack::slack_outbound_targets::SlackPersonalDmTargetStore,
+    slack::slack_preference_targets::SlackPersonalDmTargetStore,
 };
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
@@ -278,7 +278,7 @@ mod tests {
     use crate::{
         provider_identity::RebornUserIdentityBindingError,
         provider_identity::{RebornUserIdentityLookupError, installation_scoped_provider_user_id},
-        slack::slack_outbound_targets::{
+        slack::slack_preference_targets::{
             InMemorySlackPersonalDmTargetStore, SlackPersonalDmTarget, SlackPersonalDmTargetKey,
         },
         slack::slack_serve::SlackTeamId,
@@ -775,30 +775,30 @@ mod tests {
     impl SlackPersonalDmTargetStore for FailingSlackPersonalDmTargetStore {
         async fn load_personal_dm_target(
             &self,
-            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
+            _key: &crate::slack::slack_preference_targets::SlackPersonalDmTargetKey,
         ) -> Result<
-            Option<crate::slack::slack_outbound_targets::SlackPersonalDmTarget>,
-            crate::slack::slack_outbound_targets::SlackPersonalDmTargetError,
+            Option<crate::slack::slack_preference_targets::SlackPersonalDmTarget>,
+            crate::slack::slack_preference_targets::SlackPersonalDmTargetError,
         > {
             Ok(None)
         }
 
         async fn upsert_personal_dm_target(
             &self,
-            target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            target: crate::slack::slack_preference_targets::SlackPersonalDmTarget,
         ) -> Result<
-            crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
-            crate::slack::slack_outbound_targets::SlackPersonalDmTargetError,
+            crate::slack::slack_preference_targets::SlackPersonalDmTarget,
+            crate::slack::slack_preference_targets::SlackPersonalDmTargetError,
         > {
             Ok(target)
         }
 
         async fn delete_personal_dm_target(
             &self,
-            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
-        ) -> Result<bool, crate::slack::slack_outbound_targets::SlackPersonalDmTargetError>
+            _key: &crate::slack::slack_preference_targets::SlackPersonalDmTargetKey,
+        ) -> Result<bool, crate::slack::slack_preference_targets::SlackPersonalDmTargetError>
         {
-            Err(crate::slack::slack_outbound_targets::SlackPersonalDmTargetError::StoreUnavailable)
+            Err(crate::slack::slack_preference_targets::SlackPersonalDmTargetError::StoreUnavailable)
         }
 
         async fn delete_personal_dm_targets_for_user(
@@ -807,9 +807,9 @@ mod tests {
             _user_id: &UserId,
             _installation_id: &AdapterInstallationId,
             _team_id: &SlackTeamId,
-        ) -> Result<usize, crate::slack::slack_outbound_targets::SlackPersonalDmTargetError>
+        ) -> Result<usize, crate::slack::slack_preference_targets::SlackPersonalDmTargetError>
         {
-            Err(crate::slack::slack_outbound_targets::SlackPersonalDmTargetError::StoreUnavailable)
+            Err(crate::slack::slack_preference_targets::SlackPersonalDmTargetError::StoreUnavailable)
         }
     }
 }

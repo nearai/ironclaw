@@ -29,7 +29,6 @@ pub(crate) mod gsuite;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod run_delivery_ports;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;

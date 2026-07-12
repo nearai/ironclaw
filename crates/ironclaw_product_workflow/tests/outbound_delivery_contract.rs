@@ -876,7 +876,7 @@ async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_ef
     assert_eq!(attempts.len(), 1);
     assert_eq!(
         attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Pending
+        ironclaw_outbound::OutboundDeliveryStatus::Prepared
     );
 }
 
@@ -949,7 +949,7 @@ async fn status_update_failure_after_render_does_not_turn_send_into_failure() {
     assert_eq!(attempts.len(), 1);
     assert_eq!(
         attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Pending
+        ironclaw_outbound::OutboundDeliveryStatus::Prepared
     );
 }
 
@@ -1122,7 +1122,7 @@ async fn payload_kind_mismatch_preserves_status_update_failure() {
     assert_eq!(attempts.len(), 1);
     assert_eq!(
         attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Pending
+        ironclaw_outbound::OutboundDeliveryStatus::Prepared
     );
     let status_update_requests = store.status_update_requests();
     assert_eq!(status_update_requests.len(), 1);
@@ -1192,7 +1192,7 @@ async fn target_metadata_failure_with_status_update_failure_preserves_workflow_e
     assert_eq!(attempts.len(), 1);
     assert_eq!(
         attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Pending
+        ironclaw_outbound::OutboundDeliveryStatus::Prepared
     );
     let status_update_requests = store.status_update_requests();
     assert_eq!(status_update_requests.len(), 1);
@@ -1593,7 +1593,7 @@ async fn adapter_render_failure_preserves_adapter_error_when_status_update_fails
     assert_eq!(attempts.len(), 1);
     assert_eq!(
         attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Pending
+        ironclaw_outbound::OutboundDeliveryStatus::Prepared
     );
     let status_update_requests = store.status_update_requests();
     assert_eq!(status_update_requests.len(), 1);

@@ -11,10 +11,7 @@ use std::sync::Arc;
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
-use ironclaw_product_adapters::{
-    AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle,
-    ProductAdapterId, ProtocolHttpEgress,
-};
+use ironclaw_product_adapters::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     ApprovalInteractionService, AuthInteractionService, ConversationBindingService,
@@ -24,10 +21,9 @@ use ironclaw_product_workflow::{
     ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     StaticProductInstallationResolver,
 };
-use ironclaw_slack_v2_adapter::{SLACK_API_HOST, SLACK_V2_ADAPTER_ID};
+use ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::TurnCoordinator;
-use ironclaw_wasm_product_adapters::EgressPolicy;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -54,18 +50,17 @@ use crate::provider_identity::{
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
-use crate::slack::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
-use crate::slack::slack_outbound_targets::{
-    SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
-    SlackOutboundTargetProviderConfig, SlackPersonalDmTarget, SlackPersonalDmTargetError,
-    SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
-    slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
-};
 use crate::slack::slack_personal_binding::{
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
     SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService,
+};
+use crate::slack::slack_preference_targets::{
+    SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
+    SlackOutboundTargetProviderConfig, SlackPersonalDmTarget, SlackPersonalDmTargetError,
+    SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
+    slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
 use crate::slack::slack_serve::{
     RunDeliveryObserverAdapter, SlackInstallationSelector, SlackTeamId, SlackUserId,
@@ -676,10 +671,12 @@ fn slack_run_delivery_services(
     config: &SlackHostBetaConfig,
     binding_service: Arc<dyn ConversationBindingService>,
 ) -> Result<RunDeliveryServices, SlackHostBetaBuildError> {
+    // Absent exactly when the runtime was composed without host HTTP
+    // egress: no transport → no channel deliveries.
     let coordinator = parts
         .delivery_coordinator
         .clone()
-        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
     let fallback_notice_scope = ironclaw_turns::TurnScope::new_with_owner(
         config.tenant_id.clone(),
         Some(config.agent_id.clone()),
@@ -883,13 +880,14 @@ pub fn build_slack_host_beta_mounts(
             }],
             binding_store,
         ));
-    let token_handle = slack_bot_token_handle()?;
     let dm_provisioner = Arc::new(SlackPersonalDmTargetProvisioner::new(
         config.tenant_id.clone(),
         config.installation_id.clone(),
         config.team_id.clone(),
-        slack_protocol_egress(runtime, &config, token_handle.clone())?,
-        token_handle,
+        runtime
+            .services()
+            .channel_delivery_resolver()
+            .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?,
         state.clone(),
     ));
     let personal_oauth_binder: Arc<dyn SlackPersonalUserBinder> = Arc::new(
@@ -1245,41 +1243,7 @@ fn slack_channel_route_key(
         .map_err(|reason| invalid_config("channel_routes", reason.to_string()))
 }
 
-fn slack_bot_token_handle() -> Result<EgressCredentialHandle, SlackHostBetaBuildError> {
-    EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)
-        .map_err(|reason| invalid_config("bot_token_handle", reason.to_string()))
-}
-
-fn slack_protocol_egress(
-    runtime: &RebornRuntime,
-    config: &SlackHostBetaConfig,
-    token_handle: EgressCredentialHandle,
-) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
-    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
-    slack_protocol_egress_from_parts(&parts, config, token_handle)
-}
-
-fn slack_protocol_egress_from_parts(
-    parts: &SlackHostBetaRuntimeParts,
-    config: &SlackHostBetaConfig,
-    token_handle: EgressCredentialHandle,
-) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
-    let host_egress = parts
-        .local_runtime
-        .host_runtime_http_egress
-        .clone()
-        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
-    Ok(Arc::new(SlackProtocolHttpEgress::new(
-        host_egress,
-        Arc::new(StaticSlackEgressCredentialProvider::new(
-            token_handle.clone(),
-            config.bot_token.expose_secret().to_string(),
-        )),
-        EgressPolicy::new(slack_declared_egress_targets(token_handle)?),
-        slack_egress_scope_template(config),
-    )))
-}
-
+/// Scope template for the Slack host's durable idempotency ledger.
 fn slack_egress_scope_template(config: &SlackHostBetaConfig) -> ResourceScope {
     ResourceScope {
         tenant_id: config.tenant_id.clone(),
@@ -1290,14 +1254,6 @@ fn slack_egress_scope_template(config: &SlackHostBetaConfig) -> ResourceScope {
         thread_id: None,
         invocation_id: ironclaw_host_api::InvocationId::new(),
     }
-}
-
-fn slack_declared_egress_targets(
-    token_handle: EgressCredentialHandle,
-) -> Result<Vec<DeclaredEgressTarget>, SlackHostBetaBuildError> {
-    let host = DeclaredEgressHost::new(SLACK_API_HOST)
-        .map_err(|reason| invalid_config("slack_api_host", reason.to_string()))?;
-    Ok(vec![DeclaredEgressTarget::new(host, Some(token_handle))])
 }
 
 fn invalid_config(field: &'static str, reason: String) -> SlackHostBetaBuildError {
@@ -1353,7 +1309,7 @@ mod tests {
         WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
         slack_channel_route_admin_route_mount,
     };
-    use crate::slack::slack_outbound_targets::{
+    use crate::slack::slack_preference_targets::{
         InMemorySlackPersonalDmTargetStore, SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
         SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
         SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
@@ -1583,7 +1539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_outbound_targets_fail_build_when_local_runtime_missing() {
+    async fn slack_preference_targets_fail_build_when_local_runtime_missing() {
         let (mut runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
         runtime.clear_local_runtime_for_test();
@@ -2713,6 +2669,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let config = config_without_channel_routes();
         personal_dm_target_provisioner_for_test(&runtime, &config)
             .provision_for_user(
@@ -2756,6 +2713,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let config = config_without_channel_routes();
         personal_dm_target_provisioner_for_test(&runtime, &config)
             .provision_for_user(
@@ -2948,6 +2906,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
 
@@ -3007,6 +2966,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let mounts = build_slack_host_beta_runtime_mounts(
             &runtime,
             dynamic_runtime_config_without_legacy_actor(),
@@ -3095,6 +3055,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
 
         // First provisioning.
         let config = config_without_legacy_actor();
@@ -3144,6 +3105,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
 
@@ -3766,13 +3728,23 @@ mod tests {
         runtime: &RebornRuntime,
         config: &SlackHostBetaConfig,
     ) -> SlackPersonalDmTargetProvisioner {
-        let token_handle = slack_bot_token_handle().expect("bot token handle");
+        // Production ordering: the mounts register the bot-token bridge
+        // before any provisioning; direct-provisioner tests mirror that.
+        runtime
+            .services()
+            .register_channel_egress_credential_bridge(Arc::new(
+                SlackBotTokenEgressCredentialsBridge {
+                    bot_token: config.bot_token.clone(),
+                },
+            ));
         SlackPersonalDmTargetProvisioner::new(
             config.tenant_id.clone(),
             config.installation_id.clone(),
             config.team_id.clone(),
-            slack_protocol_egress(runtime, config, token_handle.clone()).expect("Slack egress"),
-            token_handle,
+            runtime
+                .services()
+                .channel_delivery_resolver()
+                .expect("channel delivery resolver"),
             personal_dm_target_store_for_test(runtime, config),
         )
     }
@@ -4374,9 +4346,9 @@ mod tests {
     impl SlackPersonalDmTargetStore for FailingSlackPersonalDmTargetStore {
         async fn load_personal_dm_target(
             &self,
-            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
+            _key: &crate::slack::slack_preference_targets::SlackPersonalDmTargetKey,
         ) -> Result<
-            Option<crate::slack::slack_outbound_targets::SlackPersonalDmTarget>,
+            Option<crate::slack::slack_preference_targets::SlackPersonalDmTarget>,
             SlackPersonalDmTargetError,
         > {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
@@ -4384,9 +4356,9 @@ mod tests {
 
         async fn upsert_personal_dm_target(
             &self,
-            target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            target: crate::slack::slack_preference_targets::SlackPersonalDmTarget,
         ) -> Result<
-            crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            crate::slack::slack_preference_targets::SlackPersonalDmTarget,
             SlackPersonalDmTargetError,
         > {
             Ok(target)
@@ -4394,7 +4366,7 @@ mod tests {
 
         async fn delete_personal_dm_target(
             &self,
-            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
+            _key: &crate::slack::slack_preference_targets::SlackPersonalDmTargetKey,
         ) -> Result<bool, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }

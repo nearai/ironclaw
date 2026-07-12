@@ -1872,6 +1872,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // SAME reply-context store the ingress router writes (ING-11).
         // Interrupted (`Sending`) attempts from prior lifetimes are
         // reconciled lazily per scope before that scope's first delivery.
+        // Gated with the outbound stores it persists through; the gate
+        // (and the stores' gate) dissolves with the P6 extraction.
+        #[cfg(feature = "slack-v2-host-beta")]
         let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
             Some(transport) => {
                 let resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> =
@@ -1895,6 +1898,11 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 (Some(coordinator), Some(resolver))
             }
             None => (None, None),
+        };
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        let (delivery_coordinator, channel_delivery_resolver) = {
+            let _ = channel_egress_transport;
+            (None, None)
         };
         (
             Some(ingress_parts),

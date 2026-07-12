@@ -12,8 +12,7 @@ use std::sync::RwLock;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, EgressCredentialHandle, ExternalActorRef, ExternalConversationRef,
-    ProtocolHttpEgress,
+    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, TargetQuery,
 };
 use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
@@ -28,9 +27,6 @@ use crate::outbound::OutboundDeliveryTargetProvider;
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
-};
-use crate::slack::slack_dm_open::{
-    SlackDmOpenError, open_slack_dm_channel, validate_slack_dm_channel_id,
 };
 use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
 
@@ -224,8 +220,11 @@ pub(crate) struct SlackPersonalDmTargetProvisioner {
     tenant_id: TenantId,
     installation_id: AdapterInstallationId,
     team_id: SlackTeamId,
-    egress: Arc<dyn ProtocolHttpEgress>,
-    credential_handle: EgressCredentialHandle,
+    /// One generation-pinned adapter + policy-egress read per provisioning
+    /// call: the DM is opened by the Slack channel adapter's `list_targets`
+    /// (`im:<user>` query → `conversations.open`) over host-injected
+    /// credentials.
+    delivery: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>,
     store: Arc<dyn SlackPersonalDmTargetStore>,
 }
 
@@ -236,8 +235,7 @@ impl std::fmt::Debug for SlackPersonalDmTargetProvisioner {
             .field("tenant_id", &self.tenant_id)
             .field("installation_id", &self.installation_id)
             .field("team_id", &self.team_id)
-            .field("egress", &"Arc<dyn ProtocolHttpEgress>")
-            .field("credential_handle", &self.credential_handle)
+            .field("delivery", &"Arc<dyn ChannelDeliveryResolver>")
             .field("store", &self.store)
             .finish()
     }
@@ -248,16 +246,14 @@ impl SlackPersonalDmTargetProvisioner {
         tenant_id: TenantId,
         installation_id: AdapterInstallationId,
         team_id: SlackTeamId,
-        egress: Arc<dyn ProtocolHttpEgress>,
-        credential_handle: EgressCredentialHandle,
+        delivery: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>,
         store: Arc<dyn SlackPersonalDmTargetStore>,
     ) -> Self {
         Self {
             tenant_id,
             installation_id,
             team_id,
-            egress,
-            credential_handle,
+            delivery,
             store,
         }
     }
@@ -282,24 +278,60 @@ impl SlackPersonalDmTargetProvisioner {
         &self,
         slack_user_id: &str,
     ) -> Result<String, SlackPersonalDmTargetError> {
-        let channel_id = open_slack_dm_channel(
-            self.egress.as_ref(),
-            self.credential_handle.clone(),
-            slack_user_id,
-        )
-        .await
-        .map_err(|error| match error {
-            SlackDmOpenError::InvalidChannel | SlackDmOpenError::MissingChannel => {
-                SlackPersonalDmTargetError::InvalidTarget
-            }
-            SlackDmOpenError::Backend(reason) => {
-                SlackPersonalDmTargetError::ProvisioningFailed(reason)
-            }
-        })?;
+        let channel = self
+            .delivery
+            .resolve_channel_delivery(
+                crate::extension_host::available_extensions::SLACK_EXTENSION_ID,
+            )
+            .ok_or_else(|| {
+                SlackPersonalDmTargetError::ProvisioningFailed(
+                    "slack channel is not active in the extension snapshot".to_string(),
+                )
+            })?;
+        let candidates = channel
+            .adapter
+            .list_targets(
+                TargetQuery {
+                    extension_id: channel.extension_id.clone(),
+                    installation_id: channel.installation_id.clone(),
+                    query: Some(format!("im:{slack_user_id}")),
+                    limit: 1,
+                },
+                channel.egress.as_ref(),
+            )
+            .await
+            .map_err(|error| SlackPersonalDmTargetError::ProvisioningFailed(error.to_string()))?;
+        let channel_id = candidates
+            .first()
+            .map(|candidate| candidate.conversation.conversation_id().to_string())
+            .ok_or(SlackPersonalDmTargetError::InvalidTarget)?;
         validate_slack_dm_channel_id(&channel_id)
             .map_err(|_| SlackPersonalDmTargetError::InvalidTarget)?;
         Ok(channel_id)
     }
+}
+
+/// Validate a Slack DM channel id before persisting it as a delivery target:
+/// non-empty, bounded, no control/separator characters, and the DM (`D`)
+/// prefix — provisioning must never store a shared-channel id as a personal
+/// DM target.
+pub(crate) fn validate_slack_dm_channel_id(channel_id: &str) -> Result<(), String> {
+    if channel_id.is_empty() {
+        return Err("slack DM channel id must not be empty".to_string());
+    }
+    if channel_id.len() > 128 {
+        return Err("slack DM channel id exceeds 128 bytes".to_string());
+    }
+    if channel_id
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | ':' | ';'))
+    {
+        return Err("slack DM channel id carries invalid characters".to_string());
+    }
+    if !channel_id.starts_with('D') {
+        return Err("slack DM channel id must start with 'D'".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

@@ -16,8 +16,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AttachmentRef, ChannelAdapter, ChannelError, DeliveryReport,
-    ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, VerifiedInbound,
+    ExternalConversationRef, ImmediateResponse, InboundOutcome, NormalizedInboundMessage,
+    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate, TargetQuery,
+    VerifiedInbound,
 };
 use serde::Deserialize;
 
@@ -147,6 +148,95 @@ impl ChannelAdapter for SlackChannelAdapter {
         }
         Ok(DeliveryReport { parts })
     }
+
+    /// Target listing. The `im:<slack_user_id>` query provisions (or reuses)
+    /// the 1:1 DM conversation with that user via `conversations.open` — the
+    /// vendor mechanics half of personal-DM target provisioning.
+    async fn list_targets(
+        &self,
+        query: TargetQuery,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<Vec<TargetCandidate>, ChannelError> {
+        let Some(slack_user_id) = query
+            .query
+            .as_deref()
+            .and_then(|value| value.strip_prefix("im:"))
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(ChannelError::Unsupported);
+        };
+        let credential = SecretHandle::new(SLACK_BOT_TOKEN_HANDLE).map_err(|error| {
+            ChannelError::VendorWiring {
+                reason: format!("invalid bot token handle: {error}"),
+            }
+        })?;
+        let body = serde_json::to_vec(&serde_json::json!({ "users": slack_user_id })).map_err(
+            |error| ChannelError::VendorWiring {
+                reason: format!("conversations.open body did not serialize: {error}"),
+            },
+        )?;
+        let response = egress
+            .send(RestrictedEgressRequest {
+                method: NetworkMethod::Post,
+                url: format!("https://{SLACK_API_HOST}/api/conversations.open"),
+                headers: vec![(
+                    "content-type".to_string(),
+                    "application/json; charset=utf-8".to_string(),
+                )],
+                body: Some(body),
+                credential: Some(credential),
+            })
+            .await
+            .map_err(|error| ChannelError::VendorWiring {
+                reason: format!("conversations.open egress failed: {error}"),
+            })?;
+        if !(200..300).contains(&response.status) {
+            return Err(ChannelError::VendorWiring {
+                reason: format!("slack web api returned status {}", response.status),
+            });
+        }
+        let parsed: SlackConversationsOpenResponse = serde_json::from_slice(&response.body)
+            .map_err(|error| ChannelError::VendorWiring {
+                reason: format!("conversations.open response was not valid JSON: {error}"),
+            })?;
+        if !parsed.ok {
+            return Err(ChannelError::VendorWiring {
+                reason: format!(
+                    "slack rejected conversations.open ({})",
+                    parsed.error.unwrap_or_else(|| "unknown_error".to_string())
+                ),
+            });
+        }
+        let channel_id = parsed
+            .channel
+            .map(|channel| channel.id)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ChannelError::VendorWiring {
+                reason: "conversations.open response missing channel id".to_string(),
+            })?;
+        let conversation =
+            ExternalConversationRef::new(None, &channel_id, None, None).map_err(|error| {
+                ChannelError::VendorWiring {
+                    reason: format!("conversations.open returned an invalid channel id: {error}"),
+                }
+            })?;
+        Ok(vec![TargetCandidate {
+            conversation,
+            display_name: "Direct message".to_string(),
+        }])
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackConversationsOpenResponse {
+    ok: bool,
+    error: Option<String>,
+    channel: Option<SlackOpenedConversation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackOpenedConversation {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -585,6 +675,55 @@ mod tests {
         assert_eq!(body["channel"], "D123");
         assert_eq!(body["thread_ts"], "1710000000.000100");
         assert_eq!(body["text"], "*bold* reply", "markdown renders to mrkdwn");
+    }
+
+    #[tokio::test]
+    async fn list_targets_im_query_opens_the_dm_conversation() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"channel":{"id":"D777"}}"#,
+        )]);
+        let candidates = SlackChannelAdapter
+            .list_targets(
+                ironclaw_product_adapters::TargetQuery {
+                    extension_id: "slack".to_string(),
+                    installation_id: "install_alpha".to_string(),
+                    query: Some("im:U123".to_string()),
+                    limit: 1,
+                },
+                &egress,
+            )
+            .await
+            .expect("list_targets drives");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].conversation.conversation_id(), "D777");
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://slack.com/api/conversations.open");
+        assert_eq!(
+            requests[0].credential.as_ref().map(|h| h.as_str()),
+            Some("slack_bot_token")
+        );
+        let body = body_json(&requests[0]);
+        assert_eq!(body["users"], "U123");
+    }
+
+    #[tokio::test]
+    async fn list_targets_rejects_non_im_queries_without_egress() {
+        let egress = ScriptedEgress::new(Vec::new());
+        let error = SlackChannelAdapter
+            .list_targets(
+                ironclaw_product_adapters::TargetQuery {
+                    extension_id: "slack".to_string(),
+                    installation_id: "install_alpha".to_string(),
+                    query: None,
+                    limit: 10,
+                },
+                &egress,
+            )
+            .await
+            .expect_err("free listing is not supported yet");
+        assert!(matches!(error, ChannelError::Unsupported));
+        assert!(egress.requests().is_empty());
     }
 
     #[tokio::test]

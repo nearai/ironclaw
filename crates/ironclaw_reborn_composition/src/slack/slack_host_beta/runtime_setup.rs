@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_outbound::TriggeredRunDeliveryStore;
-use ironclaw_product_adapters::{AdapterInstallationId, EgressCredentialHandle};
+use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     ProductConversationSubjectRouteResolver, RebornOutboundDeliveryTargetId, RebornServicesError,
@@ -30,14 +30,14 @@ use crate::slack::slack_channel_routes::{
     SlackChannelSetupActivation, SlackChannelSetupActivationError,
 };
 use crate::slack::slack_host_state::FilesystemSlackHostState;
-use crate::slack::slack_outbound_targets::{
-    SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
-    SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
-};
 use crate::slack::slack_personal_binding::{
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
     SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService,
+};
+use crate::slack::slack_preference_targets::{
+    SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
+    SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack::slack_serve::{
     SlackInstallationSelector, SlackTeamId, SlackUserId, slack_events_alias_mount,
@@ -56,8 +56,7 @@ use super::{
     SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
     SlackPersonalDmTargetProvisioning, SlackTriggeredRunDeliveryHook, build_slack_inbound_sink,
-    build_triggered_run_delivery_hook_from_parts, extension_ingress_parts, slack_bot_token_handle,
-    slack_protocol_egress_from_parts,
+    build_triggered_run_delivery_hook_from_parts, extension_ingress_parts,
 };
 use crate::extension_host::extension_ingress::GenericChannelInboundSink;
 
@@ -82,7 +81,6 @@ pub(super) async fn build_runtime_mounts(
         setup_store,
         runtime.services().secret_store(),
     ));
-    let token_handle = slack_bot_token_handle()?;
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
     let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
     let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
@@ -93,9 +91,11 @@ pub(super) async fn build_runtime_mounts(
     );
     let dm_provisioner: Arc<dyn SlackPersonalDmTargetProvisioning> =
         Arc::new(DynamicSlackPersonalDmTargetProvisioner::new(
-            Arc::clone(&parts),
             Arc::clone(&setup_service),
-            token_handle.clone(),
+            runtime
+                .services()
+                .channel_delivery_resolver()
+                .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
             Arc::clone(&personal_dm_target_store),
         ));
     let personal_oauth_binder: Arc<dyn SlackPersonalUserBinder> =
@@ -338,23 +338,20 @@ fn hash_provider_key_field(hasher: &mut Sha256, value: &str) {
 
 #[derive(Clone)]
 struct DynamicSlackPersonalDmTargetProvisioner {
-    parts: Arc<SlackHostBetaRuntimeParts>,
     setup_service: Arc<SlackSetupService>,
-    token_handle: EgressCredentialHandle,
+    delivery: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>,
     store: Arc<dyn SlackPersonalDmTargetStore>,
 }
 
 impl DynamicSlackPersonalDmTargetProvisioner {
     fn new(
-        parts: Arc<SlackHostBetaRuntimeParts>,
         setup_service: Arc<SlackSetupService>,
-        token_handle: EgressCredentialHandle,
+        delivery: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>,
         store: Arc<dyn SlackPersonalDmTargetStore>,
     ) -> Self {
         Self {
-            parts,
             setup_service,
-            token_handle,
+            delivery,
             store,
         }
     }
@@ -372,17 +369,11 @@ impl DynamicSlackPersonalDmTargetProvisioner {
             .await
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
             .map_err(|error| SlackPersonalDmTargetError::ProvisioningFailed(error.to_string()))?;
-        let egress =
-            slack_protocol_egress_from_parts(&self.parts, &config, self.token_handle.clone())
-                .map_err(|error| {
-                    SlackPersonalDmTargetError::ProvisioningFailed(error.to_string())
-                })?;
         Ok(SlackPersonalDmTargetProvisioner::new(
             config.tenant_id,
             config.installation_id,
             config.team_id,
-            egress,
-            self.token_handle.clone(),
+            Arc::clone(&self.delivery),
             Arc::clone(&self.store),
         ))
     }

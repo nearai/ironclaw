@@ -34,7 +34,7 @@ use crate::slack::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
     SlackChannelRouteListPage, SlackChannelRouteStore,
 };
-use crate::slack::slack_outbound_targets::{
+use crate::slack::slack_preference_targets::{
     SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
     SlackPersonalDmTargetStore,
 };

@@ -206,6 +206,7 @@ pub enum PartDeliveryOutcome {
 }
 
 /// A target-listing/search query for pickers.
+#[derive(Debug, Clone)]
 pub struct TargetQuery {
     pub extension_id: String,
     pub installation_id: String,
@@ -215,6 +216,7 @@ pub struct TargetQuery {
 }
 
 /// One candidate delivery target.
+#[derive(Debug, Clone)]
 pub struct TargetCandidate {
     pub conversation: ExternalConversationRef,
     pub display_name: String,
