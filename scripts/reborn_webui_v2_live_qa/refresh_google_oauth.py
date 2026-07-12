@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import stat
 import sys
 import urllib.error
 import urllib.parse
@@ -21,7 +20,10 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 def _secret(name: str) -> str:
     path = os.environ.get(f"{name}_PATH", "").strip()
     if path:
-        return Path(path).read_text(encoding="utf-8").strip()
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
     return os.environ.get(name, "").strip()
 
 
@@ -56,11 +58,16 @@ def refresh_access_token() -> Tuple[Optional[str], str]:
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.load(response)
+            try:
+                payload = json.load(response)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None, "invalid_json"
+            if not isinstance(payload, dict):
+                return None, "invalid_json"
     except urllib.error.HTTPError as exc:
         try:
             payload = json.loads(exc.read().decode("utf-8", errors="replace"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             payload = {}
         return None, str(payload.get("error") or f"http_{exc.code}")
     except (OSError, urllib.error.URLError) as exc:
@@ -74,8 +81,10 @@ def refresh_access_token() -> Tuple[Optional[str], str]:
 
 def _write_output(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(value, encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write(value)
 
 
 def main() -> int:

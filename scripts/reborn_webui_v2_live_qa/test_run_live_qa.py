@@ -4771,6 +4771,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "Mint fresh Google OAuth access token for selected cases",
             match.group("body"),
         )
+        self.assertIn("REBORN_WEBUI_V2_GOOGLE_CASES", match.group("body"))
+        self.assertEqual(
+            match.group("body").count(".github/scripts/google_oauth_cases.py"),
+            3,
+            "preflight filtering, mint selection, and mint-failure filtering "
+            "must use the same executable case classifier",
+        )
+        self.assertNotIn("google_cases='", match.group("body"))
+        self.assertIn(
+            "steps.mint_reborn_webui_v2_google_token.outputs.skip_shard != '1'",
+            match.group("body"),
+        )
         self.assertIn(
             "AUTH_LIVE_GOOGLE_ACCESS_TOKEN_PATH=${access_token_path}",
             match.group("body"),

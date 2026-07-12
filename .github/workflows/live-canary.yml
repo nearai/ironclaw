@@ -862,6 +862,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    env:
+      REBORN_WEBUI_V2_GOOGLE_CASES: >-
+        qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
+        qa_4a_gmail_connect,qa_4e_github_release_email_delivery,
+        qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
+        qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
+        qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7e_slack_bug_sheet_delivery
     strategy:
       fail-fast: false
       matrix:
@@ -1013,18 +1020,17 @@ jobs:
               echo "Running requested cases in this shard: ${joined}"
             fi
           fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}
       - name: Suppress Google cases after OAuth preflight failure
         id: filter_reborn_webui_v2_google_cases
         shell: bash
         env:
           RESOLVE_SKIP_SHARD: ${{ steps.resolve_reborn_webui_v2_cases.outputs.skip_shard }}
           GOOGLE_OAUTH_STATUS: ${{ needs.preflight-reborn-webui-v2-google-oauth.outputs.status }}
-          GOOGLE_CASES: >-
-            qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
-            qa_4a_gmail_connect,qa_4e_github_release_email_delivery,
-            qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
-            qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
-            qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7e_slack_bug_sheet_delivery
         run: |
           set -euo pipefail
           if [[ "${RESOLVE_SKIP_SHARD}" == "1" ]]; then
@@ -1036,35 +1042,13 @@ jobs:
             exit 0
           fi
 
-          declare -A google_cases=()
-          IFS=',' read -ra configured_google_cases <<< "${GOOGLE_CASES}"
-          for case_name in "${configured_google_cases[@]}"; do
-            case_name="$(echo "${case_name}" | xargs)"
-            [[ -n "${case_name}" ]] && google_cases["${case_name}"]=1
-          done
-          retained=()
-          IFS=',' read -ra selected_cases <<< "${CASES:-}"
-          for case_name in "${selected_cases[@]}"; do
-            case_name="$(echo "${case_name}" | xargs)"
-            [[ -n "${case_name}" ]] || continue
-            if [[ -z "${google_cases[${case_name}]+x}" ]]; then
-              retained+=("${case_name}")
-            fi
-          done
-          if [[ ${#retained[@]} -eq 0 ]]; then
-            echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
-            echo "All selected cases require Google OAuth; preflight status=${GOOGLE_OAUTH_STATUS:-unknown}."
-            exit 0
-          fi
-          joined="$(IFS=,; echo "${retained[*]}")"
-          echo "CASES=${joined}" >> "${GITHUB_ENV}"
-          echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
-          echo "Google OAuth unavailable; continuing with non-Google cases: ${joined}"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
-        with:
-          persist-credentials: false
-          ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}
+          python3 .github/scripts/google_oauth_cases.py \
+            --mode suppress \
+            --cases "${CASES:-}" \
+            --google-cases "${REBORN_WEBUI_V2_GOOGLE_CASES}" \
+            --status "${GOOGLE_OAUTH_STATUS:-unknown}" \
+            --github-env "${GITHUB_ENV}" \
+            --github-output "${GITHUB_OUTPUT}"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: >
           steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1' &&
@@ -1182,22 +1166,40 @@ jobs:
           write_secret "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
           write_secret "TELEGRAM_WEBHOOK_SECRET" "${TELEGRAM_WEBHOOK_SECRET:-}"
       - name: Mint fresh Google OAuth access token for selected cases
+        id: mint_reborn_webui_v2_google_token
         if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         shell: bash
         run: |
           set +x
           set -euo pipefail
-          google_cases='qa_2|qa_4a_|qa_4e_|qa_5[b-d]_|qa_6|qa_7b_|qa_7c_|qa_7e_'
-          if ! tr ',' '\n' <<< "${CASES}" | grep -Eq "^(${google_cases})"; then
+          if ! python3 .github/scripts/google_oauth_cases.py \
+            --mode needs-google --cases "${CASES}" \
+            --google-cases "${REBORN_WEBUI_V2_GOOGLE_CASES}"; then
+            echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
             echo "Selected cases do not require Google OAuth."
             exit 0
           fi
           access_token_path="${RUNNER_TEMP}/reborn-webui-v2-live-qa-secrets/AUTH_LIVE_GOOGLE_ACCESS_TOKEN"
-          python3 scripts/reborn_webui_v2_live_qa/refresh_google_oauth.py \
-            --access-token-path "${access_token_path}"
-          echo "AUTH_LIVE_GOOGLE_ACCESS_TOKEN_PATH=${access_token_path}" >> "${GITHUB_ENV}"
+          refresh_status_path="${RUNNER_TEMP}/reborn-webui-v2-google-refresh-output"
+          if python3 scripts/reborn_webui_v2_live_qa/refresh_google_oauth.py \
+            --access-token-path "${access_token_path}" \
+            --github-output "${refresh_status_path}"; then
+            echo "AUTH_LIVE_GOOGLE_ACCESS_TOKEN_PATH=${access_token_path}" >> "${GITHUB_ENV}"
+            echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          refresh_status="$(sed -n 's/^status=//p' "${refresh_status_path}" | tail -1)"
+          python3 .github/scripts/google_oauth_cases.py \
+            --mode suppress \
+            --cases "${CASES}" \
+            --google-cases "${REBORN_WEBUI_V2_GOOGLE_CASES}" \
+            --status "${refresh_status:-unknown}" \
+            --github-env "${GITHUB_ENV}" \
+            --github-output "${GITHUB_OUTPUT}"
       - name: Run Reborn WebUI v2 live QA lane
-        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
+        if: >
+          steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1' &&
+          steps.mint_reborn_webui_v2_google_token.outputs.skip_shard != '1'
         env:
           LANE: reborn-webui-v2-live-qa
           PROVIDER: reborn-webui-v2-${{ matrix.shard_id }}
