@@ -250,36 +250,68 @@ Rules — kept short on purpose:
 - [ ] AUTH-1 One engine implements `oauth2_code` and `api_key`; there is no
   auth trait in the extension ABI and no per-vendor code path (grep gate: no
   vendor-conditional in auth crates/composition).
-- [ ] AUTH-2 The authorize URL is host-constructed; recipes cannot supply or
+- [x] AUTH-2 The authorize URL is host-constructed; recipes cannot supply or
   override `state`, `redirect_uri`, PKCE, `client_id`, `response_type`, or the
-  scope parameter.
-- [ ] AUTH-3 State/CSRF, PKCE, TTL, and callback replay are enforced; exactly
-  one transition consumes a callback.
-- [ ] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
-  rejected before the vendor call.
-- [ ] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
-  extract via bounded JSON pointers, including `fallback_to_requested` scope.
-- [ ] AUTH-6 Refresh runs on-demand at injection with single-flight and honors
+  scope parameter. — `authorize_url_is_host_constructed_for_every_oauth_vendor_row`,
+  `recipes_cannot_supply_or_override_reserved_authorize_params`,
+  `authorization_endpoint_predefining_reserved_params_is_rejected`
+  (`crates/ironclaw_auth/tests/auth_engine_contract.rs`).
+- [x] AUTH-3 State/CSRF, PKCE, TTL, and callback replay are enforced; exactly
+  one transition consumes a callback. — `exactly_one_transition_consumes_a_callback`,
+  `cross_flow_callbacks_are_rejected` (`auth_engine_contract.rs`); state-hash /
+  PKCE-hash / TTL validation stays in the durable `AuthFlowManager`
+  (`crates/ironclaw_reborn_composition/src/product_auth/durable/tests.rs`).
+- [x] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
+  rejected before the vendor call. —
+  `scope_widening_is_rejected_before_any_vendor_call` (`auth_engine_contract.rs`).
+- [x] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
+  extract via bounded JSON pointers, including `fallback_to_requested` scope. —
+  `token_exchange_supports_post_body_and_basic_client_auth`,
+  `pointer_extraction_reads_nested_fields_and_scope_fallback`,
+  `missing_scope_without_fallback_fails_the_exchange` (`auth_engine_contract.rs`).
+- [x] AUTH-6 Refresh runs on-demand at injection with single-flight and honors
   `rotates_refresh_token` both ways; revoke is idempotent; vendor response
-  bodies are size-capped and redacted from errors and logs.
-- [ ] AUTH-7 Identity extracts from the token response or the declared
-  identity endpoint and is validated against the flow before storage.
+  bodies are size-capped and redacted from errors and logs. —
+  `refresh_honors_rotates_refresh_token_both_ways`,
+  `revoke_is_idempotent_and_best_effort`,
+  `vendor_error_responses_are_size_capped_and_never_echoed`
+  (`auth_engine_contract.rs`); on-demand-at-injection single-flight is the
+  per-account refresh lock in `ProviderBackedCredentialAccountService`
+  (`crates/ironclaw_auth/src/credential.rs`) driven by the inline
+  injection-time refresh in `runtime_credentials.rs` — no background
+  refresher was added.
+- [x] AUTH-7 Identity extracts from the token response or the declared
+  identity endpoint and is validated against the flow before storage. —
+  `pointer_extraction_reads_nested_fields_and_scope_fallback` (token response),
+  `identity_extracts_from_declared_endpoint_with_fresh_credential` (endpoint,
+  incl. rejection failing the exchange) (`auth_engine_contract.rs`).
 - [ ] AUTH-8 Grants/secrets are encrypted at rest; stored secrets are never
   echoed to UI or adapters.
 - [ ] AUTH-9 The auth account state machine is one shared enum
   (`disconnected/authenticating/connected/expired/revoking` + typed
   `last_error`); no vendor- or extension-specific state exists; the wire
-  exposes exactly this enum. — enum + wire form defined and pinned
-  (`AuthAccountState`, `crates/ironclaw_extension_host/src/state.rs`,
-  `auth_account_state_wire_form_matches_str`); the engine that drives its
-  transitions and the wire exposure land in P3.
-- [ ] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
-  a typed reason; refresh failure lands in `expired`.
+  exposes exactly this enum. — enum + typed `last_error` + transitions now
+  live with the engine (`crates/ironclaw_auth/src/account_state.rs`,
+  `legal_transitions_only`, `auth_account_state_wire_form_matches_str`;
+  re-exported by `ironclaw_extension_host::state`); wire exposure of the
+  projection is still pending.
+- [x] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
+  a typed reason; refresh failure lands in `expired`. —
+  `projection_prefers_live_flow_then_account_status`
+  (`crates/ironclaw_auth/src/account_state.rs`).
 - [ ] AUTH-11 `api_key` renders from recipe fields, runs the optional
   validation probe through restricted egress, and uses the same state machine.
+  — probe + storage + state machine proven engine-tier
+  (`api_key_probe_validates_through_host_egress_before_storing`,
+  `api_key_probe_failure_stores_nothing`, `api_key_without_probe_stores_directly`,
+  `auth_engine_contract.rs`); recipe-driven form rendering is P6 frontend work.
 - [ ] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
   NEAR AI) are expressed as recipes and pass the engine suite as table rows —
-  no vendor-specific test suite exists.
+  no vendor-specific test suite exists. — rows loaded from the real bundled
+  manifests (`all_five_vendors_load_as_recipe_rows_from_their_manifests` and
+  the rows across `auth_engine_contract.rs`); "no vendor-specific suite"
+  completes when the legacy provider-client tests are deleted with the
+  multiplexor (AUTH-16).
 - [ ] AUTH-13 Callback route keeps the existing
   `/api/reborn/product-auth/oauth/{provider}/callback` shape; `{provider}` is
   resolved as data (vendor-registered redirect URLs unchanged).

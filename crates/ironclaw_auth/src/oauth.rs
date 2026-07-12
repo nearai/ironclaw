@@ -199,6 +199,13 @@ impl OAuthCallbackStateKind {
         prefix: "ics1.",
         scope_policy: OAuthCallbackScopePolicy::ProviderDefined,
     };
+    /// Recipe-engine callback state (`icr1.` prefix). Scope validation happens
+    /// against the vendor recipe's scope ceiling when the engine prepares the
+    /// flow, so decode applies no static scope policy.
+    pub const RECIPE: Self = Self {
+        prefix: "icr1.",
+        scope_policy: OAuthCallbackScopePolicy::ProviderDefined,
+    };
 }
 
 #[derive(Serialize, Deserialize)]

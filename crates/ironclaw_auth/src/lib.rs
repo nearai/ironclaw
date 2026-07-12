@@ -9,9 +9,11 @@
 //! stay Reborn-native: this crate does not depend on V1 route handlers, V1
 //! pending maps, V1 extension manager authority, or V1 secret stores.
 
+mod account_state;
 mod cleanup;
 mod credential;
 pub mod domain;
+mod engine;
 mod error;
 mod fakes;
 mod flow;
@@ -21,6 +23,7 @@ mod oauth;
 mod provider;
 mod scope;
 
+pub use account_state::{AuthAccountLastError, AuthAccountState, project_auth_account_state};
 pub use cleanup::{
     SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
@@ -37,6 +40,12 @@ pub use credential::{
     binding_scope_owns_account,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
+pub use engine::{
+    ApiKeyFieldValue, ApiKeySubmission, ApiKeySubmitRequest, AuthEngine, AuthEngineDeps,
+    AuthRecipeResolver, DCR_CLIENT_HANDLE_PREFIX, EngineCallbackBase,
+    EngineClientCredentialsSource, EngineOAuthClientMaterial, PrepareOAuthFlowRequest,
+    PreparedOAuthFlow, ResolvedVendorAuthRecipe, RevokeGrantRequest, StaticAuthRecipeResolver,
+};
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{

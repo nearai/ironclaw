@@ -89,31 +89,11 @@ impl InstallationState {
 }
 
 /// The auth-account state (one enum, every vendor; overview §6.3). Owned by
-/// the auth engine; recipes affect HTTP details only, never states.
-///
-/// `Refreshing` is internal to the engine and never observable as a distinct
-/// wire state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthAccountState {
-    Disconnected,
-    Authenticating,
-    Connected,
-    Expired,
-    Revoking,
-}
-
-impl AuthAccountState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Disconnected => "disconnected",
-            Self::Authenticating => "authenticating",
-            Self::Connected => "connected",
-            Self::Expired => "expired",
-            Self::Revoking => "revoking",
-        }
-    }
-}
+/// the auth engine — the enum and its transitions are defined in
+/// `ironclaw_auth::AuthAccountState` next to the engine that drives them, and
+/// re-exported here so the two standard state machines stay discoverable
+/// together.
+pub use ironclaw_auth::AuthAccountState;
 
 #[cfg(test)]
 mod tests {

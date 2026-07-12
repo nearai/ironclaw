@@ -4099,12 +4099,15 @@ dependencies = [
  "chrono",
  "ironclaw_common",
  "ironclaw_host_api",
+ "ironclaw_secrets",
  "secrecy",
  "serde",
  "serde_json",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -4281,6 +4284,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_auth",
  "ironclaw_dispatcher",
  "ironclaw_extensions",
  "ironclaw_host_api",

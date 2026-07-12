@@ -163,3 +163,5 @@ scope = { path = "/authed_user/scope", missing = "fallback_to_requested" }
 [auth.slack.identity]
 account_id = "/authed_user/id"
 team_id = "/team/id"
+enterprise_id = "/enterprise/id"
+app_id = "/app_id"
