@@ -13,6 +13,7 @@
 //! by the binary, never linked here.
 
 pub mod active;
+pub mod egress;
 pub mod entrypoint;
 pub mod ingress;
 pub mod lifecycle;

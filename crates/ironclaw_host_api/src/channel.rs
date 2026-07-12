@@ -147,6 +147,32 @@ impl ChannelDescriptor {
                     handle: handle.as_str().to_string(),
                 });
             }
+            if let Some(injection) = &egress.injection {
+                if egress.credential_handle.is_none() {
+                    return Err(ChannelDescriptorError::EgressInjectionWithoutCredential {
+                        host: egress.host.clone(),
+                    });
+                }
+                let well_formed = match injection {
+                    crate::RuntimeCredentialTarget::Header { name, .. } => {
+                        crate::valid_http_field_name(name)
+                    }
+                    crate::RuntimeCredentialTarget::QueryParam { name } => {
+                        !name.trim().is_empty() && !name.contains(char::is_whitespace)
+                    }
+                    crate::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+                        !placeholder.is_empty()
+                            && placeholder
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    }
+                };
+                if !well_formed {
+                    return Err(ChannelDescriptorError::InvalidEgressInjection {
+                        host: egress.host.clone(),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -204,6 +230,13 @@ pub struct ChannelEgressDescriptor {
     pub methods: Vec<crate::NetworkMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_handle: Option<SecretHandle>,
+    /// How the host injects the declared credential into vendor requests.
+    /// Absent means the default `Authorization: Bearer <secret>` header.
+    /// `path_placeholder` covers vendors that carry the credential in the URL
+    /// path (the adapter writes `{placeholder}` into the path; the host
+    /// substitutes the secret — bytes never reach the adapter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injection: Option<crate::RuntimeCredentialTarget>,
 }
 
 fn default_https() -> NetworkScheme {
@@ -239,6 +272,10 @@ pub enum ChannelDescriptorError {
     UndeclaredVerificationHandle { handle: String },
     #[error("egress credential handle `{handle}` is not declared in [channel.config] fields")]
     UndeclaredEgressHandle { handle: String },
+    #[error("egress target `{host}` declares an injection but no credential_handle")]
+    EgressInjectionWithoutCredential { host: String },
+    #[error("egress target `{host}` declares a malformed credential injection")]
+    InvalidEgressInjection { host: String },
     #[error("egress host `{host}` must be a literal, non-empty host (no wildcards)")]
     WildcardOrEmptyEgressHost { host: String },
 }
@@ -332,6 +369,65 @@ max_message_chars = 40000
             channel.validate().unwrap_err(),
             ChannelDescriptorError::UndeclaredVerificationHandle { .. }
         ));
+    }
+
+    #[test]
+    fn egress_injection_target_parses_and_validates() {
+        // Path-placeholder injection (token-in-path vendor APIs).
+        let toml = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "credential_handle = \"vendor_bot_token\"\ninjection = { type = \"path_placeholder\", placeholder = \"token\" }",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        channel.validate().unwrap();
+        assert!(matches!(
+            channel.egress[0].injection,
+            Some(crate::RuntimeCredentialTarget::PathPlaceholder { .. })
+        ));
+
+        // Header injection stays expressible explicitly too.
+        let toml = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "credential_handle = \"vendor_bot_token\"\ninjection = { type = \"header\", name = \"authorization\", prefix = \"Bearer \" }",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        channel.validate().unwrap();
+    }
+
+    #[test]
+    fn egress_injection_without_a_credential_handle_fails_closed() {
+        let toml = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "injection = { type = \"path_placeholder\", placeholder = \"token\" }",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        assert!(matches!(
+            channel.validate().unwrap_err(),
+            ChannelDescriptorError::EgressInjectionWithoutCredential { .. }
+        ));
+    }
+
+    #[test]
+    fn egress_injection_shapes_are_validated() {
+        for bad in [
+            "injection = { type = \"path_placeholder\", placeholder = \"\" }",
+            "injection = { type = \"path_placeholder\", placeholder = \"has space\" }",
+            "injection = { type = \"query_param\", name = \" \" }",
+            "injection = { type = \"header\", name = \"bad header\" }",
+        ] {
+            let toml = documented_channel_toml().replace(
+                "credential_handle = \"vendor_bot_token\"",
+                &format!("credential_handle = \"vendor_bot_token\"\n{bad}"),
+            );
+            let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+            assert!(
+                matches!(
+                    channel.validate().unwrap_err(),
+                    ChannelDescriptorError::InvalidEgressInjection { .. }
+                ),
+                "expected rejection for: {bad}"
+            );
+        }
     }
 
     #[test]
