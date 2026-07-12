@@ -88,8 +88,6 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_personal_oauth::SlackPersonalOAuthBindingConfig;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::{
@@ -167,6 +165,8 @@ pub use slack::slack_personal_binding_serve::{
     SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
     SlackPersonalBindingStartResponse,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack::slack_personal_oauth::SlackPersonalOAuthBindingConfig;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]
