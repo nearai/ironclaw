@@ -62,6 +62,7 @@ async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     subscription_ids_are_scoped_not_global(&store).await;
     subscription_cursor_rejects_backward_advancement(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
+    coordinator_delivery_lifecycle_round_trips(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
 }
 
@@ -92,6 +93,7 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     subscription_ids_are_scoped_not_global(&store).await;
     subscription_cursor_rejects_backward_advancement(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
+    coordinator_delivery_lifecycle_round_trips(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
 }
 
@@ -1255,6 +1257,93 @@ async fn subscription_cursor_rejects_backward_advancement(store: &impl OutboundS
         .unwrap()
         .unwrap();
     assert_eq!(loaded.runtime, EventCursor::new(42));
+}
+
+/// The coordinator's crash-visible lifecycle (`Prepared` → `Sending` →
+/// terminal) persists and reloads on every backend: a crash between vendor
+/// egress and the result write leaves `Sending`, which recovery marks
+/// `Unknown` — never a blind resend (OUT-3/OUT-6/OUT-9).
+async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateStore) {
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let candidate = OutboundPushCandidate {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        turn_run_id: Some(TurnRunId::new()),
+        target: reply_ref("reply-coordinator-lifecycle"),
+        kind: OutboundPushKind::FinalReply,
+        projection_ref: ProjectionUpdateRef::new(format!(
+            "projection:coordinator-lifecycle:{}",
+            TurnRunId::new()
+        ))
+        .unwrap(),
+        requires_reply_target_revalidation: true,
+    };
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id,
+            scope: scope.clone(),
+            candidate,
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Sending,
+            updated_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+    let in_flight = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    let attempt = in_flight
+        .iter()
+        .find(|attempt| attempt.delivery_id == delivery_id)
+        .expect("attempt persisted");
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Sending);
+    assert!(attempt.status.is_in_flight());
+
+    // `Unknown` never carries a failure kind (the outcome is ambiguous, not
+    // a known failure) — and a kind-carrying Unknown is rejected.
+    let unknown_with_kind = store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Unknown,
+            updated_at: now(),
+            failure_kind: Some(DeliveryFailureKind::TransportUnavailable),
+        })
+        .await;
+    assert!(matches!(
+        unknown_with_kind,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Unknown,
+            updated_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+    let settled = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    let attempt = settled
+        .iter()
+        .find(|attempt| attempt.delivery_id == delivery_id)
+        .expect("attempt persisted");
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Unknown);
+    assert!(!attempt.status.is_in_flight());
 }
 
 async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl OutboundStateStore) {

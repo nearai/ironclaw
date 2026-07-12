@@ -144,13 +144,27 @@ fn validate_delivery_status(
     failure_kind: Option<DeliveryFailureKind>,
 ) -> Result<(), OutboundError> {
     match (status, failure_kind) {
-        (OutboundDeliveryStatus::Pending | OutboundDeliveryStatus::Delivered, None) => Ok(()),
+        // In-flight coordinator states and `Unknown` (outcome ambiguous, not
+        // a known failure) never carry a failure kind.
+        (
+            OutboundDeliveryStatus::Prepared
+            | OutboundDeliveryStatus::Sending
+            | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::Delivered
+            | OutboundDeliveryStatus::Unknown,
+            None,
+        ) => Ok(()),
         (OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered, Some(_)) => Ok(()),
-        (OutboundDeliveryStatus::Pending | OutboundDeliveryStatus::Delivered, Some(_)) => {
-            Err(OutboundError::InvalidRequest {
-                reason: "successful delivery statuses must not include failure kind",
-            })
-        }
+        (
+            OutboundDeliveryStatus::Prepared
+            | OutboundDeliveryStatus::Sending
+            | OutboundDeliveryStatus::Pending
+            | OutboundDeliveryStatus::Delivered
+            | OutboundDeliveryStatus::Unknown,
+            Some(_),
+        ) => Err(OutboundError::InvalidRequest {
+            reason: "non-failed delivery statuses must not include failure kind",
+        }),
         (OutboundDeliveryStatus::Failed | OutboundDeliveryStatus::DeadLettered, None) => {
             Err(OutboundError::InvalidRequest {
                 reason: "failed delivery statuses require failure kind",
