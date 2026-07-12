@@ -24,15 +24,7 @@ pub(crate) struct DoctorCommand {
 
 impl DoctorCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        let mut dto = build_doctor_dto(&context);
-        dto.checks.push(check_llm_readiness(&context));
-        if self.live {
-            dto.checks.extend(check_live_dependencies(&context));
-        } else {
-            dto.checks.extend(skipped_live_dependency_checks());
-        }
-        dto.checks.extend(build_driver_checks());
-        refresh_summary(&mut dto);
+        let dto = assemble_doctor_dto(&context, self.live);
         let mode = if self.json {
             OutputMode::Json
         } else {
@@ -40,6 +32,19 @@ impl DoctorCommand {
         };
         render::output(&dto, mode)
     }
+}
+
+fn assemble_doctor_dto(context: &RebornCliContext, live: bool) -> DoctorDto {
+    let mut dto = build_doctor_dto(context);
+    dto.checks.push(check_llm_readiness(context));
+    if live {
+        dto.checks.extend(check_live_dependencies(context));
+    } else {
+        dto.checks.extend(skipped_live_dependency_checks());
+    }
+    dto.checks.extend(build_driver_checks());
+    refresh_summary(&mut dto);
+    dto
 }
 
 fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
@@ -446,11 +451,7 @@ mod tests {
     #[test]
     fn doctor_dto_builds_with_defaults() {
         let (_tmp, context) = RebornCliContext::test_context();
-        let mut dto = build_doctor_dto(&context);
-        dto.checks.push(check_llm_readiness(&context));
-        dto.checks.extend(skipped_live_dependency_checks());
-        dto.checks.extend(build_driver_checks());
-        refresh_summary(&mut dto);
+        let dto = assemble_doctor_dto(&context, false);
         assert!(!dto.checks.is_empty());
         assert_eq!(
             dto.summary.pass + dto.summary.fail + dto.summary.skip,
@@ -461,10 +462,7 @@ mod tests {
     #[test]
     fn doctor_has_core_dependency_and_driver_checks() {
         let (_tmp, context) = RebornCliContext::test_context();
-        let mut dto = build_doctor_dto(&context);
-        dto.checks.push(check_llm_readiness(&context));
-        dto.checks.extend(skipped_live_dependency_checks());
-        dto.checks.extend(build_driver_checks());
+        let dto = assemble_doctor_dto(&context, false);
         assert!(dto.checks.iter().any(|c| c.category == CheckCategory::Core));
         assert!(
             dto.checks

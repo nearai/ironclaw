@@ -2749,6 +2749,7 @@ fn doctor_live_initializes_production_wired_storage_and_secrets() {
     assert_eq!(outcome("llm_provider"), "fail");
     assert_eq!(outcome("storage_backend"), "pass", "doctor output: {json}");
     assert_eq!(outcome("secrets_store"), "pass", "doctor output: {json}");
+    assert_eq!(outcome("runtime_wiring"), "pass", "doctor output: {json}");
     assert!(
         reborn_home.exists(),
         "--live explicitly opts into initializing Reborn-owned state"
