@@ -13,6 +13,7 @@
 
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
+pub(crate) mod channel_egress;
 pub(crate) mod extension_activation_credentials;
 pub(crate) mod extension_credential_requirements;
 pub(crate) mod extension_ingress;
