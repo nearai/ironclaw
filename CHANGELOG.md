@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(reborn)* align admin-managed user secrets with the authenticated WebUI caller's default agent/project scope so capability credential preflight resolves them, while preserving cleanup of legacy user-level entries.
+
 ### Changed
 
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).

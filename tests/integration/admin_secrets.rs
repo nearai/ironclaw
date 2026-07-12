@@ -14,23 +14,34 @@
 //! authenticator that validates the bearer). Nothing above the token crypto is
 //! stubbed.
 
-#![cfg(all(feature = "webui-v2-beta", feature = "test-support"))]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use chrono::Utc;
+use ironclaw_authorization::{GrantAuthorizer, InMemoryCapabilityLeaseStore};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, CapabilitySet, CorrelationId, EffectKind, ExecutionContext, ExtensionId,
+    HostPortCatalog, InvocationId, MountView, PackageId, ProjectId, ResourceEstimate,
+    ResourceScope, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+};
+use ironclaw_host_runtime::{
+    CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest,
+};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
+use ironclaw_processes::ProcessServices;
 use ironclaw_reborn_composition::{
     AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
     RebornRuntimeInput, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
@@ -39,14 +50,119 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, SessionAuthenticator, SessionStore, signed_session_store,
 };
+use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+use ironclaw_secrets::SecretMaterial;
+use ironclaw_trust::{
+    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
+    HostTrustPolicy, TrustDecision, TrustProvenance,
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const TENANT: &str = "admin-e2e-tenant";
 const AGENT: &str = "admin-e2e-agent";
+const PROJECT: &str = "admin-e2e-project";
 const OPERATOR_USER: &str = "admin-e2e-operator";
 const OPERATOR_TOKEN: &str = "operator-secret-token";
+
+const SECRET_PREFLIGHT_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "admin-secret-preflight"
+name = "Admin Secret Preflight"
+version = "0.1.0"
+description = "Capability requiring an admin-provisioned secret"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "admin-secret-preflight.invoke"
+description = "Exercise capability credential preflight"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "openai_key"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = true
+"#;
+
+fn secret_preflight_registry() -> ExtensionRegistry {
+    let manifest = ExtensionManifest::parse(
+        SECRET_PREFLIGHT_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect("preflight manifest parses");
+    let root =
+        VirtualPath::new("/system/extensions/admin-secret-preflight").expect("extension root");
+    let package = ExtensionPackage::from_manifest(manifest, root).expect("extension package");
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).expect("registry insert");
+    registry
+}
+
+fn secret_preflight_trust_policy() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("admin-secret-preflight").expect("package id"),
+            "/system/extensions/admin-secret-preflight/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::user_trusted(),
+            vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+            None,
+        ),
+    ]))])
+    .expect("trust policy")
+}
+
+fn secret_preflight_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
+    }
+}
+
+fn execution_context_for_scope(scope: ResourceScope) -> ExecutionContext {
+    let context = ExecutionContext {
+        invocation_id: scope.invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: Some(scope.user_id.clone()),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        mission_id: scope.mission_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        extension_id: ExtensionId::new("admin-secret-preflight-caller").expect("extension id"),
+        runtime: RuntimeKind::Script,
+        trust: TrustClass::UserTrusted,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        resource_scope: scope,
+    };
+    context.validate().expect("execution context validates");
+    context
+}
 
 // ─── no-op model gateway (admin ops never invoke the model) ───────────────
 
@@ -124,10 +240,37 @@ fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
 
 struct AdminHarness {
     router: axum::Router,
+    session_store: Arc<dyn SessionStore>,
+    operator_secret: SecretString,
     // Kept alive for the test: the runtime owns the durable stores the router
     // reads through, and the tempdir backs them.
     _runtime: RebornRuntime,
     _root: tempfile::TempDir,
+}
+
+impl AdminHarness {
+    fn router_for_scope(&self, agent_id: Option<&str>, project_id: Option<&str>) -> axum::Router {
+        let bundle = build_webui_services(&self._runtime, None).expect("webui bundle");
+        let env = EnvBearerAuthenticator::new(
+            self.operator_secret.clone(),
+            UserId::new(OPERATOR_USER).expect("user"),
+        )
+        .expect("env authenticator");
+        let session = SessionAuthenticator::new(Arc::clone(&self.session_store));
+        let authenticator = Arc::new(DualAuthenticator { env, session });
+        let mut config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            authenticator,
+            vec![HeaderValue::from_static("http://localhost:0")],
+        );
+        if let Some(agent_id) = agent_id {
+            config = config.with_default_agent_id(AgentId::new(agent_id).expect("agent"));
+        }
+        if let Some(project_id) = project_id {
+            config = config.with_default_project_id(ProjectId::new(project_id).expect("project"));
+        }
+        webui_v2_app(bundle, config).expect("webui v2 app")
+    }
 }
 
 async fn build_admin_harness() -> AdminHarness {
@@ -164,10 +307,12 @@ async fn build_admin_harness() -> AdminHarness {
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
 
-    let env =
-        EnvBearerAuthenticator::new(operator_secret, UserId::new(OPERATOR_USER).expect("user"))
-            .expect("env authenticator");
-    let session = SessionAuthenticator::new(session_store);
+    let env = EnvBearerAuthenticator::new(
+        operator_secret.clone(),
+        UserId::new(OPERATOR_USER).expect("user"),
+    )
+    .expect("env authenticator");
+    let session = SessionAuthenticator::new(Arc::clone(&session_store));
     let authenticator = Arc::new(DualAuthenticator { env, session });
 
     let config = WebuiServeConfig::new(
@@ -175,11 +320,14 @@ async fn build_admin_harness() -> AdminHarness {
         authenticator,
         vec![HeaderValue::from_static("http://localhost:0")],
     )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
     let router = webui_v2_app(bundle, config).expect("webui v2 app");
 
     AdminHarness {
         router,
+        session_store,
+        operator_secret,
         _runtime: runtime,
         _root: root,
     }
@@ -320,6 +468,15 @@ impl AdminApiDriver {
         )
         .await
     }
+
+    async fn delete_secret(&self, user_id: &str, handle: &str) -> (StatusCode, Value) {
+        self.send(
+            Method::DELETE,
+            &format!("/api/webchat/v2/admin/users/{user_id}/secrets/{handle}"),
+            None,
+        )
+        .await
+    }
 }
 
 fn user_id_of(created: &Value) -> String {
@@ -449,6 +606,121 @@ async fn admin_full_lifecycle_and_api_token_login() {
         !secrets.to_string().contains("sk-super-secret-value"),
         "listing secrets must not expose material"
     );
+    let secret_store = harness._runtime.services().secret_store_for_test();
+    let runtime_scope = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        user_id: UserId::new(admin_id.as_str()).expect("admin user"),
+        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let handle = SecretHandle::new("openai_key").expect("handle");
+    let preflight_runtime = HostRuntimeServices::new(
+        Arc::new(secret_preflight_registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("admin-secret-preflight-v1").expect("surface version"),
+    )
+    .with_trust_policy(Arc::new(secret_preflight_trust_policy()))
+    .with_run_state(Arc::new(InMemoryRunStateStore::new()))
+    .with_approval_requests(Arc::new(InMemoryApprovalRequestStore::new()))
+    .with_capability_leases(Arc::new(InMemoryCapabilityLeaseStore::new()))
+    .with_secret_store_dyn(Arc::clone(&secret_store))
+    .host_runtime_for_local_testing();
+    let preflight_scope = ResourceScope {
+        invocation_id: InvocationId::new(),
+        ..runtime_scope.clone()
+    };
+    let outcome = preflight_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_for_scope(preflight_scope),
+            CapabilityId::new("admin-secret-preflight.invoke").expect("capability id"),
+            ResourceEstimate::default(),
+            json!({}),
+            secret_preflight_trust_decision(),
+        ))
+        .await
+        .expect("capability invocation reaches credential preflight");
+    assert!(
+        !matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "HTTP-provisioned credential must satisfy capability preflight; got {outcome:?}"
+    );
+    let lease = secret_store
+        .lease_once(&runtime_scope, &handle)
+        .await
+        .expect("admin-provisioned secret is readable at the runtime agent+project scope");
+    let material = secret_store
+        .consume(&runtime_scope, lease.id)
+        .await
+        .expect("agent+project-scoped lease consumes");
+    assert_eq!(
+        material.expose_secret(),
+        "sk-super-secret-value",
+        "admin secret PUT must write to the default runtime scope capability preflight reads"
+    );
+    let mut agent_only_scope = runtime_scope.clone();
+    agent_only_scope.project_id = None;
+    let err = secret_store
+        .lease_once(&agent_only_scope, &handle)
+        .await
+        .expect_err("admin secret PUT should not write an agent-only duplicate");
+    assert!(
+        matches!(
+            err,
+            ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+        ),
+        "expected UnknownSecret for agent-only scope, got {err:?}"
+    );
+    let mut user_scope = runtime_scope.clone();
+    user_scope.agent_id = None;
+    user_scope.project_id = None;
+    let err = secret_store
+        .lease_once(&user_scope, &handle)
+        .await
+        .expect_err("admin secret PUT should not write a user-only duplicate");
+    assert!(
+        matches!(
+            err,
+            ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+        ),
+        "expected UnknownSecret for user-only scope, got {err:?}"
+    );
+    let (status, deleted) = operator.delete_secret(&admin_id, "openai_key").await;
+    assert_eq!(status, StatusCode::OK, "scoped secret delete succeeds");
+    assert_eq!(deleted["deleted"].as_bool(), Some(true));
+    let err = secret_store
+        .lease_once(&runtime_scope, &handle)
+        .await
+        .expect_err("admin secret DELETE removes from the runtime agent+project scope");
+    assert!(
+        matches!(
+            err,
+            ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+        ),
+        "expected UnknownSecret after scoped delete, got {err:?}"
+    );
+    let missing_scope = ResourceScope {
+        invocation_id: InvocationId::new(),
+        ..runtime_scope.clone()
+    };
+    let outcome = preflight_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_for_scope(missing_scope),
+            CapabilityId::new("admin-secret-preflight.invoke").expect("capability id"),
+            ResourceEstimate::default(),
+            json!({}),
+            secret_preflight_trust_decision(),
+        ))
+        .await
+        .expect("capability invocation reaches credential preflight after delete");
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "deleting the HTTP-provisioned credential must reopen the auth gate; got {outcome:?}"
+    );
 
     // Delete cascades: the record is gone, and a re-read is a 404.
     let (status, deleted) = operator.delete_user(&member_id).await;
@@ -460,6 +732,198 @@ async fn admin_full_lifecycle_and_api_token_login() {
         StatusCode::NOT_FOUND,
         "a deleted user reads as not found"
     );
+}
+
+#[tokio::test]
+async fn legacy_user_scope_secrets_remain_visible_and_clean_up_through_admin_http() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+    let (target_id, _) = create_admin(&operator, "Legacy Secret Target").await;
+    let store = harness._runtime.services().secret_store_for_test();
+    let scoped = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        user_id: UserId::new(&target_id).expect("target user"),
+        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let legacy = ResourceScope {
+        agent_id: None,
+        project_id: None,
+        invocation_id: InvocationId::new(),
+        ..scoped.clone()
+    };
+
+    let migrate_handle = SecretHandle::new("legacy_migrate").expect("handle");
+    store
+        .put(
+            legacy.clone(),
+            migrate_handle.clone(),
+            SecretMaterial::from("legacy-material"),
+            None,
+        )
+        .await
+        .expect("legacy secret seeded");
+    let (status, listed) = operator.list_secrets(&target_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        listed["secrets"]
+            .as_array()
+            .expect("secret list")
+            .iter()
+            .any(|secret| secret["handle"].as_str() == Some(migrate_handle.as_str()))
+    );
+    assert!(
+        store
+            .metadata(&legacy, &migrate_handle)
+            .await
+            .expect("legacy metadata query")
+            .is_some()
+    );
+    assert!(
+        store
+            .metadata(&scoped, &migrate_handle)
+            .await
+            .expect("runtime metadata query")
+            .is_none()
+    );
+    let (status, _) = operator
+        .put_secret(&target_id, migrate_handle.as_str(), "legacy-material")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        store
+            .metadata(&legacy, &migrate_handle)
+            .await
+            .expect("legacy metadata query after put")
+            .is_none()
+    );
+    let lease = store
+        .lease_once(&scoped, &migrate_handle)
+        .await
+        .expect("re-provisioned secret resolves at runtime scope");
+    let material = store
+        .consume(&scoped, lease.id)
+        .await
+        .expect("re-provisioned secret consumes");
+    assert_eq!(material.expose_secret(), "legacy-material");
+
+    let delete_handle = SecretHandle::new("legacy_delete").expect("handle");
+    store
+        .put(
+            legacy.clone(),
+            delete_handle.clone(),
+            SecretMaterial::from("delete-me"),
+            None,
+        )
+        .await
+        .expect("legacy delete secret seeded");
+    let (status, deleted) = operator
+        .delete_secret(&target_id, delete_handle.as_str())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["deleted"].as_bool(), Some(true));
+    assert!(
+        store
+            .metadata(&legacy, &delete_handle)
+            .await
+            .expect("legacy delete metadata query")
+            .is_none()
+    );
+
+    let overwrite_handle = SecretHandle::new("legacy_overwrite").expect("handle");
+    store
+        .put(
+            legacy.clone(),
+            overwrite_handle.clone(),
+            SecretMaterial::from("stale-material"),
+            None,
+        )
+        .await
+        .expect("legacy overwrite secret seeded");
+    let (status, _) = operator
+        .put_secret(&target_id, overwrite_handle.as_str(), "fresh-material")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        store
+            .metadata(&legacy, &overwrite_handle)
+            .await
+            .expect("legacy overwrite metadata query")
+            .is_none()
+    );
+    let lease = store
+        .lease_once(&scoped, &overwrite_handle)
+        .await
+        .expect("overwritten secret resolves at runtime scope");
+    let material = store
+        .consume(&scoped, lease.id)
+        .await
+        .expect("overwritten secret consumes");
+    assert_eq!(material.expose_secret(), "fresh-material");
+}
+
+#[tokio::test]
+async fn admin_secret_optional_owner_scopes_round_trip_independently() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+    let (target_id, _) = create_admin(&operator, "Optional Scope Target").await;
+    let handle = SecretHandle::new("scope_probe").expect("handle");
+
+    let cases = [
+        (None, None, "user-level"),
+        (Some(AGENT), None, "agent-only"),
+        (None, Some(PROJECT), "project-only"),
+    ];
+    for (agent_id, project_id, material) in cases {
+        let scoped_operator = AdminApiDriver::new(
+            harness.router_for_scope(agent_id, project_id),
+            OPERATOR_TOKEN,
+        );
+        let (status, _) = scoped_operator
+            .put_secret(&target_id, handle.as_str(), material)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{material} PUT succeeds");
+
+        let scope = ResourceScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            user_id: UserId::new(&target_id).expect("target user"),
+            agent_id: agent_id.map(|value| AgentId::new(value).expect("agent")),
+            project_id: project_id.map(|value| ProjectId::new(value).expect("project")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let store = harness._runtime.services().secret_store_for_test();
+        let lease = store
+            .lease_once(&scope, &handle)
+            .await
+            .unwrap_or_else(|error| panic!("{material} scope reads its secret: {error}"));
+        let stored = store
+            .consume(&scope, lease.id)
+            .await
+            .unwrap_or_else(|error| panic!("{material} lease consumes: {error}"));
+        assert_eq!(stored.expose_secret(), material);
+
+        let (status, deleted) = scoped_operator
+            .delete_secret(&target_id, handle.as_str())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{material} DELETE succeeds");
+        assert_eq!(deleted["deleted"].as_bool(), Some(true));
+        let err = store
+            .lease_once(&scope, &handle)
+            .await
+            .expect_err("DELETE removes from the matching optional scope");
+        assert!(
+            matches!(
+                err,
+                ironclaw_secrets::SecretStoreError::UnknownSecret { .. }
+            ),
+            "expected UnknownSecret for {material} after delete, got {err:?}"
+        );
+    }
 }
 
 #[tokio::test]

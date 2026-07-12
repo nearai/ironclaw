@@ -3949,6 +3949,7 @@ dependencies = [
  "ironclaw_reborn_config",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
+ "ironclaw_reborn_webui_ingress",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runner",

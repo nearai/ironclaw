@@ -984,9 +984,10 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[allow(dead_code)]
     pub(crate) identity_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-    /// Admin per-user secret provisioner (target-user-scoped secret store over
-    /// the shared root + crypto). `None` when no filesystem secret store was
-    /// built. Read only by the WebUI v2 admin surface.
+    /// Admin per-user secret provisioner (target user plus trusted runtime
+    /// agent/project scope over the shared root + crypto). `None` when no
+    /// filesystem secret store was built. Read only by the WebUI v2 admin
+    /// surface.
     #[cfg(feature = "webui-v2-beta")]
     pub(crate) admin_secret_provisioner:
         Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>>,

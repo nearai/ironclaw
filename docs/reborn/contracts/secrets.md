@@ -92,6 +92,18 @@ let material = secrets.consume(&scope, lease.id).await?;
 
 `SecretStore::put(...)` is for trusted setup, composition, migration, or storage-code paths that are already allowed to manage secret material. It is not a runtime/plugin API, and it intentionally does not perform authorization itself.
 
+The Reborn WebUI admin adapter is one such trusted composition path. It derives
+the secret owner from the authenticated caller's tenant and host-stamped
+default agent/project plus the admin-selected target user; request bodies
+cannot choose those runtime dimensions. This makes admin-provisioned material
+visible to capability credential preflight under the same
+tenant/user/agent/project scope used for runs. When agent/project dimensions
+are present, the adapter also lists unique legacy user-only handles, writes the
+supplied value into the current scope and removes a same-named legacy entry on
+put, and deletes from both scopes. This is bounded compatibility behavior, not
+a global handle lookup: tenant and target-user isolation remain fixed for every
+operation.
+
 Durable libSQL/PostgreSQL storage is provided by `FilesystemSecretStore` and
 `FilesystemCredentialBroker` over the database-backed `RootFilesystem`
 implementations. Backend selection is now a property of the filesystem layer;

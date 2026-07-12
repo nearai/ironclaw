@@ -322,6 +322,7 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features
 # build-time cost for the lane, behaviorally inert for suites that never
 # reference Slack types.
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta"] }
+ironclaw_reborn_webui_ingress = { path = "crates/ironclaw_reborn_webui_ingress", version = "0.1.0" }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper.
@@ -444,6 +445,10 @@ path = "tests/integration/triggered_delivery_outcome.rs"
 [[test]]
 name = "reborn_integration_attach"
 path = "tests/integration/attach.rs"
+
+[[test]]
+name = "reborn_integration_admin_secrets"
+path = "tests/integration/admin_secrets.rs"
 
 [[test]]
 name = "reborn_integration_subagent_await_edge"

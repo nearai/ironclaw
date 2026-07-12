@@ -1,3 +1,4 @@
+// arch-exempt: large_file, RebornServices facade decomposition tracked separately, plan #4469
 //! WebUI-facing Reborn service facade.
 //!
 //! This module is the stable high-level API beta WebUI route handlers use
@@ -83,11 +84,12 @@ use admin_users::{
 };
 pub use admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
-    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    AdminUserSecretMeta, AdminUserSecretScope, AdminUserService, AdminUserStatus,
+    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
+    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse,
 };
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
@@ -1040,6 +1042,18 @@ fn caller_resource_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
         thread_id: None,
         invocation_id: InvocationId::new(),
     }
+}
+
+fn admin_user_secret_scope(
+    caller: WebUiAuthenticatedCaller,
+    user_id: UserId,
+) -> AdminUserSecretScope {
+    AdminUserSecretScope::new(
+        caller.tenant_id,
+        user_id,
+        caller.agent_id,
+        caller.project_id,
+    )
 }
 
 fn operator_config_not_wired_response() -> RebornOperatorConfigListResponse {
@@ -3280,9 +3294,10 @@ impl RebornServicesApi for RebornServices {
         self.authorize_admin(&caller).await?;
         self.require_admin_target(&caller.tenant_id, &user_id)
             .await?;
+        let scope = admin_user_secret_scope(caller, user_id);
         let secrets = self
             .admin_users
-            .list_secrets(&caller.tenant_id, &user_id)
+            .list_secrets(&scope)
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminUserSecretsListResponse { secrets })
@@ -3298,14 +3313,10 @@ impl RebornServicesApi for RebornServices {
         self.authorize_admin(&caller).await?;
         self.require_admin_target(&caller.tenant_id, &user_id)
             .await?;
+        let scope = admin_user_secret_scope(caller, user_id);
         let secret = self
             .admin_users
-            .put_secret(
-                &caller.tenant_id,
-                &user_id,
-                handle,
-                SecretString::from(request.value),
-            )
+            .put_secret(&scope, handle, SecretString::from(request.value))
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminSecretResponse { secret })
@@ -3322,9 +3333,10 @@ impl RebornServicesApi for RebornServices {
             .await?;
         // Echo the parsed, canonical handle back on the wire as a plain string.
         let handle_str = handle.as_str().to_string();
+        let scope = admin_user_secret_scope(caller, user_id);
         let deleted = self
             .admin_users
-            .delete_secret(&caller.tenant_id, &user_id, handle)
+            .delete_secret(&scope, handle)
             .await
             .map_err(map_admin_user_error)?;
         Ok(RebornAdminSecretDeletedResponse {

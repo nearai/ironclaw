@@ -113,6 +113,18 @@ are enforced server-side in `ironclaw_product_workflow::AdminUserService`, and a
 non-admin caller receives `403`. `webui.v2.admin.create_user` returns the new
 user's one-time API bearer exactly once in `api_token`; there is no re-issue
 endpoint for existing users.
+
+Admin secret list, put, and delete operations combine the authenticated
+caller's trusted tenant/default agent/default project with the target
+`user_id` from the path. This places provisioned material in the same
+tenant/user/agent/project namespace capability credential preflight uses for
+runs; the browser cannot select or override those runtime dimensions. If host
+composition omits an agent or project default, that dimension remains absent
+and the operation uses the corresponding broader user-level scope. For
+compatibility, list also exposes unique handles left in the legacy user-only
+scope, put writes the supplied value to the current runtime scope and removes
+the same-named legacy entry, and delete removes the handle from both scopes.
+Secret values remain write-only through the admin HTTP surface.
 | `webui.v2.trace_credits` | GET | `/api/webchat/v2/traces/credit` | None | `ProductWorkflow` |
 | `webui.v2.trace_account_traces` | GET | `/api/webchat/v2/traces/account` (optional `?limit=N`) | None | `ProductWorkflow` |
 | `webui.v2.trace_account_login_link` | POST | `/api/webchat/v2/traces/account-login-link` | None | `ProductWorkflow` |

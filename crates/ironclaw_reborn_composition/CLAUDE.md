@@ -70,7 +70,7 @@ middleware with v1's `src/channels/web/`.
 | `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
-| `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
+| `WebuiServeConfig { tenant_id, authenticator, default_agent_id, default_project_id, max_body_bytes, allowed_origins, csp_header, ... }` | Required config for `webui_v2_app`; trusted agent/project defaults are stamped onto authenticated callers and no security control silently defaults open |
 | `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
 | `ProtectedRouteMount` | Host-supplied protected API route fragment merged inside the WebUI bearer-auth layer with descriptor-driven body/rate limits. Reborn OpenAI-compatible routes use this seam; do not use it for v1 gateway routers. |
 
@@ -344,10 +344,18 @@ rows are inventoried here, not implemented in the current PR.
   `SseCapacity` (3 streams per `(tenant, user)`, 5-minute max stream
   lifetime). No WS surface to bound.
 - **Caller construction** — `WebUiAuthenticatedCaller` is built from
-  `config.tenant_id` (trusted host installation) plus the
-  authenticator's verified `UserId`. The browser body cannot influence
-  either field; matches the rule in
+  `config.tenant_id`, `config.default_agent_id`, and
+  `config.default_project_id` (trusted host installation/runtime owner
+  scope) plus the authenticator's verified `UserId`. The browser body cannot
+  influence any of those fields; matches the rule in
   `crates/ironclaw_product_workflow/CLAUDE.md`.
+
+  Admin-managed user secrets deliberately replace only the caller's user id
+  with the target user id. List, put, and delete retain the host-stamped
+  tenant/agent/project dimensions so provisioned credentials resolve at the
+  same scope as capability runs. An omitted optional project default produces
+  projectless secret ownership; hosts with a canonical project should always
+  call `with_default_project_id`.
 
 ### What this composition deliberately does NOT do
 
@@ -391,7 +399,9 @@ let config = WebuiServeConfig::new(
     TenantId::new(host_installation_tenant)?,
     Arc::new(MyHostAuthenticator::new(...)),
     same_origin_allowlist(bound_addr),
-);
+)
+.with_default_agent_id(AgentId::new(host_default_agent)?)
+.with_default_project_id(ProjectId::new(host_default_project)?);
 let app = webui_v2_app(bundle, config)?;
 let listener = tokio::net::TcpListener::bind(addr).await?;
 axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;

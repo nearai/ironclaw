@@ -1,7 +1,7 @@
 //! Composition adapter implementing the product-workflow
 //! [`AdminUserService`](ironclaw_product_workflow::AdminUserService) port over
-//! the Reborn identity user-directory + admin secret provisioner + a token
-//! minter.
+//! the Reborn identity user-directory + runtime-owner-scoped admin secret
+//! provisioner + a token minter.
 //!
 //! This is the one place identity, secrets, and token issuance meet — the
 //! composition root is the only crate allowed to depend on all three, so the
@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{SecretHandle, TenantId, UserId};
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+    AdminUserSecretMeta, AdminUserSecretScope, AdminUserService, AdminUserStatus,
 };
 use ironclaw_reborn_identity::{
     RebornIdentityError, RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole,
@@ -198,21 +198,15 @@ impl AdminUserService for RebornAdminUserDirectory {
 
     async fn list_secrets(
         &self,
-        tenant: &TenantId,
-        user_id: &UserId,
+        scope: &AdminUserSecretScope,
     ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
-        let secrets = self
-            .secrets
-            .list(tenant, user_id)
-            .await
-            .map_err(map_secret_error)?;
+        let secrets = self.secrets.list(scope).await.map_err(map_secret_error)?;
         Ok(secrets.into_iter().map(to_secret_meta).collect())
     }
 
     async fn put_secret(
         &self,
-        tenant: &TenantId,
-        user_id: &UserId,
+        scope: &AdminUserSecretScope,
         handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
@@ -221,7 +215,7 @@ impl AdminUserService for RebornAdminUserDirectory {
         // there), so the adapter never sees a raw string to re-validate.
         let meta = self
             .secrets
-            .put(tenant, user_id, handle, material)
+            .put(scope, handle, material)
             .await
             .map_err(map_secret_error)?;
         Ok(to_secret_meta(meta))
@@ -229,12 +223,11 @@ impl AdminUserService for RebornAdminUserDirectory {
 
     async fn delete_secret(
         &self,
-        tenant: &TenantId,
-        user_id: &UserId,
+        scope: &AdminUserSecretScope,
         handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         self.secrets
-            .delete(tenant, user_id, &handle)
+            .delete(scope, &handle)
             .await
             .map_err(map_secret_error)
     }

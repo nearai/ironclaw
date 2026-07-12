@@ -1633,8 +1633,9 @@ impl RebornRuntime {
     }
 
     /// Admin per-user secret provisioner over the host-owned secret substrate,
-    /// scoped to an arbitrary target user (not the runtime owner). `None` when
-    /// no filesystem secret store was built. See `admin_secrets.rs`.
+    /// scoped to an arbitrary target user plus the authenticated caller's
+    /// trusted runtime agent/project defaults. `None` when no filesystem secret
+    /// store was built. See `admin_secrets.rs`.
     #[cfg(feature = "webui-v2-beta")]
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
