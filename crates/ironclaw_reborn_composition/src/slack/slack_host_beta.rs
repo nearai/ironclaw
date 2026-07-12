@@ -1412,6 +1412,8 @@ mod tests {
 
     type HmacSha256 = Hmac<sha2::Sha256>;
 
+    /// A persisted run id proves acceptance even if that run later failed;
+    /// `Error` without a run id means submission failed before acceptance.
     fn accepted_trigger_run_id(
         run_id: Option<TurnRunId>,
         status: Option<TriggerRunHistoryStatus>,

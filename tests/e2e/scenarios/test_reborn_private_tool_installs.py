@@ -32,7 +32,7 @@ from reborn_webui_harness import (
     create_thread,
     reborn_bearer_headers,
     reborn_v2_private_installs_yolo_server,  # noqa: F401 - imported fixture
-    send_message,
+    send_and_settle,
     wait_for_capability_preview,
 )
 
@@ -130,11 +130,12 @@ async def test_private_tool_installs_full_path(
             # 5. Alice's ascii-renderer (shared) and hacker-news (her private
             #    install) prompts both dispatch.
             thread_id = await create_thread(alice_client, base_url)
-            await send_message(
+            await send_and_settle(
                 alice_client,
                 base_url,
                 thread_id,
                 "let's use the ascii renderer to draw a cat",
+                expected=1,
             )
             ascii_preview = await wait_for_capability_preview(
                 alice_client,
@@ -145,8 +146,12 @@ async def test_private_tool_installs_full_path(
             )
             assert ascii_preview["status"] == "completed", ascii_preview
 
-            await send_message(
-                alice_client, base_url, thread_id, "let's use the hacker news tool"
+            await send_and_settle(
+                alice_client,
+                base_url,
+                thread_id,
+                "let's use the hacker news tool",
+                expected=2,
             )
             hn_preview = await wait_for_capability_preview(
                 alice_client,
@@ -175,11 +180,12 @@ async def test_private_tool_installs_full_path(
             #    ascii-renderer and his private market-data install in the
             #    same turn.
             thread_id = await create_thread(bob_client, base_url)
-            await send_message(
+            await send_and_settle(
                 bob_client,
                 base_url,
                 thread_id,
                 "let's use ascii renderer and market data",
+                expected=1,
             )
             ascii_preview = await wait_for_capability_preview(
                 bob_client,
