@@ -8,14 +8,18 @@ use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, LocalFilesystem,
     RootFilesystem,
 };
+use ironclaw_host_api::runtime_policy::{
+    ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+    NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, CommandExecutionOutput,
     CommandExecutionRequest, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, LIST_DIR_CAPABILITY_ID, PostEditCheckConfig, READ_FILE_CAPABILITY_ID,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
@@ -1222,14 +1226,19 @@ async fn builtin_edit_tools_append_new_post_edit_check_findings_only() {
         "read_file must not trigger the post-edit check"
     );
 
-    let first = invoke_with_context(
+    let first_completed = invoke_completed_with_context(
         &runtime,
         APPLY_PATCH_CAPABILITY_ID,
         json!({"path": "/workspace/main.rs", "old_string": "alpha", "new_string": "gamma"}),
         context.clone(),
     )
-    .await
-    .unwrap();
+    .await;
+    assert_eq!(
+        first_completed.usage.process_count, 1,
+        "an edit whose post-edit check ran must account for the spawned \
+         process exactly like builtin.shell"
+    );
+    let first = first_completed.output;
 
     assert_eq!(first["success"], json!(true), "edit itself must succeed");
     assert_eq!(first["post_edit_check"]["exit_code"], json!(1));
@@ -1357,6 +1366,106 @@ async fn builtin_edit_tools_omit_new_output_when_check_passes_clean() {
     .unwrap();
 
     assert_eq!(written["post_edit_check"], json!({"exit_code": 0}));
+}
+
+#[tokio::test]
+async fn builtin_edit_tools_disable_post_edit_check_when_process_backend_is_none() {
+    // Regression (PR #5979 review): write_file/apply_patch declare only
+    // filesystem effects, so their plan never requires a process — but a
+    // configured post-edit check used to spawn through the default process
+    // port anyway, bypassing ProcessBackendKind::None entirely. Under a
+    // no-process policy the advisory check must be withheld: the edit
+    // succeeds, no process port is touched, and nothing is accounted.
+    let temp = tempfile::tempdir().unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let check_port = Arc::new(ScriptedProcessPort::completing("diagnostics", 1));
+    let runtime = runtime_with_post_edit_check_and_policy(
+        filesystem,
+        Arc::clone(&check_port),
+        None,
+        PostEditCheckConfig::new("cargo check", Duration::from_secs(30)),
+        process_denied_runtime_policy(),
+    );
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let completed = invoke_completed_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
+        context,
+    )
+    .await;
+
+    assert_eq!(
+        completed.output["success"],
+        json!(true),
+        "edit must succeed"
+    );
+    assert!(
+        completed.output.get("post_edit_check").is_none(),
+        "ProcessBackendKind::None must disable the post-edit check"
+    );
+    assert!(
+        check_port.requests().is_empty(),
+        "a no-process policy must never spawn the check on the local host port"
+    );
+    assert_eq!(
+        completed.usage.process_count, 0,
+        "no process ran, so none may be accounted"
+    );
+}
+
+#[tokio::test]
+async fn builtin_edit_tools_disable_post_edit_check_under_tenant_sandbox_policy() {
+    // Regression (PR #5979 review): under a tenant-sandbox process policy the
+    // default process port handed to non-process plans is still the raw local
+    // host port, so a configured check used to escape the sandbox onto the
+    // provider host. The check must be withheld outright — not spawned on the
+    // local host port, and not silently rerouted to the sandbox port either.
+    let temp = tempfile::tempdir().unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let local_port = Arc::new(ScriptedProcessPort::completing("diagnostics", 1));
+    let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
+    let runtime = runtime_with_post_edit_check_and_policy(
+        filesystem,
+        Arc::clone(&local_port),
+        Some(Arc::new(TenantSandboxProcessPort::new(
+            Arc::clone(&sandbox_transport) as Arc<dyn SandboxCommandTransport>,
+        ))),
+        PostEditCheckConfig::new("cargo check", Duration::from_secs(30)),
+        tenant_sandbox_runtime_policy(),
+    );
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let completed = invoke_completed_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
+        context,
+    )
+    .await;
+
+    assert_eq!(
+        completed.output["success"],
+        json!(true),
+        "edit must succeed"
+    );
+    assert!(
+        completed.output.get("post_edit_check").is_none(),
+        "a tenant-sandbox process policy must disable the post-edit check"
+    );
+    assert!(
+        local_port.requests().is_empty(),
+        "the check must not escape the sandbox policy onto the local host port"
+    );
+    assert_eq!(
+        sandbox_transport.request_count(),
+        0,
+        "the withheld check must not be rerouted through the sandbox port"
+    );
+    assert_eq!(completed.usage.process_count, 0);
 }
 
 fn assert_aggregate_scan_limit(output: &Value) {
@@ -1522,6 +1631,106 @@ where
     .with_post_edit_check(post_edit_check)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
+}
+
+/// Like `runtime_with_filesystem_process_port_and_post_edit_check`, but with
+/// an explicit runtime policy (and optionally a tenant sandbox process port)
+/// so tests can pin how the process policy gates the post-edit check.
+fn runtime_with_post_edit_check_and_policy<F, P>(
+    filesystem: F,
+    process_port: Arc<P>,
+    tenant_sandbox_process_port: Option<Arc<TenantSandboxProcessPort>>,
+    post_edit_check: PostEditCheckConfig,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+    P: RuntimeProcessPort + 'static,
+{
+    let mut services = HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_runtime_process_port(process_port)
+    .with_post_edit_check(post_edit_check)
+    .with_runtime_policy(policy)
+    .with_trust_policy(Arc::new(trust_policy()));
+    if let Some(tenant_sandbox_process_port) = tenant_sandbox_process_port {
+        services = services.with_tenant_sandbox_process_port(tenant_sandbox_process_port);
+    }
+    services.host_runtime_for_local_testing()
+}
+
+/// SecureDefault-shaped local policy: scoped-virtual filesystem, no process
+/// backend. Approval stays at AskDestructive so the only axis under test is
+/// the process backend.
+fn process_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Brokered,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+/// HostedDev-shaped tenant policy with a tenant-sandbox process backend. The
+/// filesystem backend is ScopedVirtual (not the hosted TenantWorkspace)
+/// because the local invocation-services resolver under test can only serve
+/// mount-scoped filesystem plans; the axis under test is the process backend.
+fn tenant_sandbox_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+/// Sandbox transport double that counts requests; the tenant-sandbox test
+/// asserts the withheld post-edit check is not rerouted through it.
+#[derive(Default)]
+struct RecordingSandboxTransport {
+    requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
+}
+
+impl RecordingSandboxTransport {
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl SandboxCommandTransport for RecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(CommandExecutionOutput {
+            output: "sandbox diagnostics".to_string(),
+            saved_output: None,
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::from_millis(3),
+        })
+    }
 }
 
 /// Process-port double that records every request and replays one scripted

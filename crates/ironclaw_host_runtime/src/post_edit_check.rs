@@ -15,7 +15,14 @@
 //! [`PostEditCheckConfig::from_env`] (the composition layer calls this
 //! module-owned factory; nothing here reads the environment per call) and is
 //! threaded through `HostRuntimeServices::with_post_edit_check` into
-//! [`InvocationServices`](crate::InvocationServices).
+//! [`InvocationServices`](crate::InvocationServices). Because the edit plans
+//! never declare a process effect, the invocation-services resolver only
+//! populates `InvocationServices::post_edit_check` when the effective
+//! process policy permits local host execution (`ProcessBackendKind::
+//! LocalHost` under `DeploymentMode::LocalSingleUser`); under
+//! `ProcessBackendKind::None` or sandbox-backed policies the advisory check
+//! is disabled instead of bypassing process-backend selection. A check that
+//! does run is accounted as one spawned process, like `builtin.shell`.
 //!
 //! v1 limitation (kept deliberately simple): the seen-line registry is
 //! global per scope — editing a file again does not clear previously

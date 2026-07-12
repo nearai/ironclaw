@@ -470,21 +470,26 @@ impl BuiltinFirstPartyTools {
     /// `write_file` / `apply_patch` and append the advisory `post_edit_check`
     /// value to the edit's model-visible output. Read-only coding tools never
     /// trigger it, and it never fails the edit — the edit already succeeded
-    /// when this runs.
+    /// when this runs. The invocation-services resolver only supplies
+    /// `services.post_edit_check` when the process policy permits spawning
+    /// through `services.process`, so no placement decision happens here.
+    ///
+    /// Returns `true` when a check process actually ran (completed or timed
+    /// out), so the caller can account for it like a `builtin.shell` spawn.
     async fn append_post_edit_check(
         &self,
         kind: CodingCapabilityKind,
         request: &FirstPartyCapabilityRequest,
         output: &mut serde_json::Value,
-    ) {
+    ) -> bool {
         if !matches!(
             kind,
             CodingCapabilityKind::WriteFile | CodingCapabilityKind::ApplyPatch
         ) {
-            return;
+            return false;
         }
         let Some(config) = &request.services.post_edit_check else {
-            return;
+            return false;
         };
         let Some(check) = crate::post_edit_check::run_post_edit_check(
             &self.post_edit_check_seen,
@@ -495,11 +500,12 @@ impl BuiltinFirstPartyTools {
         )
         .await
         else {
-            return;
+            return false;
         };
         if let Some(object) = output.as_object_mut() {
             object.insert("post_edit_check".to_string(), check);
         }
+        true
     }
 }
 
@@ -513,6 +519,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
+        let mut process_count = 0u32;
         let (output, display_preview) = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
             TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
@@ -605,8 +612,14 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     .dispatch(&coding_request)
                     .await
                     .map_err(coding_error)?;
-                self.append_post_edit_check(metadata.kind, &request, &mut result.output)
-                    .await;
+                if self
+                    .append_post_edit_check(metadata.kind, &request, &mut result.output)
+                    .await
+                {
+                    // The advisory check spawned one process; account for it
+                    // exactly like a `builtin.shell` invocation.
+                    process_count = 1;
+                }
                 (result.output, result.display_preview)
             }
         };
@@ -616,11 +629,12 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {
-            if network_egress_bytes > 0 {
+            if network_egress_bytes > 0 || process_count > 0 {
                 error.with_usage(
                     ResourceUsage::default()
                         .set_wall_clock_ms(wall_clock_ms)
-                        .set_network_egress_bytes(network_egress_bytes),
+                        .set_network_egress_bytes(network_egress_bytes)
+                        .set_process_count(process_count),
                 )
             } else {
                 error
@@ -629,7 +643,8 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         let usage = ResourceUsage::default()
             .set_wall_clock_ms(wall_clock_ms)
             .set_output_bytes(output_bytes)
-            .set_network_egress_bytes(network_egress_bytes);
+            .set_network_egress_bytes(network_egress_bytes)
+            .set_process_count(process_count);
         Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }

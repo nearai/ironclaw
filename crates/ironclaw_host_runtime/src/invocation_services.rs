@@ -56,7 +56,11 @@ pub struct InvocationServices {
     /// Operator-configured post-edit check appended to successful
     /// `builtin.write_file` / `builtin.apply_patch` output. Resolved once at
     /// composition time (never from env in per-call handlers); `None` keeps
-    /// the feature off.
+    /// the feature off. Resolvers must only populate this when the plan's
+    /// process policy permits spawning through [`InvocationServices::process`]
+    /// — the edit plans themselves never declare a process effect, so this
+    /// field is the policy gate that keeps the check from bypassing
+    /// process-backend selection.
     pub post_edit_check: Option<PostEditCheckConfig>,
 }
 
@@ -248,9 +252,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         let filesystem = self.filesystem_for_plan(plan, request.mounts)?;
         let process = if plan.requires_process {
             match plan.process_backend {
-                ProcessBackendKind::LocalHost
-                    if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
-                {
+                ProcessBackendKind::LocalHost if local_host_process_execution_permitted(plan) => {
                     Arc::clone(&self.process)
                 }
                 ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone().ok_or(
@@ -302,9 +304,29 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 plan.deployment,
                 plan.resolved_profile,
             ),
-            post_edit_check: self.post_edit_check.clone(),
+            // The post-edit check spawns an operator command through the
+            // default `process` port above, from edit plans that never
+            // declare a process effect. Withhold it unless the effective
+            // process policy is the one under which that default port is
+            // the policy-approved backend (the same LocalHost +
+            // LocalSingleUser arm that `requires_process` plans resolve
+            // to); under `ProcessBackendKind::None` or sandbox-backed
+            // policies the advisory check is disabled instead of escaping
+            // onto the provider host.
+            post_edit_check: self
+                .post_edit_check
+                .clone()
+                .filter(|_| local_host_process_execution_permitted(plan)),
         })
     }
+}
+
+/// Whether the plan's process policy resolves process execution to the local
+/// host port for this resolver — the condition under which `resolve` hands
+/// `self.process` to a process-requiring plan such as `builtin.shell`.
+fn local_host_process_execution_permitted(plan: &ExecutionPlan) -> bool {
+    matches!(plan.process_backend, ProcessBackendKind::LocalHost)
+        && matches!(plan.deployment, DeploymentMode::LocalSingleUser)
 }
 
 impl LocalInvocationServicesResolver {
