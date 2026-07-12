@@ -106,6 +106,7 @@ use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
+use self::slack_output_hygiene::SlackOutputHygieneGateway;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
@@ -507,6 +508,7 @@ mod outbound_delivery_tests;
 mod production;
 mod runtime_turn_scheduler;
 mod skills;
+mod slack_output_hygiene;
 #[cfg(feature = "test-support")]
 #[path = "runtime/test_support.rs"]
 mod test_support;
@@ -3375,6 +3377,8 @@ pub async fn build_reborn_runtime(
         not(any(test, feature = "test-support"))
     ))]
     let (model_gateway, llm_cost_table) = build_production_model_gateway()?;
+    let model_gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway> =
+        Arc::new(SlackOutputHygieneGateway::new(model_gateway));
 
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic
