@@ -5302,13 +5302,22 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "truncation would blind it to ids early in a long digest",
         )
         self.assertIn(
-            "_redact_slack_user_ids_in_text",
+            "_redact_slack_entity_ids_in_artifact_details",
             source,
-            "the persisted excerpt must be redacted of raw user ids",
+            "all persisted assistant-response fields must be redacted before "
+            "the digest returns",
+        )
+        sanitizer_source = inspect.getsource(
+            run_live_qa._redact_slack_entity_ids_in_artifact_details
+        )
+        self.assertIn(
+            "_redact_slack_user_ids_in_text",
+            sanitizer_source,
+            "the artifact sanitizer must redact raw user ids",
         )
         self.assertIn(
             "RAW_SLACK_CONVERSATION_ID_PATTERN.sub",
-            source,
+            sanitizer_source,
             "the persisted excerpt must be redacted of raw C…/D…/G… "
             "conversation ids too — scanning without redacting would still "
             "persist them",
@@ -5379,6 +5388,43 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 persisted = json.dumps(result.details)
                 self.assertNotIn(raw_id, persisted)
                 self.assertNotIn("full_reply_text", result.details)
+
+    def test_qa_9c_digest_redacts_failed_chat_artifacts_before_return(self):
+        raw_user_id = "UABCDEFGH"
+        raw_conversation_id = "D0BDC16TML3"
+        reply = (
+            f"latest DM from <@{raw_user_id}> in {raw_conversation_id}"
+        )
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=False,
+                latency_ms=1,
+                details={
+                    "full_reply_text": reply,
+                    "text_excerpt": reply,
+                    "error": f"timed out with last_assistant={reply!r}",
+                },
+            )
+
+        with patch.object(
+            run_live_qa,
+            "_live_chat_case",
+            side_effect=fake_live_chat_case,
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_9c_slack_digest_names_not_ids(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(result.success)
+        persisted = json.dumps(result.details)
+        self.assertNotIn(raw_user_id, persisted)
+        self.assertNotIn(raw_conversation_id, persisted)
+        self.assertNotIn("full_reply_text", result.details)
 
     def test_dm_counterpart_scan_paginates_to_exhaustion(self):
         import inspect
@@ -6073,6 +6119,80 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             (1, 1, 1, 1, 1),
             "10I is a one-shot behavioral observation and must never retry",
         )
+
+    def test_qa_10i_redacts_failed_chat_artifacts_before_return(self):
+        raw_user_id = "WABCDEFGH"
+        reply = f"Canary Person (<@{raw_user_id}>) should sync the fixture."
+
+        async def fake_identity(_token):
+            return {"ok": True, "user_id": "W0FIXTURE1"}
+
+        async def fake_display_name(_token, _user_id):
+            return {"ok": True, "display_name": "Canary Person"}
+
+        async def fake_seed(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=False,
+                latency_ms=1,
+                details={
+                    "full_reply_text": reply,
+                    "text_excerpt": reply,
+                    "error": f"terminal failure after reply {reply!r}",
+                },
+            )
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_token",
+                return_value="xoxp-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_bot_token",
+                return_value="xoxb-unit-test",
+            ),
+            patch.object(
+                run_live_qa,
+                "_require_slack_personal_bot_dm_channel",
+                return_value="D0FIXTURE1",
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_auth_identity",
+                side_effect=fake_identity,
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_display_name",
+                side_effect=fake_display_name,
+            ),
+            patch.object(
+                run_live_qa,
+                "_seed_slack_fixture_message",
+                side_effect=fake_seed,
+            ),
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_10i_slack_raw_entity_hygiene(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertFalse(result.success)
+        persisted = json.dumps(result.details)
+        self.assertNotIn(raw_user_id, persisted)
+        self.assertNotIn("full_reply_text", result.details)
 
     def test_qa_10_case_specs_gate_and_run_by_default(self):
         qa_10_cases = [

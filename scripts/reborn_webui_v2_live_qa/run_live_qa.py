@@ -5104,6 +5104,35 @@ def _raw_slack_conversation_ids_in_text(text: str) -> list[str]:
     return RAW_SLACK_CONVERSATION_ID_PATTERN.findall(text or "")
 
 
+def _redact_slack_entity_ids_in_artifact_details(
+    details: dict[str, object],
+) -> None:
+    """Remove Slack entity ids from persisted assistant-response fields."""
+
+    def redact(value: object) -> object:
+        if isinstance(value, str):
+            return RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
+                "C_REDACTED",
+                _redact_slack_user_ids_in_text(value),
+            )
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(redact(item) for item in value)
+        return value
+
+    for key in (
+        "text_excerpt",
+        "routine_confirmation_initial_text_excerpt",
+        "error",
+        "semantic_judge",
+    ):
+        if key in details:
+            details[key] = redact(details[key])
+
+
 # Encoded Slack mention markup as stored in raw message text. Both the bare
 # (<@U123…>) and labelled (<@U123…|name>) forms actually notify the target;
 # a literal "@Display Name" renders as inert text and notifies nobody.
@@ -5252,23 +5281,18 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
         timeout=240.0,
         expose_full_reply_text=True,
     )
-    if not result.success:
-        result.details.pop("full_reply_text", None)
-        return result
-    # Scan the FULL reply (a raw id early in a long digest must not escape
-    # via excerpt truncation), then drop it from persisted details and keep
-    # the bounded excerpt redacted of raw ids.
+    # Preserve the full reply only in memory for leak detection, then sanitize
+    # every persisted string before any success or failure return.
     reply_text = str(
         result.details.pop("full_reply_text", None)
         or result.details.get("text_excerpt")
         or ""
     )
-    excerpt = str(result.details.get("text_excerpt") or "")
-    if excerpt:
-        result.details["text_excerpt"] = RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
-            "C_REDACTED",
-            _redact_slack_user_ids_in_text(excerpt),
-        )
+    _redact_slack_entity_ids_in_artifact_details(result.details)
+    if not result.success:
+        return result
+    # Scan the FULL reply (a raw id early in a long digest must not escape
+    # via excerpt truncation). Persist leak counts only below.
     # Persist leak COUNTS only: echoing the leaked identifiers into the
     # artifact JSON would re-leak the very values this probe exists to keep
     # out of persisted artifacts (the redacted excerpt would be moot).
@@ -6067,6 +6091,7 @@ async def _slack_correctness_chat_reply(
         or chat.details.get("text_excerpt")
         or ""
     )
+    _redact_slack_entity_ids_in_artifact_details(chat.details)
     if not chat.success:
         failure_category = str(chat.details.get("failure_category") or "")
         if failure_category.endswith(("_unavailable", "_transient")):
@@ -6121,19 +6146,21 @@ def _slack_correctness_failure_result(
 ) -> ProbeResult:
     error = _exc_text(exc)
     precondition = error.startswith("probe precondition failed:")
+    artifact_details = {
+        **details,
+        "error": error,
+        "failure_class": "precondition" if precondition else "product",
+        "failure_category": (
+            "invalid_fixture" if precondition else "answer_mismatch"
+        ),
+        "failure_status": "failed",
+    }
+    _redact_slack_entity_ids_in_artifact_details(artifact_details)
     return _result(
         case_name,
         False,
         started,
-        {
-            **details,
-            "error": error,
-            "failure_class": "precondition" if precondition else "product",
-            "failure_category": (
-                "invalid_fixture" if precondition else "answer_mismatch"
-            ),
-            "failure_status": "failed",
-        },
+        artifact_details,
     )
 
 
