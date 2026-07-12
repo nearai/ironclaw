@@ -181,7 +181,10 @@ async fn gateway_records_prompt_cache_break_on_tool_capable_path_when_tool_surfa
     let request = model_request(interactive_model());
     let run_id = request.run_id;
     gateway
-        .stream_model_with_capabilities(request, Arc::new(GatewayCapabilityPort::with_tool_surface()))
+        .stream_model_with_capabilities(
+            request,
+            Arc::new(GatewayCapabilityPort::with_tool_surface()),
+        )
         .await
         .unwrap();
     assert!(
