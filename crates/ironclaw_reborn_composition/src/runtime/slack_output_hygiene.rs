@@ -110,7 +110,14 @@ fn capabilities_have_slack_context(capabilities: &dyn LoopCapabilityPort) -> boo
         Ok(definitions) => definitions
             .iter()
             .any(|definition| is_slack_capability(definition.capability_id.as_str())),
-        Err(_) => false,
+        Err(error) => {
+            tracing::debug!(
+                error_kind = error.kind.as_str(),
+                safe_summary = %error.safe_summary,
+                "capability definitions unavailable; applying conservative Slack output hygiene"
+            );
+            true
+        }
     }
 }
 
@@ -161,7 +168,7 @@ fn redact_slack_identifiers(text: &str) -> String {
     while cursor < bytes.len() {
         let mention = bytes[cursor] == b'<' && bytes.get(cursor + 1) == Some(&b'@');
         let identifier_start = if mention { cursor + 2 } else { cursor };
-        let Some(identifier_end) = slack_identifier_end(bytes, identifier_start) else {
+        let Some(identifier_end) = slack_identifier_end(bytes, identifier_start, mention) else {
             cursor += 1;
             continue;
         };
@@ -181,7 +188,7 @@ fn redact_slack_identifiers(text: &str) -> String {
     redacted
 }
 
-fn slack_identifier_end(bytes: &[u8], start: usize) -> Option<usize> {
+fn slack_identifier_end(bytes: &[u8], start: usize, encoded_mention: bool) -> Option<usize> {
     let prefix = *bytes.get(start)?;
     if !matches!(prefix, b'U' | b'W')
         || start
@@ -193,14 +200,17 @@ fn slack_identifier_end(bytes: &[u8], start: usize) -> Option<usize> {
     }
 
     let mut end = start + 1;
-    while bytes
+    let mut has_digit = false;
+    while let Some(byte) = bytes
         .get(end)
-        .is_some_and(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        .filter(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
+        has_digit |= byte.is_ascii_digit();
         end += 1;
     }
     let suffix_len = end - start - 1;
     if suffix_len < 8
+        || (!encoded_mention && !has_digit)
         || bytes
             .get(end)
             .is_some_and(|byte| is_ascii_token_byte(*byte))
@@ -226,11 +236,11 @@ mod tests {
     };
     use ironclaw_threads::ProviderToolCallReferenceEnvelope;
     use ironclaw_turns::run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, LoopCapabilityPort, LoopModelUsage, ModelProfileId,
-        ParentLoopOutput, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
+        CapabilityOutcome, CapabilitySurfaceVersion, LoopCapabilityPort, LoopModelUsage,
+        ModelProfileId, ParentLoopOutput, ProviderToolCallReplay, ProviderToolDefinition,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     };
     use ironclaw_turns::{LoopMessageRef, TurnId, TurnRunId, TurnScope};
 
@@ -247,8 +257,16 @@ mod tests {
             "mention [Slack identifier redacted]"
         );
         assert_eq!(
+            redact_slack_identifiers("mention <@UABCDEFGH>"),
+            "mention [Slack identifier redacted]"
+        );
+        assert_eq!(
             redact_slack_identifiers("legacy W0123ABCDE."),
             "legacy [Slack identifier redacted]."
+        );
+        assert_eq!(
+            redact_slack_identifiers("letter-first WABC12345"),
+            "letter-first [Slack identifier redacted]"
         );
     }
 
@@ -260,6 +278,18 @@ mod tests {
         );
         let once = redact_slack_identifiers("U0123ABCDE");
         assert_eq!(redact_slack_identifiers(&once), once);
+    }
+
+    #[test]
+    fn slack_output_hygiene_preserves_uppercase_prose_and_unicode() {
+        assert_eq!(
+            redact_slack_identifiers("UNAVAILABLE WORKSPACE WASHINGTON"),
+            "UNAVAILABLE WORKSPACE WASHINGTON"
+        );
+        assert_eq!(
+            redact_slack_identifiers("emoji 🙂 U0123ABCDE and café"),
+            "emoji 🙂 [Slack identifier redacted] and café"
+        );
     }
 
     #[derive(Clone)]
@@ -384,6 +414,39 @@ mod tests {
 
     struct StaticToolDefinitions {
         definitions: Vec<ProviderToolDefinition>,
+    }
+
+    struct FailingToolDefinitions;
+
+    #[async_trait::async_trait]
+    impl LoopCapabilityPort for FailingToolDefinitions {
+        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "synthetic capability lookup failure",
+            ))
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            panic!("output hygiene tests do not inspect visible capabilities")
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            panic!("output hygiene tests do not invoke capabilities")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            panic!("output hygiene tests do not invoke capability batches")
+        }
     }
 
     #[async_trait::async_trait]
@@ -655,6 +718,67 @@ mod tests {
             arguments,
             "Slack send_message arguments must remain byte-for-byte unchanged"
         );
+    }
+
+    #[tokio::test]
+    async fn slack_output_hygiene_gateway_fails_closed_when_tool_definitions_are_unavailable() {
+        let inner = Arc::new(
+            RecordingGateway::new(HostManagedModelResponse::assistant_reply("user U0123ABCDE"))
+                .with_progress(vec!["checking U0123ABCDE"]),
+        );
+        let gateway = SlackOutputHygieneGateway::new(inner);
+
+        let response = gateway
+            .stream_model_with_capabilities(model_request(None), Arc::new(FailingToolDefinitions))
+            .await
+            .expect("capability lookup failure must not disable output hygiene");
+        assert_eq!(
+            response.output,
+            ParentLoopOutput::AssistantReply(ironclaw_turns::run_profile::AssistantReply {
+                content: "user [Slack identifier redacted]".to_string(),
+            })
+        );
+
+        let sink = Arc::new(RecordingStreamSink::default());
+        let response = gateway
+            .stream_model_with_capabilities_and_progress(
+                model_request(None),
+                Arc::new(FailingToolDefinitions),
+                sink.clone(),
+            )
+            .await
+            .expect("capability lookup failure must not disable progress hygiene");
+        assert_eq!(sink.updates(), vec!["checking [Slack identifier redacted]"]);
+        assert_eq!(
+            response.output,
+            ParentLoopOutput::AssistantReply(ironclaw_turns::run_profile::AssistantReply {
+                content: "user [Slack identifier redacted]".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_output_hygiene_gateway_preserves_uppercase_prose_in_slack_context() {
+        let raw_response = HostManagedModelResponse::assistant_reply_with_reasoning(
+            "UNAVAILABLE WORKSPACE",
+            Some("WASHINGTON".to_string()),
+        );
+        let inner =
+            Arc::new(RecordingGateway::new(raw_response.clone()).with_progress(vec!["UNDERSTAND"]));
+        let gateway = SlackOutputHygieneGateway::new(inner);
+        let sink = Arc::new(RecordingStreamSink::default());
+
+        let response = gateway
+            .stream_model_with_capabilities_and_progress(
+                model_request(None),
+                tool_definitions("slack.get_conversation_history"),
+                sink.clone(),
+            )
+            .await
+            .expect("uppercase prose must remain intact in Slack context");
+
+        assert_eq!(response, raw_response);
+        assert_eq!(sink.updates(), vec!["UNDERSTAND"]);
     }
 
     #[tokio::test]

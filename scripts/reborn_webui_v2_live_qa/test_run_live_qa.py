@@ -5283,6 +5283,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             [],
         )
+        prose = "UNDERSTAND this WONDERFUL WATERFALL"
+        self.assertEqual(
+            run_live_qa.RAW_SLACK_USER_ID_PATTERN.sub("U_REDACTED", prose),
+            prose,
+        )
 
     def test_digest_scan_uses_full_reply_and_redacts_persisted_excerpt(self):
         import inspect
@@ -5297,7 +5302,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "truncation would blind it to ids early in a long digest",
         )
         self.assertIn(
-            "RAW_SLACK_USER_ID_PATTERN.sub",
+            "_redact_slack_user_ids_in_text",
             source,
             "the persisted excerpt must be redacted of raw user ids",
         )
@@ -5327,6 +5332,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "U0BDC16TML3",
                 "leaked_raw_user_id_count",
             ),
+            "encoded_user_id": (
+                "your DMs: <@UABCDEFGH> said hi REBORN_QA_9C_DIGEST",
+                "UABCDEFGH",
+                "leaked_raw_user_id_count",
+            ),
             "conversation_id": (
                 "your DMs: D0BDC16TML3 has one message REBORN_QA_9C_DIGEST",
                 "D0BDC16TML3",
@@ -5347,10 +5357,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         },
                     )
 
-                with patch.object(
-                    run_live_qa,
-                    "_live_chat_case",
-                    side_effect=fake_live_chat_case,
+                with (
+                    patch.object(
+                        run_live_qa,
+                        "_live_chat_case",
+                        side_effect=fake_live_chat_case,
+                    ),
+                    patch.object(
+                        run_live_qa,
+                        "_slack_personal_dm_counterpart_names",
+                        return_value={"names": []},
+                    ),
                 ):
                     result = asyncio.run(
                         run_live_qa.case_qa_9c_slack_digest_names_not_ids(
@@ -6028,6 +6045,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         raw_id, raw_id_calls = drive(
             "Canary Person (W0FIXTURE1) should sync the fixture."
         )
+        encoded_id, encoded_id_calls = drive(
+            "Canary Person (<@WABCDEFGH>) should sync the fixture."
+        )
         intervened, intervention_calls = drive(
             "Canary Person ([Slack identifier redacted]) should sync the fixture."
         )
@@ -6036,13 +6056,21 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(natural.success)
         self.assertFalse(raw_id.success)
         self.assertEqual(raw_id.details["failure_class"], "product")
+        self.assertFalse(encoded_id.success)
+        self.assertNotIn("WABCDEFGH", json.dumps(encoded_id.details))
         self.assertFalse(intervened.success)
         self.assertEqual(intervened.details["failure_class"], "model_quality")
         self.assertFalse(missing_name.success)
         self.assertEqual(missing_name.details["failure_class"], "product")
         self.assertEqual(
-            (natural_calls, raw_id_calls, intervention_calls, missing_name_calls),
-            (1, 1, 1, 1),
+            (
+                natural_calls,
+                raw_id_calls,
+                encoded_id_calls,
+                intervention_calls,
+                missing_name_calls,
+            ),
+            (1, 1, 1, 1, 1),
             "10I is a one-shot behavioral observation and must never retry",
         )
 

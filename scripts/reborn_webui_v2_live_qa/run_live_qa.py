@@ -5064,20 +5064,32 @@ def _gated_case(case_name: str) -> CaseFn:
     return run_gated
 
 
-RAW_SLACK_USER_ID_PATTERN = re.compile(r"\b[UW][A-Z0-9]{8,}\b")
+RAW_SLACK_USER_ID_PATTERN = re.compile(
+    r"\b[UW](?=[A-Z0-9]*[0-9])[A-Z0-9]{8,}\b"
+)
+ENCODED_RAW_SLACK_USER_ID_PATTERN = re.compile(
+    r"<@([UW][A-Z0-9]{8,})(?:\|[^>]*)?>"
+)
 
 
 def _raw_slack_user_ids_in_text(text: str) -> list[str]:
     """Raw Slack user ids (U…/W…) leaked into user-facing text.
 
-    Requires at least one digit so all-caps words like UNDERSTAND never
-    false-positive; real Slack ids always mix letters and digits.
+    Encoded mentions are unambiguous. Bare tokens require a digit to avoid
+    classifying all-caps prose such as UNDERSTAND as a Slack identifier.
     """
-    return [
-        match
-        for match in RAW_SLACK_USER_ID_PATTERN.findall(text or "")
-        if any(ch.isdigit() for ch in match)
-    ]
+    source = text or ""
+    encoded = ENCODED_RAW_SLACK_USER_ID_PATTERN.findall(source)
+    bare_source = ENCODED_RAW_SLACK_USER_ID_PATTERN.sub("", source)
+    return encoded + RAW_SLACK_USER_ID_PATTERN.findall(bare_source)
+
+
+def _redact_slack_user_ids_in_text(text: str) -> str:
+    source = text or ""
+    without_mentions = ENCODED_RAW_SLACK_USER_ID_PATTERN.sub(
+        "U_REDACTED", source
+    )
+    return RAW_SLACK_USER_ID_PATTERN.sub("U_REDACTED", without_mentions)
 
 
 # Slack conversation ids (C… channel / D… DM / G… group) in the
@@ -5255,7 +5267,7 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
     if excerpt:
         result.details["text_excerpt"] = RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
             "C_REDACTED",
-            RAW_SLACK_USER_ID_PATTERN.sub("U_REDACTED", excerpt),
+            _redact_slack_user_ids_in_text(excerpt),
         )
     # Persist leak COUNTS only: echoing the leaked identifiers into the
     # artifact JSON would re-leak the very values this probe exists to keep
@@ -6610,9 +6622,7 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
         if excerpt:
             # The model often echoes the encoded mention it posted — keep raw
             # user ids out of persisted artifacts, same as qa_9c/qa_10i.
-            details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                "U_REDACTED", excerpt
-            )
+            details["text_excerpt"] = _redact_slack_user_ids_in_text(excerpt)
         posted = await _wait_for_authored_slack_message(
             personal_token,
             channel_id=channel_id,
@@ -6627,8 +6637,8 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             # failure — the original pin this probe exists for.
             if posted.get("unencoded_author_marker_ts") is not None:
                 details["mention_encoded"] = False
-                details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                    "U_REDACTED", str(posted.get("unencoded_author_text") or "")
+                details["posted_text_redacted"] = _redact_slack_user_ids_in_text(
+                    str(posted.get("unencoded_author_text") or "")
                 )
                 raise AssertionError(
                     "posted mention is NOT <@U…>-encoded in the raw message "
@@ -6657,8 +6667,8 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
         )
         details["mention_targets_counterpart"] = targets_counterpart
         if not targets_counterpart:
-            details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                "U_REDACTED", raw_text
+            details["posted_text_redacted"] = _redact_slack_user_ids_in_text(
+                raw_text
             )
             raise AssertionError(
                 "posted mention is encoded but does not target the requested "
@@ -6922,9 +6932,7 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
         details.update(chat.details)
         excerpt = str(details.get("text_excerpt") or "")
         if excerpt:
-            details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                "U_REDACTED", excerpt
-            )
+            details["text_excerpt"] = _redact_slack_user_ids_in_text(excerpt)
         if "<@U" in reply_text or "<@W" in reply_text:
             raise AssertionError(
                 "reply leaked encoded Slack mention markup (<@U…>/<@W…>) into "

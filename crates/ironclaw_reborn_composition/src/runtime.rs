@@ -5226,6 +5226,13 @@ output_schema_ref = "schemas/write.output.json"
         requests: StdMutex<Vec<HostManagedModelRequest>>,
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[derive(Debug, Default)]
+    struct SlackHygieneToolCallingGateway {
+        calls: StdMutex<usize>,
+        requests: StdMutex<Vec<HostManagedModelRequest>>,
+    }
+
     #[derive(Debug, Default)]
     struct AuthGateToolCallingGateway {
         requests: StdMutex<Vec<HostManagedModelRequest>>,
@@ -5430,6 +5437,112 @@ output_schema_ref = "schemas/write.output.json"
                         id: "call-1".to_string(),
                         name: echo_tool.name,
                         arguments: serde_json::json!({"message": "hello from tool"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
+                .await
+                .map_err(model_capability_error)?;
+            Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ))
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[async_trait]
+    impl HostManagedModelGateway for SlackHygieneToolCallingGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            const RAW_SLACK_USER_ID: &str = "U0123ABCDE";
+
+            let call_index = {
+                let mut calls = self
+                    .calls
+                    .lock()
+                    .expect("Slack hygiene gateway call lock poisoned");
+                let call_index = *calls;
+                *calls += 1;
+                call_index
+            };
+            self.requests
+                .lock()
+                .expect("Slack hygiene gateway requests lock poisoned")
+                .push(request.clone());
+
+            let definitions = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?;
+            assert!(
+                definitions
+                    .iter()
+                    .any(|definition| definition.capability_id.as_str().starts_with("slack.")),
+                "activated Slack capabilities must be visible through the production runtime surface"
+            );
+
+            if call_index > 0 {
+                let tool_result = request
+                    .messages
+                    .iter()
+                    .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                    .expect("second model call should include the echo tool result");
+                assert!(
+                    tool_result.content.contains(RAW_SLACK_USER_ID),
+                    "the model must receive the raw hydrated Slack identifier for tool chaining; got {}",
+                    tool_result.content
+                );
+                assert!(matches!(
+                    tool_result.tool_result_content,
+                    Some(ironclaw_loop_support::HostManagedToolResultContent::Resolved { .. })
+                ));
+                assert_eq!(
+                    tool_result
+                        .tool_result_provider_call
+                        .as_ref()
+                        .expect("provider replay metadata")
+                        .capability_id,
+                    CapabilityId::new("builtin.echo").expect("echo capability id")
+                );
+                return Ok(HostManagedModelResponse::assistant_reply(format!(
+                    "resolved user {RAW_SLACK_USER_ID}"
+                )));
+            }
+
+            capabilities
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .map_err(model_capability_error)?;
+            let echo_id = CapabilityId::new("builtin.echo").expect("echo capability id");
+            let echo_tool = definitions
+                .into_iter()
+                .find(|definition| definition.capability_id == echo_id)
+                .expect("builtin echo must be visible through the production runtime surface");
+            let candidate = capabilities
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "slack-hygiene-test-provider".to_string(),
+                        provider_model_id: "slack-hygiene-test-model".to_string(),
+                        turn_id: Some("slack-hygiene-test-turn".to_string()),
+                        id: "slack-hygiene-echo-call".to_string(),
+                        name: echo_tool.name,
+                        arguments: serde_json::json!({
+                            "message": format!("message from <@{RAW_SLACK_USER_ID}>")
+                        }),
                         response_reasoning: None,
                         reasoning: None,
                         signature: None,
@@ -8509,6 +8622,87 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(
             provider_call.capability_id,
             CapabilityId::new("builtin.echo").unwrap()
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn build_reborn_runtime_hydrates_raw_slack_shaped_tool_result_before_redacting_output() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(SlackHygieneToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-slack-hygiene-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-slack-hygiene-tenant".to_string(),
+            agent_id: "runtime-slack-hygiene-agent".to_string(),
+            source_binding_id: "runtime-slack-hygiene-source".to_string(),
+            reply_target_binding_id: "runtime-slack-hygiene-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let extension_management = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime services")
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+            .expect("valid Slack extension ref");
+        extension_management
+            .install(
+                slack_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
+            .await
+            .expect("install bundled Slack extension");
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                slack_ref,
+                ExtensionActivationMode::Static,
+            )
+            .await
+            .expect("activate bundled Slack extension");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "resolve the synthetic Slack user"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(
+            reply.text.as_deref(),
+            Some("resolved user [Slack identifier redacted]")
+        );
+        assert_eq!(
+            gateway
+                .requests
+                .lock()
+                .expect("Slack hygiene gateway requests lock poisoned")
+                .len(),
+            2,
+            "tool call should require initial request plus hydrated tool-result follow-up"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
