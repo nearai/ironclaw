@@ -354,14 +354,29 @@ impl InboundSink for GenericChannelInboundSink {
             }
             Err(error) => {
                 let retryable = error.is_retryable();
-                let reason = error.to_string();
                 if let Some(observer) = self.config.observer.clone() {
                     self.spawn_observer(async move {
                         observer.observe_error(envelope, error).await;
                     })
                     .await;
+                } else if !retryable {
+                    tracing::debug!(
+                        "inbound admission settled terminally with no post-admission observer"
+                    );
                 }
-                Err(InboundSinkError { retryable, reason })
+                if retryable {
+                    Err(InboundSinkError {
+                        retryable: true,
+                        reason: "workflow admission failed retryably".to_string(),
+                    })
+                } else {
+                    // A non-retryable workflow error is settled in the durable
+                    // idempotency ledger (a vendor redelivery replays as
+                    // Duplicate) — the event is durably accounted for, so the
+                    // vendor gets its 2xx; user-visible feedback flows through
+                    // the post-admission observer.
+                    Ok(InboundAdmissionAck::Accepted)
+                }
             }
         }
     }

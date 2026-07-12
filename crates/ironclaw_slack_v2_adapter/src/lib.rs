@@ -6,6 +6,7 @@
 //! signing secrets or bot tokens.
 //!
 //! * [`adapter`] — ProductAdapter implementation and egress/auth metadata.
+//! * [`channel`] — the generic-ingress `ChannelAdapter` (inbound cutover).
 //! * [`delivery`] — Slack Web API response classification and status mapping.
 //! * [`mrkdwn`] — Slack mrkdwn rendering and message chunking.
 //! * [`payload`] — Slack Events API payload normalization.
@@ -14,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod adapter;
+mod channel;
 mod delivery;
 mod mrkdwn;
 mod payload;
@@ -25,8 +27,10 @@ pub use adapter::{
     SlackV2Adapter, SlackV2AdapterConfig, slack_declared_egress_hosts, slack_default_capabilities,
     slack_request_signature_auth_requirement,
 };
+pub use channel::SlackChannelAdapter;
 pub use payload::{
-    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackPayloadParseError, SlackUrlVerificationChallenge,
-    parse_slack_event, parse_slack_url_verification_challenge,
+    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackInboundEvent, SlackNormalizedMessage,
+    SlackPayloadParseError, SlackUrlVerificationChallenge, classify_interaction_resolution,
+    normalize_slack_event, parse_slack_event, parse_slack_url_verification_challenge,
 };
 pub use render::{SlackRenderError, render_final_reply};

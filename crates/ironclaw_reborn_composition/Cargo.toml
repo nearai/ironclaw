@@ -192,6 +192,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"

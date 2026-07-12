@@ -1750,6 +1750,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         let generic = crate::extension_host::generic_host::build_generic_extension_host(
             services.extension_lane_tool_binder(),
             native_extension_factories,
+            crate::extension_host::available_extensions::bundled_channel_adapter_bindings(),
             store_graph
                 .local_runtime
                 .extension_management

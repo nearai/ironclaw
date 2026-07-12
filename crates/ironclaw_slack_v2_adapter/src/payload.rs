@@ -109,6 +109,130 @@ pub fn parse_slack_event(
     }
 }
 
+// ── Channel-normalized parsing (generic ingress router, extension-runtime P4) ──
+
+/// One host-verified Slack inbound request, normalized for the generic
+/// channel-adapter contract: a URL-verification challenge, an ignored event,
+/// or one plain user message. Gate-resolution classification (`approve` /
+/// `deny gate:<ref>` / `auth deny <ref>`) is deliberately NOT applied here —
+/// the host sink reclassifies via [`classify_interaction_resolution`].
+#[derive(Debug)]
+pub enum SlackInboundEvent {
+    UrlVerification { challenge: String },
+    Ignore,
+    Message(Box<SlackNormalizedMessage>),
+}
+
+/// One normalized Slack user message.
+#[derive(Debug)]
+pub struct SlackNormalizedMessage {
+    pub event_id: ExternalEventId,
+    pub actor: ExternalActorRef,
+    pub conversation: ExternalConversationRef,
+    pub text: String,
+    pub attachments: Vec<ProductAttachmentDescriptor>,
+    pub trigger: ProductTriggerReason,
+}
+
+/// Parse one host-verified Slack Events API request into its normalized
+/// channel form. Pure protocol work — no I/O, no secrets; the host executed
+/// the signature recipe before calling this.
+pub fn normalize_slack_event(
+    raw_payload: &[u8],
+    installation_id: &AdapterInstallationId,
+) -> Result<SlackInboundEvent, SlackPayloadParseError> {
+    if raw_payload.len() > MAX_SLACK_PAYLOAD_BYTES {
+        return Err(SlackPayloadParseError::InvalidJson {
+            reason: "payload exceeds size limit".into(),
+        });
+    }
+    let url_wrapper: SlackUrlVerificationWrapper =
+        serde_json::from_slice(raw_payload).map_err(|err| SlackPayloadParseError::InvalidJson {
+            reason: err.to_string(),
+        })?;
+    if url_wrapper.event_type == "url_verification" {
+        let challenge =
+            url_wrapper
+                .challenge
+                .ok_or_else(|| SlackPayloadParseError::InvalidExternalRef {
+                    kind: "slack_url_verification_challenge",
+                    reason: "missing challenge".to_string(),
+                })?;
+        return Ok(SlackInboundEvent::UrlVerification { challenge });
+    }
+
+    let wrapper: SlackEventWrapper =
+        serde_json::from_slice(raw_payload).map_err(|err| SlackPayloadParseError::InvalidJson {
+            reason: err.to_string(),
+        })?;
+    let event_id = build_event_id(
+        installation_id,
+        wrapper.event_id.as_deref(),
+        &wrapper.event_type,
+    )?;
+    if wrapper.event_type != "event_callback" {
+        return Ok(SlackInboundEvent::Ignore);
+    }
+    let Some(event) = wrapper.event.as_ref() else {
+        return Ok(SlackInboundEvent::Ignore);
+    };
+    let team_id = wrapper.team_id.as_deref();
+    let parsed = match event.event_type.as_str() {
+        "app_mention" => {
+            try_parse_user_message(event_id, team_id, event, SlackMessageKind::AppMention)?
+        }
+        "message" => {
+            if is_dm_channel(
+                event.channel.as_deref().unwrap_or_default(),
+                event.channel_type.as_deref(),
+            ) {
+                try_parse_user_message(event_id, team_id, event, SlackMessageKind::Dm)?
+            } else if event.thread_ts.is_some() {
+                try_parse_user_message(event_id, team_id, event, SlackMessageKind::ThreadReply)?
+            } else {
+                return Ok(SlackInboundEvent::Ignore);
+            }
+        }
+        _ => return Ok(SlackInboundEvent::Ignore),
+    };
+    match parsed.payload {
+        ProductInboundPayload::UserMessage(message) => {
+            let trigger = message.trigger;
+            Ok(SlackInboundEvent::Message(Box::new(
+                SlackNormalizedMessage {
+                    event_id: parsed.external_event_id,
+                    actor: parsed.external_actor_ref,
+                    conversation: parsed.external_conversation_ref,
+                    text: message.text,
+                    attachments: message.attachments,
+                    trigger,
+                },
+            )))
+        }
+        // try_parse_user_message downgrades bot/system/subtype messages to
+        // NoOp — authenticated no-ops for the channel contract.
+        _ => Ok(SlackInboundEvent::Ignore),
+    }
+}
+
+/// Classify a normalized message's text as a gate-resolution interaction
+/// (`approve [gate:<ref>]` / `deny [gate:<ref>]` / `auth deny <ref>`),
+/// exactly as the event parse path used to. Malformed interaction phrasings
+/// fail closed to an authenticated no-op payload; non-interaction text is
+/// `None` (an ordinary user message).
+pub fn classify_interaction_resolution(
+    text: &str,
+    trigger: ProductTriggerReason,
+) -> Option<ProductInboundPayload> {
+    match parse_interaction_resolution(text, trigger) {
+        Ok(classification) => classification,
+        // A recognized interaction verb whose payload failed validation
+        // (hostile ref bytes): fail closed to a no-op rather than starting a
+        // turn on gate-resolution phrasing.
+        Err(_) => Some(ProductInboundPayload::NoOp),
+    }
+}
+
 fn parse_app_mention(
     event_id: ExternalEventId,
     team_id: Option<&str>,

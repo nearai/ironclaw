@@ -63,6 +63,7 @@ pub(crate) struct GenericExtensionHost {
 pub(crate) async fn build_generic_extension_host(
     binder: ExtensionLaneToolBinder,
     native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
+    channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
     installation_store: Arc<dyn ExtensionInstallationStore>,
     governor: Arc<dyn ResourceGovernor>,
     reserved_capability_ids: BTreeSet<CapabilityId>,
@@ -75,6 +76,7 @@ pub(crate) async fn build_generic_extension_host(
     let loader = Arc::new(CompositionExtensionLoader {
         binder,
         factories,
+        channel_adapters: channel_adapters.into_iter().collect(),
         governor,
         installation_store: Arc::clone(&installation_store),
     });
@@ -166,6 +168,11 @@ pub(crate) fn effective_resolved_for_package(
 struct CompositionExtensionLoader {
     binder: ExtensionLaneToolBinder,
     factories: HashMap<String, Arc<dyn NativeExtensionFactory>>,
+    /// Real channel adapters keyed by extension id, for channel-declaring
+    /// extensions whose TOOLS load via the runtime lanes (P4 ingress cutover).
+    /// An extension without an entry binds the transitional bridge until its
+    /// adapter lands.
+    channel_adapters: HashMap<String, Arc<dyn ChannelAdapter>>,
     governor: Arc<dyn ResourceGovernor>,
     installation_store: Arc<dyn ExtensionInstallationStore>,
 }
@@ -229,11 +236,16 @@ impl ExtensionLoader for CompositionExtensionLoader {
             })?;
         Ok(LoadedExtension::new(Box::new(LaneEntrypoint {
             adapter,
-            // A channel declared while its serve graph is still host-owned
-            // (until the P4/P5 cutovers) binds the transitional bridge so
-            // the binding rule holds.
-            channel: declares_channel
-                .then(|| Arc::new(HostServedChannelBridge) as Arc<dyn ChannelAdapter>),
+            // A channel-declaring extension binds its REAL channel adapter
+            // when the binary/composition assembled one (the P4 inbound
+            // cutover); otherwise the transitional bridge keeps the binding
+            // rule satisfied until the adapter lands.
+            channel: declares_channel.then(|| {
+                self.channel_adapters
+                    .get(&ctx.extension_id)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(HostServedChannelBridge) as Arc<dyn ChannelAdapter>)
+            }),
         })))
     }
 }

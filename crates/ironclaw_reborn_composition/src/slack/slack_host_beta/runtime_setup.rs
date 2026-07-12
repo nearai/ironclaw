@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
+use crate::extension_host::extension_ingress::{ChannelIngressDrain, ChannelIngressRegistration};
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
@@ -39,22 +40,26 @@ use crate::slack::slack_personal_binding::{
     SlackPersonalUserBindingService,
 };
 use crate::slack::slack_serve::{
-    ResolvedSlackIngress, SlackEventsRouteState, SlackIngressError, SlackInstallationResolver,
-    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
-    slack_events_route_mount,
+    SlackInstallationSelector, SlackTeamId, SlackUserId, slack_events_alias_mount,
 };
 use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupService,
 };
+use ironclaw_extension_host::ingress::{
+    InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError, IngressPortError,
+    IngressSecretsPort, VerificationCandidate,
+};
+use ironclaw_host_api::SecretHandle;
 
 use super::{
     ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaBuildError,
     SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
-    SlackPersonalDmTargetProvisioning, build_slack_installation_record_with_resolvers,
-    build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
+    SlackPersonalDmTargetProvisioning, build_slack_inbound_sink,
+    build_triggered_run_delivery_hook_from_parts, extension_ingress_parts, slack_bot_token_handle,
     slack_protocol_egress_from_parts,
 };
+use crate::extension_host::extension_ingress::GenericChannelInboundSink;
 
 pub(super) async fn build_runtime_mounts(
     runtime: &RebornRuntime,
@@ -98,12 +103,50 @@ pub(super) async fn build_runtime_mounts(
             Arc::clone(&dynamic_binding_service),
             dm_provisioner,
         ));
-    let resolver = DynamicSlackInstallationResolver::new(
+    let ingress = extension_ingress_parts(runtime)?;
+    let dynamic_sink = Arc::new(DynamicSlackInboundSink::new(
         Arc::clone(&parts),
         Arc::clone(&setup_service),
         state.clone(),
         Arc::clone(&channel_route_store),
+    ));
+    let drain: Arc<dyn ChannelIngressDrain> =
+        Arc::clone(&dynamic_sink) as Arc<dyn ChannelIngressDrain>;
+    ingress.registry.register(
+        "slack",
+        ChannelIngressRegistration {
+            secrets: Arc::new(DynamicSlackIngressSecrets {
+                setup_service: Arc::clone(&setup_service),
+            }),
+            sink: dynamic_sink as Arc<dyn InboundSink>,
+            drain: Some(Arc::clone(&drain)),
+        },
     );
+    let events =
+        slack_events_alias_mount(Arc::clone(&ingress.router), Some(drain)).map_err(|error| {
+            SlackHostBetaBuildError::InvalidConfig {
+                field: "events_alias",
+                reason: error.to_string(),
+            }
+        })?;
+    // Configured-before-cutover deployments: a saved setup implies the
+    // operator expects live inbound events, so make sure the channel package
+    // is active in the generic host (idempotent; setup save is the normal
+    // activation trigger). Best-effort: activation failures surface through
+    // the normal lifecycle paths, not as a serve-boot failure.
+    if let Some(extension_management) = &parts.local_runtime.extension_management
+        && setup_service.current_setup().await.ok().flatten().is_some()
+        && let Err(error) =
+            DynamicSlackChannelSetupActivation::new(Arc::clone(extension_management))
+                .activate_slack_channel_after_setup_save()
+                .await
+    {
+        tracing::warn!(
+            target = "ironclaw::reborn::slack_host_beta",
+            error = %error,
+            "existing channel setup could not activate the channel package at serve boot"
+        );
+    }
     let mut channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
         Arc::clone(&channel_route_store),
         Arc::clone(&setup_service),
@@ -167,14 +210,13 @@ pub(super) async fn build_runtime_mounts(
         });
     }
 
-    let resolver: Arc<dyn SlackInstallationResolver> = Arc::new(resolver);
     let personal_connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver> =
         Arc::new(DynamicSlackPersonalConnectionScopeResolver {
             setup_service: Arc::clone(&setup_service),
         });
 
     Ok(SlackHostBetaMounts {
-        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(resolver)),
+        events,
         channel_routes,
         tenant_id: config.tenant_id.clone(),
         personal_connection_scope: None,
@@ -461,16 +503,66 @@ impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
     }
 }
 
-#[derive(Clone)]
-struct DynamicSlackInstallationResolver {
+/// Per-request verification secret candidates from the CURRENT channel
+/// setup: a WebUI setup save takes effect on the next webhook without any
+/// route rebuild. No setup configured -> no candidates -> the generic router
+/// rejects 401 (the pre-cutover installation-not-found semantic).
+struct DynamicSlackIngressSecrets {
+    setup_service: Arc<SlackSetupService>,
+}
+
+#[async_trait::async_trait]
+impl IngressSecretsPort for DynamicSlackIngressSecrets {
+    async fn verification_candidates(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+        _handle: Option<&SecretHandle>,
+    ) -> Result<Vec<VerificationCandidate>, IngressPortError> {
+        let setup = self
+            .setup_service
+            .current_setup()
+            .await
+            .map_err(|error| IngressPortError {
+                reason: format!("channel setup unavailable: {error}"),
+            })?;
+        let Some(setup) = setup else {
+            return Ok(Vec::new());
+        };
+        let signing_secret = self
+            .setup_service
+            .signing_secret(&setup)
+            .await
+            .map_err(|error| IngressPortError {
+                reason: format!("signing secret unavailable: {error}"),
+            })?;
+        Ok(vec![VerificationCandidate {
+            installation_id: setup.installation_id.clone(),
+            secret: secrecy::ExposeSecret::expose_secret(&signing_secret)
+                .as_bytes()
+                .to_vec(),
+        }])
+    }
+}
+
+/// Per-revision inbound sink over the CURRENT channel setup: the workflow +
+/// delivery-observer graph is rebuilt when the WebUI setup revision changes,
+/// and retired generations are drained at shutdown.
+struct DynamicSlackInboundSink {
     parts: Arc<SlackHostBetaRuntimeParts>,
     setup_service: Arc<SlackSetupService>,
     state: Arc<dyn RebornUserIdentityLookup>,
     channel_route_store: Arc<dyn SlackChannelRouteStore>,
-    live_resolvers: Arc<Mutex<DynamicSlackInstallationResolverLifecycle>>,
+    live: Mutex<DynamicSlackSinkLifecycle>,
 }
 
-impl DynamicSlackInstallationResolver {
+#[derive(Default)]
+struct DynamicSlackSinkLifecycle {
+    current: Option<(u64, Arc<GenericChannelInboundSink>)>,
+    retired: Vec<Arc<GenericChannelInboundSink>>,
+}
+
+impl DynamicSlackInboundSink {
     fn new(
         parts: Arc<SlackHostBetaRuntimeParts>,
         setup_service: Arc<SlackSetupService>,
@@ -482,67 +574,62 @@ impl DynamicSlackInstallationResolver {
             setup_service,
             state,
             channel_route_store,
-            live_resolvers: Arc::new(Mutex::new(
-                DynamicSlackInstallationResolverLifecycle::default(),
-            )),
+            live: Mutex::new(DynamicSlackSinkLifecycle::default()),
         }
     }
 
-    async fn resolver(&self) -> Result<Arc<StaticSlackInstallationResolver>, SlackIngressError> {
-        // Read setup before consulting the live resolver holder so WebUI changes
-        // take effect on the next webhook. The holder below is for runner
-        // lifecycle/drain ownership, not for hiding setup-store I/O.
+    async fn current_sink(&self) -> Result<Arc<GenericChannelInboundSink>, InboundSinkError> {
+        // Read setup before consulting the cache so WebUI changes take effect
+        // on the next webhook.
         let setup = self
             .setup_service
             .current_setup()
             .await
-            .map_err(map_setup_error_to_ingress_not_found("read Slack setup"))?
-            .ok_or(SlackIngressError::InstallationNotFound)?;
+            .map_err(|error| InboundSinkError {
+                retryable: true,
+                reason: format!("channel setup unavailable: {error}"),
+            })?
+            .ok_or_else(|| InboundSinkError {
+                retryable: true,
+                reason: "no channel setup is configured".to_string(),
+            })?;
         let revision = setup.revision;
-        if let Some(resolver) = self.live_resolver_for_revision(revision).await {
-            return Ok(resolver);
-        }
-
-        let resolver = Arc::new(self.build_resolver(setup).await?);
-        let mut live_resolvers = self.live_resolvers.lock().await;
-        if let Some(current) = &live_resolvers.current
-            && current.revision == revision
         {
-            return Ok(Arc::clone(&current.resolver));
+            let live = self.live.lock().await;
+            if let Some((cached_revision, sink)) = &live.current
+                && *cached_revision == revision
+            {
+                return Ok(Arc::clone(sink));
+            }
         }
-        if let Some(previous) = live_resolvers.current.replace(DynamicLiveSlackResolver {
-            revision,
-            resolver: Arc::clone(&resolver),
-        }) {
-            live_resolvers.retired.push(previous.resolver);
+
+        let sink = self.build_sink(setup).await?;
+        let mut live = self.live.lock().await;
+        if let Some((cached_revision, cached)) = &live.current
+            && *cached_revision >= revision
+        {
+            return Ok(Arc::clone(cached));
         }
-        Ok(resolver)
+        if let Some((_, previous)) = live.current.replace((revision, Arc::clone(&sink))) {
+            live.retired.push(previous);
+        }
+        Ok(sink)
     }
 
-    async fn live_resolver_for_revision(
-        &self,
-        revision: u64,
-    ) -> Option<Arc<StaticSlackInstallationResolver>> {
-        let live_resolvers = self.live_resolvers.lock().await;
-        live_resolvers
-            .current
-            .as_ref()
-            .filter(|current| current.revision == revision)
-            .map(|current| Arc::clone(&current.resolver))
-    }
-
-    async fn build_resolver(
+    async fn build_sink(
         &self,
         setup: SlackInstallationSetup,
-    ) -> Result<StaticSlackInstallationResolver, SlackIngressError> {
+    ) -> Result<Arc<GenericChannelInboundSink>, InboundSinkError> {
         let config = slack_host_beta_config_from_setup(&self.setup_service, setup)
             .await
-            .map_err(map_setup_error_to_ingress_not_found(
-                "resolve Slack setup secrets",
-            ))?
-            .map_err(map_build_error_to_ingress_not_found(
-                "build Slack setup config",
-            ))?;
+            .map_err(|error| InboundSinkError {
+                retryable: true,
+                reason: format!("channel setup secrets unavailable: {error}"),
+            })?
+            .map_err(|error| InboundSinkError {
+                retryable: true,
+                reason: format!("channel setup config invalid: {error}"),
+            })?;
         let identity_lookup: Arc<dyn crate::provider_identity::RebornUserIdentityLookup> =
             self.state.clone();
         let actor_user_resolver = Arc::new(slack_provider_identity_actor_resolver(Arc::clone(
@@ -554,7 +641,7 @@ impl DynamicSlackInstallationResolver {
                 config.installation_id.clone(),
                 Arc::clone(&self.channel_route_store),
             ));
-        // Durable, filesystem-backed conversation binding store so Slack
+        // Durable, filesystem-backed conversation binding store so channel
         // conversation continuity survives a process restart. Backend
         // (libSQL / Postgres / local disk) is a property of the host-state
         // root filesystem, shared with the idempotency ledger.
@@ -563,83 +650,51 @@ impl DynamicSlackInstallationResolver {
         ))
         .await
         .map_err(|error| {
-            tracing::error!(%error, "Slack durable conversation store unavailable");
-            SlackIngressError::ConversationStoreUnavailable {
-                reason: error.to_string(),
+            tracing::error!(%error, "durable channel conversation store unavailable");
+            InboundSinkError {
+                retryable: true,
+                reason: format!("durable conversation store unavailable: {error}"),
             }
         })?;
-        let record = build_slack_installation_record_with_resolvers(
+        build_slack_inbound_sink(
             &self.parts,
             config,
             actor_user_resolver,
             Some(subject_route_resolver),
             SlackConversationServices::from_shared(Arc::new(conversations)),
         )
-        .map_err(map_build_error_to_ingress_not_found(
-            "build Slack installation resolver",
-        ))?;
-        Ok(StaticSlackInstallationResolver::new([record]))
+        .map_err(|error| InboundSinkError {
+            retryable: true,
+            reason: format!("inbound sink construction failed: {error}"),
+        })
     }
+}
 
-    async fn drain_live_resolvers(&self) {
-        let resolvers = {
-            let live_resolvers = self.live_resolvers.lock().await;
-            live_resolvers.resolvers()
+#[async_trait::async_trait]
+impl InboundSink for DynamicSlackInboundSink {
+    async fn admit(
+        &self,
+        admission: InboundAdmission,
+    ) -> Result<InboundAdmissionAck, InboundSinkError> {
+        self.current_sink().await?.admit(admission).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ChannelIngressDrain for DynamicSlackInboundSink {
+    async fn drain(&self) {
+        let sinks: Vec<Arc<GenericChannelInboundSink>> = {
+            let mut live = self.live.lock().await;
+            let mut sinks: Vec<Arc<GenericChannelInboundSink>> = live.retired.drain(..).collect();
+            if let Some((_, sink)) = &live.current {
+                sinks.push(Arc::clone(sink));
+            }
+            sinks
         };
-        for resolver in &resolvers {
-            resolver.drain_installations().await;
+        for sink in sinks {
+            ChannelIngressDrain::drain(sink.as_ref()).await;
         }
-        let mut live_resolvers = self.live_resolvers.lock().await;
-        live_resolvers.forget_retired(&resolvers);
     }
-}
-
-impl SlackInstallationResolver for DynamicSlackInstallationResolver {
-    fn resolve_ingress<'a>(
-        &'a self,
-        headers: &'a axum::http::HeaderMap,
-        body: &'a [u8],
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<ResolvedSlackIngress, SlackIngressError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move { self.resolver().await?.resolve_ingress(headers, body).await })
-    }
-
-    fn drain_installations<'a>(
-        &'a self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move { self.drain_live_resolvers().await })
-    }
-}
-
-#[derive(Default)]
-struct DynamicSlackInstallationResolverLifecycle {
-    current: Option<DynamicLiveSlackResolver>,
-    retired: Vec<Arc<StaticSlackInstallationResolver>>,
-}
-
-impl DynamicSlackInstallationResolverLifecycle {
-    fn resolvers(&self) -> Vec<Arc<StaticSlackInstallationResolver>> {
-        self.current
-            .iter()
-            .map(|current| Arc::clone(&current.resolver))
-            .chain(self.retired.iter().map(Arc::clone))
-            .collect()
-    }
-
-    fn forget_retired(&mut self, drained: &[Arc<StaticSlackInstallationResolver>]) {
-        self.retired
-            .retain(|resolver| !drained.iter().any(|drained| Arc::ptr_eq(drained, resolver)));
-    }
-}
-
-struct DynamicLiveSlackResolver {
-    revision: u64,
-    resolver: Arc<StaticSlackInstallationResolver>,
 }
 
 #[derive(Clone)]
@@ -862,24 +917,6 @@ async fn slack_host_beta_config_from_setup(
         signing_secret,
         bot_token,
     }))
-}
-
-fn map_setup_error_to_ingress_not_found(
-    context: &'static str,
-) -> impl FnOnce(crate::slack::slack_setup::SlackSetupError) -> SlackIngressError {
-    move |error| {
-        tracing::debug!(%error, context, "Slack setup unavailable for dynamic ingress");
-        SlackIngressError::InstallationNotFound
-    }
-}
-
-fn map_build_error_to_ingress_not_found(
-    context: &'static str,
-) -> impl FnOnce(SlackHostBetaBuildError) -> SlackIngressError {
-    move |error| {
-        tracing::debug!(%error, context, "Slack setup config unavailable for dynamic ingress");
-        SlackIngressError::InstallationNotFound
-    }
 }
 
 fn map_setup_error_to_dynamic_target_unavailable(

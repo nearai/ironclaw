@@ -598,7 +598,7 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
 }
 
@@ -646,6 +646,29 @@ pub(crate) fn web_access_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_toml() -> &'static str {
     SLACK_MANIFEST
+}
+
+/// Real channel adapters for bundled channel-declaring extensions, keyed by
+/// extension id (the generic loader binds them at activation; extensions
+/// without an entry bind the transitional bridge). Feature-gated transitional
+/// debt: the Slack adapter crate is already a composition dependency under
+/// `slack-v2-host-beta`; the binding assembly moves to the binary's native
+/// factory registry when the extension crates extract (P6).
+pub(crate) fn bundled_channel_adapter_bindings() -> Vec<(
+    String,
+    std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
+)> {
+    #[cfg(feature = "slack-v2-host-beta")]
+    {
+        vec![(
+            "slack".to_string(),
+            std::sync::Arc::new(ironclaw_slack_v2_adapter::SlackChannelAdapter),
+        )]
+    }
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    {
+        Vec::new()
+    }
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(

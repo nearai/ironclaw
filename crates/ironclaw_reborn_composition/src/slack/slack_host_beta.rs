@@ -7,7 +7,6 @@
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
@@ -32,10 +31,7 @@ use ironclaw_slack_v2_adapter::{
 };
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::TurnCoordinator;
-use ironclaw_wasm_product_adapters::{
-    EgressPolicy, HmacWebhookAuth, NativeProductAdapterRunner, NativeProductAdapterRunnerConfig,
-    WebhookAuth,
-};
+use ironclaw_wasm_product_adapters::EgressPolicy;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -43,6 +39,10 @@ use thiserror::Error;
 pub(crate) mod runtime_setup;
 
 use crate::RebornRuntime;
+use crate::extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
+    ExtensionIngressParts, GenericChannelInboundSink, StaticIngressSecrets,
+};
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::provider_identity::RebornUserIdentityLookup;
@@ -69,17 +69,13 @@ use crate::slack::slack_personal_binding::{
     SlackPersonalUserBindingService,
 };
 use crate::slack::slack_serve::{
-    SlackEventsRouteState, SlackInstallationRecord, SlackInstallationResolver,
-    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
-    slack_events_route_mount,
+    ImmediateAckObserverAdapter, SlackInstallationSelector, SlackTeamId, SlackUserId,
+    slack_events_alias_mount, slack_evidence_mint, slack_inbound_classifier,
 };
 use crate::webui::webui_serve::PublicRouteMount;
+use ironclaw_extension_host::ingress::{InboundSink, VerificationCandidate};
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
-const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
-const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
-const SLACK_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(2);
-const SLACK_MAX_IN_FLIGHT_WEBHOOKS: usize = 64;
 const SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const SLACK_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 const SLACK_OUTBOUND_PROVIDER_KEY_PREFIX: &str = "slack-v2-host-beta";
@@ -585,6 +581,48 @@ pub fn build_slack_events_route_mount(
     build_slack_host_beta_mounts(runtime, config).map(|mounts| mounts.events)
 }
 
+/// The runtime's generic ingress parts, required for any Slack events wiring
+/// after the P4 cutover (the generic router serves the canonical route; the
+/// legacy path is a one-release forwarding alias).
+fn extension_ingress_parts(
+    runtime: &RebornRuntime,
+) -> Result<ExtensionIngressParts, SlackHostBetaBuildError> {
+    runtime
+        .services()
+        .extension_ingress_parts()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)
+}
+
+/// Register the Slack channel's inbound wiring (verification secret
+/// candidates + the durable admission sink) with the generic ingress
+/// registry and return the one-release `/webhooks/slack/events` forwarding
+/// alias mount (MIG-5).
+fn register_slack_ingress(
+    ingress: &ExtensionIngressParts,
+    installation_id: &AdapterInstallationId,
+    signing_secret: &SecretString,
+    sink: Arc<GenericChannelInboundSink>,
+) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    let drain: Arc<dyn ChannelIngressDrain> = Arc::clone(&sink) as Arc<dyn ChannelIngressDrain>;
+    ingress.registry.register(
+        "slack",
+        ChannelIngressRegistration {
+            secrets: Arc::new(StaticIngressSecrets::new(vec![VerificationCandidate {
+                installation_id: installation_id.as_str().to_string(),
+                secret: signing_secret.expose_secret().as_bytes().to_vec(),
+            }])),
+            sink: sink as Arc<dyn InboundSink>,
+            drain: Some(Arc::clone(&drain)),
+        },
+    );
+    slack_events_alias_mount(Arc::clone(&ingress.router), Some(drain)).map_err(|error| {
+        SlackHostBetaBuildError::InvalidConfig {
+            field: "events_alias",
+            reason: error.to_string(),
+        }
+    })
+}
+
 /// Build a [`TriggeredRunDeliveryDriver`] that delivers triggered-run results
 /// to the creator's personal Slack DM.
 ///
@@ -717,17 +755,27 @@ pub fn build_slack_host_beta_mounts(
             config.installation_id.clone(),
             Arc::clone(&channel_route_store),
         ));
-    // Build the installation resolver once so the events route has a single
-    // source of truth for the Slack signing identity.
-    let resolver: Arc<dyn SlackInstallationResolver> =
-        build_slack_installation_resolver_with_resolvers(
-            runtime,
-            config.clone(),
-            actor_user_resolver,
-            Some(subject_route_resolver),
-        )?;
-    let events =
-        slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::clone(&resolver)));
+    // Build the inbound sink once so the generic ingress route has a single
+    // source of truth for the Slack workflow + delivery observer, then
+    // register it (with the signing secret candidates) against the generic
+    // router and mount the one-release legacy alias.
+    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    // Sync/test entrypoint: no async context to rehydrate a durable store, so
+    // bindings are in-memory here. Production Slack traffic flows through the
+    // async `runtime_setup` path, which supplies the durable store.
+    let sink = build_slack_inbound_sink(
+        &parts,
+        config.clone(),
+        actor_user_resolver,
+        Some(subject_route_resolver),
+        SlackConversationServices::from_shared(Arc::new(InMemoryConversationServices::default())),
+    )?;
+    let events = register_slack_ingress(
+        &extension_ingress_parts(runtime)?,
+        &config.installation_id,
+        &config.signing_secret,
+        sink,
+    )?;
     let allowed_route_subjects = std::iter::once(config.user_id.clone())
         .chain(config.shared_subject_user_id.clone())
         .chain(
@@ -879,45 +927,23 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
-    build_slack_events_route_mount_with_resolvers(runtime, config, actor_user_resolver, None)
-}
-
-fn build_slack_events_route_mount_with_resolvers(
-    runtime: &RebornRuntime,
-    config: SlackHostBetaConfig,
-    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
-    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
-) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
-    let resolver = build_slack_installation_resolver_with_resolvers(
-        runtime,
-        config,
-        actor_user_resolver,
-        subject_route_resolver,
-    )?;
-    Ok(slack_events_route_mount(
-        SlackEventsRouteState::from_resolver(resolver),
-    ))
-}
-
-/// Build the static installation resolver used by the Slack Events route.
-fn build_slack_installation_resolver_with_resolvers(
-    runtime: &RebornRuntime,
-    config: SlackHostBetaConfig,
-    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
-    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
-) -> Result<Arc<StaticSlackInstallationResolver>, SlackHostBetaBuildError> {
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
     // Sync/test entrypoint: no async context to rehydrate a durable store, so
     // bindings are in-memory here. Production Slack traffic flows through the
     // async `runtime_setup` path, which supplies the durable store.
-    let record = build_slack_installation_record_with_resolvers(
+    let sink = build_slack_inbound_sink(
         &parts,
-        config,
+        config.clone(),
         actor_user_resolver,
-        subject_route_resolver,
+        None,
         SlackConversationServices::from_shared(Arc::new(InMemoryConversationServices::default())),
     )?;
-    Ok(Arc::new(StaticSlackInstallationResolver::new([record])))
+    register_slack_ingress(
+        &extension_ingress_parts(runtime)?,
+        &config.installation_id,
+        &config.signing_secret,
+        sink,
+    )
 }
 
 /// The conversation binding + actor-pairing services backing a Slack
@@ -943,14 +969,19 @@ impl SlackConversationServices {
     }
 }
 
-fn build_slack_installation_record_with_resolvers(
+/// Build the Slack inbound sink for the generic ingress router: the EXISTING
+/// product workflow (durable idempotency ledger -> identity/conversation
+/// binding -> turn submission) parameterized with Slack's adapter identity,
+/// evidence shape, gate-reply classifier, and the final-reply delivery
+/// observer. Replaces the deleted per-installation webhook runner.
+fn build_slack_inbound_sink(
     parts: &SlackHostBetaRuntimeParts,
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
     conversation_services: SlackConversationServices,
-) -> Result<SlackInstallationRecord, SlackHostBetaBuildError> {
-    // The resolver controls inbound Slack actor binding. `config.user_id`
+) -> Result<Arc<GenericChannelInboundSink>, SlackHostBetaBuildError> {
+    // The scope controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and shared-route fallback
     // mapping. Shared Slack channel execution is configured separately.
     let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
@@ -989,7 +1020,7 @@ fn build_slack_installation_record_with_resolvers(
     }
     let scope = scope.with_actor_user_resolver(actor_user_resolver, actor_pairings);
     let installation_resolver = StaticProductInstallationResolver::new([(
-        ProductInstallationKey::new(adapter_id, config.installation_id.clone()),
+        ProductInstallationKey::new(adapter_id.clone(), config.installation_id.clone()),
         scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
@@ -1027,22 +1058,6 @@ fn build_slack_installation_record_with_resolvers(
         .with_delivered_gate_routes(route_store.clone()),
     );
 
-    let runner = Arc::new(NativeProductAdapterRunner::with_config(
-        adapter.clone(),
-        workflow,
-        WebhookAuth::Hmac(HmacWebhookAuth::new(
-            SLACK_SIGNATURE_HEADER,
-            SLACK_TIMESTAMP_HEADER,
-            config.signing_secret.expose_secret().as_bytes().to_vec(),
-            config.installation_id.as_str(),
-        )),
-        NativeProductAdapterRunnerConfig::new(
-            SLACK_WEBHOOK_WORKFLOW_TIMEOUT,
-            NonZeroUsize::new(SLACK_MAX_IN_FLIGHT_WEBHOOKS)
-                .ok_or_else(|| invalid_config("max_in_flight", "must be non-zero".to_string()))?,
-        ),
-    ));
-
     let egress = slack_protocol_egress_from_parts(parts, &config, token_handle)?;
     let outbound_store: Arc<dyn OutboundStateStore> =
         Arc::clone(&parts.local_runtime.outbound_state);
@@ -1068,13 +1083,15 @@ fn build_slack_installation_record_with_resolvers(
         SlackFinalReplyDeliverySettings::default(),
     ));
 
-    Ok(SlackInstallationRecord::new(
-        config.tenant_id,
-        config.installation_id,
-        config.installation_selector,
-        runner,
-    )
-    .with_workflow_observer(observer))
+    Ok(Arc::new(GenericChannelInboundSink::new(
+        ChannelInboundSinkConfig {
+            adapter_id,
+            evidence: slack_evidence_mint(),
+            classifier: Some(slack_inbound_classifier()),
+            workflow,
+            observer: Some(Arc::new(ImmediateAckObserverAdapter(observer))),
+        },
+    )))
 }
 
 fn slack_channel_route_key(
@@ -1216,6 +1233,10 @@ mod tests {
     const API_APP: &str = "A0HOST";
     const SLACK_USER: &str = "U0HOST";
     const SECRET: &str = "host-signing-secret";
+    const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
+    const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
+
+    use std::time::Duration;
 
     type HmacSha256 = Hmac<sha2::Sha256>;
 
@@ -1308,6 +1329,7 @@ mod tests {
     #[tokio::test]
     async fn build_slack_events_route_mount_builds_signed_route_from_reborn_runtime() {
         let (runtime, _root) = runtime().await;
+        activate_slack_package_for_test(&runtime).await;
 
         let mount = build_slack_events_route_mount(&runtime, config()).expect("route builds");
         assert_eq!(mount.descriptors.len(), 1);
@@ -1345,6 +1367,7 @@ mod tests {
     #[tokio::test]
     async fn custom_actor_user_resolver_routes_inbound_slack_event() {
         let (runtime, _root) = runtime().await;
+        activate_slack_package_for_test(&runtime).await;
         let resolver = Arc::new(RecordingProductActorUserResolver::new(
             UserId::new(USER).expect("user"),
         ));
@@ -1440,6 +1463,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         // Inbound Slack actor resolution now requires a durable OAuth identity
         // binding; the removed static `slack_user_id` seed no longer maps the
         // Slack user to a Reborn user. Bind through the production OAuth path
@@ -1504,6 +1528,7 @@ mod tests {
             "1710000000.000011",
         );
 
+        activate_slack_package_for_test(&runtime).await;
         // Inbound Slack actor resolution now requires a durable OAuth identity
         // binding (the static `slack_user_id` seed was removed). The binding is
         // durable in the shared runtime state, so it survives the route rebuild
@@ -1613,6 +1638,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
 
@@ -1676,6 +1702,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
         // The channel-mention actor is resolved through the durable OAuth
         // identity binding (the static `slack_user_id` seed was removed); bind
@@ -1763,6 +1790,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
         // Bind the inbound Slack actor through the OAuth path before the admin
@@ -1830,6 +1858,7 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
+        activate_slack_package_for_test(&runtime).await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
 
@@ -3687,6 +3716,20 @@ mod tests {
 
     async fn runtime() -> (RebornRuntime, tempfile::TempDir) {
         runtime_with_host_egress_override(None).await
+    }
+
+    /// Activate the bundled channel package in the runtime's generic host so
+    /// its ingress route resolves (production activates through the channel
+    /// setup save / extension lifecycle paths).
+    async fn activate_slack_package_for_test(runtime: &RebornRuntime) {
+        let package = crate::extension_host::available_extensions::slack_package()
+            .expect("bundled channel package builds");
+        runtime
+            .services()
+            .publish_bundled_extension_for_test(&package.package, None)
+            .await
+            .expect("local runtime present")
+            .expect("bundled channel package activates");
     }
 
     async fn runtime_with_host_egress_override(

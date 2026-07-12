@@ -258,11 +258,7 @@ pub use slack::slack_personal_binding_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
-    slack_events_route_mount,
-};
+pub use slack::slack_serve::{SLACK_EVENTS_PATH, SlackInstallationSelector, SlackTeamId};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;

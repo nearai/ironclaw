@@ -61,17 +61,17 @@ use ironclaw_turns::{
     RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
     TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
-use ironclaw_wasm_product_adapters::{
-    HmacWebhookAuth, ImmediateAckWorkflowObserver, NativeProductAdapterRunner,
-    NativeProductAdapterRunnerConfig, WebhookAuth,
-};
 use tower::ServiceExt;
 
 use super::*;
+use crate::extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, GenericChannelInboundSink, StaticIngressSecrets,
+};
 use crate::slack::slack_delivery::{
     PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
+use crate::webui::webui_serve::PublicRouteMount;
 use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
 
 #[path = "e2e_auth_challenge.rs"]
@@ -96,7 +96,7 @@ const AUTH_GATE: &str = "gate:auth-slack";
 
 struct Harness {
     mount: PublicRouteMount,
-    state: SlackEventsRouteState,
+    sink: Arc<GenericChannelInboundSink>,
     egress: RecordingEgress,
     coordinator: Arc<RecordingTurnCoordinator>,
     approvals: Arc<RecordingApprovalInteractionService>,
@@ -174,7 +174,36 @@ impl Harness {
     }
 
     async fn drain(&self) {
-        self.state.drain_immediate_ack_tasks().await;
+        ChannelIngressDrain::drain(self.sink.as_ref()).await;
+    }
+
+    /// Ensure a foreign-scope thread exists in the harness thread service.
+    /// The scripted coordinator's `complete_run` appends the final message to
+    /// the resolved scope's thread; with the P4 sync-admission transport that
+    /// append happens before the webhook response, so a missing scripted
+    /// thread surfaces as a 5xx instead of hiding behind the old
+    /// immediate-ack 200.
+    async fn ensure_scope_thread(&self, scope: &TurnScope) {
+        self.coordinator
+            .threads
+            .ensure_thread(EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    agent_id: scope
+                        .agent_id
+                        .clone()
+                        .unwrap_or_else(|| AgentId::new(AGENT).expect("agent")), // safety: static test agent id is valid.
+                    project_id: scope.project_id.clone(),
+                    owner_user_id: scope.thread_owner.explicit_owner_user_id().cloned(),
+                    mission_id: None,
+                },
+                thread_id: Some(scope.thread_id.clone()),
+                created_by_actor_id: "test-actor".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("ensure scripted foreign thread"); // safety: in-memory test thread service should not fail.
     }
 
     fn slack_messages(&self) -> Vec<serde_json::Value> {
@@ -305,21 +334,6 @@ async fn build_harness_with_full_settings(
         .with_delivered_gate_routes(route_store.clone()),
     );
 
-    let runner = Arc::new(NativeProductAdapterRunner::with_config(
-        adapter.clone(),
-        workflow,
-        WebhookAuth::Hmac(HmacWebhookAuth::new(
-            SLACK_SIGNATURE_HEADER,
-            SLACK_TIMESTAMP_HEADER,
-            SECRET.as_bytes().to_vec(),
-            INSTALLATION,
-        )),
-        NativeProductAdapterRunnerConfig::new(
-            Duration::from_secs(2),
-            NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
-        ),
-    ));
-
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
@@ -348,27 +362,123 @@ async fn build_harness_with_full_settings(
         },
     ));
 
-    let slack_resolver = StaticSlackInstallationResolver::new(vec![
-        SlackInstallationRecord::new(
-            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            installation_id,
-            SlackInstallationSelector::team(TEAM),
-            runner,
-        )
-        .with_workflow_observer(observer),
-    ]);
-    let state = SlackEventsRouteState::from_resolver(Arc::new(slack_resolver));
-    let mount = slack_events_route_mount(state.clone());
+    let (mount, ingress_sink) = slack_ingress_transport(workflow, observer).await;
 
     Harness {
         mount,
-        state,
+        sink: ingress_sink,
         egress,
         coordinator: Arc::new(coordinator),
         approvals,
         auths,
         route_store,
     }
+}
+
+/// The P4 generic-ingress transport: a minimal `ExtensionHost` with the REAL
+/// bundled channel manifest active (binding the real `SlackChannelAdapter`),
+/// the generic recipe verifier over the test signing secret, the generic
+/// inbound sink over the harness's `DefaultProductWorkflow`, and the
+/// one-release legacy alias mount the fixtures post to. Every request
+/// exercises the production per-request order: verification recipe →
+/// adapter parse → durable admission → post-admission delivery observer.
+async fn slack_ingress_transport(
+    workflow: Arc<DefaultProductWorkflow>,
+    observer: Arc<SlackFinalReplyDeliveryObserver>,
+) -> (PublicRouteMount, Arc<GenericChannelInboundSink>) {
+    use ironclaw_extension_host::ingress::{
+        ExtensionIngressRouter, ExtensionIngressRouterDeps, InMemoryReplyContextStore, InboundSink,
+        IngressRouterConfig, VerificationCandidate,
+    };
+    use ironclaw_extension_host::test_support::{
+        FakeEgressFactory, FakeToolAdapter, RecordingDrain, RecordingRemovalHooks,
+    };
+    use ironclaw_extension_host::{
+        BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
+        ExtensionHostDeps, ExtensionLoader, InMemoryInstallationRecordStore, InstallationRecord,
+        InstallationState, LoadContext, LoadedExtension,
+    };
+
+    struct SlackTestEntrypoint;
+    impl ExtensionEntrypoint for SlackTestEntrypoint {
+        fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+            Ok(ExtensionBindings {
+                tools: Some(Arc::new(FakeToolAdapter)),
+                channel: Some(Arc::new(ironclaw_slack_v2_adapter::SlackChannelAdapter)),
+            })
+        }
+    }
+    struct SlackTestLoader;
+    #[async_trait]
+    impl ExtensionLoader for SlackTestLoader {
+        async fn load(&self, _ctx: &LoadContext) -> Result<LoadedExtension, BindError> {
+            Ok(LoadedExtension::new(Box::new(SlackTestEntrypoint)))
+        }
+    }
+
+    let resolved = {
+        let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
+        let contracts =
+            ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
+        ironclaw_extensions::ExtensionManifestRecord::from_toml(
+            crate::extension_host::available_extensions::slack_manifest_toml(),
+            ironclaw_extensions::ManifestSource::HostBundled,
+            &host_ports,
+            None,
+            &contracts,
+        )
+        .expect("bundled channel manifest resolves") // safety: compile-time bundled manifest is valid.
+        .resolved()
+        .clone()
+    };
+    let host = ExtensionHost::new(ExtensionHostDeps {
+        store: Arc::new(InMemoryInstallationRecordStore::default()),
+        loader: Arc::new(SlackTestLoader),
+        removal_hooks: Arc::new(RecordingRemovalHooks::default()),
+        drain: Arc::new(RecordingDrain::default()),
+        egress: Arc::new(FakeEgressFactory),
+        reserved_capability_ids: Default::default(),
+        reserved_ingress_routes: Default::default(),
+        hook_deadline: Duration::from_secs(5),
+    })
+    .await;
+    host.install(InstallationRecord {
+        extension_id: "slack".to_string(),
+        installation_id: INSTALLATION.to_string(),
+        state: InstallationState::Installed,
+        resolved: Arc::new(resolved),
+        config: Vec::new(),
+        last_error: None,
+    })
+    .await
+    .expect("install"); // safety: in-memory test host install should not fail.
+    host.activate("slack").await.expect("activate"); // safety: scripted test loader binds valid adapters.
+
+    let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+        adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.
+        evidence: super::slack_evidence_mint(),
+        classifier: Some(super::slack_inbound_classifier()),
+        workflow,
+        observer: Some(Arc::new(super::ImmediateAckObserverAdapter(observer))),
+    }));
+    let router = Arc::new(ExtensionIngressRouter::new(
+        host.snapshot_watch(),
+        ExtensionIngressRouterDeps {
+            secrets: Arc::new(StaticIngressSecrets::new(vec![VerificationCandidate {
+                installation_id: INSTALLATION.to_string(),
+                secret: SECRET.as_bytes().to_vec(),
+            }])),
+            sink: Arc::clone(&sink) as Arc<dyn InboundSink>,
+            reply_context: Arc::new(InMemoryReplyContextStore::default()),
+        },
+        IngressRouterConfig::default(),
+    ));
+    let mount = super::slack_events_alias_mount(
+        router,
+        Some(Arc::clone(&sink) as Arc<dyn ChannelIngressDrain>),
+    )
+    .expect("alias mount builds"); // safety: bundled manifest projects a valid alias descriptor.
+    (mount, sink)
 }
 
 fn static_personal_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
@@ -523,21 +633,6 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
         .with_delivered_gate_routes(workflow_route_store.clone()),
     );
 
-    let runner = Arc::new(NativeProductAdapterRunner::with_config(
-        adapter.clone(),
-        workflow,
-        WebhookAuth::Hmac(HmacWebhookAuth::new(
-            SLACK_SIGNATURE_HEADER,
-            SLACK_TIMESTAMP_HEADER,
-            SECRET.as_bytes().to_vec(),
-            INSTALLATION,
-        )),
-        NativeProductAdapterRunnerConfig::new(
-            Duration::from_secs(2),
-            NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
-        ),
-    ));
-
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
@@ -566,21 +661,11 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
         },
     ));
 
-    let slack_resolver = StaticSlackInstallationResolver::new(vec![
-        SlackInstallationRecord::new(
-            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            installation_id,
-            SlackInstallationSelector::team(TEAM),
-            runner,
-        )
-        .with_workflow_observer(observer),
-    ]);
-    let state = SlackEventsRouteState::from_resolver(Arc::new(slack_resolver));
-    let mount = slack_events_route_mount(state.clone());
+    let (mount, ingress_sink) = slack_ingress_transport(workflow, observer).await;
 
     let harness = Harness {
         mount,
-        state,
+        sink: ingress_sink,
         egress,
         coordinator: Arc::new(coordinator),
         approvals: inner_approvals.clone(),
@@ -657,6 +742,7 @@ async fn bare_approve_in_dm_resolves_gate_on_foreign_scope_via_delivered_route()
 
     // Post the bare approve. list_pending returns [] (ForeignScopeApprovalService),
     // so the workflow falls back to the conversation fingerprint index.
+    harness.ensure_scope_thread(&foreign_run_scope()).await;
     let approve_response = harness.post_event(DM_APPROVE).await;
     assert_eq!(approve_response.status(), StatusCode::OK);
     harness.drain().await;
@@ -1143,8 +1229,21 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     // scope via the DRIVER-recorded route: list_pending on the DM returns []
     // (ForeignScopeApprovalService), the workflow falls back to the conversation
     // fingerprint index and finds the driver route.
+    harness.ensure_scope_thread(&foreign_run_scope()).await;
     let approve_response = harness.post_event(DM_APPROVE).await;
-    assert_eq!(approve_response.status(), StatusCode::OK);
+    let approve_status = approve_response.status();
+    let approve_body = approve_response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    assert_eq!(
+        approve_status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&approve_body)
+    );
     harness.drain().await;
 
     let requests = inner_approvals.requests();
@@ -1620,6 +1719,7 @@ async fn bare_approve_with_two_live_routes_resolves_most_recent() {
         .expect("second route record write"); // safety: in-memory store should not fail.
 
     // Post bare approve with two ambiguous routes.
+    harness.ensure_scope_thread(&foreign_run_scope()).await;
     let approve_response = harness.post_event(DM_APPROVE).await;
     assert_eq!(approve_response.status(), StatusCode::OK);
     harness.drain().await;
@@ -1719,6 +1819,7 @@ async fn bare_approve_with_one_approval_and_one_stale_auth_gate_resolves_approva
     // Post a bare "approve".  Two records exist in the conversation bucket but
     // only the approval-gate record passes the gate-kind filter, so the workflow
     // should resolve Single → forward exactly one approval resolve request.
+    harness.ensure_scope_thread(&foreign_run_scope()).await;
     let approve_response = harness.post_event(DM_APPROVE).await;
     assert_eq!(approve_response.status(), StatusCode::OK);
     harness.drain().await;
@@ -3314,21 +3415,6 @@ async fn build_harness_for_auth_fanout_test(
         .with_delivered_gate_routes(route_store.clone()),
     );
 
-    let runner = Arc::new(NativeProductAdapterRunner::with_config(
-        adapter.clone(),
-        workflow,
-        WebhookAuth::Hmac(HmacWebhookAuth::new(
-            SLACK_SIGNATURE_HEADER,
-            SLACK_TIMESTAMP_HEADER,
-            SECRET.as_bytes().to_vec(),
-            INSTALLATION,
-        )),
-        NativeProductAdapterRunnerConfig::new(
-            Duration::from_secs(2),
-            NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
-        ),
-    ));
-
     let outbound = Arc::new(InMemoryOutboundStateStore::default());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
@@ -3357,21 +3443,11 @@ async fn build_harness_for_auth_fanout_test(
         },
     ));
 
-    let slack_resolver = StaticSlackInstallationResolver::new(vec![
-        SlackInstallationRecord::new(
-            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            installation_id,
-            SlackInstallationSelector::team(TEAM),
-            runner,
-        )
-        .with_workflow_observer(observer.clone() as Arc<dyn ImmediateAckWorkflowObserver>),
-    ]);
-    let state = SlackEventsRouteState::from_resolver(Arc::new(slack_resolver));
-    let mount = slack_events_route_mount(state.clone());
+    let (mount, ingress_sink) = slack_ingress_transport(workflow, observer.clone()).await;
 
     let harness = Harness {
         mount,
-        state,
+        sink: ingress_sink,
         egress,
         coordinator: Arc::new(coordinator),
         approvals,
