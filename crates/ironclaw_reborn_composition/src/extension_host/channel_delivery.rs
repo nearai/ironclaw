@@ -21,16 +21,12 @@ use ironclaw_product_workflow::{
 /// bound channel adapter plus a policy-enforced egress built from the SAME
 /// snapshot read, so an in-flight delivery survives an upgrade on the `Arc`s
 /// it resolved.
-// Consumed by the generic run-delivery observer in the cutover slice (9b);
-// inert until then.
-#[allow(dead_code)]
 pub(crate) struct SnapshotChannelDeliveryResolver {
     watch: SnapshotWatch,
     transport: Arc<dyn ChannelEgressTransport>,
 }
 
 impl SnapshotChannelDeliveryResolver {
-    #[allow(dead_code)]
     pub(crate) fn new(watch: SnapshotWatch, transport: Arc<dyn ChannelEgressTransport>) -> Self {
         Self { watch, transport }
     }
@@ -71,13 +67,11 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
 /// The delivery-time read half of the ingress router's `reply_context`
 /// storage: the opaque vendor context an adapter attached to the originating
 /// inbound message, keyed by conversation fingerprint.
-#[allow(dead_code)]
 pub(crate) struct IngressReplyContextSource {
     store: Arc<dyn ReplyContextStore>,
 }
 
 impl IngressReplyContextSource {
-    #[allow(dead_code)]
     pub(crate) fn new(store: Arc<dyn ReplyContextStore>) -> Self {
         Self { store }
     }

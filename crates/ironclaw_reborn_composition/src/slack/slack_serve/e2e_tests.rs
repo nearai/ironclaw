@@ -64,13 +64,41 @@ use ironclaw_turns::{
 use tower::ServiceExt;
 
 use super::*;
+use crate::automation::trigger_poller::PostSubmitDeliveryHook;
 use crate::extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, GenericChannelInboundSink, StaticIngressSecrets,
 };
 use crate::slack::slack_delivery::{
-    PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
+use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
+
+/// Test-local stand-in for the deleted production adapter: bridges the OLD
+/// observer onto the post-admission seam until this harness re-points onto
+/// the generic run-delivery observer (the delivery-cutover deletion slice).
+struct ImmediateAckObserverAdapter(Arc<dyn ImmediateAckWorkflowObserver>);
+
+#[async_trait]
+impl crate::extension_host::extension_ingress::PostAdmissionObserver
+    for ImmediateAckObserverAdapter
+{
+    async fn observe_ack(
+        &self,
+        envelope: ironclaw_product_adapters::ProductInboundEnvelope,
+        ack: ironclaw_product_adapters::ProductInboundAck,
+    ) {
+        self.0.observe_workflow_ack(envelope, ack).await;
+    }
+
+    async fn observe_error(
+        &self,
+        envelope: ironclaw_product_adapters::ProductInboundEnvelope,
+        error: ironclaw_product_adapters::ProductAdapterError,
+    ) {
+        self.0.observe_workflow_error(envelope, error).await;
+    }
+}
 use crate::webui::webui_serve::PublicRouteMount;
 use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
 
@@ -459,7 +487,7 @@ async fn slack_ingress_transport(
         evidence: super::slack_evidence_mint(),
         classifier: Some(super::slack_inbound_classifier()),
         workflow,
-        observer: Some(Arc::new(super::ImmediateAckObserverAdapter(observer))),
+        observer: Some(Arc::new(ImmediateAckObserverAdapter(observer))),
     }));
     let router = Arc::new(ExtensionIngressRouter::new(
         host.snapshot_watch(),

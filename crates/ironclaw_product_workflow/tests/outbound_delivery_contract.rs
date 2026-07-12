@@ -2493,6 +2493,62 @@ async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
 }
 
 #[tokio::test]
+async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    // Durable shape a crash leaves behind: an attempt stuck in `Sending`
+    // from a PREVIOUS process lifetime.
+    let stray = OutboundDeliveryAttempt {
+        delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+        scope: scope.clone(),
+        candidate: ironclaw_outbound::OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: None,
+            target: validated_reply_target(),
+            kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new("projection:stray")
+                .expect("projection ref"),
+            requires_reply_target_revalidation: false,
+        },
+        status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+        attempted_at: Utc::now(),
+        failure_kind: None,
+    };
+    store
+        .record_delivery_attempt(stray.clone())
+        .await
+        .expect("seed stray attempt");
+
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-950")],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    coordinator
+        .deliver_notice(working_notice(scope.clone(), "vendorx"))
+        .await
+        .expect("notice delivers");
+
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    let recovered = attempts
+        .iter()
+        .find(|attempt| attempt.delivery_id == stray.delivery_id)
+        .expect("stray attempt still present");
+    // OUT-6: found in Sending from a prior lifetime → Unknown, never resent.
+    assert_eq!(
+        recovered.status,
+        ironclaw_outbound::OutboundDeliveryStatus::Unknown
+    );
+    assert_eq!(adapter.deliver_calls(), 1, "only the new notice was sent");
+}
+
+#[tokio::test]
 async fn coordinator_notice_rejected_while_draining() {
     let scope = scope();
     let store = Arc::new(InMemoryOutboundStateStore::default());

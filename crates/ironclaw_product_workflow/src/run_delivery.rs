@@ -273,15 +273,15 @@ pub(crate) fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Dura
 }
 
 /// Poll a run until it reaches a terminal state or a blocked state the
-/// caller has not yet announced. `on_idle_poll` fires once per quiet poll so
-/// the live path can raise its working indicator.
+/// caller has not yet announced. (The live observer carries its own copy of
+/// this loop to raise the working indicator between polls; keep the two in
+/// sync.)
 pub(crate) async fn wait_for_actionable_state(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
     settings: &RunDeliverySettings,
     delivered_blocked_marker: Option<&BlockedActionableMarker>,
-    mut on_idle_poll: impl AsyncFnMut(&TurnRunState),
 ) -> Result<TurnRunState, RunDeliveryError> {
     let start = std::time::Instant::now();
     let mut poll_interval = settings.poll_interval;
@@ -303,7 +303,6 @@ pub(crate) async fn wait_for_actionable_state(
         if start.elapsed() >= settings.max_wait {
             return Err(RunDeliveryError::RunWaitTimedOut { run_id });
         }
-        on_idle_poll(&state).await;
         tokio::time::sleep(jittered_poll_interval(poll_interval, &run_id)).await;
         poll_interval = poll_interval.saturating_mul(2).min(MAX_RUN_POLL_INTERVAL);
     }

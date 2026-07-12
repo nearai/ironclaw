@@ -83,6 +83,58 @@ impl ChannelEgressCredentialsPort for SecretStoreChannelEgressCredentials {
     }
 }
 
+/// Beta-era credential bridging: channel hosts whose credentials predate the
+/// extension-config store register a port here; resolution consults bridges
+/// first and falls back to the scoped secret store. A §11 compatibility
+/// surface — removed when the per-vendor setup storage migrates (P6).
+pub(crate) struct BridgedChannelEgressCredentials {
+    bridges: std::sync::RwLock<Vec<Arc<dyn ChannelEgressCredentialsPort>>>,
+    fallback: Arc<dyn ChannelEgressCredentialsPort>,
+}
+
+impl BridgedChannelEgressCredentials {
+    pub(crate) fn new(fallback: Arc<dyn ChannelEgressCredentialsPort>) -> Self {
+        Self {
+            bridges: std::sync::RwLock::new(Vec::new()),
+            fallback,
+        }
+    }
+
+    pub(crate) fn register(&self, bridge: Arc<dyn ChannelEgressCredentialsPort>) {
+        self.bridges
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(bridge);
+    }
+}
+
+#[async_trait]
+impl ChannelEgressCredentialsPort for BridgedChannelEgressCredentials {
+    async fn channel_secret(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, ChannelEgressCredentialError> {
+        let bridges: Vec<Arc<dyn ChannelEgressCredentialsPort>> = self
+            .bridges
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for bridge in bridges {
+            if let Some(material) = bridge
+                .channel_secret(extension_id, installation_id, handle)
+                .await?
+            {
+                return Ok(Some(material));
+            }
+        }
+        self.fallback
+            .channel_secret(extension_id, installation_id, handle)
+            .await
+    }
+}
+
 /// The production [`ChannelEgressTransport`]: host runtime egress with the
 /// network policy pinned to the approved host.
 pub(crate) struct HostRuntimeChannelEgressTransport {

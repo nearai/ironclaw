@@ -253,6 +253,10 @@ pub struct DeliveryCoordinator {
     retry: DeliveryRetryPolicy,
     /// Per-delivery single-flight: a delivery id enters once.
     in_flight: Mutex<HashSet<ironclaw_outbound::OutboundDeliveryId>>,
+    /// Scopes whose interrupted (`Sending`) attempts from prior lifetimes
+    /// have been reconciled this lifetime. The store enumerates attempts per
+    /// scope only, so recovery runs lazily before a scope's first delivery.
+    recovered_scopes: Mutex<HashSet<TurnScope>>,
     draining: std::sync::atomic::AtomicBool,
 }
 
@@ -272,7 +276,30 @@ impl DeliveryCoordinator {
             reply_context,
             retry,
             in_flight: Mutex::new(HashSet::new()),
+            recovered_scopes: Mutex::new(HashSet::new()),
             draining: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Run crash recovery for `scope` exactly once per coordinator lifetime,
+    /// before the scope's first delivery. Recovery failures are logged and
+    /// do not block the new delivery: the stray attempt stays `Sending` and
+    /// the next lifetime reconciles it.
+    async fn ensure_scope_recovered(&self, scope: &TurnScope) {
+        {
+            let mut recovered = self
+                .recovered_scopes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !recovered.insert(scope.clone()) {
+                return;
+            }
+        }
+        if let Err(error) = self.recover_interrupted_deliveries(scope.clone()).await {
+            debug!(
+                error = %error,
+                "delivery coordinator: lazy interrupted-delivery recovery failed"
+            );
         }
     }
 
@@ -336,6 +363,8 @@ impl DeliveryCoordinator {
                 intent: request.intent,
             });
         }
+        self.ensure_scope_recovered(&request.delivery.resolution_request.scope)
+            .await;
 
         // 1. Policy: authorize the candidate and persist the attempt.
         let Some(decision) = outbound_policy
@@ -398,6 +427,7 @@ impl DeliveryCoordinator {
                 intent: request.intent,
             });
         }
+        self.ensure_scope_recovered(&request.scope).await;
 
         // Persist the attempt before anything else. The synthetic reply
         // target names the source conversation (hashed: fingerprints can

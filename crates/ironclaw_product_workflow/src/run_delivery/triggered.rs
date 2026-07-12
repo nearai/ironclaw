@@ -322,7 +322,6 @@ async fn deliver_triggered_run(
             run_id,
             settings,
             delivered_blocked_marker.as_ref(),
-            async |_state: &TurnRunState| {},
         )
         .await
         {

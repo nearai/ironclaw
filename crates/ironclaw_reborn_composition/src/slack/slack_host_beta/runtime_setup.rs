@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
+use crate::automation::trigger_poller::PostSubmitDeliveryHook;
 use crate::extension_host::extension_ingress::{ChannelIngressDrain, ChannelIngressRegistration};
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
@@ -28,7 +29,6 @@ use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
     SlackChannelSetupActivation, SlackChannelSetupActivationError,
 };
-use crate::slack::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
 use crate::slack::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
@@ -55,7 +55,7 @@ use super::{
     ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaBuildError,
     SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
-    SlackPersonalDmTargetProvisioning, build_slack_inbound_sink,
+    SlackPersonalDmTargetProvisioning, SlackTriggeredRunDeliveryHook, build_slack_inbound_sink,
     build_triggered_run_delivery_hook_from_parts, extension_ingress_parts, slack_bot_token_handle,
     slack_protocol_egress_from_parts,
 };
@@ -195,6 +195,14 @@ pub(super) async fn build_runtime_mounts(
             }
         }
     }
+    // §11 bridge (dynamic): the current Slack setup's bot token backs the
+    // bundled slack extension's egress credential handle; re-read per
+    // resolution so setup revisions take effect without rewiring.
+    runtime
+        .services()
+        .register_channel_egress_credential_bridge(Arc::new(DynamicSlackBotTokenBridge {
+            setup_service: Arc::clone(&setup_service),
+        }));
     let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
         Arc::clone(&parts.local_runtime.triggered_run_delivery);
     let trigger_delivery_hook: Arc<dyn PostSubmitDeliveryHook> =
@@ -406,6 +414,42 @@ impl SlackPersonalDmTargetProvisioning for DynamicSlackPersonalDmTargetProvision
     }
 }
 
+/// §11 credential bridge (dynamic flavor): resolves the bot token from the
+/// live Slack setup on every request, so setup revisions apply immediately.
+struct DynamicSlackBotTokenBridge {
+    setup_service: Arc<SlackSetupService>,
+}
+
+#[async_trait::async_trait]
+impl crate::extension_host::channel_egress::ChannelEgressCredentialsPort
+    for DynamicSlackBotTokenBridge
+{
+    async fn channel_secret(
+        &self,
+        extension_id: &str,
+        _installation_id: &str,
+        handle: &ironclaw_host_api::SecretHandle,
+    ) -> Result<
+        Option<ironclaw_secrets::SecretMaterial>,
+        crate::extension_host::channel_egress::ChannelEgressCredentialError,
+    > {
+        use crate::extension_host::available_extensions::SLACK_EXTENSION_ID;
+        if extension_id != SLACK_EXTENSION_ID || handle.as_str() != "slack_bot_token" {
+            return Ok(None);
+        }
+        let setup = self.setup_service.current_setup().await.map_err(|_| {
+            crate::extension_host::channel_egress::ChannelEgressCredentialError::Unavailable
+        })?;
+        let Some(setup) = setup else {
+            return Ok(None);
+        };
+        let bot_token = self.setup_service.bot_token(&setup).await.map_err(|_| {
+            crate::extension_host::channel_egress::ChannelEgressCredentialError::Unavailable
+        })?;
+        Ok(Some(bot_token))
+    }
+}
+
 #[derive(Clone)]
 struct DynamicSlackTriggeredRunDeliveryHook {
     parts: Arc<SlackHostBetaRuntimeParts>,
@@ -417,7 +461,7 @@ struct DynamicSlackTriggeredRunDeliveryHook {
 #[derive(Clone)]
 struct DynamicSlackTriggeredRunDeliveryDriver {
     revision: u64,
-    driver: Arc<TriggeredRunDeliveryDriver>,
+    driver: Arc<SlackTriggeredRunDeliveryHook>,
 }
 
 impl DynamicSlackTriggeredRunDeliveryHook {
@@ -434,7 +478,7 @@ impl DynamicSlackTriggeredRunDeliveryHook {
         }
     }
 
-    async fn current_driver(&self) -> Result<Option<Arc<TriggeredRunDeliveryDriver>>, String> {
+    async fn current_driver(&self) -> Result<Option<Arc<SlackTriggeredRunDeliveryHook>>, String> {
         let Some(setup) = self
             .setup_service
             .current_setup()

@@ -1881,35 +1881,7 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 // run to completion and delivers the result to the creator's personal Slack DM
 // using the same polling machinery as the observer path (above).
 
-/// Composition-owned hook invoked by the trigger poller after a successful fire
-/// submission has been durably settled in trigger storage. The composition root
-/// wires a real implementation (behind the `slack-v2-host-beta` feature) or a
-/// no-op.
-#[async_trait]
-pub trait PostSubmitDeliveryHook: Send + Sync {
-    /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under. The trigger poller invokes this
-    /// hook from a detached task after the accepted fire appears as settled, so
-    /// hook latency cannot delay settlement and delivery cannot precede the
-    /// persisted run/thread mapping. Implementations may still spawn their own
-    /// longer-lived delivery tasks when they need bounded admission or shutdown
-    /// tracking.
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
-}
-
-/// No-op hook used when the Slack host-beta feature is not active.
-pub struct NoopPostSubmitDeliveryHook;
-
-#[async_trait]
-impl PostSubmitDeliveryHook for NoopPostSubmitDeliveryHook {
-    async fn on_trigger_submitted(
-        &self,
-        _fire: TriggerFire,
-        _run_id: TurnRunId,
-        _scope: TurnScope,
-    ) {
-    }
-}
+pub use crate::automation::trigger_poller::PostSubmitDeliveryHook;
 
 /// Drives triggered-run delivery for a single submitted run.
 ///

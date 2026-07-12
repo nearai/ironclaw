@@ -32,7 +32,7 @@ use super::{
     HintSeenSet, RunDeliveryError, RunDeliveryServices, RunDeliverySettings,
     blocked_actionable_marker, cancel_auth_blocked_run, delivered_messages_from_outcome,
     gate_routes::record_gate_route_if_needed, thread_scope_from_binding,
-    turn_scope_from_thread_scope, wait_for_actionable_state,
+    turn_scope_from_thread_scope,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
@@ -295,28 +295,12 @@ impl RunDeliveryObserver {
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
         loop {
             let actionable_state = {
-                let working_slot = &mut working_message;
-                wait_for_actionable_state(
-                    self.services.turn_coordinator.as_ref(),
+                self.wait_for_actionable(
+                    &envelope,
                     &scope,
                     run_id,
-                    &self.settings,
                     delivered_blocked_marker.as_ref(),
-                    async |state: &TurnRunState| {
-                        if working_slot.is_none() && blocked_actionable_marker(state).is_none() {
-                            *working_slot = self
-                                .services
-                                .post_notice(
-                                    DeliveryIntent::Working,
-                                    scope.clone(),
-                                    Some(run_id),
-                                    envelope.external_conversation_ref(),
-                                    prompts::WORKING_MESSAGE,
-                                    format!("working:{run_id}"),
-                                )
-                                .await;
-                        }
-                    },
+                    &mut working_message,
                 )
                 .await
                 .map_err(|err| {
@@ -401,6 +385,60 @@ impl RunDeliveryObserver {
                 messages_to_delete_after_final.extend(delivered_messages);
             }
             delivered_blocked_marker = Some(marker);
+        }
+    }
+
+    /// The live-path poll loop: waits for a terminal or newly-blocked state,
+    /// raising the working indicator once while the run is quietly running.
+    /// (Mirror of `wait_for_actionable_state`; kept separate so the indicator
+    /// side effect stays on the live path only.)
+    async fn wait_for_actionable(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        delivered_blocked_marker: Option<&BlockedActionableMarker>,
+        working_message: &mut Option<DeliveredChannelMessage>,
+    ) -> Result<TurnRunState, RunDeliveryError> {
+        let start = std::time::Instant::now();
+        let mut poll_interval = self.settings.poll_interval;
+        loop {
+            let state = self
+                .services
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await?;
+            if state.status.is_terminal() {
+                return Ok(state);
+            }
+            if let Some(marker) = blocked_actionable_marker(&state)
+                && Some(&marker) != delivered_blocked_marker
+            {
+                return Ok(state);
+            }
+            if start.elapsed() >= self.settings.max_wait {
+                return Err(RunDeliveryError::RunWaitTimedOut { run_id });
+            }
+            if working_message.is_none() && blocked_actionable_marker(&state).is_none() {
+                *working_message = self
+                    .services
+                    .post_notice(
+                        DeliveryIntent::Working,
+                        scope.clone(),
+                        Some(run_id),
+                        envelope.external_conversation_ref(),
+                        prompts::WORKING_MESSAGE,
+                        format!("working:{run_id}"),
+                    )
+                    .await;
+            }
+            tokio::time::sleep(super::jittered_poll_interval(poll_interval, &run_id)).await;
+            poll_interval = poll_interval
+                .saturating_mul(2)
+                .min(std::time::Duration::from_secs(5));
         }
     }
 

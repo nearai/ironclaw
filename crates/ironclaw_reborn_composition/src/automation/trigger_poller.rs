@@ -26,8 +26,36 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationCon
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_delivery::PostSubmitDeliveryHook;
+use ironclaw_triggers::TriggerFire;
+use ironclaw_turns::{TurnRunId, TurnScope};
+
+/// Composition-owned hook invoked by the trigger poller after a successful
+/// fire submission has been durably settled in trigger storage. The
+/// composition root wires a channel-host implementation or a no-op.
+///
+/// The poller invokes this hook from a detached task after the accepted fire
+/// appears as settled, so hook latency cannot delay settlement and delivery
+/// cannot precede the persisted run/thread mapping.
+#[async_trait::async_trait]
+pub trait PostSubmitDeliveryHook: Send + Sync {
+    /// Called with the original trigger fire, the submitted run id, and the
+    /// turn scope the run was submitted under.
+    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
+}
+
+/// No-op hook used when no channel host wires triggered delivery.
+pub struct NoopPostSubmitDeliveryHook;
+
+#[async_trait::async_trait]
+impl PostSubmitDeliveryHook for NoopPostSubmitDeliveryHook {
+    async fn on_trigger_submitted(
+        &self,
+        _fire: TriggerFire,
+        _run_id: TurnRunId,
+        _scope: TurnScope,
+    ) {
+    }
+}
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
@@ -339,6 +367,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
+        use super::super::PostSubmitDeliveryHook;
         use async_trait::async_trait;
         use chrono::Utc;
         use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
@@ -351,7 +380,6 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
-        use crate::slack::slack_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
         struct RecordingHook {

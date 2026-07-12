@@ -671,7 +671,7 @@ pub struct RebornRuntime {
     /// `None` when the trigger poller is not enabled.
     #[cfg(feature = "slack-v2-host-beta")]
     post_submit_hook_slot:
-        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>>,
+        Option<Arc<std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -839,8 +839,9 @@ struct TriggerPollerServices {
     /// so `build_slack_host_beta_mounts` (called after runtime build) can wire the
     /// hook without restarting the poller.
     #[cfg(feature = "slack-v2-host-beta")]
-    post_submit_hook_slot:
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>,
+    post_submit_hook_slot: Arc<
+        std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
+    >,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -1755,7 +1756,7 @@ impl RebornRuntime {
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn set_trigger_post_submit_hook(
         &self,
-        hook: Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>,
+        hook: Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>,
     ) -> bool {
         let Some(slot) = self.post_submit_hook_slot.as_ref() else {
             tracing::debug!("set_trigger_post_submit_hook: trigger poller not enabled, ignoring");
@@ -3837,7 +3838,9 @@ pub async fn build_reborn_runtime(
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
     #[cfg(feature = "slack-v2-host-beta")]
     let runtime_post_submit_hook_slot: Option<
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>,
+        Arc<
+            std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
+        >,
     >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<

@@ -71,6 +71,7 @@ mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::trigger_poller::{NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook};
 pub use error::RebornBuildError;
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
@@ -221,9 +222,7 @@ pub use slack::slack_channel_routes::{
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
+pub use slack::slack_delivery::TriggeredRunDeliveryDriver;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,

@@ -473,6 +473,23 @@ pub struct RebornServices {
     /// extension host.
     pub(crate) extension_ingress:
         Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
+    /// The generic delivery coordinator (extension-runtime §5.4): the sole
+    /// writer of outbound delivery state, resolving channel adapters +
+    /// policy egress from the active snapshot. `None` when the composition
+    /// path builds no channel egress transport.
+    pub(crate) delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
+    /// The snapshot-backed channel delivery resolver behind the coordinator,
+    /// exposed separately for host flows (e.g. DM target provisioning) that
+    /// need one generation-pinned adapter + egress read outside a delivery.
+    // Consumed by the DM-provisioning re-point in the deletion slice.
+    #[allow(dead_code)]
+    pub(crate) channel_delivery_resolver:
+        Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+    /// Registry of beta-era channel credential bridges (§11 compatibility):
+    /// channel hosts whose secrets predate the extension-config store
+    /// register resolution ports here.
+    pub(crate) channel_egress_credential_bridges:
+        Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
 }
 
 /// Whether the background credential keepalive worker can be started, with its
@@ -517,6 +534,34 @@ impl RebornServices {
         &self,
     ) -> Option<crate::extension_host::extension_ingress::ExtensionIngressParts> {
         self.extension_ingress.clone()
+    }
+
+    /// The generic delivery coordinator (extension-runtime §5.4), when this
+    /// composition path built the channel egress transport.
+    pub fn delivery_coordinator(
+        &self,
+    ) -> Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>> {
+        self.delivery_coordinator.clone()
+    }
+
+    /// The snapshot-backed channel delivery resolver behind the coordinator.
+    #[allow(dead_code)]
+    pub(crate) fn channel_delivery_resolver(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>> {
+        self.channel_delivery_resolver.clone()
+    }
+
+    /// Register a beta-era channel-egress credential bridge (§11): consulted
+    /// ahead of the scoped secret store when resolving channel credential
+    /// handles.
+    pub(crate) fn register_channel_egress_credential_bridge(
+        &self,
+        bridge: Arc<dyn crate::extension_host::channel_egress::ChannelEgressCredentialsPort>,
+    ) {
+        if let Some(bridges) = &self.channel_egress_credential_bridges {
+            bridges.register(bridge);
+        }
     }
 
     /// Test-support access to the shared scoped secret store backing the
@@ -1044,6 +1089,9 @@ impl RebornServices {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
             extension_ingress: None,
+            delivery_coordinator: None,
+            channel_delivery_resolver: None,
+            channel_egress_credential_bridges: None,
         }
     }
 }
@@ -1740,7 +1788,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // configured runtime lanes, hydrated from the facade's durable state.
     // From here extension dispatch resolves from the host's active snapshot;
     // the registry lane serves built-ins only.
-    let extension_ingress = {
+    let (
+        extension_ingress,
+        delivery_coordinator,
+        channel_delivery_resolver,
+        channel_egress_credential_bridges,
+    ) = {
         let reserved_capability_ids: std::collections::BTreeSet<_> = services
             .shared_extension_registry()
             .snapshot()
@@ -1750,21 +1803,32 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             })
             .map(|descriptor| descriptor.id.clone())
             .collect();
-        let channel_egress_transport = services.host_runtime_http_egress_port().map(|port| {
-            Arc::new(
-                crate::extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
-                    port,
-                    Arc::new(
-                        crate::extension_host::channel_egress::SecretStoreChannelEgressCredentials::new(
-                            Arc::clone(&secret_store),
-                            channel_egress_scope.clone(),
-                        ),
-                    ),
+        let channel_egress_credentials = Arc::new(
+            crate::extension_host::channel_egress::BridgedChannelEgressCredentials::new(Arc::new(
+                crate::extension_host::channel_egress::SecretStoreChannelEgressCredentials::new(
+                    Arc::clone(&secret_store),
                     channel_egress_scope.clone(),
                 ),
-            )
-                as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
-        });
+            )),
+        );
+        let channel_egress_credential_bridges = Arc::clone(&channel_egress_credentials);
+        // Use the SAME effective port the rest of the runtime egresses
+        // through (test overrides included) — a transport on a different
+        // port would silently bypass recording/replay harnesses.
+        let channel_egress_transport = store_graph
+            .local_runtime
+            .host_runtime_http_egress
+            .clone()
+            .map(|port| {
+                Arc::new(
+                    crate::extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
+                        port,
+                        channel_egress_credentials,
+                        channel_egress_scope.clone(),
+                    ),
+                )
+                    as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
+            });
         let generic = crate::extension_host::generic_host::build_generic_extension_host(
             crate::extension_host::generic_host::GenericExtensionHostParams {
                 binder: services.extension_lane_tool_binder(),
@@ -1784,7 +1848,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 reserved_capability_ids,
                 reserved_ingress_routes:
                     crate::extension_host::extension_ingress::reserved_fixed_ingress_routes(),
-                channel_egress_transport,
+                channel_egress_transport: channel_egress_transport.clone(),
             },
         )
         .await?;
@@ -1800,10 +1864,43 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         services.set_extension_tool_resolver(generic.resolver);
         // Generic channel ingress (extension-runtime P4): one router over
         // the host's snapshot watch; the serve layer mounts it once.
-        Some(
-            crate::extension_host::extension_ingress::build_extension_ingress(
-                generic.host.snapshot_watch(),
-            ),
+        let ingress_parts = crate::extension_host::extension_ingress::build_extension_ingress(
+            generic.host.snapshot_watch(),
+        );
+        // The delivery coordinator (§5.4): sole delivery-state writer over
+        // the SAME transport the host's channel hooks egress through and the
+        // SAME reply-context store the ingress router writes (ING-11).
+        // Interrupted (`Sending`) attempts from prior lifetimes are
+        // reconciled lazily per scope before that scope's first delivery.
+        let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
+            Some(transport) => {
+                let resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> =
+                    Arc::new(
+                        crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
+                            generic.host.snapshot_watch(),
+                            transport,
+                        ),
+                    );
+                let coordinator = Arc::new(ironclaw_product_workflow::DeliveryCoordinator::new(
+                    Arc::clone(&store_graph.local_runtime.outbound_state)
+                        as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+                    Arc::clone(&resolver),
+                    Arc::new(
+                        crate::extension_host::channel_delivery::IngressReplyContextSource::new(
+                            Arc::clone(&ingress_parts.reply_context),
+                        ),
+                    ),
+                    ironclaw_product_workflow::DeliveryRetryPolicy::default(),
+                ));
+                (Some(coordinator), Some(resolver))
+            }
+            None => (None, None),
+        };
+        (
+            Some(ingress_parts),
+            delivery_coordinator,
+            channel_delivery_resolver,
+            Some(channel_egress_credential_bridges),
         )
     };
 
@@ -1833,6 +1930,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         extension_ingress,
+        delivery_coordinator,
+        channel_delivery_resolver,
+        channel_egress_credential_bridges,
     })
 }
 
@@ -4791,6 +4891,9 @@ where
         // The production composition path does not build the generic
         // extension host yet; the generic ingress mounts with it.
         extension_ingress: None,
+        delivery_coordinator: None,
+        channel_delivery_resolver: None,
+        channel_egress_credential_bridges: None,
     })
 }
 

@@ -22,7 +22,6 @@ use axum::{
 };
 use ironclaw_extension_host::ingress::ExtensionIngressRouter;
 use ironclaw_product_adapters::{ProductInboundAck, ProductInboundEnvelope};
-use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 
 use crate::extension_host::extension_ingress::{
     ChannelIngressDrain, InboundPayloadClassifier, PostAdmissionObserver, VerifiedEvidenceMint,
@@ -65,15 +64,16 @@ pub(crate) fn slack_inbound_classifier() -> Arc<InboundPayloadClassifier> {
     })
 }
 
-/// Adapts the Slack final-reply delivery observer (an
-/// [`ImmediateAckWorkflowObserver`]) to the generic post-admission observer
-/// seam. Deleted with the P5 delivery-coordinator cutover.
-pub(crate) struct ImmediateAckObserverAdapter(pub(crate) Arc<dyn ImmediateAckWorkflowObserver>);
+/// Adapts the generic run-delivery observer to the post-admission observer
+/// seam of the generic ingress sink.
+pub(crate) struct RunDeliveryObserverAdapter(
+    pub(crate) Arc<ironclaw_product_workflow::RunDeliveryObserver>,
+);
 
 #[async_trait]
-impl PostAdmissionObserver for ImmediateAckObserverAdapter {
+impl PostAdmissionObserver for RunDeliveryObserverAdapter {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        self.0.observe_workflow_ack(envelope, ack).await;
+        self.0.observe_ack(envelope, ack).await;
     }
 
     async fn observe_error(
@@ -81,7 +81,7 @@ impl PostAdmissionObserver for ImmediateAckObserverAdapter {
         envelope: ProductInboundEnvelope,
         error: ironclaw_product_adapters::ProductAdapterError,
     ) {
-        self.0.observe_workflow_error(envelope, error).await;
+        self.0.observe_error(envelope, error).await;
     }
 }
 

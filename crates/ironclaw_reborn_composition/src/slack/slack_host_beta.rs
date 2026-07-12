@@ -12,9 +12,8 @@ use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
-    EgressCredentialHandle, OutboundDeliverySink, ProductAdapter, ProductAdapterId,
-    ProtocolHttpEgress,
+    AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle,
+    ProductAdapterId, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
@@ -25,10 +24,7 @@ use ironclaw_product_workflow::{
     ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     StaticProductInstallationResolver,
 };
-use ironclaw_slack_v2_adapter::{
-    SLACK_API_HOST, SLACK_V2_ADAPTER_ID, SlackV2Adapter, SlackV2AdapterConfig,
-    slack_request_signature_auth_requirement,
-};
+use ironclaw_slack_v2_adapter::{SLACK_API_HOST, SLACK_V2_ADAPTER_ID};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::TurnCoordinator;
 use ironclaw_wasm_product_adapters::EgressPolicy;
@@ -39,9 +35,15 @@ use thiserror::Error;
 pub(crate) mod runtime_setup;
 
 use crate::RebornRuntime;
+use crate::automation::trigger_poller::PostSubmitDeliveryHook;
+use crate::extension_host::available_extensions::SLACK_EXTENSION_ID;
 use crate::extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressParts, GenericChannelInboundSink, StaticIngressSecrets,
+};
+use crate::extension_host::run_delivery_ports::{
+    ProductAuthBlockedAuthFlowCancel, ProductAuthBlockedAuthPromptSource,
+    ProjectionApprovalPromptContextSource,
 };
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
@@ -52,16 +54,13 @@ use crate::provider_identity::{
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
-use crate::slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
-};
 use crate::slack::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
 use crate::slack::slack_outbound_targets::{
     SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
     SlackOutboundTargetProviderConfig, SlackPersonalDmTarget, SlackPersonalDmTargetError,
     SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
+    slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
 use crate::slack::slack_personal_binding::{
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
@@ -69,23 +68,20 @@ use crate::slack::slack_personal_binding::{
     SlackPersonalUserBindingService,
 };
 use crate::slack::slack_serve::{
-    ImmediateAckObserverAdapter, SlackInstallationSelector, SlackTeamId, SlackUserId,
+    RunDeliveryObserverAdapter, SlackInstallationSelector, SlackTeamId, SlackUserId,
     slack_events_alias_mount, slack_evidence_mint, slack_inbound_classifier,
 };
 use crate::webui::webui_serve::PublicRouteMount;
 use ironclaw_extension_host::ingress::{InboundSink, VerificationCandidate};
+use ironclaw_product_workflow::{
+    PreferenceTargetCodec, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
+};
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const SLACK_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
 const SLACK_OUTBOUND_PROVIDER_KEY_PREFIX: &str = "slack-v2-host-beta";
-
-struct NoopSlackDeliverySink;
-
-#[async_trait::async_trait]
-impl OutboundDeliverySink for NoopSlackDeliverySink {
-    async fn record(&self, _status: DeliveryStatus) {}
-}
 
 /// No-op [`ConversationBindingService`] used by [`build_triggered_run_delivery_hook`].
 ///
@@ -547,6 +543,7 @@ struct SlackHostBetaRuntimeParts {
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     auth_challenge_provider: Option<Arc<dyn crate::AuthChallengeProvider>>,
     auth_flow_canceller: Option<Arc<dyn crate::BlockedAuthFlowCanceller>>,
+    delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
 }
 
 impl SlackHostBetaRuntimeParts {
@@ -570,6 +567,7 @@ impl SlackHostBetaRuntimeParts {
             auth_interaction_service: runtime.webui_auth_interaction_service(),
             auth_challenge_provider: runtime.auth_challenge_provider(),
             auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
+            delivery_coordinator: runtime.services().delivery_coordinator(),
         })
     }
 }
@@ -641,7 +639,7 @@ pub fn build_triggered_run_delivery_hook(
     runtime: &RebornRuntime,
     config: &SlackHostBetaConfig,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-) -> Result<Arc<TriggeredRunDeliveryDriver>, SlackHostBetaBuildError> {
+) -> Result<Arc<SlackTriggeredRunDeliveryHook>, SlackHostBetaBuildError> {
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
     build_triggered_run_delivery_hook_from_parts(&parts, config, delivery_store)
 }
@@ -650,50 +648,205 @@ fn build_triggered_run_delivery_hook_from_parts(
     parts: &SlackHostBetaRuntimeParts,
     config: &SlackHostBetaConfig,
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
-) -> Result<Arc<TriggeredRunDeliveryDriver>, SlackHostBetaBuildError> {
-    let token_handle = slack_bot_token_handle()?;
-    let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
-        .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
-    let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
-        adapter_id,
-        installation_id: config.installation_id.clone(),
-        egress_credential_handle: token_handle.clone(),
-        auth_requirement: slack_request_signature_auth_requirement(),
-    }));
-    let egress = slack_protocol_egress_from_parts(parts, config, token_handle)?;
-    let outbound_store: Arc<dyn OutboundStateStore> =
-        Arc::clone(&parts.local_runtime.outbound_state);
-    let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::clone(&parts.local_runtime.delivered_gate_routes);
-    let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
-        Arc::clone(&parts.local_runtime.outbound_preferences);
-    let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
+) -> Result<Arc<SlackTriggeredRunDeliveryHook>, SlackHostBetaBuildError> {
+    // The triggered path never resolves a conversation binding: the target
+    // comes from the creator's personal preference.
     let binding_service: Arc<dyn ConversationBindingService> =
         Arc::new(NoopConversationBindingService);
-    let services = SlackFinalReplyDeliveryServices {
+    let services = slack_run_delivery_services(parts, config, binding_service)?;
+    // Pass config.agent_id as the fallback so the ThreadScope key matches the
+    // value ConversationContentRefMaterializer uses (same runtime default_agent_id).
+    let driver = Arc::new(TriggeredRunDeliveryDriver::with_settings(
+        services,
+        triggered_run_delivery_settings(),
+        Arc::clone(&delivery_store),
+        Arc::new(SlackPreferenceTargetCodec),
+        config.agent_id.clone(),
+    ));
+    Ok(Arc::new(SlackTriggeredRunDeliveryHook {
+        driver,
+        delivery_store,
+    }))
+}
+
+/// Generic run-delivery services over this Slack host's runtime parts: the
+/// delivery coordinator plus the composition port implementations.
+fn slack_run_delivery_services(
+    parts: &SlackHostBetaRuntimeParts,
+    config: &SlackHostBetaConfig,
+    binding_service: Arc<dyn ConversationBindingService>,
+) -> Result<RunDeliveryServices, SlackHostBetaBuildError> {
+    let coordinator = parts
+        .delivery_coordinator
+        .clone()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let fallback_notice_scope = ironclaw_turns::TurnScope::new_with_owner(
+        config.tenant_id.clone(),
+        Some(config.agent_id.clone()),
+        config.project_id.clone(),
+        ironclaw_host_api::ThreadId::new("slack-channel-notices")
+            .map_err(|reason| invalid_config("fallback_notice_scope", reason.to_string()))?,
+        Some(config.user_id.clone()),
+    );
+    Ok(RunDeliveryServices {
         binding_service,
         thread_service: Arc::clone(&parts.thread_service),
         turn_coordinator: Arc::clone(&parts.turn_coordinator),
-        outbound_store,
-        route_store: Arc::clone(&route_store),
-        communication_preferences: preferences,
-        adapter,
-        egress,
-        delivery_sink,
-        auth_challenges: parts.auth_challenge_provider.clone(),
-        auth_flow_canceller: parts.auth_flow_canceller.clone(),
-        approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
-            as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
-    };
-    // Pass config.agent_id as the fallback so the ThreadScope key matches the
-    // value ConversationContentRefMaterializer uses (same runtime default_agent_id).
-    let driver = TriggeredRunDeliveryDriver::new(
-        services,
-        delivery_store,
-        route_store,
-        config.agent_id.clone(),
-    );
-    Ok(Arc::new(driver))
+        outbound_store: Arc::clone(&parts.local_runtime.outbound_state)
+            as Arc<dyn OutboundStateStore>,
+        route_store: Arc::clone(&parts.local_runtime.delivered_gate_routes)
+            as Arc<dyn DeliveredGateRouteStore>,
+        communication_preferences: Arc::clone(&parts.local_runtime.outbound_preferences)
+            as Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+        coordinator,
+        extension_id: SLACK_EXTENSION_ID.to_string(),
+        fallback_notice_scope,
+        approval_context: Some(Arc::new(ProjectionApprovalPromptContextSource::new(
+            Arc::clone(&parts.local_runtime.approval_requests)
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+        ))),
+        blocked_auth_prompts: Some(Arc::new(ProductAuthBlockedAuthPromptSource::new(
+            parts.auth_challenge_provider.clone(),
+        ))),
+        auth_flow_cancel: parts.auth_flow_canceller.clone().map(|canceller| {
+            Arc::new(ProductAuthBlockedAuthFlowCancel::new(canceller))
+                as Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCancel>
+        }),
+    })
+}
+
+/// §11 credential bridge: serves the Slack beta bot token for the bundled
+/// slack extension's egress credential handle until Slack credentials move
+/// to the extension-config store (P6). Registered into the composition's
+/// bridged channel-egress credentials by every Slack beta wiring path.
+pub(crate) struct SlackBotTokenEgressCredentialsBridge {
+    pub(crate) bot_token: SecretString,
+}
+
+#[async_trait::async_trait]
+impl crate::extension_host::channel_egress::ChannelEgressCredentialsPort
+    for SlackBotTokenEgressCredentialsBridge
+{
+    async fn channel_secret(
+        &self,
+        extension_id: &str,
+        _installation_id: &str,
+        handle: &ironclaw_host_api::SecretHandle,
+    ) -> Result<
+        Option<ironclaw_secrets::SecretMaterial>,
+        crate::extension_host::channel_egress::ChannelEgressCredentialError,
+    > {
+        if extension_id != SLACK_EXTENSION_ID || handle.as_str() != SLACK_BOT_TOKEN_HANDLE {
+            return Ok(None);
+        }
+        Ok(Some(self.bot_token.clone()))
+    }
+}
+
+/// Decodes Slack preference reply-target binding refs for the generic
+/// triggered driver (the vendor half of `PreferenceTargetCodec`).
+pub(crate) struct SlackPreferenceTargetCodec;
+
+impl PreferenceTargetCodec for SlackPreferenceTargetCodec {
+    fn conversation_for_target(
+        &self,
+        target: &ironclaw_turns::ReplyTargetBindingRef,
+    ) -> Option<ironclaw_product_adapters::ExternalConversationRef> {
+        let (conversation_id, space_id) =
+            slack_conversation_id_from_reply_target_binding_ref(target)?;
+        ironclaw_product_adapters::ExternalConversationRef::new(
+            space_id.as_deref(),
+            &conversation_id,
+            None,
+            None,
+        )
+        .ok()
+    }
+
+    fn is_personal_direct_message(&self, target: &ironclaw_turns::ReplyTargetBindingRef) -> bool {
+        slack_reply_target_is_personal_dm(target)
+    }
+}
+
+/// The Slack post-submit delivery hook: translates a trigger fire into the
+/// generic triggered-delivery request and hands it to the generic driver.
+pub struct SlackTriggeredRunDeliveryHook {
+    driver: Arc<TriggeredRunDeliveryDriver>,
+    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+}
+
+impl SlackTriggeredRunDeliveryHook {
+    /// The generic driver behind this hook (test seam: preference-store
+    /// pointer identity through the production entry point).
+    pub fn driver(&self) -> &Arc<TriggeredRunDeliveryDriver> {
+        &self.driver
+    }
+}
+
+#[async_trait::async_trait]
+impl PostSubmitDeliveryHook for SlackTriggeredRunDeliveryHook {
+    async fn on_trigger_submitted(
+        &self,
+        fire: ironclaw_triggers::TriggerFire,
+        run_id: ironclaw_turns::TurnRunId,
+        scope: ironclaw_turns::TurnScope,
+    ) {
+        let trigger_context = match triggered_communication_context(&fire) {
+            Ok(context) => context,
+            Err(reason) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::slack_host_beta",
+                    %run_id,
+                    %reason,
+                    "triggered run delivery skipped: cannot build trigger context"
+                );
+                let record = ironclaw_outbound::TriggeredRunDeliveryRecord {
+                    run_id,
+                    outcome: ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::Failed,
+                    recorded_at: chrono::Utc::now(),
+                };
+                if let Err(error) = self
+                    .delivery_store
+                    .record_triggered_run_delivery(record)
+                    .await
+                {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::slack_host_beta",
+                        %run_id,
+                        error = %error,
+                        "failed to record triggered run delivery outcome (best-effort)"
+                    );
+                }
+                return;
+            }
+        };
+        self.driver
+            .on_trigger_submitted(TriggeredRunDeliveryRequest {
+                run_id,
+                scope,
+                creator_user_id: fire.creator_user_id.clone(),
+                project_scoped: fire.project_id.is_some(),
+                prompt: fire.prompt.clone(),
+                trigger_context,
+            })
+            .await;
+    }
+}
+
+/// Build a `TriggerCommunicationContext` from the fire's identity.
+fn triggered_communication_context(
+    fire: &ironclaw_triggers::TriggerFire,
+) -> Result<ironclaw_outbound::TriggerCommunicationContext, String> {
+    let trigger_origin_ref =
+        ironclaw_outbound::TriggerOriginRef::new(fire.identity.trigger_id().to_string())
+            .map_err(|e| format!("invalid trigger origin ref: {e}"))?;
+    let fire_slot = ironclaw_outbound::TriggerFireSlot::new(fire.identity.fire_slot().to_rfc3339())
+        .map_err(|e| format!("invalid fire slot: {e}"))?;
+    Ok(ironclaw_outbound::TriggerCommunicationContext {
+        trigger_origin_ref,
+        trigger_source_kind: ironclaw_outbound::TriggerSourceKind::Schedule,
+        fire_slot,
+    })
 }
 
 pub fn build_slack_host_beta_mounts(
@@ -760,6 +913,16 @@ pub fn build_slack_host_beta_mounts(
     // register it (with the signing secret candidates) against the generic
     // router and mount the one-release legacy alias.
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    // §11 bridge: the beta config's bot token backs the bundled slack
+    // extension's egress credential handle until Slack credentials move to
+    // the extension-config store (P6).
+    runtime
+        .services()
+        .register_channel_egress_credential_bridge(Arc::new(
+            SlackBotTokenEgressCredentialsBridge {
+                bot_token: config.bot_token.clone(),
+            },
+        ));
     // Sync/test entrypoint: no async context to rehydrate a durable store, so
     // bindings are in-memory here. Production Slack traffic flows through the
     // async `runtime_setup` path, which supplies the durable store.
@@ -928,6 +1091,13 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    runtime
+        .services()
+        .register_channel_egress_credential_bridge(Arc::new(
+            SlackBotTokenEgressCredentialsBridge {
+                bot_token: config.bot_token.clone(),
+            },
+        ));
     // Sync/test entrypoint: no async context to rehydrate a durable store, so
     // bindings are in-memory here. Production Slack traffic flows through the
     // async `runtime_setup` path, which supplies the durable store.
@@ -986,13 +1156,6 @@ fn build_slack_inbound_sink(
     // mapping. Shared Slack channel execution is configured separately.
     let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
-    let token_handle = slack_bot_token_handle()?;
-    let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
-        adapter_id: adapter_id.clone(),
-        installation_id: config.installation_id.clone(),
-        egress_credential_handle: token_handle.clone(),
-        auth_requirement: slack_request_signature_auth_requirement(),
-    }));
 
     let SlackConversationServices {
         binding: conversation_port,
@@ -1058,29 +1221,9 @@ fn build_slack_inbound_sink(
         .with_delivered_gate_routes(route_store.clone()),
     );
 
-    let egress = slack_protocol_egress_from_parts(parts, &config, token_handle)?;
-    let outbound_store: Arc<dyn OutboundStateStore> =
-        Arc::clone(&parts.local_runtime.outbound_state);
-    let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
-        Arc::clone(&parts.local_runtime.outbound_preferences);
-    let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
-            binding_service: Arc::new(binding),
-            thread_service: Arc::clone(&parts.thread_service),
-            turn_coordinator: Arc::clone(&parts.turn_coordinator),
-            outbound_store,
-            route_store,
-            communication_preferences: preferences,
-            adapter,
-            egress,
-            delivery_sink,
-            auth_challenges: parts.auth_challenge_provider.clone(),
-            auth_flow_canceller: parts.auth_flow_canceller.clone(),
-            approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
-        },
-        SlackFinalReplyDeliverySettings::default(),
+    let observer = Arc::new(RunDeliveryObserver::with_settings(
+        slack_run_delivery_services(parts, &config, Arc::new(binding))?,
+        RunDeliverySettings::default(),
     ));
 
     Ok(Arc::new(GenericChannelInboundSink::new(
@@ -1089,7 +1232,7 @@ fn build_slack_inbound_sink(
             evidence: slack_evidence_mint(),
             classifier: Some(slack_inbound_classifier()),
             workflow,
-            observer: Some(Arc::new(ImmediateAckObserverAdapter(observer))),
+            observer: Some(Arc::new(RunDeliveryObserverAdapter(observer))),
         },
     )))
 }
@@ -1690,7 +1833,10 @@ mod tests {
         let final_reply = wait_for_slack_post_message(&egress, "ok").await;
         assert_eq!(final_reply["channel"], "D0HOST");
         assert_eq!(final_reply["text"], "ok");
-        assert_eq!(final_reply["mrkdwn"], true);
+        // The channel adapter renders markdown to mrkdwn and omits the
+        // explicit `mrkdwn` flag (Slack defaults it to true for
+        // chat.postMessage bodies).
+        assert!(final_reply.get("mrkdwn").is_none());
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -4462,20 +4608,23 @@ mod tests {
         .await
         .expect("upsert trigger record");
 
-        // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
-        // both `last_fired_slot` and `active_run_ref` atomically, so if we see
-        // `last_fired_slot` we can also safely read the run_id.
+        // Wait for the poller to fire the trigger. `mark_fire_accepted` sets
+        // both `last_fired_slot` and `active_run_ref` atomically, but the
+        // settle transition CLEARS `active_run_ref` again — and with an
+        // instant-completing scripted gateway the whole accept→settle window
+        // can fit between two polls. Poll tightly and capture the run ref the
+        // moment it is visible; only give up at the deadline.
         let deadline = Instant::now() + std::time::Duration::from_secs(15);
         let mut fired_run_id = None;
         while Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             let current = repo
                 .get_trigger(tenant_id.clone(), trigger_id)
                 .await
                 .expect("get_trigger")
                 .expect("record present");
-            if current.last_fired_slot.is_some() {
-                fired_run_id = current.active_run_ref;
+            if let Some(run_ref) = current.active_run_ref {
+                fired_run_id = Some(run_ref);
                 break;
             }
         }
@@ -4564,7 +4713,7 @@ mod tests {
         // `build_triggered_run_delivery_hook` is regressed to
         // `Arc::new(FilesystemOutboundStateStore::new(...))`, the new allocation
         // will produce a different pointer pair and this assertion fails.
-        let driver_store = driver.communication_preferences_for_test();
+        let driver_store = driver.driver().communication_preferences();
         let facade_store: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
             Arc::clone(&local_runtime.outbound_preferences);
         assert!(
