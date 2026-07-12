@@ -127,6 +127,7 @@ pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 /// An attachment reference — the vendor URL/id plus a mime hint. Bytes are
 /// fetched host-side through restricted egress with the channel credential
 /// only when a consumer needs them, keeping `inbound` pure.
+#[derive(Debug, Clone)]
 pub struct AttachmentRef {
     pub descriptor: ProductAttachmentDescriptor,
     pub vendor_ref: String,
@@ -145,6 +146,7 @@ pub struct ImmediateResponse {
 pub const MAX_IMMEDIATE_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// One outbound envelope the delivery coordinator hands the adapter.
+#[derive(Debug, Clone)]
 pub struct OutboundEnvelope {
     pub extension_id: String,
     pub installation_id: String,
@@ -160,6 +162,7 @@ pub struct OutboundEnvelope {
 }
 
 /// A resolved outbound target for one delivery.
+#[derive(Debug, Clone)]
 pub struct OutboundTarget {
     /// Vendor conversation reference (channel/DM/chat id).
     pub conversation: ExternalConversationRef,
@@ -168,6 +171,7 @@ pub struct OutboundTarget {
 }
 
 /// One part of an outbound message.
+#[derive(Debug, Clone)]
 pub enum OutboundPart {
     Text(String),
     Attachment(AttachmentRef),

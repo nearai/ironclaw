@@ -41,6 +41,7 @@ mod fakes;
 // `ironclaw_product_workflow_storage` crate). Gated behind `storage` so the
 // facade surface stays free of the `ironclaw_filesystem` dependency unless a
 // consumer opts into a durable backend.
+mod delivery_coordinator;
 #[cfg(feature = "storage")]
 mod filesystem_ledger;
 mod gate_state;
@@ -134,6 +135,11 @@ pub use lifecycle::{
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
+pub use delivery_coordinator::{
+    ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
+    CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
+    DeliveryRetryPolicy, NoReplyContext, ResolvedChannelDelivery,
+};
 pub use outbound_delivery::{
     ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
     ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,

@@ -291,7 +291,9 @@ fn delivery_failure_kind_for_adapter_error(error: &ProductAdapterError) -> Deliv
     }
 }
 
-fn delivery_failure_kind_for_workflow_error(error: &ProductWorkflowError) -> DeliveryFailureKind {
+pub(crate) fn delivery_failure_kind_for_workflow_error(
+    error: &ProductWorkflowError,
+) -> DeliveryFailureKind {
     match error {
         ProductWorkflowError::Transient { .. } => DeliveryFailureKind::TransportUnavailable,
         ProductWorkflowError::BindingAccessDenied

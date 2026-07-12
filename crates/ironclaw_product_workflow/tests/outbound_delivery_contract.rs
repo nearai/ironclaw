@@ -1825,3 +1825,476 @@ async fn require_direct_message_false_does_not_trigger_dm_rejection() {
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
 }
+
+// ---------------------------------------------------------------------------
+// Delivery coordinator (extension-runtime §5.4; OUT-1..7, ING-11)
+// ---------------------------------------------------------------------------
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+use ironclaw_product_adapters::{
+    ChannelAdapter, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
+    PartDeliveryOutcome, VerifiedInbound,
+};
+use ironclaw_product_workflow::{
+    ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
+    CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
+    DeliveryRetryPolicy, ResolvedChannelDelivery,
+};
+
+struct CoordinatorDenyAllEgress;
+
+#[async_trait]
+impl ironclaw_host_api::RestrictedEgress for CoordinatorDenyAllEgress {
+    async fn send(
+        &self,
+        _request: ironclaw_host_api::RestrictedEgressRequest,
+    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
+    {
+        Err(ironclaw_host_api::RestrictedEgressError::PolicyDenied)
+    }
+}
+
+/// Scripted channel adapter: pops one report per deliver call, records the
+/// envelope it saw, and captures the durable attempt status AT deliver time
+/// (proving OUT-3: `Sending` is persisted before any vendor work).
+struct ScriptedChannelAdapter {
+    reports: Mutex<VecDeque<Result<DeliveryReport, ChannelError>>>,
+    envelopes: Mutex<Vec<OutboundEnvelope>>,
+    observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
+    store: Arc<InMemoryOutboundStateStore>,
+    scope: TurnScope,
+}
+
+impl ScriptedChannelAdapter {
+    fn new(
+        store: Arc<InMemoryOutboundStateStore>,
+        scope: TurnScope,
+        reports: Vec<Result<DeliveryReport, ChannelError>>,
+    ) -> Self {
+        Self {
+            reports: Mutex::new(reports.into_iter().collect()),
+            envelopes: Mutex::new(Vec::new()),
+            observed_status: Mutex::new(Vec::new()),
+            store,
+            scope,
+        }
+    }
+
+    fn deliver_calls(&self) -> usize {
+        self.envelopes.lock().expect("envelopes lock").len()
+    }
+
+    fn envelopes(&self) -> Vec<OutboundEnvelope> {
+        self.envelopes.lock().expect("envelopes lock").clone()
+    }
+
+    fn observed_statuses(&self) -> Vec<ironclaw_outbound::OutboundDeliveryStatus> {
+        self.observed_status.lock().expect("status lock").clone()
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for ScriptedChannelAdapter {
+    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+        Ok(InboundOutcome::Ignore)
+    }
+
+    async fn deliver(
+        &self,
+        envelope: OutboundEnvelope,
+        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        let attempts = self
+            .store
+            .list_delivery_attempts(self.scope.clone())
+            .await
+            .expect("list attempts");
+        if let Some(attempt) = attempts.first() {
+            self.observed_status
+                .lock()
+                .expect("status lock")
+                .push(attempt.status);
+        }
+        self.envelopes
+            .lock()
+            .expect("envelopes lock")
+            .push(envelope);
+        self.reports
+            .lock()
+            .expect("reports lock")
+            .pop_front()
+            .unwrap_or_else(|| Err(ChannelError::Unsupported))
+    }
+}
+
+struct StaticChannelResolver {
+    adapter: Arc<ScriptedChannelAdapter>,
+    unavailable: bool,
+}
+
+impl ChannelDeliveryResolver for StaticChannelResolver {
+    fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+        if self.unavailable {
+            return None;
+        }
+        Some(ResolvedChannelDelivery {
+            extension_id: extension_id.to_string(),
+            installation_id: "inst-1".to_string(),
+            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            egress: Arc::new(CoordinatorDenyAllEgress),
+        })
+    }
+}
+
+struct FixedReplyContext(Vec<u8>);
+
+#[async_trait]
+impl DeliveryReplyContextSource for FixedReplyContext {
+    async fn reply_context(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+        _conversation_fingerprint: &str,
+    ) -> Option<Vec<u8>> {
+        Some(self.0.clone())
+    }
+}
+
+fn sent(reference: &str) -> PartDeliveryOutcome {
+    PartDeliveryOutcome::Sent {
+        vendor_message_ref: Some(reference.to_string()),
+    }
+}
+
+fn retryable_part() -> PartDeliveryOutcome {
+    PartDeliveryOutcome::Retryable {
+        reason: "vendor 429".to_string(),
+    }
+}
+
+fn coordinator_over(
+    store: &Arc<InMemoryOutboundStateStore>,
+    adapter: &Arc<ScriptedChannelAdapter>,
+) -> DeliveryCoordinator {
+    DeliveryCoordinator::new(
+        Arc::clone(store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(adapter),
+            unavailable: false,
+        }),
+        Arc::new(FixedReplyContext(b"vendor-reply-ctx".to_vec())),
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    )
+}
+
+fn coordinated_final_reply(scope: TurnScope, extension_id: &str) -> CoordinatedDeliveryRequest<'_> {
+    CoordinatedDeliveryRequest {
+        intent: DeliveryIntent::FinalReply,
+        delivery: delivery_request(scope),
+        parts: vec![ironclaw_product_adapters::OutboundPart::Text(
+            "final reply".to_string(),
+        )],
+        thread_anchor: Some("thread-1".to_string()),
+        require_direct_message_target: false,
+        extension_id,
+    }
+}
+
+#[tokio::test]
+async fn coordinator_persists_sending_before_the_adapter_delivers() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-100")],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            coordinated_final_reply(scope.clone(), "vendorx"),
+        )
+        .await
+        .expect("delivery drives");
+
+    let CoordinatedDeliveryOutcome::Delivered {
+        attempt,
+        vendor_message_refs,
+    } = outcome
+    else {
+        panic!("expected delivered outcome");
+    };
+    assert_eq!(vendor_message_refs, vec!["ts-100".to_string()]);
+    // OUT-3: the adapter observed the attempt already persisted as Sending.
+    assert_eq!(
+        adapter.observed_statuses(),
+        vec![ironclaw_outbound::OutboundDeliveryStatus::Sending]
+    );
+    // ING-11: the stored reply context rode the envelope back to the adapter.
+    let envelopes = adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(
+        envelopes[0].reply_context.as_deref(),
+        Some(b"vendor-reply-ctx".as_slice())
+    );
+    assert_eq!(
+        envelopes[0].delivery_attempt_id,
+        attempt.delivery_id.to_string()
+    );
+    assert_eq!(
+        envelopes[0].target.thread_anchor.as_deref(),
+        Some("thread-1")
+    );
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
+async fn coordinator_retries_fully_retryable_reports_then_delivers() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![
+            Ok(DeliveryReport {
+                parts: vec![retryable_part()],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![sent("ts-200")],
+            }),
+        ],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            coordinated_final_reply(scope.clone(), "vendorx"),
+        )
+        .await
+        .expect("delivery drives");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert_eq!(adapter.deliver_calls(), 2, "one retry then success");
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
+async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-300"), retryable_part()],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            coordinated_final_reply(scope.clone(), "vendorx"),
+        )
+        .await
+        .expect("delivery drives");
+
+    // OUT-7: once any part sent, a later retryable failure is terminal — a
+    // whole-envelope retry would duplicate the accepted part.
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::Rejected,
+            ..
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1, "no blind whole-envelope retry");
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-400")],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            coordinated_final_reply(scope.clone(), "vendorx"),
+        )
+        .await
+        .expect("delivery drives");
+    // Rewind the delivered attempt to Sending — the durable shape a crash
+    // between vendor egress and the result write leaves behind.
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    store
+        .update_delivery_status(ironclaw_outbound::UpdateDeliveryStatusRequest {
+            delivery_id: attempts[0].delivery_id,
+            scope: scope.clone(),
+            status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+            updated_at: Utc::now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let recovered = coordinator
+        .recover_interrupted_deliveries(scope.clone())
+        .await
+        .expect("recovery scans");
+    assert_eq!(recovered, 1);
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    // OUT-6: terminal-ambiguous, never blindly resent.
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Unknown
+    );
+    assert_eq!(adapter.deliver_calls(), 1, "adapter never called again");
+}
+
+#[tokio::test]
+async fn coordinator_rejects_new_deliveries_while_draining() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    coordinator.begin_drain();
+
+    let error = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            coordinated_final_reply(scope.clone(), "vendorx"),
+        )
+        .await
+        .expect_err("draining rejects new work");
+    assert!(matches!(error, CoordinatedDeliveryError::Draining));
+    assert_eq!(adapter.deliver_calls(), 0);
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert!(attempts.is_empty(), "no attempt recorded while draining");
+}
+
+#[tokio::test]
+async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: true,
+        }),
+        Arc::new(FixedReplyContext(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let error = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            coordinated_final_reply(scope.clone(), "vendorx"),
+        )
+        .await
+        .expect_err("unavailable channel fails closed");
+    assert!(matches!(
+        error,
+        CoordinatedDeliveryError::ChannelUnavailable { .. }
+    ));
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
+    );
+    assert_eq!(adapter.deliver_calls(), 0);
+}
