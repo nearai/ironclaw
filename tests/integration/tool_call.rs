@@ -62,6 +62,13 @@ async fn runs_numeric_time_input_through_builtin_tools_group() {
             .expect("time input has a description")
             .contains("100000000000")
     );
+    println!(
+        "E2E_TIME_EVIDENCE {}",
+        json!({
+            "tool_result": output,
+            "model_visible_input_schema": time.parameters["properties"]["input"]
+        })
+    );
 }
 
 #[tokio::test]
