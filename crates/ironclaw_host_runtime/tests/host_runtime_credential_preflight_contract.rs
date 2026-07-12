@@ -396,6 +396,7 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
     // fields. The invocation_id in the scope will not match context_a's
     // invocation_id.
     let forged_context = ExecutionContext {
+        run_id: None,
         resource_scope: context_b.resource_scope.clone(), // mismatched scope
         ..context_a
     };
@@ -457,6 +458,7 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
     let context_b = execution_context_without_grants();
 
     let forged_context = ExecutionContext {
+        run_id: None,
         resource_scope: context_b.resource_scope.clone(),
         ..context_a
     };

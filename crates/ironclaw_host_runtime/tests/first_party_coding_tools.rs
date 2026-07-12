@@ -799,6 +799,86 @@ async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
 }
 
 #[tokio::test]
+async fn builtin_coding_read_state_is_scoped_to_the_run() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.txt"), "original content\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let mut run_a = execution_context_with_mounts(coding_capability_ids(), mounts.clone());
+    run_a.run_id = Some(RunId::new());
+    // Same tenant/user/agent/project identity, but a different loop run and a
+    // different tool call: a run that never read the file itself.
+    let mut run_b = execution_context_with_mounts(coding_capability_ids(), mounts);
+    run_b.run_id = Some(RunId::new());
+
+    // Run A reads the file in full.
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.txt"}),
+        run_a.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["truncated"], json!(false));
+
+    // Run B never read the file; run A's read (with a still-matching
+    // fingerprint) must not authorize run B's edits.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.txt", "content": "cross-run overwrite"}),
+        run_b.clone(),
+    )
+    .await;
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("read it in full with read_file"),
+        "cross-run write rejection must carry the read-before-edit guidance, got: {message}"
+    );
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.txt",
+            "old_string": "original",
+            "new_string": "patched"
+        }),
+        run_b,
+    )
+    .await;
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+        "original content\n",
+        "cross-run edits must be rejected before touching the file"
+    );
+
+    // Within the SAME run, the read from an earlier tool call still unlocks a
+    // later tool call's edit: run scoping must not degrade to per-invocation
+    // scoping, which would break the read -> edit flow entirely.
+    let mut run_a_later_call = run_a;
+    let later_invocation = InvocationId::new();
+    run_a_later_call.invocation_id = later_invocation;
+    run_a_later_call.resource_scope.invocation_id = later_invocation;
+    let written = invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.txt", "content": "same-run informed overwrite\n"}),
+        run_a_later_call,
+    )
+    .await
+    .unwrap();
+    assert_eq!(written["success"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+        "same-run informed overwrite\n"
+    );
+}
+
+#[tokio::test]
 async fn builtin_write_file_rejects_edit_when_default_read_was_truncated_by_lines() {
     let temp = tempfile::tempdir().unwrap();
     let original: String = (0..2_100).map(|index| format!("line {index}\n")).collect();

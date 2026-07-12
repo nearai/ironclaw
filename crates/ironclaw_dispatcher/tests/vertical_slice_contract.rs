@@ -30,6 +30,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
     let wasm = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: wasm_scope,
             authenticated_actor_user_id: None,
@@ -56,6 +57,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let script_account = ResourceAccount::tenant(script_scope.tenant_id.clone());
     let script = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: script_scope,
             authenticated_actor_user_id: None,
@@ -85,6 +87,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let mcp_account = ResourceAccount::tenant(mcp_scope.tenant_id.clone());
     let mcp = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
             scope: mcp_scope,
             authenticated_actor_user_id: None,

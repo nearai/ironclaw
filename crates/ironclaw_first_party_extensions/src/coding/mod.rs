@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceScope,
+    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceScope, RunId,
     RuntimeDispatchErrorKind,
 };
 use serde_json::Value;
@@ -60,6 +60,10 @@ pub struct CodingCapabilityRequest<'a> {
     pub(crate) capability_id: &'a CapabilityId,
     pub(crate) kind: CodingCapabilityKind,
     pub(crate) scope: &'a ResourceScope,
+    /// Loop turn-run identity; `None` for non-loop callers. Read-before-edit
+    /// state is keyed on it so a recorded read never authorizes edits in a
+    /// later run.
+    pub(crate) run_id: Option<RunId>,
     pub(crate) mounts: Option<&'a MountView>,
     pub(crate) filesystem: Arc<dyn RootFilesystem>,
     pub(crate) input: &'a Value,
@@ -95,6 +99,7 @@ impl<'a> CodingCapabilityRequest<'a> {
         capability_id: &'a CapabilityId,
         kind: CodingCapabilityKind,
         scope: &'a ResourceScope,
+        run_id: Option<RunId>,
         mounts: Option<&'a MountView>,
         filesystem: Arc<dyn RootFilesystem>,
         input: &'a Value,
@@ -103,6 +108,7 @@ impl<'a> CodingCapabilityRequest<'a> {
             capability_id,
             kind,
             scope,
+            run_id,
             mounts,
             filesystem,
             input,
@@ -326,6 +332,7 @@ mod tests {
             &write_capability_id,
             super::CodingCapabilityKind::WriteFile,
             &scope,
+            None,
             Some(&mounts),
             Arc::clone(&filesystem),
             &write_input,
@@ -373,6 +380,7 @@ mod tests {
             &read_capability_id,
             super::CodingCapabilityKind::ReadFile,
             &scope,
+            None,
             Some(&mounts),
             Arc::clone(&filesystem),
             &read_input,
@@ -396,6 +404,7 @@ mod tests {
             &write_capability_id,
             super::CodingCapabilityKind::WriteFile,
             &scope,
+            None,
             Some(&mounts),
             Arc::clone(&filesystem),
             &url_like_input,
@@ -422,6 +431,7 @@ mod tests {
             &write_capability_id,
             super::CodingCapabilityKind::WriteFile,
             &scope,
+            None,
             Some(&mounts),
             filesystem,
             &reserved_workspace_file_input,
@@ -494,6 +504,7 @@ mod tests {
                 &capability_id,
                 kind,
                 &self.scope,
+                None,
                 Some(&self.mounts),
                 Arc::clone(&self.filesystem),
                 &input,
@@ -682,6 +693,7 @@ mod tests {
             &read_capability_id,
             super::CodingCapabilityKind::ReadFile,
             &scope,
+            None,
             Some(&mounts),
             filesystem,
             &input,
@@ -747,6 +759,7 @@ mod tests {
             &write_capability_id,
             super::CodingCapabilityKind::WriteFile,
             &scope,
+            None,
             Some(&mounts),
             filesystem,
             &input,

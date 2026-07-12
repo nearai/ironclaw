@@ -1000,6 +1000,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     let invocation_id = InvocationId::new();
     let resource_scope = sample_scope(invocation_id, "tenant1", "user1");
     ExecutionContext {
+        run_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

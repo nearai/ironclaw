@@ -105,12 +105,19 @@ pub(super) struct CodingReadScopeKey {
     project_id: Option<String>,
     mission_id: Option<String>,
     thread_id: Option<String>,
+    /// Loop turn-run identity. Read-before-edit is a within-run policy: the
+    /// model must have seen the file during the CURRENT run, so a read
+    /// recorded in one run never authorizes edits in a later run even when
+    /// the content fingerprint still matches. `None` (non-loop callers) is
+    /// its own bucket, never a wildcard.
+    run_id: Option<ironclaw_host_api::RunId>,
 }
 
 pub(super) fn read_scope_key(request: &CodingCapabilityRequest<'_>) -> CodingReadScopeKey {
     CodingReadScopeKey {
         tenant_id: request.scope.tenant_id.as_str().to_string(),
         user_id: request.scope.user_id.as_str().to_string(),
+        run_id: request.run_id,
         agent_id: request
             .scope
             .agent_id

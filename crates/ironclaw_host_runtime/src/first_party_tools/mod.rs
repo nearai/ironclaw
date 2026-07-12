@@ -556,6 +556,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     &request.capability_id,
                     metadata.kind,
                     &request.scope,
+                    request.run_id,
                     request.mounts.as_ref(),
                     Arc::clone(&request.services.filesystem),
                     &request.input,

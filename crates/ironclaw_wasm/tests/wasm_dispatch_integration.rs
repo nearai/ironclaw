@@ -867,6 +867,7 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
 
 fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest {
     CapabilityDispatchRequest {
+        run_id: None,
         capability_id: CapabilityId::new(capability).unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,

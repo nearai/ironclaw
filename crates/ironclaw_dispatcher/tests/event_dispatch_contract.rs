@@ -28,6 +28,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -43,6 +44,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -100,6 +102,7 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
 
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -126,6 +129,7 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -165,6 +169,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -207,6 +212,7 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -249,6 +255,7 @@ async fn dispatcher_emits_events_for_mcp_success() {
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -288,6 +295,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
 
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,

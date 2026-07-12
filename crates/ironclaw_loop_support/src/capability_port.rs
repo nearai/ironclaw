@@ -2311,6 +2311,12 @@ fn invocation_context_from_visible(
     context.process_id = None;
     context.parent_process_id = None;
     context.resource_scope.invocation_id = invocation_id;
+    // Prompt-visible run identity: tool calls within the same turn-run share
+    // it, so run-scoped policy state (e.g. coding read-before-edit) carries
+    // across tool calls of one run but never leaks into a later run.
+    context.run_id = Some(ironclaw_host_api::RunId::from_uuid(
+        request.run_context.run_id.as_uuid(),
+    ));
     context.authenticated_actor_user_id = request
         .run_context
         .actor()
@@ -7540,6 +7546,17 @@ mod tests {
         assert_eq!(
             invocation_context.grants.grants[0].constraints.mounts,
             grant_mounts
+        );
+        // The invocation context must carry the turn-run identity: run-scoped
+        // policy state (coding read-before-edit) keys on it, and a dropped
+        // stamp would silently collapse every run into the shared `None`
+        // bucket, reopening the cross-run read-state leak.
+        assert_eq!(
+            invocation_context.run_id,
+            Some(ironclaw_host_api::RunId::from_uuid(
+                run_context.run_id.as_uuid()
+            )),
+            "invocation context must be stamped with the loop turn-run identity"
         );
     }
 

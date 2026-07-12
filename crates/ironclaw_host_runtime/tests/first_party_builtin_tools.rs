@@ -7776,7 +7776,10 @@ async fn builtin_apply_patch_requires_prior_read_of_existing_file() {
     assert_eq!(
         failure.message.as_deref(),
         Some(
-            "apply_patch failed for path workspace code.rs: read it with read_file before editing it"
+            "apply_patch failed for path workspace code.rs: read it in full with read_file before \
+             editing it. Ranged reads (offset or limit) and default reads truncated at the line \
+             or byte cap do not count as having seen the whole file; a file too large to read in \
+             full cannot be edited with this tool"
         )
     );
     assert_eq!(
