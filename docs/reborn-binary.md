@@ -292,10 +292,10 @@ Expected fields include:
 - `profile`
 - `v1_state: not-used`
 
-`config path`, `doctor` (without `--live`), and other read-only surfaces do not
-create Reborn state or seed config files. `doctor --live` explicitly opts into
-opening and initializing the configured storage and secrets backends, which may
-create or migrate Reborn-owned local state.
+`config path`, `doctor` (without `--live`), `channels list`, `logs`, `status`, and
+`models status` do not create Reborn state or seed config files. `doctor --live`
+explicitly opts into opening and initializing the configured storage and secrets
+backends, which may create or migrate Reborn-owned local state.
 
 ### `doctor`
 

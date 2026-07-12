@@ -35,8 +35,11 @@ impl DoctorCommand {
 }
 
 fn assemble_doctor_dto(context: &RebornCliContext, live: bool) -> DoctorDto {
-    let mut dto = build_doctor_dto(context);
-    dto.checks.push(check_llm_readiness(context));
+    let config_path = context.boot_config().home().config_file_path();
+    let loaded_config = LoadedDoctorConfig::load(&config_path);
+    let mut dto = build_doctor_dto(context, &loaded_config);
+    dto.checks
+        .push(check_llm_readiness(context, &loaded_config));
     if live {
         dto.checks.extend(check_live_dependencies(context));
     } else {
@@ -47,7 +50,7 @@ fn assemble_doctor_dto(context: &RebornCliContext, live: bool) -> DoctorDto {
     dto
 }
 
-fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
+fn build_doctor_dto(context: &RebornCliContext, loaded_config: &LoadedDoctorConfig) -> DoctorDto {
     let mut checks = Vec::new();
 
     let report = RebornDoctorReport::from_config(context.boot_config().clone());
@@ -74,8 +77,7 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
         detail: report.profile().to_string(),
     });
 
-    let config_path = context.boot_config().home().config_file_path();
-    checks.push(check_config_file(&config_path));
+    checks.push(check_config_file(loaded_config));
 
     let providers_path = context.boot_config().home().providers_file_path();
     checks.push(check_providers_file(&providers_path));
@@ -113,11 +115,13 @@ fn build_driver_checks() -> Vec<DoctorCheck> {
 }
 
 #[cfg(feature = "root-llm-provider")]
-fn check_llm_readiness(context: &RebornCliContext) -> DoctorCheck {
-    let config_path = context.boot_config().home().config_file_path();
-    let config = match RebornConfigFile::load(&config_path) {
-        Ok(config) => config,
-        Err(error) => {
+fn check_llm_readiness(
+    context: &RebornCliContext,
+    loaded_config: &LoadedDoctorConfig,
+) -> DoctorCheck {
+    let config = match loaded_config {
+        LoadedDoctorConfig::Loaded(config) => config,
+        LoadedDoctorConfig::Invalid(error) => {
             return dependency_check(
                 "llm_provider",
                 CheckOutcome::Fail,
@@ -153,7 +157,10 @@ fn check_llm_readiness(context: &RebornCliContext) -> DoctorCheck {
 }
 
 #[cfg(not(feature = "root-llm-provider"))]
-fn check_llm_readiness(_context: &RebornCliContext) -> DoctorCheck {
+fn check_llm_readiness(
+    _context: &RebornCliContext,
+    _loaded_config: &LoadedDoctorConfig,
+) -> DoctorCheck {
     dependency_check(
         "llm_provider",
         CheckOutcome::Skip,
@@ -263,7 +270,15 @@ fn classify_live_build_error(error: RebornBuildError) -> Vec<DoctorCheck> {
         | RebornBuildError::PlannedRunProfileResolver { .. }
         | RebornBuildError::ProductionWiring { .. }
         | RebornBuildError::InvalidConfig { .. } => FailureKind::RuntimeWiring,
-        _ => FailureKind::Storage,
+        RebornBuildError::MissingDatabaseHandle { .. }
+        | RebornBuildError::HostRuntime(_)
+        | RebornBuildError::EventStore(_)
+        | RebornBuildError::Filesystem(_)
+        | RebornBuildError::Resource(_)
+        | RebornBuildError::RunState(_)
+        | RebornBuildError::CapabilityLease(_)
+        | RebornBuildError::Turn(_)
+        | RebornBuildError::Mount(_) => FailureKind::Storage,
     };
 
     match kind {
@@ -318,25 +333,39 @@ fn dependency_check(name: &str, outcome: CheckOutcome, detail: String) -> Doctor
     }
 }
 
-fn check_config_file(path: &std::path::Path) -> DoctorCheck {
-    match RebornConfigFile::load(path) {
-        Ok(Some(_)) => DoctorCheck {
+enum LoadedDoctorConfig {
+    Loaded(Option<RebornConfigFile>),
+    Invalid(String),
+}
+
+impl LoadedDoctorConfig {
+    fn load(path: &std::path::Path) -> Self {
+        match RebornConfigFile::load(path) {
+            Ok(config) => Self::Loaded(config),
+            Err(error) => Self::Invalid(error.to_string()),
+        }
+    }
+}
+
+fn check_config_file(loaded_config: &LoadedDoctorConfig) -> DoctorCheck {
+    match loaded_config {
+        LoadedDoctorConfig::Loaded(Some(_)) => DoctorCheck {
             name: "config_file".to_string(),
             category: CheckCategory::Core,
             outcome: CheckOutcome::Pass,
             detail: "valid".to_string(),
         },
-        Ok(None) => DoctorCheck {
+        LoadedDoctorConfig::Loaded(None) => DoctorCheck {
             name: "config_file".to_string(),
             category: CheckCategory::Core,
             outcome: CheckOutcome::Skip,
             detail: "absent (using defaults)".to_string(),
         },
-        Err(error) => DoctorCheck {
+        LoadedDoctorConfig::Invalid(error) => DoctorCheck {
             name: "config_file".to_string(),
             category: CheckCategory::Core,
             outcome: CheckOutcome::Fail,
-            detail: error.to_string(),
+            detail: error.clone(),
         },
     }
 }
@@ -510,7 +539,8 @@ mod tests {
 
     #[test]
     fn doctor_config_file_absent_is_skip() {
-        let check = check_config_file(std::path::Path::new("/nonexistent/config.toml"));
+        let config = LoadedDoctorConfig::load(std::path::Path::new("/nonexistent/config.toml"));
+        let check = check_config_file(&config);
         assert_eq!(check.outcome, CheckOutcome::Skip);
     }
 
@@ -525,7 +555,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "api_version = \"ironclaw.runtime/v1\"\n").expect("write");
-        let check = check_config_file(&path);
+        let config = LoadedDoctorConfig::load(&path);
+        let check = check_config_file(&config);
         assert_eq!(check.outcome, CheckOutcome::Pass);
     }
 
@@ -534,8 +565,21 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "not valid { toml").expect("write");
-        let check = check_config_file(&path);
+        let config = LoadedDoctorConfig::load(&path);
+        let check = check_config_file(&config);
         assert_eq!(check.outcome, CheckOutcome::Fail);
+    }
+
+    #[test]
+    fn doctor_reuses_loaded_config_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "api_version = \"ironclaw.runtime/v1\"\n").expect("write");
+        let config = LoadedDoctorConfig::load(&path);
+
+        std::fs::remove_file(path).expect("remove config after loading");
+
+        assert_eq!(check_config_file(&config).outcome, CheckOutcome::Pass);
     }
 
     #[test]
