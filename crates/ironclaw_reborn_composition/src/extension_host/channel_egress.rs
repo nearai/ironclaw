@@ -217,3 +217,263 @@ fn map_runtime_http_error(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_extension_host::egress::{ApprovedChannelCredential, ApprovedChannelEgress};
+    use ironclaw_extensions::ExtensionRegistry;
+    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_host_api::{InvocationId, NetworkMethod, RuntimeCredentialTarget, UserId};
+    use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
+    use ironclaw_network::{
+        NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+    };
+    use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+    use ironclaw_resources::InMemoryResourceGovernor;
+    use ironclaw_secrets::InMemorySecretStore;
+    use secrecy::SecretString;
+
+    use super::*;
+
+    struct RecordingNetworkHttpEgress {
+        requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+        response: Result<NetworkHttpResponse, NetworkHttpError>,
+    }
+
+    impl RecordingNetworkHttpEgress {
+        fn ok() -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                response: Ok(NetworkHttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: br#"{"ok":true}"#.to_vec(),
+                    usage: NetworkUsage {
+                        request_bytes: 0,
+                        response_bytes: 11,
+                        resolved_ip: None,
+                    },
+                }),
+            }
+        }
+
+        fn requests(&self) -> Arc<Mutex<Vec<NetworkHttpRequest>>> {
+            Arc::clone(&self.requests)
+        }
+    }
+
+    #[async_trait]
+    impl NetworkHttpEgress for RecordingNetworkHttpEgress {
+        async fn execute(
+            &self,
+            request: NetworkHttpRequest,
+        ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+            self.requests
+                .lock()
+                .expect("network HTTP requests lock")
+                .push(request);
+            self.response.clone()
+        }
+    }
+
+    fn test_host_runtime_services() -> HostRuntimeServices<
+        LocalFilesystem,
+        InMemoryResourceGovernor,
+        InMemoryProcessStore,
+        InMemoryProcessResultStore,
+    > {
+        HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
+        )
+    }
+
+    fn host_egress_port(
+        network: RecordingNetworkHttpEgress,
+    ) -> (
+        HostRuntimeHttpEgressPort,
+        Arc<Mutex<Vec<NetworkHttpRequest>>>,
+    ) {
+        let requests = network.requests();
+        let services = test_host_runtime_services()
+            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .try_with_host_http_egress(network)
+            .expect("host HTTP egress should wire");
+        let port = services
+            .host_runtime_http_egress_port()
+            .expect("host runtime HTTP egress port should be configured");
+        (port, requests)
+    }
+
+    fn test_scope() -> ResourceScope {
+        ResourceScope::local_default(
+            UserId::new("channel-egress-user").unwrap(),
+            InvocationId::new(),
+        )
+        .unwrap()
+    }
+
+    async fn seeded_credentials(
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+        value: &str,
+    ) -> Arc<dyn ChannelEgressCredentialsPort> {
+        let store = Arc::new(InMemorySecretStore::new());
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretString::from(value.to_string()),
+                None,
+            )
+            .await
+            .expect("seed channel secret");
+        Arc::new(SecretStoreChannelEgressCredentials::new(
+            store as Arc<dyn SecretStore>,
+            scope.clone(),
+        ))
+    }
+
+    fn approved(
+        url: &str,
+        host: &str,
+        credential: Option<ApprovedChannelCredential>,
+    ) -> ApprovedChannelEgress {
+        ApprovedChannelEgress {
+            extension_id: "vendorx".to_string(),
+            installation_id: "inst-1".to_string(),
+            method: NetworkMethod::Post,
+            url: url.to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: b"{}".to_vec(),
+            host: host.to_string(),
+            credential,
+            response_body_limit: 64 * 1024,
+            timeout_ms: 5_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn header_injection_reaches_the_network_request() {
+        let scope = test_scope();
+        let handle = SecretHandle::new("vendor_bot_token").unwrap();
+        let credentials = seeded_credentials(&scope, &handle, "xoxb-secret-token").await;
+        let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope);
+
+        let response = transport
+            .execute(approved(
+                "https://vendor.example/api/chat.postMessage",
+                "vendor.example",
+                Some(ApprovedChannelCredential {
+                    handle: handle.clone(),
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                }),
+            ))
+            .await
+            .expect("transport executes");
+        assert_eq!(response.status, 200);
+
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].url,
+            "https://vendor.example/api/chat.postMessage"
+        );
+        let authorization = recorded[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .expect("authorization header injected host-side");
+        assert_eq!(authorization.1, "Bearer xoxb-secret-token");
+        // The network policy is pinned to the approved host with private-IP
+        // denial.
+        assert!(recorded[0].policy.deny_private_ip_ranges);
+        assert_eq!(recorded[0].policy.allowed_targets.len(), 1);
+        assert_eq!(
+            recorded[0].policy.allowed_targets[0].host_pattern,
+            "vendor.example"
+        );
+        assert_eq!(recorded[0].response_body_limit, Some(64 * 1024));
+    }
+
+    #[tokio::test]
+    async fn path_placeholder_injection_substitutes_the_secret_host_side() {
+        let scope = test_scope();
+        let handle = SecretHandle::new("vendor_bot_token").unwrap();
+        let credentials = seeded_credentials(&scope, &handle, "123456:telegram-token").await;
+        let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope);
+
+        transport
+            .execute(approved(
+                "https://vendor.example/bot{token}/sendMessage",
+                "vendor.example",
+                Some(ApprovedChannelCredential {
+                    handle,
+                    target: RuntimeCredentialTarget::PathPlaceholder {
+                        placeholder: "token".to_string(),
+                    },
+                }),
+            ))
+            .await
+            .expect("transport executes");
+
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].url, "https://vendor.example/bot123456:telegram-token/sendMessage",
+            "the placeholder is substituted host-side; the adapter never saw the token"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_secret_material_fails_closed_as_auth_required() {
+        let scope = test_scope();
+        let handle = SecretHandle::new("vendor_bot_token").unwrap();
+        // Credentials port over an EMPTY store: no material seeded.
+        let credentials: Arc<dyn ChannelEgressCredentialsPort> =
+            Arc::new(SecretStoreChannelEgressCredentials::new(
+                Arc::new(InMemorySecretStore::new()) as Arc<dyn SecretStore>,
+                scope.clone(),
+            ));
+        let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope);
+
+        let error = transport
+            .execute(approved(
+                "https://vendor.example/api/x",
+                "vendor.example",
+                Some(ApprovedChannelCredential {
+                    handle: handle.clone(),
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                }),
+            ))
+            .await
+            .expect_err("missing material fails closed");
+        match error {
+            RestrictedEgressError::AuthRequired {
+                required_secrets, ..
+            } => assert_eq!(required_secrets, vec![handle]),
+            other => panic!("expected AuthRequired, got {other:?}"),
+        }
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "no network activity without credential material"
+        );
+    }
+}

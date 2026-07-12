@@ -68,6 +68,9 @@ pub(crate) async fn build_generic_extension_host(
     governor: Arc<dyn ResourceGovernor>,
     reserved_capability_ids: BTreeSet<CapabilityId>,
     reserved_ingress_routes: BTreeSet<String>,
+    channel_egress_transport: Option<
+        Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>,
+    >,
 ) -> Result<GenericExtensionHost, crate::RebornBuildError> {
     let factories: HashMap<String, Arc<dyn NativeExtensionFactory>> = native_factories
         .into_iter()
@@ -80,6 +83,15 @@ pub(crate) async fn build_generic_extension_host(
         governor,
         installation_store: Arc::clone(&installation_store),
     });
+    // Channel hooks (and, at P5, deliver()) egress through the declared
+    // [[channel.egress]] policy over the injected transport; compositions
+    // built without a transport stay fail-closed.
+    let egress: Arc<dyn EgressFactory> = match channel_egress_transport {
+        Some(transport) => {
+            Arc::new(ironclaw_extension_host::egress::TransportBackedEgressFactory::new(transport))
+        }
+        None => Arc::new(DenyAllEgressFactory),
+    };
     let host = Arc::new(
         ExtensionHost::new(ExtensionHostDeps {
             // The facade owns durable lifecycle state in P2b; this store is
@@ -89,7 +101,7 @@ pub(crate) async fn build_generic_extension_host(
             loader,
             removal_hooks: Arc::new(FacadeOwnedRemovalHooks),
             drain: Arc::new(GenerationDrain),
-            egress: Arc::new(DenyAllEgressFactory),
+            egress,
             reserved_capability_ids,
             reserved_ingress_routes,
             hook_deadline: Duration::from_secs(30),

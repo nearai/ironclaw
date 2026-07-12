@@ -817,6 +817,68 @@ async fn host_http_egress_preserves_existing_path_encoding_when_rewriting_placeh
 }
 
 #[tokio::test]
+async fn host_http_egress_substitutes_brace_template_placeholder_within_a_segment() {
+    // Some vendor APIs fuse the credential into a path segment (the Telegram
+    // Bot API's `/bot<token>/method`); a `{placeholder}` template inside
+    // exactly one segment substitutes host-side. (The URL parser percent-
+    // encodes the braces; the rewriter matches the encoded form.)
+    let (_response, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/bot{__credential__}/sendMessage",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .await
+    .expect("brace-template placeholder should substitute");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/botsk-staged-secret/sendMessage"
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_accepts_colon_credential_values_in_path() {
+    // RFC 3986 allows `:` raw inside a path segment, and real vendor tokens
+    // carry it (a `<bot-id>:<secret>` token); everything else non-unreserved
+    // stays rejected.
+    let (_response, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/bot{__credential__}/sendMessage",
+        "__credential__",
+        "123456:telegram-token",
+    )
+    .await
+    .expect("pchar credential values are legal path material");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/bot123456:telegram-token/sendMessage"
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_mixed_placeholder_forms_before_transport() {
+    // One whole-segment occurrence plus one brace-template occurrence is two
+    // substitution sites — rejected before any transport activity.
+    let (error, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/__credential__/bot{__credential__}/run",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .await
+    .expect_err("mixed placeholder forms must be rejected");
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(error.to_string().contains("exactly once"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport() {
     for (url, expected_reason) in [
         ("not a url", "credential injection target URL is invalid"),

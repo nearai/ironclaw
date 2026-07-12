@@ -1373,6 +1373,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         owner_user_id.clone(),
         local_runtime_identity_for_nearai_mcp.as_ref(),
     )?;
+    // Same local-dev deployment identity anchors channel egress credentials
+    // ([channel.config] secret handles) and their vendor calls.
+    let channel_egress_scope = nearai_mcp_owner_scope.clone();
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -1747,6 +1750,21 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             })
             .map(|descriptor| descriptor.id.clone())
             .collect();
+        let channel_egress_transport = services.host_runtime_http_egress_port().map(|port| {
+            Arc::new(
+                crate::extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
+                    port,
+                    Arc::new(
+                        crate::extension_host::channel_egress::SecretStoreChannelEgressCredentials::new(
+                            Arc::clone(&secret_store),
+                            channel_egress_scope.clone(),
+                        ),
+                    ),
+                    channel_egress_scope.clone(),
+                ),
+            )
+                as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
+        });
         let generic = crate::extension_host::generic_host::build_generic_extension_host(
             services.extension_lane_tool_binder(),
             native_extension_factories,
@@ -1763,6 +1781,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 as Arc<dyn ironclaw_resources::ResourceGovernor>,
             reserved_capability_ids,
             crate::extension_host::extension_ingress::reserved_fixed_ingress_routes(),
+            channel_egress_transport,
         )
         .await?;
         if let Some(management) = store_graph.local_runtime.extension_management.as_ref() {
