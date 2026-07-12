@@ -32,6 +32,20 @@ pub(crate) trait RecoveryStrategy: Send + Sync {
         state: &LoopExecutionState,
         err: &ModelErrorSummary,
     ) -> RecoveryOutcome;
+
+    /// Ceiling on total model-call attempts the executor allows within a
+    /// single model stage before treating continued `Retry` outcomes as a
+    /// strategy contract bug and failing the run.
+    ///
+    /// Implementations MUST return a value large enough that every call-scope
+    /// retry budget they can grant reaches their own `Abort` decision — the
+    /// executor derives its retry-loop bound from this method, so an
+    /// undersized value silently truncates the strategy's budget and loses
+    /// its abort diagnostics. The default is a margin above the built-in
+    /// per-class budget for strategies that abort quickly.
+    fn max_total_model_attempts(&self) -> u32 {
+        16
+    }
 }
 
 /// Compile-time object-safety check.
@@ -329,6 +343,20 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                 )
             }
         }
+    }
+
+    fn max_total_model_attempts(&self) -> u32 {
+        // Upper bound on model calls one stage can legitimately issue before
+        // some class reaches its own Abort: the initial call, plus call-scope
+        // invalid-output retries (`max_attempts_per_class`), plus an
+        // availability budget for each availability class (transient /
+        // unavailable / internal — attempts are tracked per class, so a
+        // pathological host can rotate through all three). Context-overflow
+        // retries are iteration-scoped and leave the stage, so they don't
+        // consume this loop. +1 margin keeps the strategy's Abort — with its
+        // failure kind and diagnostics — strictly inside the loop bound.
+        2u32.saturating_add(self.max_attempts_per_class)
+            .saturating_add(self.max_model_availability_attempts.saturating_mul(3))
     }
 }
 
