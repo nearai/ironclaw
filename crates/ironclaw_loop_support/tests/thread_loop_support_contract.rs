@@ -1707,7 +1707,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
     assert_eq!(prompt_bundle.messages[0].role, "system");
     assert_eq!(
         prompt_bundle.messages[0].content_ref,
-        LoopMessageRef::new("msg:snippet.skill.alpha.0.48cf250f887a9389").unwrap()
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.c6c47a3818b58f3d").unwrap()
     );
 
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));

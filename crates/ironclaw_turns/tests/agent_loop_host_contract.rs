@@ -1668,7 +1668,7 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
     assert_eq!(bundle.messages[0].role, "system");
     assert_eq!(
         bundle.messages[0].content_ref,
-        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.cc9bb6b98aba6b9b").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "user");
     assert_eq!(host.effects(), vec!["context"]);
@@ -1705,7 +1705,7 @@ async fn loop_prompt_port_preserves_mid_conversation_system_message_order() {
     assert_eq!(bundle.messages[0].role, "system");
     assert_eq!(
         bundle.messages[0].content_ref,
-        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.cc9bb6b98aba6b9b").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "user");
     assert_eq!(
@@ -1757,7 +1757,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
     assert_eq!(bundle.messages[1].role, "system");
     assert_eq!(
         bundle.messages[1].content_ref,
-        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.cc9bb6b98aba6b9b").unwrap()
     );
     assert_eq!(bundle.messages[2].role, "user");
 

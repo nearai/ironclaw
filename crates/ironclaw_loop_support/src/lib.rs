@@ -1565,6 +1565,7 @@ where
             let content_ref = skill_context::snippet_model_message_ref(
                 &snippet.snippet_ref,
                 &snippet.safe_summary,
+                &snippet.model_content,
                 ordinal,
             )?;
             messages.insert(
