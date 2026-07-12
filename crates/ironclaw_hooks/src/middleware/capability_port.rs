@@ -28,9 +28,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::TenantId;
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-    CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
+    CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
+    LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 use crate::dispatch::{BeforeCapabilityDispatchOutcome, HookDispatcher};
@@ -229,6 +230,31 @@ impl HookedLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HookedLoopCapabilityPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.tool_definitions()
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        self.inner.provider_tool_call_capability_ids(tool_call)
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        request: RegisterProviderToolCallRequest,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        self.inner.register_provider_tool_call(request).await
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
@@ -304,7 +330,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         enum Slot {
             /// Hook produced a final outcome — no inner call needed.
             Resolved {
-                outcome: CapabilityOutcome,
+                outcome: Box<CapabilityOutcome>,
                 provider: Option<ironclaw_host_api::ExtensionId>,
             },
             /// Hooks allowed; the inner port will produce the outcome.
@@ -326,7 +352,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                 Some(translated) => {
                     let is_suspension = translated.is_suspension();
                     slots.push(Slot::Resolved {
-                        outcome: translated,
+                        outcome: Box::new(translated),
                         provider,
                     });
                     if is_suspension && stop_on_first_suspension {
@@ -418,7 +444,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         let mut pending_after_stop = false;
         for slot in slots {
             let outcome_and_provider = match slot {
-                Slot::Resolved { outcome, provider } => Some((outcome, provider)),
+                Slot::Resolved { outcome, provider } => Some((*outcome, provider)),
                 Slot::Pending { provider } => {
                     if pending_after_stop {
                         // We already stopped on a prior suspension and
@@ -496,6 +522,7 @@ impl HookedLoopCapabilityPort {
                     Ok(gate_ref) => Some(CapabilityOutcome::ApprovalRequired {
                         gate_ref,
                         safe_summary: reason.as_str().to_string(),
+                        approval_resume: None,
                     }),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }
@@ -506,6 +533,7 @@ impl HookedLoopCapabilityPort {
                         gate_ref,
                         credential_requirements: Vec::new(),
                         safe_summary: reason.as_str().to_string(),
+                        auth_resume: None,
                     }),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }
@@ -653,6 +681,7 @@ mod tests {
             _request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
             Ok(VisibleCapabilitySurface {
+                callable_capability_ids: None,
                 version: CapabilitySurfaceVersion::new("v1").expect("ok"),
                 descriptors: vec![CapabilityDescriptorView {
                     capability_id: CapabilityId::new("cap.x").expect("ok"),
@@ -681,6 +710,7 @@ mod tests {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             }))
         }
 
@@ -837,6 +867,7 @@ mod tests {
 
     fn snapshot_fixture_invocation() -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
             )
@@ -847,6 +878,8 @@ mod tests {
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
+            approval_resume: None,
+            auth_resume: None,
         }
     }
 
@@ -882,6 +915,7 @@ mod tests {
     #[test]
     fn invocation_arguments_digest_is_stable_for_known_inputs() {
         let invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
             )
@@ -892,6 +926,8 @@ mod tests {
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
+            approval_resume: None,
+            auth_resume: None,
         };
         let digest = invocation_arguments_digest(&invocation);
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
@@ -942,6 +978,7 @@ mod tests {
             TenantId::new("alpha").expect("ok"),
         );
         let invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
             )
@@ -952,6 +989,8 @@ mod tests {
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
+            approval_resume: None,
+            auth_resume: None,
         };
         let ctx = port.hook_context(&invocation, None).await;
         let hex: String = ctx
@@ -1043,14 +1082,20 @@ mod tests {
         let cap_id = CapabilityId::new("cap.x").expect("ok");
         let surface = ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("v").expect("ok");
         let a = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.clone(),
             capability_id: cap_id.clone(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
+            approval_resume: None,
+            auth_resume: None,
         };
         let b = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface,
             capability_id: cap_id,
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
+            approval_resume: None,
+            auth_resume: None,
         };
         assert_ne!(
             invocation_arguments_digest(&a),
@@ -1060,9 +1105,12 @@ mod tests {
 
     fn invocation(capability: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new(capability).expect("ok"),
             input_ref: CapabilityInputRef::new(format!("input:{capability}")).expect("ok"),
+            approval_resume: None,
+            auth_resume: None,
         }
     }
 
@@ -1169,6 +1217,7 @@ mod tests {
             CapabilityOutcome::ApprovalRequired {
                 gate_ref,
                 safe_summary,
+                ..
             } => {
                 assert!(gate_ref.as_str().starts_with("gate:hook-approval-"));
                 assert_eq!(safe_summary, "needs approval for this capability");

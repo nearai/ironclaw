@@ -101,9 +101,10 @@ pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
         "longer than the model's context length",
     ];
 
-    CONTEXT_PATTERNS
-        .iter()
-        .any(|pattern| lower.contains(pattern))
+    parse_prompt_too_long_counts(lower).is_some()
+        || CONTEXT_PATTERNS
+            .iter()
+            .any(|pattern| lower.contains(pattern))
 }
 
 /// Try to extract token counts from a context-length error message.
@@ -111,9 +112,16 @@ pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
 /// Handles patterns like:
 /// - "maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."
 /// - "The input (150000 tokens) is longer than the model's context length (128000 tokens)."
+/// - "prompt is too long: 150000 tokens > 128000 maximum"
 ///
 /// Returns `(0, 0)` if parsing fails.
 pub(crate) fn parse_context_token_counts(lower: &str) -> (usize, usize) {
+    // NEAR Anthropic-compatible proxy pattern:
+    // "prompt is too long: {used} tokens > {limit} maximum"
+    if let Some((used, limit)) = parse_prompt_too_long_counts(lower) {
+        return (used, limit);
+    }
+
     let numbers = token_count_numbers(lower);
     if numbers.len() < 2 {
         return (0, 0);
@@ -131,6 +139,16 @@ pub(crate) fn parse_context_token_counts(lower: &str) -> (usize, usize) {
     }
 
     (0, 0)
+}
+
+fn parse_prompt_too_long_counts(lower: &str) -> Option<(usize, usize)> {
+    let tail = lower.split_once("prompt is too long:")?.1.trim_start();
+    let (used, tail) = tail.split_once("tokens")?;
+    let used = used.trim().parse().ok().filter(|&n| n > 0)?;
+    let tail = tail.trim_start().strip_prefix('>')?.trim_start();
+    let (limit, _) = tail.split_once("maximum")?;
+    let limit = limit.trim().parse().ok().filter(|&n| n > 0)?;
+    Some((used, limit))
 }
 
 fn token_count_numbers(lower: &str) -> Vec<usize> {
@@ -277,6 +295,18 @@ mod tests {
         let (used, limit) = parse_context_token_counts(msg);
         assert_eq!(used, 150000);
         assert_eq!(limit, 128000);
+    }
+
+    #[test]
+    fn prompt_too_long_requires_near_proxy_token_limit_shape() {
+        let malformed = r#"{"error":{"message":"prompt is too long: 234872 tokens"}}"#;
+        assert!(!is_context_length_error_message(malformed));
+        assert_eq!(parse_context_token_counts(malformed), (0, 0));
+
+        let unrelated = r#"{"error":{"message":"prompt is too long for this schema"}}"#;
+        assert!(!is_context_length_error_message(unrelated));
+        assert_eq!(parse_context_token_counts(unrelated), (0, 0));
+        assert!(context_length_error(400, unrelated).is_none());
     }
 
     // ------------------------------------------------------------------

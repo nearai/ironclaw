@@ -5,12 +5,31 @@
 **Parent doc:** [`README.md`](./README.md) — read §5, §6, §8, §9, §11 first.
 **Depends on:** Phase 1 ([`phase-1-contracts.md`](./phase-1-contracts.md)).
 
+> **Status: partially superseded (2026-07).** The spawn-mechanics workstreams
+> (P2.A spawn handling, P2.B prompt composition, P2.C driver binding) remain
+> live and accurate. The delivery half of P2.D — writing a
+> `SubagentResultTombstone` and reconciler-facing gate delivery — is replaced
+> outright by [`thread-harness-design.md`](./thread-harness-design.md)
+> (canonical); that doc's `AwaitEdgeResolver` supersedes the tombstone/gate-
+> store path described below.
+>
+> **Code citations are point-in-time (2026-05) and have drifted.** Implemented
+> reality differs in places the banner above does not cover: the family
+> registry already binds `families::subagent()` (`app_loop_family.rs`),
+> `subagent/completion_observer.rs` already exists, the flavor/payload files
+> shipped as `flavors.rs`/`spawn_result.rs` with different struct shapes, and
+> the coordinator event hook shipped as
+> `TurnLifecycleEventBus::subscribe_required`, not
+> `DefaultTurnCoordinator::with_event_sink`. Verify every symbol against the
+> live code before implementing from this doc.
+
 > **Current implementation note.** Background subagents are disabled pending the
-> durable completion delivery design in
-> [#4147](https://github.com/nearai/ironclaw/issues/4147). The active public
-> `spawn_subagent` schema exposes `flavor_id`, `task`, and optional `handoff`;
-> omitted mode defaults to blocking. Background-related mechanisms below are
-> historical design context, not active behavior.
+> *implementation* of the durable completion delivery layer — the design itself
+> now exists ([`thread-harness-design.md`](./thread-harness-design.md),
+> canonical for [#4147](https://github.com/nearai/ironclaw/issues/4147)). The
+> active public `spawn_subagent` schema exposes `flavor_id`, `task`, and
+> optional `handoff`; omitted mode defaults to blocking. Background-related
+> mechanisms below are historical design context, not active behavior.
 
 Phase 2 builds the four *mechanisms* of subagent spawn on top of the Phase 1
 contracts. The four workstreams are independently reviewable PRs and run in
@@ -20,8 +39,8 @@ parallel after Phase 1 lands:
 |---|---|---|
 | **P2.A** | `ironclaw_loop_support` | spawn handling in the capability-port impl |
 | **P2.B** | `ironclaw_loop_support` | subagent prompt composition + attenuation |
-| **P2.C** | `ironclaw_reborn` | `subagent` `PlannedDriver` + run-profile→driver binding |
-| **P2.D** | `ironclaw_reborn` | `SubagentCompletionObserver` (`TurnEventSink`) |
+| **P2.C** | `ironclaw_runner` | `subagent` `PlannedDriver` + run-profile→driver binding |
+| **P2.D** | `ironclaw_runner` | `SubagentCompletionObserver` (`TurnEventSink`) |
 
 P2.A and P2.B touch the **same crate** but **different files** — see
 [§5 File-overlap note](#5-file-overlap-note-p2a-vs-p2b).
@@ -125,12 +144,15 @@ pub struct TurnRunRecord {
 // pub enum TreeReservationError { WouldExceed { cap: u32, current: u32 }, … }
 ```
 
-### P1.C — `ironclaw_reborn` data (assumed present)
+### P1.C — `ironclaw_runner` data (assumed present)
 
 ```rust
-// ironclaw_reborn/src/subagent/flavor.rs  (P1.C)
+// ironclaw_runner/src/subagent/flavor.rs  (P1.C)
 pub struct SubagentFlavor {
-    pub flavor_id: SubagentFlavorId,         // "general" | "researcher"
+    pub flavor_id: SubagentFlavorId,         // v1 proposal: "general" | "researcher" —
+                                              // historical naming, shipped as General |
+                                              // Explorer | Coder | Planner (thread-
+                                              // harness-design.md §10 is canonical)
     pub direction_id: DirectionId,           // selects the .md
     pub tool_allowlist: BTreeSet<CapabilityId>,
     pub model_profile_id: ModelProfileId,
@@ -141,7 +163,7 @@ pub struct SubagentFlavor {
 pub fn resolve_flavor(id: &SubagentFlavorId) -> Option<&'static SubagentFlavor>;
 pub fn direction_md(direction_id: &DirectionId) -> &'static str;   // include_str!
 
-// ironclaw_reborn/src/subagent/goal_store.rs  (P1.C — DB-BACKED in v1)
+// ironclaw_runner/src/subagent/goal_store.rs  (P1.C — DB-BACKED in v1)
 //
 // README §6 "Goal durability (DB-backed)": persisted store keyed by the child
 // `TurnRunId`. The child id is known BEFORE submit_turn via prepare_turn — no
@@ -158,12 +180,15 @@ pub trait SubagentGoalStore: Send + Sync {
 }
 // Note: no `rekey(staging, real)` — `prepare_turn` makes it unnecessary.
 
-// ironclaw_reborn/src/subagent/gate_resolution.rs  (P1.C)
+// SUPERSEDED (2026-07): gate_resolution.rs and tombstone_store.rs below are
+// replaced outright by thread-harness-design.md's AwaitEdge files (canonical).
+// Historical context only — do not build against these.
+// ironclaw_runner/src/subagent/gate_resolution.rs  (P1.C)
 //   - AwaitedChildSet: the set of child run ids one gate awaits, + recorded
 //     child results; persisted; supports "all terminal?" reconciliation.
 //   - SubagentGateResolutionStore trait with the awaited-set + result ops.
 
-// ironclaw_reborn/src/subagent/tombstone_store.rs  (P1.C)
+// ironclaw_runner/src/subagent/tombstone_store.rs  (P1.C)
 //
 // README §6 "Cancellation tombstone": a child terminal during a parent-cancel
 // sweep writes a typed disposition so the reconciler distinguishes "discarded
@@ -187,7 +212,7 @@ pub trait SubagentResultTombstoneStore: Send + Sync {
         -> Result<Option<SubagentResultTombstone>, TombstoneStoreError>;
 }
 
-// ironclaw_reborn/src/subagent/spawn_result_payload.rs  (P1.C — schema)
+// ironclaw_runner/src/subagent/spawn_result_payload.rs  (P1.C — schema)
 //
 // README §6 "Spawn-result payload (schema)": the wire-stable typed JSON the
 // parent's model receives as the `spawn_subagent` tool result. Snake_case
@@ -213,7 +238,10 @@ pub enum SubagentSpawnMode { Blocking, Background }
 #[serde(rename_all = "snake_case")]
 pub enum SubagentSpawnStatus { Spawned, Completed, Failed, Cancelled }
 
-// ironclaw_reborn/src/subagent/continuation_budget.rs  (P1.C)
+// SUPERSEDED (2026-07): continuation_budget.rs below was never built —
+// thread-harness-design.md §8.3's derived System-wake streak cap subsumes it
+// (its production-readiness field is retired by that doc's §3). Historical.
+// ironclaw_runner/src/subagent/continuation_budget.rs  (P1.C)
 //
 // README §6 + §7.4 "Autonomous-continuation budget": bounds per-spawn-tree
 // wake-turn count and per-time-window rate, keyed by `spawn_tree_root_run_id`.
@@ -265,8 +293,8 @@ the crate's "named types with a single policy responsibility" rule
 > stores". The decorator therefore **holds trait objects only** — a
 > `TurnCoordinator`, a `SessionThreadService`, a `SubagentGoalStore`, a
 > `SubagentGateResolutionStore`, a flavor resolver fn — all *injected* by
-> `ironclaw_reborn` at host-factory construction time (Phase 3 wiring). The
-> stores themselves live in `ironclaw_reborn` (P1.C). This keeps the decorator
+> `ironclaw_runner` at host-factory construction time (Phase 3 wiring). The
+> stores themselves live in `ironclaw_runner` (P1.C). This keeps the decorator
 > pure glue and respects the layering in README §5.1.
 
 ### 1.3 Signatures implemented against
@@ -382,9 +410,9 @@ pub struct SubagentSpawnLimits {
 pub struct SubagentSpawnDeps {
     pub coordinator:      Arc<dyn TurnCoordinator>,
     pub thread_service:   Arc<dyn SessionThreadService>,
-    pub goal_store:       Arc<dyn SubagentGoalStore>,            // from ironclaw_reborn
-    pub gate_store:       Arc<dyn SubagentGateResolutionStore>,  // from ironclaw_reborn
-    pub flavor_resolver:  Arc<dyn SubagentFlavorResolver>,       // from ironclaw_reborn
+    pub goal_store:       Arc<dyn SubagentGoalStore>,            // from ironclaw_runner
+    pub gate_store:       Arc<dyn SubagentGateResolutionStore>,  // from ironclaw_runner
+    pub flavor_resolver:  Arc<dyn SubagentFlavorResolver>,       // from ironclaw_runner
     pub child_profiles:   Arc<dyn SubagentRunProfileBinding>,    // flavor -> RunProfileRequest
     pub spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,     // parses the tool input_ref
     pub result_writer:   Arc<dyn LoopCapabilityResultWriter>,    // writes bg spawn result refs
@@ -980,7 +1008,7 @@ impl SubagentPromptComposer {
                 "subagent run has no resolved flavor"))?;
 
         // ── (1) SYSTEM message — static authored direction .md only.
-        //    direction_md is include_str!'d in ironclaw_reborn (P1.C); it is
+        //    direction_md is include_str!'d in ironclaw_runner (P1.C); it is
         //    authored text, never model-generated => safe to be the system msg.
         let direction = direction_md(&flavor.direction_id);  // &'static str
         let system_body = LoopSafeSummary::new(frame_direction(direction))
@@ -1106,7 +1134,7 @@ pub fn attenuate_child_capability_port(
 
 ---
 
-## 3. P2.C — `ironclaw_reborn`: `subagent` `PlannedDriver` + run-profile→driver binding
+## 3. P2.C — `ironclaw_runner`: `subagent` `PlannedDriver` + run-profile→driver binding
 
 ### 3.1 Goal
 
@@ -1120,9 +1148,9 @@ driver + profile binding is not runnable* — a subagent run reaches the
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_reborn/src/subagent/driver.rs` |
-| **modify** | `crates/ironclaw_reborn/src/app_loop_family.rs` (register the `subagent` family) |
-| **modify** | `crates/ironclaw_reborn/src/lib.rs` (`mod subagent;` if not added by P1.C) |
+| **create** | `crates/ironclaw_runner/src/subagent/driver.rs` |
+| **modify** | `crates/ironclaw_runner/src/app_loop_family.rs` (register the `subagent` family) |
+| **modify** | `crates/ironclaw_runner/src/lib.rs` (`mod subagent;` if not added by P1.C) |
 
 > `planned_driver_factory.rs` is **not** modified — its CLAUDE.md says keep it
 > "limited to driver/profile factory wiring" for the *default* planned driver.
@@ -1133,7 +1161,7 @@ driver + profile binding is not runnable* — a subagent run reaches the
 ### 3.3 Signatures implemented against
 
 ```rust
-// ironclaw_reborn/src/planned_driver.rs — the reusable adapter
+// ironclaw_runner/src/planned_driver.rs — the reusable adapter
 pub struct PlannedDriver { /* descriptor, family: Arc<LoopFamily>, executor */ }
 impl PlannedDriver {
     pub fn from_family_with_descriptor(
@@ -1147,7 +1175,7 @@ impl PlannedDriver {
     ) -> Result<Self, AgentLoopDriverError>;
 }
 
-// ironclaw_reborn/src/driver_registry.rs
+// ironclaw_runner/src/driver_registry.rs
 impl DriverRegistry {
     pub fn register_driver(&mut self, driver: Arc<dyn AgentLoopDriver>,
         requirements: DriverRequirements, kind: DriverKind)
@@ -1188,7 +1216,7 @@ impl InMemoryRunProfileRegistry { pub fn register(&mut self, def: RunProfileDefi
 ### 3.4 The subagent driver factory — pseudo code
 
 ```rust
-// crates/ironclaw_reborn/src/subagent/driver.rs
+// crates/ironclaw_runner/src/subagent/driver.rs
 
 use std::sync::Arc;
 use ironclaw_agent_loop::{
@@ -1312,7 +1340,7 @@ pub fn register_subagent_run_profiles(
 the subagent family:
 
 ```rust
-// crates/ironclaw_reborn/src/app_loop_family.rs  (modified)
+// crates/ironclaw_runner/src/app_loop_family.rs  (modified)
 pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
     LoopFamilyRegistry::with_families(vec![
         Arc::new(families::default()),
@@ -1362,7 +1390,7 @@ README §11 P2.C requires "a dedicated `PlannedDriver` for the `subagent` family
 
 ---
 
-## 4. P2.D — `ironclaw_reborn`: `SubagentCompletionObserver` (`TurnEventSink`)
+## 4. P2.D — `ironclaw_runner`: `SubagentCompletionObserver` (`TurnEventSink`)
 
 ### 4.1 Goal
 
@@ -1378,8 +1406,8 @@ recursive subtree `cancel_run`.
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_reborn/src/subagent/completion_observer.rs` |
-| **modify** | `crates/ironclaw_reborn/src/lib.rs` (`pub use` from `subagent`) |
+| **create** | `crates/ironclaw_runner/src/subagent/completion_observer.rs` |
+| **modify** | `crates/ironclaw_runner/src/lib.rs` (`pub use` from `subagent`) |
 
 ### 4.3 Signatures implemented against
 
@@ -1444,7 +1472,7 @@ pub struct AcceptedInboundMessage {
 ### 4.4 The observer type
 
 ```rust
-// crates/ironclaw_reborn/src/subagent/completion_observer.rs
+// crates/ironclaw_runner/src/subagent/completion_observer.rs
 
 pub struct SubagentCompletionObserver {
     coordinator:     Arc<dyn TurnCoordinator>,
@@ -1867,10 +1895,10 @@ reverse. If the two PRs land in either order, P2.A must not be *merged* before
 - `cargo fmt` clean.
 - `cargo clippy --all --benches --tests --examples --all-features` — zero
   warnings.
-- `cargo test` green for `ironclaw_loop_support` and `ironclaw_reborn`.
+- `cargo test` green for `ironclaw_loop_support` and `ironclaw_runner`.
 - No new public API in `ironclaw_turns` or `ironclaw_agent_loop` beyond the
   Phase 1 additions — Phase 2 is mechanisms in `ironclaw_loop_support` and
-  `ironclaw_reborn` only (README §10 crate-boundary table).
+  `ironclaw_runner` only (README §10 crate-boundary table).
 - Integration tests (background E2E, blocking E2E, parallel-blocking,
   early-completion, child-authority, fork-bomb, cancellation subtree,
   no-deadlock) are **Phase 3** — Phase 2 ships unit coverage only.

@@ -6,21 +6,107 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
-use serde::Deserialize;
 
-use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
+use super::wasm_execution::{ReservationGuard, execute_prepared_wasm, run_wasm_prepare_blocking};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
     McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
-    ResourceUsage, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
+    RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
     RuntimeDispatchErrorKind, RuntimeKind, ScriptError, ScriptExecutionRequest, ScriptExecutor,
     ScriptInvocation, SharedRuntimeHttpEgress, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRequest,
-    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRuntime,
+    WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
-use crate::FirstPartyCapabilityError;
+use crate::{
+    FirstPartyCapabilityError,
+    latency::{
+        RuntimeLatencyFields, RuntimeLatencyMetrics, started_at as latency_started_at,
+        trace_runtime_error, trace_runtime_ok,
+    },
+};
+
+type FirstPartyLatencyFields = RuntimeLatencyFields;
+
+fn first_party_latency_fields<F, G>(
+    request: &RuntimeAdapterRequest<'_, F, G>,
+) -> Option<FirstPartyLatencyFields>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    RuntimeLatencyFields::from_json_input(
+        request.capability_id,
+        &request.scope,
+        request.descriptor.runtime.as_str(),
+        &request.input,
+    )
+}
+
+fn trace_first_party_latency_ok(
+    operation: &'static str,
+    fields: Option<&FirstPartyLatencyFields>,
+    started_at: Option<std::time::Instant>,
+    output_bytes: u64,
+    used_prepared_reservation: bool,
+) {
+    trace_runtime_ok(
+        "first_party_runtime_adapter",
+        operation,
+        fields,
+        started_at,
+        RuntimeLatencyMetrics {
+            output_bytes,
+            used_prepared_reservation,
+            ..RuntimeLatencyMetrics::default()
+        },
+    );
+}
+
+fn trace_first_party_latency_error(
+    operation: &'static str,
+    fields: Option<&FirstPartyLatencyFields>,
+    started_at: Option<std::time::Instant>,
+    error_kind: &str,
+    used_prepared_reservation: bool,
+) {
+    trace_runtime_error(
+        "first_party_runtime_adapter",
+        operation,
+        fields,
+        started_at,
+        error_kind,
+        RuntimeLatencyMetrics {
+            used_prepared_reservation,
+            ..RuntimeLatencyMetrics::default()
+        },
+    );
+}
+
+fn trace_first_party_stage_and_dispatch_error(
+    stage: &'static str,
+    fields: Option<&FirstPartyLatencyFields>,
+    stage_started_at: Option<std::time::Instant>,
+    dispatch_started_at: Option<std::time::Instant>,
+    error_kind: &str,
+    used_prepared_reservation: bool,
+) {
+    trace_first_party_latency_error(
+        stage,
+        fields,
+        stage_started_at,
+        error_kind,
+        used_prepared_reservation,
+    );
+    trace_first_party_latency_error(
+        "dispatch",
+        fields,
+        dispatch_started_at,
+        error_kind,
+        used_prepared_reservation,
+    );
+}
 
 pub(super) struct ServiceResolvedRuntimeAdapter<T> {
     inner: Arc<T>,
@@ -233,7 +319,11 @@ where
         &self,
         request: RuntimeAdapterRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let latency_fields = first_party_latency_fields(&request);
+        let dispatch_started_at = latency_started_at();
+        let used_prepared_reservation = request.resource_reservation.is_some();
         tracing::debug!("first-party runtime adapter dispatch started");
+        let lookup_started_at = latency_started_at();
         let Some(handler) = self.registry.get(request.capability_id) else {
             if let Some(reservation) = request.resource_reservation
                 && let Err(error) = request.governor.release(reservation.id)
@@ -245,26 +335,60 @@ where
                 );
             }
             tracing::debug!("first-party runtime adapter missing handler");
+            trace_first_party_stage_and_dispatch_error(
+                "lookup_handler",
+                latency_fields.as_ref(),
+                lookup_started_at,
+                dispatch_started_at,
+                RuntimeDispatchErrorKind::UndeclaredCapability.as_str(),
+                used_prepared_reservation,
+            );
             return Err(DispatchError::FirstParty {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
+                detail: None,
             });
         };
+        trace_first_party_latency_ok(
+            "lookup_handler",
+            latency_fields.as_ref(),
+            lookup_started_at,
+            0,
+            used_prepared_reservation,
+        );
 
+        let plan_started_at = latency_started_at();
         let plan =
             plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
+                let kind = planner_error_kind(&error);
                 tracing::debug!(
-                    error_kind = %planner_error_kind(&error),
+                    error_kind = %kind,
                     "first-party runtime adapter policy planning failed"
                 );
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
+                trace_first_party_stage_and_dispatch_error(
+                    "plan_capability",
+                    latency_fields.as_ref(),
+                    plan_started_at,
+                    dispatch_started_at,
+                    kind.as_str(),
+                    used_prepared_reservation,
+                );
                 DispatchError::FirstParty {
-                    kind: planner_error_kind(&error),
+                    kind,
                     safe_summary: None,
+                    detail: None,
                 }
             })?;
+        trace_first_party_latency_ok(
+            "plan_capability",
+            latency_fields.as_ref(),
+            plan_started_at,
+            0,
+            used_prepared_reservation,
+        );
         tracing::debug!(
             filesystem_backend = ?plan.filesystem_backend,
             process_backend = ?plan.process_backend,
@@ -272,6 +396,7 @@ where
             secret_mode = ?plan.secret_mode,
             "first-party runtime adapter policy plan resolved"
         );
+        let resolve_started_at = latency_started_at();
         let services = self
             .invocation_services
             .resolve(InvocationServicesResolutionRequest {
@@ -287,24 +412,67 @@ where
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
+                trace_first_party_stage_and_dispatch_error(
+                    "resolve_services",
+                    latency_fields.as_ref(),
+                    resolve_started_at,
+                    dispatch_started_at,
+                    error.kind().as_str(),
+                    used_prepared_reservation,
+                );
                 DispatchError::FirstParty {
                     kind: error.kind(),
                     safe_summary: None,
+                    detail: None,
                 }
             })?;
+        trace_first_party_latency_ok(
+            "resolve_services",
+            latency_fields.as_ref(),
+            resolve_started_at,
+            0,
+            used_prepared_reservation,
+        );
         tracing::debug!("first-party runtime adapter services resolved");
 
-        let used_prepared_reservation = request.resource_reservation.is_some();
+        let reserve_started_at = latency_started_at();
         let reservation = match request.resource_reservation {
-            Some(reservation) => reservation,
+            Some(reservation) => {
+                trace_first_party_latency_ok(
+                    "reserve_resources",
+                    latency_fields.as_ref(),
+                    reserve_started_at,
+                    0,
+                    used_prepared_reservation,
+                );
+                reservation
+            }
             None => request
                 .governor
                 .reserve(request.scope.clone(), request.estimate.clone())
+                .inspect(|_| {
+                    trace_first_party_latency_ok(
+                        "reserve_resources",
+                        latency_fields.as_ref(),
+                        reserve_started_at,
+                        0,
+                        used_prepared_reservation,
+                    );
+                })
                 .map_err(|_| {
                     tracing::debug!("first-party runtime adapter resource reservation failed");
+                    trace_first_party_stage_and_dispatch_error(
+                        "reserve_resources",
+                        latency_fields.as_ref(),
+                        reserve_started_at,
+                        dispatch_started_at,
+                        RuntimeDispatchErrorKind::Resource.as_str(),
+                        used_prepared_reservation,
+                    );
                     DispatchError::FirstParty {
                         kind: RuntimeDispatchErrorKind::Resource,
                         safe_summary: None,
+                        detail: None,
                     }
                 })?,
         };
@@ -313,14 +481,28 @@ where
             used_prepared_reservation,
             "first-party runtime adapter resource reservation ready"
         );
+        // From here the reservation lives in an RAII guard carried across the
+        // handler `catch_unwind().await` below. If the turn scheduler drops this
+        // future mid-await (cancel/lease-expiry/timeout), `Drop` releases the
+        // reservation instead of leaking it permanently. Every early `return`
+        // below drops the still-armed guard, which releases.
+        let reservation_id = reservation.id;
+        let guard = ReservationGuard::new(request.governor, reservation_id);
+        let first_party_resource_error = || DispatchError::FirstParty {
+            kind: RuntimeDispatchErrorKind::Resource,
+            safe_summary: None,
+            detail: None,
+        };
 
         tracing::debug!(
-            reservation_id = %reservation.id,
+            reservation_id = %reservation_id,
             "first-party runtime adapter invoking handler"
         );
+        let handler_started_at = latency_started_at();
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
+            authenticated_actor_user_id: request.authenticated_actor_user_id,
             estimate: request.estimate,
             mounts: request.mounts,
             services,
@@ -329,20 +511,39 @@ where
         .catch_unwind()
         .await
         {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                trace_first_party_latency_ok(
+                    "handler_dispatch",
+                    latency_fields.as_ref(),
+                    handler_started_at,
+                    0,
+                    used_prepared_reservation,
+                );
+                result
+            }
             Ok(Err(error)) => {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reservation_id,
                     is_auth_required = error.is_auth_required(),
                     "first-party runtime adapter handler failed"
                 );
-                if let Err(acct_err) = account_or_release_failed_first_party_execution(
-                    request.governor,
-                    reservation.id,
-                    error.usage(),
-                ) {
+                let error_kind = error
+                    .kind()
+                    .map(RuntimeDispatchErrorKind::as_str)
+                    .unwrap_or("auth_required");
+                trace_first_party_stage_and_dispatch_error(
+                    "handler_dispatch",
+                    latency_fields.as_ref(),
+                    handler_started_at,
+                    dispatch_started_at,
+                    error_kind,
+                    used_prepared_reservation,
+                );
+                if let Err(acct_err) =
+                    guard.account_failed(error.usage(), first_party_resource_error)
+                {
                     tracing::warn!(
-                        reservation_id = %reservation.id,
+                        reservation_id = %reservation_id,
                         error = ?acct_err,
                         "first-party resource accounting failed on handler error; \
                          returning original handler error"
@@ -359,62 +560,126 @@ where
                         credential_requirements,
                     }),
                     FirstPartyCapabilityError::Dispatch {
-                        kind, safe_summary, ..
-                    } => Err(DispatchError::FirstParty { kind, safe_summary }),
+                        kind,
+                        safe_summary,
+                        detail,
+                        ..
+                    } => Err(DispatchError::FirstParty {
+                        kind,
+                        safe_summary,
+                        detail: detail.map(|detail| *detail),
+                    }),
                 };
             }
             Err(_) => {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reservation_id,
                     "first-party runtime adapter handler panicked"
                 );
-                release_first_party_reservation(request.governor, reservation.id);
+                trace_first_party_stage_and_dispatch_error(
+                    "handler_dispatch",
+                    latency_fields.as_ref(),
+                    handler_started_at,
+                    dispatch_started_at,
+                    RuntimeDispatchErrorKind::Backend.as_str(),
+                    used_prepared_reservation,
+                );
+                // Dropping `guard` releases the reservation.
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
                     safe_summary: None,
+                    detail: None,
                 });
             }
         };
 
+        let serialize_started_at = latency_started_at();
         let output_bytes = serde_json::to_vec(&result.output)
             .map(|bytes| bytes.len() as u64)
             .map_err(|_| {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reservation_id,
                     "first-party runtime adapter output serialization failed"
                 );
-                release_first_party_reservation(request.governor, reservation.id);
+                trace_first_party_stage_and_dispatch_error(
+                    "serialize_output",
+                    latency_fields.as_ref(),
+                    serialize_started_at,
+                    dispatch_started_at,
+                    RuntimeDispatchErrorKind::OutputDecode.as_str(),
+                    used_prepared_reservation,
+                );
+                // Dropping `guard` releases the reservation.
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
                     safe_summary: None,
+                    detail: None,
                 }
             })?;
+        trace_first_party_latency_ok(
+            "serialize_output",
+            latency_fields.as_ref(),
+            serialize_started_at,
+            output_bytes,
+            used_prepared_reservation,
+        );
         let mut usage = result.usage;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
-        let receipt = match request.governor.reconcile(reservation.id, usage.clone()) {
-            Ok(receipt) => receipt,
+        // Happy path: reconcile inline so we preserve the existing
+        // warn-on-release-error-after-reconcile-failure diagnostic. `disarm`
+        // hands reservation ownership back from the guard; both reconcile
+        // outcomes settle the reservation below.
+        let reconcile_id = guard.disarm();
+        let reconcile_started_at = latency_started_at();
+        let receipt = match request.governor.reconcile(reconcile_id, usage.clone()) {
+            Ok(receipt) => {
+                trace_first_party_latency_ok(
+                    "reconcile_resources",
+                    latency_fields.as_ref(),
+                    reconcile_started_at,
+                    output_bytes,
+                    used_prepared_reservation,
+                );
+                receipt
+            }
             Err(_) => {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reconcile_id,
                     "first-party runtime adapter resource reconcile failed"
                 );
-                if let Err(release_error) = request.governor.release(reservation.id) {
+                if let Err(release_error) = request.governor.release(reconcile_id) {
                     tracing::warn!(
-                        reservation_id = %reservation.id,
+                        reservation_id = %reconcile_id,
                         error = %release_error,
                         "failed to release first-party resource reservation after reconcile failure"
                     );
                 }
+                trace_first_party_stage_and_dispatch_error(
+                    "reconcile_resources",
+                    latency_fields.as_ref(),
+                    reconcile_started_at,
+                    dispatch_started_at,
+                    RuntimeDispatchErrorKind::Resource.as_str(),
+                    used_prepared_reservation,
+                );
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Resource,
                     safe_summary: None,
+                    detail: None,
                 });
             }
         };
         tracing::debug!(
-            reservation_id = %reservation.id,
+            reservation_id = %reconcile_id,
             output_bytes,
             "first-party runtime adapter dispatch completed"
+        );
+        trace_first_party_latency_ok(
+            "dispatch",
+            latency_fields.as_ref(),
+            dispatch_started_at,
+            output_bytes,
+            used_prepared_reservation,
         );
 
         Ok(RuntimeAdapterResult {
@@ -475,6 +740,7 @@ impl WasmRuntimeAdapter {
     ) -> Result<MutexGuard<'_, HashMap<String, Arc<PreparedWitTool>>>, DispatchError> {
         self.prepared.lock().map_err(|_| DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Executor,
+            safe_summary: None,
         })
     }
 
@@ -517,6 +783,7 @@ where
                 .resolve_under(&request.package.root)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
+                    safe_summary: None,
                 })?,
             other => {
                 return Err(DispatchError::Wasm {
@@ -525,6 +792,7 @@ where
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
+                    safe_summary: None,
                 });
             }
         };
@@ -532,7 +800,7 @@ where
         let prepared = self.prepared_guard()?.get(&cache_key).cloned();
         if let Some(prepared) = prepared {
             let host = self.host_for_scope(&request.scope, request.capability_id);
-            return execute_prepared_wasm(&self.runtime, &prepared, host, request);
+            return execute_prepared_wasm(self.runtime.clone(), prepared, host, request).await;
         }
 
         let wasm_bytes = request
@@ -541,13 +809,19 @@ where
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
+                safe_summary: None,
             })?;
         let prepared = Arc::new(
-            self.runtime
-                .prepare(request.package.id.as_str(), &wasm_bytes)
-                .map_err(|error| DispatchError::Wasm {
-                    kind: wasm_error_kind(&error),
-                })?,
+            run_wasm_prepare_blocking(
+                self.runtime.clone(),
+                request.package.id.as_str().to_string(),
+                wasm_bytes,
+            )
+            .await
+            .map_err(|error| DispatchError::Wasm {
+                kind: wasm_error_kind(&error),
+                safe_summary: None,
+            })?,
         );
         let prepared = {
             let mut prepared_cache = self.prepared_guard()?;
@@ -559,7 +833,7 @@ where
             }
         };
         let host = self.host_for_scope(&request.scope, request.capability_id);
-        execute_prepared_wasm(&self.runtime, &prepared, host, request)
+        execute_prepared_wasm(self.runtime.clone(), prepared, host, request).await
     }
 }
 
@@ -574,175 +848,17 @@ impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
     }
 }
 
-fn execute_prepared_wasm<G>(
-    runtime: &WitToolRuntime,
-    prepared: &PreparedWitTool,
-    host: WitToolHost,
-    request: RuntimeAdapterRequest<'_, impl RootFilesystem, G>,
-) -> Result<RuntimeAdapterResult, DispatchError>
-where
-    G: ResourceGovernor,
-{
-    let reservation = match request.resource_reservation {
-        Some(reservation) => reservation,
-        None => request
-            .governor
-            .reserve(request.scope.clone(), request.estimate.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-            })?,
-    };
-    let input_json = match serde_json::to_string(&request.input) {
-        Ok(json) => json,
-        Err(_) => {
-            release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::InputEncode,
-            });
-        }
-    };
-    let context_json = wasm_invocation_context(request.capability_id);
-    let execution = match runtime.execute(
-        prepared,
-        host,
-        WitToolRequest::new(input_json).with_context(context_json),
-    ) {
-        Ok(execution) => execution,
-        Err(error) => {
-            log_wasm_runtime_error(request.capability_id, &error);
-            if let Some(usage) = preserved_wasm_error_usage(&error) {
-                account_or_release_failed_wasm_execution(request.governor, reservation.id, &usage)?;
-            } else {
-                release_wasm_reservation(request.governor, reservation.id);
-            }
-            return Err(DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
-            });
-        }
-    };
-    if let Some(error) = execution.error {
-        log_wasm_guest_error(request.capability_id, &execution.logs, &error);
-        account_or_release_failed_wasm_execution(
-            request.governor,
-            reservation.id,
-            &execution.usage,
-        )?;
-        return Err(wasm_guest_dispatch_error(&error, request.capability_id));
-    }
-    let Some(output_json) = execution.output_json else {
-        account_or_release_failed_wasm_execution(
-            request.governor,
-            reservation.id,
-            &execution.usage,
-        )?;
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::InvalidResult,
-        });
-    };
-    let output = match serde_json::from_str(&output_json) {
-        Ok(output) => output,
-        Err(_) => {
-            account_or_release_failed_wasm_execution(
-                request.governor,
-                reservation.id,
-                &execution.usage,
-            )?;
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::OutputDecode,
-            });
-        }
-    };
-    let receipt = match request
-        .governor
-        .reconcile(reservation.id, execution.usage.clone())
-    {
-        Ok(receipt) => receipt,
-        Err(_) => {
-            release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-            });
-        }
-    };
-    Ok(RuntimeAdapterResult {
-        output,
-        display_preview: None,
-        output_bytes: execution.usage.output_bytes,
-        usage: execution.usage,
-        receipt,
-    })
-}
-
-fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
-    serde_json::json!({
-        "capability_id": capability_id.as_str(),
-    })
-    .to_string()
-}
-
-fn account_or_release_failed_first_party_execution<G>(
-    governor: &G,
-    reservation_id: ResourceReservationId,
-    usage: Option<&ResourceUsage>,
-) -> Result<(), DispatchError>
-where
-    G: ResourceGovernor + ?Sized,
-{
-    let Some(usage) = usage else {
-        release_first_party_reservation(governor, reservation_id);
-        return Ok(());
-    };
-    if !has_accountable_effects(usage) {
-        release_first_party_reservation(governor, reservation_id);
-        return Ok(());
-    }
-
-    if governor.reconcile(reservation_id, usage.clone()).is_err() {
-        release_first_party_reservation(governor, reservation_id);
-        return Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::Resource,
-            safe_summary: None,
-        });
-    }
-
-    Ok(())
-}
-
 fn release_first_party_reservation<G>(governor: &G, reservation_id: ResourceReservationId)
 where
     G: ResourceGovernor + ?Sized,
 {
-    let _ = governor.release(reservation_id);
-}
-
-fn account_or_release_failed_wasm_execution<G>(
-    governor: &G,
-    reservation_id: ResourceReservationId,
-    usage: &ResourceUsage,
-) -> Result<(), DispatchError>
-where
-    G: ResourceGovernor + ?Sized,
-{
-    if !has_accountable_effects(usage) {
-        release_wasm_reservation(governor, reservation_id);
-        return Ok(());
+    if let Err(error) = governor.release(reservation_id) {
+        tracing::warn!(
+            reservation_id = %reservation_id,
+            error = %error,
+            "failed to release prepared first-party reservation"
+        );
     }
-
-    if governor.reconcile(reservation_id, usage.clone()).is_err() {
-        release_wasm_reservation(governor, reservation_id);
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Resource,
-        });
-    }
-
-    Ok(())
-}
-
-fn release_wasm_reservation<G>(governor: &G, reservation_id: ResourceReservationId)
-where
-    G: ResourceGovernor + ?Sized,
-{
-    let _ = governor.release(reservation_id);
 }
 
 fn release_adapter_reservation<G>(governor: &G, reservation_id: Option<ResourceReservationId>)
@@ -761,26 +877,6 @@ where
     }
 }
 
-fn preserved_wasm_error_usage(error: &WasmError) -> Option<ResourceUsage> {
-    if let WasmError::ExecutionFailed { usage, .. } = error
-        && has_accountable_effects(usage)
-    {
-        Some(usage.clone())
-    } else {
-        None
-    }
-}
-
-fn has_accountable_effects(usage: &ResourceUsage) -> bool {
-    usage.usd != Default::default()
-        || usage.input_tokens > 0
-        || usage.output_tokens > 0
-        || usage.wall_clock_ms > 0
-        || usage.output_bytes > 0
-        || usage.network_egress_bytes > 0
-        || usage.process_count > 0
-}
-
 fn dispatch_error_for_runtime(
     runtime: RuntimeKind,
     kind: RuntimeDispatchErrorKind,
@@ -788,109 +884,15 @@ fn dispatch_error_for_runtime(
     match runtime {
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+        RuntimeKind::Wasm => DispatchError::Wasm {
             kind,
             safe_summary: None,
         },
-    }
-}
-
-fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> DispatchError {
-    match wasm_guest_error_kind(error) {
-        WasmGuestErrorKind::AuthRequired => DispatchError::AuthRequired {
-            capability: capability.clone(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
+        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+            kind,
+            safe_summary: None,
+            detail: None,
         },
-        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WasmGuestErrorKind {
-    AuthRequired,
-    Runtime(RuntimeDispatchErrorKind),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StructuredWasmGuestErrorKind {
-    AuthRequired,
-    Input,
-    OutputTooLarge,
-    Executor,
-    NetworkDenied,
-    Client,
-    OperationFailed,
-}
-
-#[derive(Debug, Deserialize)]
-struct StructuredWasmGuestError {
-    #[allow(dead_code)]
-    code: String,
-    kind: StructuredWasmGuestErrorKind,
-}
-
-fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {
-    if let Ok(payload) = serde_json::from_str::<StructuredWasmGuestError>(error) {
-        return match payload.kind {
-            StructuredWasmGuestErrorKind::AuthRequired => WasmGuestErrorKind::AuthRequired,
-            StructuredWasmGuestErrorKind::Input => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-            }
-            StructuredWasmGuestErrorKind::OutputTooLarge => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
-            }
-            StructuredWasmGuestErrorKind::Executor => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            }
-            StructuredWasmGuestErrorKind::NetworkDenied => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
-            }
-            StructuredWasmGuestErrorKind::Client => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
-            }
-            StructuredWasmGuestErrorKind::OperationFailed => {
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed)
-            }
-        };
-    }
-
-    match error {
-        "AuthRequired" => WasmGuestErrorKind::AuthRequired,
-        "missing_invocation_context"
-        | "invalid_invocation_context"
-        | "unsupported_capability"
-        | "invalid_parameters"
-        | "invalid_repository"
-        | "invalid_query_empty"
-        | "invalid_query_too_large"
-        | "invalid_author"
-        | "invalid_assignee"
-        | "invalid_involves"
-        | "invalid_state"
-        | "invalid_type"
-        | "invalid_sort"
-        | "invalid_order"
-        | "invalid_page"
-        | "invalid_limit"
-        | "invalid_issue_number"
-        | "invalid_body_empty"
-        | "invalid_body_too_large" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-        }
-        "host_http_body_limit" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
-        }
-        "host_http_timeout" => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-        "host_http_network_denied" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
-        }
-        "host_http_forbidden" | "host_http_rate_limited" => {
-            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
-        }
-        _ => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
     }
 }
 
@@ -944,7 +946,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
     }
 }
 
-fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
+pub(super) fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
     match error {
         WasmError::EngineCreationFailed(_) => RuntimeDispatchErrorKind::Executor,
         WasmError::CompilationFailed(_) => RuntimeDispatchErrorKind::Manifest,
@@ -953,99 +955,5 @@ fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wasm_guest_error_kind_maps_structured_payloads() {
-        let cases = [
-            (
-                r#"{"code":"AuthRequired","kind":"auth_required"}"#,
-                WasmGuestErrorKind::AuthRequired,
-            ),
-            (
-                r#"{"code":"invalid_repository","kind":"input"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                r#"{"code":"host_http_body_limit","kind":"output_too_large"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
-            ),
-            (
-                r#"{"code":"host_http_timeout","kind":"executor"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-            ),
-            (
-                r#"{"code":"host_http_network_denied","kind":"network_denied"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
-            ),
-            (
-                r#"{"code":"host_http_forbidden","kind":"client"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                r#"{"code":"host_http_request_failed","kind":"operation_failed"}"#,
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(wasm_guest_error_kind(error), expected);
-        }
-    }
-
-    #[test]
-    fn wasm_guest_error_kind_preserves_legacy_error_mapping_without_prefix_catch_all() {
-        let cases = [
-            ("AuthRequired", WasmGuestErrorKind::AuthRequired),
-            (
-                "invalid_repository",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "missing_invocation_context",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "unsupported_capability",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
-            ),
-            (
-                "host_http_body_limit",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
-            ),
-            (
-                "host_http_timeout",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
-            ),
-            (
-                "host_http_network_denied",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
-            ),
-            (
-                "host_http_forbidden",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                "host_http_rate_limited",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
-            ),
-            (
-                "invalid_internal_state",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-            (
-                "unknown_error",
-                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(wasm_guest_error_kind(error), expected);
-        }
     }
 }

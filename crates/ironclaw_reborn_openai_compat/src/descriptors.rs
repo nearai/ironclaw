@@ -8,7 +8,15 @@ use ironclaw_host_api::ingress::{
     WebSocketOriginPolicy,
 };
 
+/// Maximum accepted chat-completion request body. Sized to admit base64-inline
+/// images (vision, #4644). Single source of truth for both the route
+/// descriptor's ingress `body_limit` (below) and the in-workflow body check in
+/// `chat_workflow.rs`, so the two can never drift apart.
+pub(crate) const MAX_CHAT_BODY_BYTES: usize = 14 * 1024 * 1024;
+
 pub const OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS: &str = "openai.compat.chat_completions";
+pub const OPENAI_COMPAT_ROUTE_MODELS_LIST: &str = "openai.compat.models.list";
+pub const OPENAI_COMPAT_ROUTE_MODELS_API_LIST: &str = "openai.compat.models_api.list";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE: &str = "openai.compat.responses_api.create";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE: &str = "openai.compat.responses_v1.create";
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_API_RETRIEVE: &str = "openai.compat.responses_api.retrieve";
@@ -17,6 +25,8 @@ pub const OPENAI_COMPAT_ROUTE_RESPONSES_API_CANCEL: &str = "openai.compat.respon
 pub const OPENAI_COMPAT_ROUTE_RESPONSES_V1_CANCEL: &str = "openai.compat.responses_v1.cancel";
 
 pub const OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS: &str = "/v1/chat/completions";
+pub const OPENAI_COMPAT_PATTERN_MODELS_LIST: &str = "/v1/models";
+pub const OPENAI_COMPAT_PATTERN_MODELS_API_LIST: &str = "/api/v1/models";
 pub const OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE: &str = "/api/v1/responses";
 pub const OPENAI_COMPAT_PATTERN_RESPONSES_V1_CREATE: &str = "/v1/responses";
 pub const OPENAI_COMPAT_PATTERN_RESPONSES_API_ITEM: &str = "/api/v1/responses/{response_id}";
@@ -29,6 +39,8 @@ pub const OPENAI_COMPAT_PATTERN_RESPONSES_V1_ITEM_CANCEL: &str =
 pub fn openai_compat_routes() -> Vec<IngressRouteDescriptor> {
     vec![
         chat_completions_descriptor(),
+        models_list_descriptor(),
+        models_api_list_descriptor(),
         responses_api_create_descriptor(),
         responses_v1_create_descriptor(),
         responses_api_retrieve_descriptor(),
@@ -43,7 +55,31 @@ fn chat_completions_descriptor() -> IngressRouteDescriptor {
         OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS,
         NetworkMethod::Post,
         OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS,
-        create_policy(),
+        // Admits base64-inline images (vision, #4644); the per-image decoded
+        // ceiling is enforced in the workflow. Both this ingress cap and the
+        // in-workflow body check read the single `MAX_CHAT_BODY_BYTES` source of
+        // truth so they can't drift apart.
+        create_policy(body_limit_kib((MAX_CHAT_BODY_BYTES / 1024) as u64)),
+    )
+}
+
+fn models_list_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        OPENAI_COMPAT_ROUTE_MODELS_LIST,
+        NetworkMethod::Get,
+        OPENAI_COMPAT_PATTERN_MODELS_LIST,
+        // Read-only model listing: same host-owned ingress shape as a Responses
+        // retrieve (no body, bearer required, projection-only effect).
+        retrieve_policy(),
+    )
+}
+
+fn models_api_list_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        OPENAI_COMPAT_ROUTE_MODELS_API_LIST,
+        NetworkMethod::Get,
+        OPENAI_COMPAT_PATTERN_MODELS_API_LIST,
+        retrieve_policy(),
     )
 }
 
@@ -52,7 +88,7 @@ fn responses_api_create_descriptor() -> IngressRouteDescriptor {
         OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE,
         NetworkMethod::Post,
         OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
-        create_policy(),
+        create_policy(body_limit_kib(1024)),
     )
 }
 
@@ -61,7 +97,7 @@ fn responses_v1_create_descriptor() -> IngressRouteDescriptor {
         OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE,
         NetworkMethod::Post,
         OPENAI_COMPAT_PATTERN_RESPONSES_V1_CREATE,
-        create_policy(),
+        create_policy(body_limit_kib(1024)),
     )
 }
 
@@ -101,12 +137,12 @@ fn responses_v1_cancel_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn create_policy() -> IngressPolicy {
+fn create_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::LocalGateway,
         auth: bearer_required(),
         scope_source: IngressScopeSource::AuthenticatedCaller,
-        body_limit: body_limit_kib(1024),
+        body_limit,
         rate_limit: rate_limit_per_caller(60, 60),
         cors: CorsPolicy::HostConfiguredAllowlist,
         websocket_origin: WebSocketOriginPolicy::NotApplicable,

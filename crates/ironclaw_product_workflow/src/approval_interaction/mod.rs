@@ -11,14 +11,17 @@ mod resolver;
 mod service;
 mod types;
 
-pub use gate_ref::{approval_gate_ref, is_approval_gate_ref};
+pub use gate_ref::{approval_gate_ref, approval_request_id_from_gate_ref, is_approval_gate_ref};
 pub use read_model::{
     ApprovalBlockedTurnRun, ApprovalInteractionReadModel, ApprovalTurnRunLocator,
     RunStateApprovalInteractionReadModel,
 };
 pub use resolver::{ApprovalLeaseTermsProvider, ApprovalResolutionPort, ApprovalResolverPort};
 pub(crate) use service::RejectingApprovalInteractionService;
-pub use service::{ApprovalInteractionService, DefaultApprovalInteractionService};
+pub use service::{
+    ApprovalInteractionService, DefaultApprovalInteractionService,
+    PersistentApprovalGranteeResolver,
+};
 pub use types::{
     ApprovalGateRecord, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionRejectionKind, ApprovalInteractionScope, ListPendingApprovalsRequest,

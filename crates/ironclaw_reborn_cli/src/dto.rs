@@ -105,6 +105,7 @@ impl std::fmt::Display for ConfigValue {
             Self::String(s) => write!(f, "{s}"),
             Self::Bool(b) => write!(f, "{b}"),
             Self::Integer(n) => write!(f, "{n}"),
+            Self::Float(v) if v.fract() == 0.0 => write!(f, "{v:.1}"),
             Self::Float(v) => write!(f, "{v}"),
             Self::List(items) => {
                 write!(f, "[{}]", items.join(", "))

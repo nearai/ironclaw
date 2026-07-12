@@ -16,10 +16,10 @@ v1 secrets / settings / DB.
 |---|---|
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
-| `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev |
+| `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
 | `SessionStore` trait | Pluggable session storage; durable impl is host's; `InMemorySessionStore` for local dev / tests |
-| `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore` |
-| `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims) |
+| `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore`; accepted tokens map to non-operator WebUI capabilities |
+| `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
@@ -37,6 +37,12 @@ the session lifecycle types. The OAuth callback's job is exactly that
 — so the login mint path belongs in the same host-owned crate, not
 behind the product/API seam in `ironclaw_reborn_composition`.
 
+SSO sessions are user identity only. They must not inherit operator
+WebUI configuration privileges from the deployment. When the CLI
+composes SSO plus the env bearer token, the env token remains the
+separate operator credential and session/OIDC bearers remain
+non-operator.
+
 Composition merges the `PublicRouteMount` supplied by
 `webui_v2_auth_router` through
 `WebuiServeConfig::with_public_route_mount`. The router merges
@@ -51,7 +57,8 @@ secrets, never speaks to Google, never reads a `SessionStore` row.
 Routes mounted by `webui_v2_auth_router`:
 
 - `GET  /auth/providers` — list configured provider names.
-- `GET  /auth/login/{provider}` — mint a pending flow (CSRF state +
+- `GET  /auth/login/{provider}` — redirect non-canonical hosts to
+  the configured `base_url`, then mint a pending flow (CSRF state +
   PKCE verifier + sanitized `redirect_after`) and redirect the
   browser to the provider's authorization URL.
 - `GET  /auth/callback/{provider}` — single-use state lookup,
@@ -109,6 +116,11 @@ pub trait OAuthProvider: Send + Sync + 'static {
   5-min TTL), and single-use on `take`. A replayed callback cannot
   re-use a state token; cross-provider replay (state minted for
   Google arriving on the GitHub callback) fails closed.
+- **Canonical login host** is the configured `base_url`. Login
+  requests received on any other `Host` redirect to that base URL
+  before a pending-flow entry is created, so preview/custom domains
+  cannot mint state that the registered provider callback host will
+  never see.
 - **Session exchange tickets** are process-local, bounded (1024
   entries + 60-sec TTL), and single-use on `take`. The OAuth
   callback puts only the ticket in the redirect `Location`; the SPA

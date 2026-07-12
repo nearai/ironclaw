@@ -4,8 +4,10 @@
 //! inbound event enters [`crate::ProductWorkflow`]. Verified evidence is an
 //! in-memory capability, not a wire format: production constructors are kept
 //! crate-private so downstream adapter crates cannot mint host-authenticated
-//! claims. Test-support builds expose [`ProtocolAuthEvidence::test_verified`]
-//! for fakes only.
+//! claims. Host-minted claims may also carry a resolved tenant scope when the
+//! consuming product surface is tenant-scoped. Test-support builds expose
+//! [`ProtocolAuthEvidence::test_verified`] and
+//! [`ProtocolAuthEvidence::test_verified_for_tenant`] for fakes only.
 
 use serde::de::{self, Visitor};
 use serde::ser::SerializeStruct;
@@ -15,6 +17,7 @@ use thiserror::Error;
 
 use crate::error::ProductAdapterError;
 use crate::redaction::RedactedString;
+use ironclaw_host_api::TenantId;
 
 /// Host-only seal. Cannot be named or constructed outside this module.
 #[cfg_attr(
@@ -127,6 +130,8 @@ fn validate_cookie_name(field: &'static str, value: &str) -> Result<(), ProductA
 pub struct VerifiedAuthClaim {
     requirement: AuthRequirement,
     subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<TenantId>,
 }
 
 impl VerifiedAuthClaim {
@@ -138,9 +143,33 @@ impl VerifiedAuthClaim {
         )
     )]
     pub(crate) fn new(requirement: AuthRequirement, subject: impl Into<String>) -> Self {
+        Self::new_with_tenant(requirement, subject, None)
+    }
+
+    #[cfg_attr(
+        not(any(test, feature = "test-support", feature = "host-auth-mint")),
+        allow(
+            dead_code,
+            reason = "constructed only by host-auth/test-support feature gates"
+        )
+    )]
+    pub(crate) fn new_for_tenant(
+        requirement: AuthRequirement,
+        subject: impl Into<String>,
+        tenant_id: TenantId,
+    ) -> Self {
+        Self::new_with_tenant(requirement, subject, Some(tenant_id))
+    }
+
+    fn new_with_tenant(
+        requirement: AuthRequirement,
+        subject: impl Into<String>,
+        tenant_id: Option<TenantId>,
+    ) -> Self {
         Self {
             requirement,
             subject: subject.into(),
+            tenant_id,
         }
     }
 
@@ -150,6 +179,10 @@ impl VerifiedAuthClaim {
 
     pub fn subject(&self) -> &str {
         &self.subject
+    }
+
+    pub fn tenant_id(&self) -> Option<&TenantId> {
+        self.tenant_id.as_ref()
     }
 }
 
@@ -272,6 +305,26 @@ impl ProtocolAuthEvidence {
         }
     }
 
+    #[cfg_attr(
+        not(any(test, feature = "test-support", feature = "host-auth-mint")),
+        allow(
+            dead_code,
+            reason = "called only by host-auth/test-support feature gates"
+        )
+    )]
+    pub(crate) fn host_verified_for_tenant(
+        requirement: AuthRequirement,
+        subject: impl Into<String>,
+        tenant_id: TenantId,
+    ) -> Self {
+        Self {
+            kind: ProtocolAuthEvidenceKind::Verified {
+                claim: VerifiedAuthClaim::new_for_tenant(requirement, subject, tenant_id),
+                _seal: HostAuthSeal::host_only(),
+            },
+        }
+    }
+
     pub fn failed(failure: ProtocolAuthFailure) -> Self {
         Self {
             kind: ProtocolAuthEvidenceKind::Failed { failure },
@@ -281,6 +334,15 @@ impl ProtocolAuthEvidence {
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_verified(requirement: AuthRequirement, subject: impl Into<String>) -> Self {
         Self::host_verified(requirement, subject)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_verified_for_tenant(
+        requirement: AuthRequirement,
+        subject: impl Into<String>,
+        tenant_id: TenantId,
+    ) -> Self {
+        Self::host_verified_for_tenant(requirement, subject, tenant_id)
     }
 
     pub fn is_verified(&self) -> bool {
@@ -318,6 +380,23 @@ pub fn mark_request_signature_verified(
 }
 
 #[cfg(feature = "host-auth-mint")]
+pub fn mark_request_signature_verified_for_tenant(
+    header_name: impl Into<String>,
+    timestamp_header_name: Option<String>,
+    subject: impl Into<String>,
+    tenant_id: TenantId,
+) -> ProtocolAuthEvidence {
+    ProtocolAuthEvidence::host_verified_for_tenant(
+        AuthRequirement::RequestSignature {
+            header_name: header_name.into(),
+            timestamp_header_name,
+        },
+        subject,
+        tenant_id,
+    )
+}
+
+#[cfg(feature = "host-auth-mint")]
 pub fn mark_shared_secret_header_verified(
     header_name: impl Into<String>,
     subject: impl Into<String>,
@@ -327,6 +406,21 @@ pub fn mark_shared_secret_header_verified(
             header_name: header_name.into(),
         },
         subject,
+    )
+}
+
+#[cfg(feature = "host-auth-mint")]
+pub fn mark_shared_secret_header_verified_for_tenant(
+    header_name: impl Into<String>,
+    subject: impl Into<String>,
+    tenant_id: TenantId,
+) -> ProtocolAuthEvidence {
+    ProtocolAuthEvidence::host_verified_for_tenant(
+        AuthRequirement::SharedSecretHeader {
+            header_name: header_name.into(),
+        },
+        subject,
+        tenant_id,
     )
 }
 
@@ -344,8 +438,31 @@ pub fn mark_session_verified(
 }
 
 #[cfg(feature = "host-auth-mint")]
+pub fn mark_session_verified_for_tenant(
+    cookie_name: impl Into<String>,
+    subject: impl Into<String>,
+    tenant_id: TenantId,
+) -> ProtocolAuthEvidence {
+    ProtocolAuthEvidence::host_verified_for_tenant(
+        AuthRequirement::SessionCookie {
+            name: cookie_name.into(),
+        },
+        subject,
+        tenant_id,
+    )
+}
+
+#[cfg(feature = "host-auth-mint")]
 pub fn mark_bearer_token_verified(subject: impl Into<String>) -> ProtocolAuthEvidence {
     ProtocolAuthEvidence::host_verified(AuthRequirement::BearerToken, subject)
+}
+
+#[cfg(feature = "host-auth-mint")]
+pub fn mark_bearer_token_verified_for_tenant(
+    subject: impl Into<String>,
+    tenant_id: TenantId,
+) -> ProtocolAuthEvidence {
+    ProtocolAuthEvidence::host_verified_for_tenant(AuthRequirement::BearerToken, subject, tenant_id)
 }
 
 /// Structured failure classifications. The `detail` field is redacted.
@@ -382,6 +499,21 @@ mod tests {
         );
         assert!(evidence.is_verified());
         assert!(evidence.claim().is_some());
+        assert!(evidence.claim().expect("claim").tenant_id().is_none());
+    }
+
+    #[test]
+    fn verified_claim_can_carry_host_resolved_tenant_scope() {
+        let tenant_id = TenantId::new("tenant-a").expect("tenant");
+        let evidence = ProtocolAuthEvidence::host_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            "alice",
+            tenant_id.clone(),
+        );
+
+        let claim = evidence.claim().expect("claim");
+        assert_eq!(claim.subject(), "alice");
+        assert_eq!(claim.tenant_id(), Some(&tenant_id));
     }
 
     #[test]

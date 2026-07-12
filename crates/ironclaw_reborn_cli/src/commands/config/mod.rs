@@ -171,6 +171,7 @@ fn flatten_config(
         harness: Some(config.harness.clone().unwrap_or_default()),
         runner: Some(config.runner.clone().unwrap_or_default()),
         skills: Some(config.skills.clone().unwrap_or_default()),
+        storage: Some(config.storage.clone().unwrap_or_default()),
         llm: Some(llm),
         webui: Some(config.webui.clone().unwrap_or_default()),
         slack: Some(config.slack.clone().unwrap_or_default()),
@@ -250,6 +251,7 @@ mod tests {
         assert!(entries.iter().any(|e| e.key == "api_version"));
         assert!(entries.iter().any(|e| e.key == "boot.profile"));
         assert!(entries.iter().any(|e| e.key == "identity.tenant"));
+        assert!(entries.iter().any(|e| e.key == "storage.backend"));
         assert!(entries.iter().any(|e| e.key == "llm.default.provider_id"));
         assert!(entries.iter().any(|e| e.key == "webui.listen_port"));
         assert!(entries.iter().any(|e| e.key == "budget.user_daily_usd"));
@@ -262,7 +264,15 @@ mod tests {
                 .any(|e| e.key == "trigger_poller.poll_interval_secs"),
         );
         for entry in &entries {
-            assert!(entry.value.is_none(), "key {} should be unset", entry.key);
+            let is_empty_list_default = matches!(
+                &entry.value,
+                Some(ConfigValue::List(items)) if items.is_empty()
+            );
+            assert!(
+                entry.value.is_none() || is_empty_list_default,
+                "key {} should be unset or an empty-list default",
+                entry.key
+            );
         }
     }
 

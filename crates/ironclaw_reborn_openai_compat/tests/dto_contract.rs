@@ -49,10 +49,12 @@ fn responses_create_request_accepts_text_or_item_input() {
         "model": "gpt-reborn",
         "input": "hello",
         "stream": false,
+        "temperature": 0.42,
         "previous_response_id": "resp_previous"
     }))
     .expect("text input");
     assert!(matches!(text.input, OpenAiResponsesInput::Text(_)));
+    assert_eq!(text.temperature, Some(0.42));
     assert_eq!(
         text.previous_response_id
             .as_ref()
@@ -127,6 +129,20 @@ fn responses_items_are_tagged_and_tolerate_future_request_fields() {
             ..
         }
     ));
+}
+
+#[test]
+fn responses_explicit_message_item_missing_role_reports_missing_role() {
+    let error = serde_json::from_value::<OpenAiResponsesInputItem>(json!({
+        "type": "message",
+        "content": "hello"
+    }))
+    .expect_err("explicit message items without a role must reject as malformed messages");
+
+    assert!(
+        error.to_string().contains("missing field `role`"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

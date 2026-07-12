@@ -10,20 +10,22 @@ use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
     LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
-    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
+    LoopResultRef, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCheckpointId, TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnStatus,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext,
+        CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
+        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+        DeliveryTargetSummary, FinalizeAssistantMessage, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
+        InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
@@ -36,8 +38,8 @@ use ironclaw_turns::{
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
         LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
         LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
+        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
+        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
         PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
@@ -99,6 +101,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
     host.push_capability_outcome(CapabilityOutcome::ApprovalRequired {
         gate_ref: LoopGateRef::new("gate:approval-needed").unwrap(),
         safe_summary: "approval required".to_string(),
+        approval_resume: None,
     });
 
     let reply_exit = ReplyDriver
@@ -183,6 +186,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
                 content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
@@ -208,9 +212,15 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             .iter()
             .map(|milestone| milestone.kind.kind_name())
             .collect::<Vec<_>>(),
-        vec!["model_started", "model_reasoning_delta", "model_completed"]
+        vec![
+            "model_started",
+            "model_reasoning_delta",
+            "model_text_delta",
+            "model_completed",
+        ]
     );
     let serialized_milestones = serde_json::to_string(&milestone_sink.milestones()).unwrap();
+    assert!(serialized_milestones.contains("safe delta"));
     assert!(!serialized_milestones.contains("RAW_ASSISTANT_CONTENT_SENTINEL"));
     assert!(!serialized_milestones.contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456"));
     assert!(serialized_milestones.contains("[redacted]"));
@@ -237,6 +247,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -253,7 +264,10 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
         "model response survived start milestone failure"
     );
     assert_eq!(gateway.requests().len(), 1);
-    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+    assert_eq!(
+        milestone_sink.kind_names(),
+        vec!["model_text_delta", "model_completed"]
+    );
 }
 
 #[tokio::test]
@@ -277,6 +291,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -290,7 +305,10 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
     };
     assert_eq!(reply.content, "model response survived milestone failure");
     assert_eq!(gateway.requests().len(), 1);
-    assert_eq!(milestone_sink.kind_names(), vec!["model_started"]);
+    assert_eq!(
+        milestone_sink.kind_names(),
+        vec!["model_started", "model_text_delta"]
+    );
 }
 
 #[tokio::test]
@@ -314,6 +332,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -340,6 +359,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministically() {
     let context = claimed_run_context().await;
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -414,6 +434,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 .unwrap(),
         ),
         inline_messages: Vec::new(),
+        runtime_context: None,
     };
 
     let builder = InstructionBundleBuilder::new(context);
@@ -493,6 +514,311 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
     assert_eq!(first.skill_context[0].source_name, "alpha");
 }
 
+#[tokio::test]
+async fn instruction_bundle_renders_runtime_context_section() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "instruction:system".to_string(),
+                model_content: "system rule".to_string(),
+                safe_summary: "system rule".to_string(),
+                metadata: None,
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            communication: None,
+            product_context: None,
+            user_profile: None,
+        }),
+    };
+
+    let first = builder.build(request.clone()).unwrap();
+    let second = builder.build(request.clone()).unwrap();
+    assert_eq!(
+        first.fingerprint, second.fingerprint,
+        "same request must produce same fingerprint"
+    );
+
+    let runtime_idx = first
+        .materialized_messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section message must exist");
+    assert_eq!(first.materialized_messages[runtime_idx].role, "system");
+    assert!(
+        first.materialized_messages[runtime_idx]
+            .model_content
+            .contains("Current date/time at loop start: 2026-06-11T21:32Z"),
+        "model_content: {}",
+        first.materialized_messages[runtime_idx].model_content
+    );
+
+    let identity_idx = first
+        .messages
+        .iter()
+        .rposition(|m| m.content_ref.as_str() == "msg:identity")
+        .expect("identity message must exist");
+    let instruction_idx = first
+        .messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:instruction."))
+        .expect("instruction snippet message must exist");
+    let runtime_msg_idx = first
+        .messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime message must exist in messages list");
+    assert!(
+        runtime_msg_idx > identity_idx,
+        "runtime must be after last identity message"
+    );
+    assert!(
+        runtime_msg_idx < instruction_idx,
+        "runtime must be before first instruction snippet"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
+    // Two requests that differ only in the seconds component within the same
+    // minute must produce identical rendered model_content, identical runtime
+    // message content_ref, and an identical whole-bundle fingerprint.
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let base_bundle = LoopContextBundle {
+        identity_messages: vec![LoopContextMessage {
+            message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+            role: "system".to_string(),
+            safe_summary: "identity safe".to_string(),
+            compaction: None,
+        }],
+        messages: Vec::new(),
+        compaction_message_index: Vec::new(),
+        instruction_snippets: vec![LoopContextSnippet {
+            snippet_ref: "instruction:system".to_string(),
+            model_content: "system rule".to_string(),
+            safe_summary: "system rule".to_string(),
+            metadata: None,
+        }],
+        memory_snippets: Vec::new(),
+    };
+
+    let request_early = InstructionBundleRequest {
+        context_bundle: base_bundle.clone(),
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 7)
+                .unwrap(),
+            communication: None,
+            product_context: None,
+            user_profile: None,
+        }),
+    };
+
+    let request_late = InstructionBundleRequest {
+        context_bundle: base_bundle,
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 46)
+                .unwrap(),
+            communication: None,
+            product_context: None,
+            user_profile: None,
+        }),
+    };
+
+    let bundle_early = builder.build(request_early).unwrap();
+    let bundle_late = builder.build(request_late).unwrap();
+
+    let runtime_early = bundle_early
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime materialized message must exist (early)");
+    let runtime_late = bundle_late
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime materialized message must exist (late)");
+
+    assert_eq!(
+        runtime_early.model_content, runtime_late.model_content,
+        "rendered runtime model_content must be identical within the same minute"
+    );
+    assert_eq!(
+        runtime_early.content_ref, runtime_late.content_ref,
+        "runtime message content_ref must be identical within the same minute"
+    );
+    assert_eq!(
+        bundle_early.fingerprint, bundle_late.fingerprint,
+        "whole-bundle fingerprint must be identical when loop_started_at_utc differs only in seconds within the same minute"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
+    // Regression guard: each InstructionBundleBuilder::build call must embed
+    // exactly one msg:runtime.* ref and exactly one materialized message whose
+    // model_content contains the "Current date/time at loop start:" line.
+    // This catches any accidental accumulation (e.g. two calls to
+    // push_runtime_context, or the section being added both as a synthetic ref
+    // and as a transcript message).
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "instruction:system".to_string(),
+                model_content: "system rule".to_string(),
+                safe_summary: "system rule".to_string(),
+                metadata: None,
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            communication: None,
+            product_context: None,
+            user_profile: None,
+        }),
+    };
+
+    // Simulate what a real loop does: the prompt bundle is rebuilt on every
+    // model call (for checkpointing / surface-version refresh). Neither the
+    // messages list nor the materialized_messages list must accumulate extra
+    // runtime entries across two build() calls on the same builder.
+    let bundle_iter1 = builder.build(request.clone()).unwrap();
+    let bundle_iter2 = builder.build(request.clone()).unwrap();
+
+    for (bundle, iteration) in [(&bundle_iter1, 1usize), (&bundle_iter2, 2usize)] {
+        let ref_count = bundle
+            .messages
+            .iter()
+            .filter(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+            .count();
+        assert_eq!(
+            ref_count, 1,
+            "bundle for iteration {iteration} must contain exactly one msg:runtime.* message ref, found {ref_count}"
+        );
+
+        let materialized_count = bundle
+            .materialized_messages
+            .iter()
+            .filter(|m| m.model_content.contains("Current date/time at loop start:"))
+            .count();
+        assert_eq!(
+            materialized_count, 1,
+            "bundle for iteration {iteration} must contain exactly one materialized message with 'Current date/time at loop start:', found {materialized_count}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn instruction_bundle_without_runtime_context_renders_no_runtime_section() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "instruction:system".to_string(),
+                model_content: "system rule".to_string(),
+                safe_summary: "system rule".to_string(),
+                metadata: None,
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: None,
+    };
+
+    let first = builder.build(request.clone()).unwrap();
+    let second = builder.build(request.clone()).unwrap();
+    assert_eq!(
+        first.fingerprint, second.fingerprint,
+        "None runtime context must be deterministic"
+    );
+
+    assert!(
+        !first
+            .materialized_messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:runtime.")),
+        "no runtime section message should appear when runtime_context is None"
+    );
+
+    assert!(
+        !first
+            .messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:runtime.")),
+        "no runtime section ref should appear in messages vec when runtime_context is None"
+    );
+
+    let with_runtime_request = InstructionBundleRequest {
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: chrono::Utc
+                .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
+                .unwrap(),
+            communication: None,
+            product_context: None,
+            user_profile: None,
+        }),
+        ..request
+    };
+    let with_runtime = builder.build(with_runtime_request).unwrap();
+    assert_ne!(
+        first.fingerprint, with_runtime.fingerprint,
+        "fingerprint must differ when runtime_context is Some vs None"
+    );
+}
+
 #[test]
 fn instruction_bundle_fingerprint_deserialize_rejects_invalid_values() {
     let error = serde_json::from_value::<InstructionBundleFingerprint>(serde_json::json!(
@@ -531,6 +857,7 @@ async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 }
@@ -557,6 +884,7 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 }
@@ -583,6 +911,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -643,6 +972,7 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 
@@ -686,6 +1016,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 
@@ -722,6 +1053,7 @@ fn skill_instruction_request(
         visible_surface: None,
         safety_context: None,
         inline_messages: Vec::new(),
+        runtime_context: None,
     }
 }
 
@@ -748,6 +1080,7 @@ async fn instruction_bundle_rejects_empty_model_content() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -781,6 +1114,7 @@ async fn instruction_bundle_rejects_oversized_model_content() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -818,31 +1152,40 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_actual_secret_value() {
+async fn instruction_bundle_allows_trusted_skill_credential_shaped_value() {
+    // #5169: trusted/certified skill instruction bodies bypass content
+    // denylisting, so a credential-shaped value in the body no longer fails the
+    // turn. (Untrusted surfaces still reject it — see the tests below and the
+    // unit tests in prompt_text.rs.)
+    let body = "Use Authorization: Bearer ghp_secretvalue123".to_string();
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    let bundle = InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
-            "Use Authorization: Bearer ghp_secretvalue123",
+            body.clone(),
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
+        .expect("trusted skill body must bypass content checks after #5169");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == body)
+    );
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_authorization_scheme_secret_value() {
+async fn instruction_bundle_allows_trusted_skill_authorization_scheme_value() {
+    // #5169: an Authorization scheme + value in a trusted skill body is allowed.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("trusted skill body must bypass content checks after #5169");
 }
 
 #[tokio::test]
@@ -874,6 +1217,74 @@ async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_companion() {
+    // #5169 security boundary: each skill snippet is evaluated on its OWN
+    // trust_level. A `trusted` skill present in the same bundle (e.g. a parent
+    // that chain-loaded a companion via requires.skills) must NOT extend the
+    // content-check exemption to an `installed` companion snippet — the
+    // companion's credential-shaped body is still rejected.
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                compaction_message_index: Vec::new(),
+                instruction_snippets: vec![
+                    LoopContextSnippet {
+                        snippet_ref: "skill:code-review".to_string(),
+                        model_content: "Use Authorization: Bearer ghp_trustedparent123".to_string(),
+                        safe_summary: "code-review skill".to_string(),
+                        metadata: Some(LoopContextSnippetMetadata {
+                            source_name: "code-review".to_string(),
+                            trust_level: "trusted".to_string(),
+                        }),
+                    },
+                    LoopContextSnippet {
+                        snippet_ref: "skill:github".to_string(),
+                        model_content: "Use Authorization: Bearer ghp_companionvalue456"
+                            .to_string(),
+                        safe_summary: "github companion skill".to_string(),
+                        metadata: Some(LoopContextSnippetMetadata {
+                            source_name: "github".to_string(),
+                            trust_level: "installed".to_string(),
+                        }),
+                    },
+                ],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+            runtime_context: None,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_untrusted_skill_host_path_and_secret_value() {
+    // #5169 boundary: the content-check exemption is trust-scoped. An *installed*
+    // (untrusted) skill body carrying a host path or a credential-shaped value is
+    // still rejected — only trusted/certified skill content bypasses the checks.
+    let context = claimed_run_context().await;
+    for body in [
+        "Read /Users/alice/.config/token before calling GitHub",
+        "Use Authorization: Bearer ghp_secretvalue123",
+    ] {
+        let error = InstructionBundleBuilder::new(context.clone())
+            .build(skill_instruction_request(body, "GitHub skill", "installed"))
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            AgentLoopHostErrorKind::PolicyDenied,
+            "body: {body:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() {
     let context = claimed_run_context().await;
     let error = InstructionBundleBuilder::new(context)
@@ -893,6 +1304,7 @@ async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() 
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -900,17 +1312,18 @@ async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() 
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_host_path() {
+async fn instruction_bundle_allows_trusted_skill_host_path() {
+    // #5169: a host path in a trusted skill body is allowed (a path is not a
+    // leak, and skill docs reference paths constantly). Untrusted surfaces still
+    // reject host paths — see `instruction_bundle_builder_rejects_unsafe_instruction_context`.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Read /Users/alice/.config/token before calling GitHub",
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("trusted skill body must bypass the host-path check after #5169");
 }
 
 #[tokio::test]
@@ -942,6 +1355,7 @@ async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matche
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap();
 
@@ -978,6 +1392,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
             visible_surface: None,
             safety_context: None,
             inline_messages: Vec::new(),
+            runtime_context: None,
         })
         .unwrap_err();
 
@@ -1027,6 +1442,7 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
     let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![
             CapabilityDescriptorView {
@@ -1620,6 +2036,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             .with_context_memory_snippet("memory:project", "project memory available"),
     );
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -1631,14 +2048,13 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
     };
+    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
         host.milestone_sink.clone(),
     )
-    .with_instruction_materialization_store(Arc::new(
-        InMemoryInstructionMaterializationStore::default(),
-    ))
+    .with_instruction_materialization_store(materialization_store.clone())
     .with_current_surface(surface.clone())
     .with_safety_context(
         InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
@@ -1676,6 +2092,62 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             .as_str()
             .starts_with("msg:surface.surface-v1.")
     }));
+    let surface_message = bundle
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .content_ref
+                .as_str()
+                .starts_with("msg:surface.surface-v1.")
+        })
+        .expect("surface message should be present");
+    let surface_materialized = materialization_store
+        .get_materialized_message(&host.context, &surface_message.content_ref)
+        .expect("surface message ref lookup should succeed")
+        .expect("surface message should be materialized");
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\nPolicy:\nUse only visible capabilities."),
+        "surface prompt must render the capability policy separately: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("not listed under Capabilities"),
+        "surface prompt must tell the model to refuse unavailable named capabilities: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("do not call another capability as a substitute or workaround"),
+        "surface prompt must tell the model not to route unavailable tools through alternatives: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\nCapabilities:\n- id: demo.echo"),
+        "surface prompt must render capability descriptors under a stable header: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\n  name: Echo"),
+        "surface prompt must render capability names as labeled fields: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\n  description: Echo safe input"),
+        "surface prompt must render capability descriptions as labeled fields: {:?}",
+        surface_materialized.model_content
+    );
     assert!(bundle.instruction_fingerprint.is_some());
     assert_eq!(host.effects(), vec!["context"]);
     assert_eq!(host.milestone_kind_names(), vec!["prompt_bundle_built"]);
@@ -1826,9 +2298,12 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
     };
     let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
     assert!(public_json.contains("prompt_bundle_built"));
@@ -1890,9 +2365,12 @@ async fn capability_invocations_must_cite_visible_surface_before_host_dispatch()
 
     let error = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: foreign,
             input_ref: CapabilityInputRef::new("input:opaque-agent-loop-host-sentinel").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -2126,6 +2604,7 @@ impl AgentLoopDriver for ReplyDriver {
         assert_eq!(prompt.messages.len(), 1);
         let response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt.messages,
                 surface_version: prompt.surface_version,
                 model_preference: Some(
@@ -2141,6 +2620,7 @@ impl AgentLoopDriver for ReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let message_ref = host
@@ -2202,15 +2682,19 @@ impl AgentLoopDriver for CapabilityDriver {
             .map_err(driver_error)?;
         let outcome = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: surface.descriptors[0].capability_id.clone(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-arguments").unwrap(),
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .map_err(driver_error)?;
         let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "expected_approval".to_string(),
+                detail: None,
             });
         };
         let state_ref = LoopCheckpointStateRef::new("checkpoint:approval-state").unwrap();
@@ -2231,6 +2715,7 @@ impl AgentLoopDriver for CapabilityDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             checkpoint_id,
             state_ref,
@@ -2344,6 +2829,66 @@ impl LoopModelGateway for RecordingLoopModelGateway {
     }
 }
 
+/// Gateway that never returns within the primary model-call timeout: it sleeps
+/// for `delay` before yielding. Under `tokio::time::pause`, the runtime
+/// auto-advances the clock so the wrapper timeout fires deterministically with
+/// no real wall-clock wait.
+struct HangingLoopModelGateway {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl LoopModelGateway for HangingLoopModelGateway {
+    async fn stream_model(
+        &self,
+        _request: LoopModelGatewayRequest,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        tokio::time::sleep(self.delay).await;
+        Err(LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Internal,
+            "should never be reached: timeout fires first",
+        )
+        .unwrap())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_managed_model_port_times_out_a_hung_gateway() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    // Sleep well past the primary model-call timeout (75s).
+    let gateway = Arc::new(HangingLoopModelGateway {
+        delay: std::time::Duration::from_secs(600),
+    });
+    let port = HostManagedLoopModelPort::new(context.clone(), gateway, milestone_sink.clone());
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+            }],
+            surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
+            model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            capability_view: None,
+        })
+        .await
+        .expect_err("a hung gateway must surface a timeout error");
+
+    // Timeout maps to the retryable `Unavailable` kind, not a bespoke variant.
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(error.safe_summary, "model gateway timed out");
+    // The failure milestone must still fire so the run records the failure.
+    assert!(
+        milestone_sink
+            .milestones()
+            .iter()
+            .any(|milestone| milestone.kind.kind_name() == "model_failed"),
+        "a timed-out model call must emit a model_failed milestone"
+    );
+}
+
 struct RecordingAgentLoopHost {
     context: LoopRunContext,
     effects: Mutex<Vec<String>>,
@@ -2369,6 +2914,7 @@ impl RecordingAgentLoopHost {
             capability_outcomes: Mutex::new(Vec::new()),
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             visible_surface: VisibleCapabilitySurface {
+                callable_capability_ids: None,
                 version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
                 descriptors: vec![CapabilityDescriptorView {
                     capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -2771,6 +3317,7 @@ async fn claimed_run_context() -> LoopRunContext {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: None,
         })
         .await
         .unwrap();
@@ -2804,6 +3351,7 @@ fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoo
 fn driver_error(error: AgentLoopHostError) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: error.kind.as_str().to_string(),
+        detail: error.detail,
     }
 }
 
@@ -2916,6 +3464,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
 
 fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
     LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: vec![LoopModelMessage {
             role: "user".to_string(),
             content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
@@ -3234,7 +3783,10 @@ async fn model_started_failure_still_accounts_provider_outcome() {
     assert!(accountant.was_post_called());
     assert!(!accountant.post_saw_failure());
     assert_eq!(gateway.requests().len(), 1);
-    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+    assert_eq!(
+        milestone_sink.kind_names(),
+        vec!["model_text_delta", "model_completed"]
+    );
 }
 
 /// Budget accounting on failure: post hook still fires.
@@ -3390,4 +3942,370 @@ async fn error_kind_mapping_through_host_managed_port() {
         );
         assert_eq!(error.safe_summary, summary);
     }
+}
+
+// ── ProductTurnContext serde round-trips ──────────────────────────────────────
+
+#[test]
+fn product_turn_context_serde_round_trips_all_origin_kinds() {
+    let web_ui = ProductTurnContext::new(
+        TurnOriginKind::WebUi,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    );
+    let json = serde_json::to_value(&web_ui).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
+        web_ui
+    );
+
+    let inbound = ProductTurnContext::new(
+        TurnOriginKind::Inbound,
+        None,
+        Some(RunOriginAdapter::new("slack").unwrap()),
+        TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    );
+    let json = serde_json::to_value(&inbound).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
+        inbound
+    );
+
+    let trigger = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    );
+    let json = serde_json::to_value(&trigger).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
+        trigger
+    );
+}
+
+#[test]
+fn submit_turn_request_product_context_defaults_to_none_when_missing_from_json() {
+    // Old payloads without product_context must deserialize successfully with None.
+    let json = serde_json::json!({
+        "scope": {
+            "tenant_id": "tenant-serde",
+            "thread_id": "thread-serde"
+        },
+        "actor": {"user_id": "user-serde"},
+        "accepted_message_ref": "accepted-serde",
+        "source_binding_ref": "source-serde",
+        "reply_target_binding_ref": "reply-serde",
+        "idempotency_key": "idem-serde",
+        "received_at": "2026-06-11T21:32:00Z"
+    });
+    let request: SubmitTurnRequest = serde_json::from_value(json).unwrap();
+    assert!(
+        request.product_context.is_none(),
+        "product_context must default to None when absent from JSON"
+    );
+}
+
+#[tokio::test]
+async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json() {
+    // Old persisted TurnRunState payloads without product_context must deserialize with None.
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-origin-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-origin-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-origin-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        resolved_model_route: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    // Serialize without the product_context field (simulate old wire).
+    let mut json = serde_json::to_value(&state).unwrap();
+    json.as_object_mut().unwrap().remove("product_context");
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert!(
+        decoded.product_context.is_none(),
+        "product_context must default to None when absent from legacy JSON"
+    );
+
+    // Verify round-trip with a value present.
+    let ctx_value = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("user-origin-serde").unwrap(),
+        },
+    );
+    let state_with_ctx = TurnRunState {
+        product_context: Some(ctx_value.clone()),
+        ..state
+    };
+    let json_with_ctx = serde_json::to_value(&state_with_ctx).unwrap();
+    assert!(
+        json_with_ctx["product_context"].is_object(),
+        "product_context must serialize as an object"
+    );
+    let decoded_with: TurnRunState = serde_json::from_value(json_with_ctx).unwrap();
+    assert_eq!(decoded_with.product_context, Some(ctx_value));
+}
+
+#[tokio::test]
+async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_json() {
+    // Guard the #[serde(default)] backward-compat contract for resume_disposition
+    // (serialized under the legacy key "auth_resume_disposition"):
+    // old persisted TurnRunState payloads that pre-date the field must deserialize
+    // cleanly with resume_disposition == None.
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-ard-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-ard-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-ard-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        resolved_model_route: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    // Serialize, remove the auth_resume_disposition key (simulates a legacy checkpoint
+    // that was written before the field existed), then deserialize — must succeed with None.
+    let mut json = serde_json::to_value(&state).unwrap();
+    // The field is skip_serializing_if = "Option::is_none", so it may already be absent;
+    // either way, ensure it is absent before decoding.
+    json.as_object_mut()
+        .unwrap()
+        .remove("auth_resume_disposition");
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert!(
+        decoded.resume_disposition.is_none(),
+        "resume_disposition must default to None when absent from legacy JSON"
+    );
+}
+
+// ── Communication runtime context rendering (integration with bundle) ─────────
+
+#[tokio::test]
+async fn instruction_bundle_runtime_communication_none_is_byte_identical_to_4795_baseline() {
+    // Regression guard: communication: None must not change the rendered output or
+    // fingerprint relative to the #4795 time-only baseline.
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let base_bundle = LoopContextBundle {
+        identity_messages: vec![LoopContextMessage {
+            message_ref: Some(LoopMessageRef::new("msg:identity-comm").unwrap()),
+            role: "system".to_string(),
+            safe_summary: "identity comm".to_string(),
+            compaction: None,
+        }],
+        messages: Vec::new(),
+        compaction_message_index: Vec::new(),
+        instruction_snippets: Vec::new(),
+        memory_snippets: Vec::new(),
+    };
+
+    let request_with_comm_none = InstructionBundleRequest {
+        context_bundle: base_bundle.clone(),
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+            communication: None,
+            product_context: None,
+            user_profile: None,
+        }),
+    };
+
+    let bundle = builder.build(request_with_comm_none).unwrap();
+    let runtime_msg = bundle
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section must exist");
+
+    // Should contain the time line and nothing else (no channel/delivery/origin lines).
+    assert!(
+        runtime_msg
+            .model_content
+            .contains("Current date/time at loop start:"),
+        "{}",
+        runtime_msg.model_content
+    );
+    assert!(
+        !runtime_msg.model_content.contains("Connected channels"),
+        "no channel line when communication is None: {}",
+        runtime_msg.model_content
+    );
+    assert!(
+        !runtime_msg.model_content.contains("Outbound delivery"),
+        "no delivery line when communication is None: {}",
+        runtime_msg.model_content
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_runtime_communication_renders_all_fields() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity-full-comm").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity full comm".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                    name: "Slack".to_string(),
+                    authenticated: true,
+                    active: true,
+                }]),
+                delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
+                    display_name: "#general".to_string(),
+                    channel: "slack".to_string(),
+                }),
+                delivery_tools_visible: true,
+            }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
+            user_profile: None,
+        }),
+    };
+
+    let bundle = builder.build(request).unwrap();
+    let runtime_msg = bundle
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section must exist");
+
+    let content = &runtime_msg.model_content;
+    assert!(
+        content.contains("Current date/time at loop start:"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Connected channels: Slack (authenticated, active)."),
+        "{content}"
+    );
+    assert!(
+        content.contains("Outbound delivery target: #general (slack)"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Run origin: scheduled trigger fire."),
+        "{content}"
+    );
+    // No warning because delivery is Set (not NoneSet).
+    assert!(!content.contains("Warning:"), "{content}");
+}
+
+#[tokio::test]
+async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_warning() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity-trigger-warn").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity trigger warn".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::NoneSet,
+                delivery_tools_visible: true,
+            }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
+            user_profile: None,
+        }),
+    };
+
+    let bundle = builder.build(request).unwrap();
+    let runtime_msg = bundle
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section must exist");
+    let content = &runtime_msg.model_content;
+    assert!(
+        content.contains("Warning: no default delivery target is set"),
+        "{content}"
+    );
+    assert!(
+        content.contains("builtin__outbound_delivery_target_set"),
+        "{content}"
+    );
 }

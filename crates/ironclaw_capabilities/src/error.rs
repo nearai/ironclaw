@@ -1,7 +1,7 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
-    CapabilityId, DenyReason, DispatchError, DispatchFailureKind, HostApiError, Obligation,
-    RuntimeCredentialAuthRequirement, SecretHandle,
+    CapabilityId, DenyReason, DispatchError, DispatchFailureDetail, DispatchFailureKind,
+    HostApiError, Obligation, RuntimeCredentialAuthRequirement, SecretHandle,
 };
 use ironclaw_processes::ProcessError;
 
@@ -100,6 +100,7 @@ pub enum CapabilityInvocationError {
     Dispatch {
         kind: DispatchFailureKind,
         safe_summary: Option<String>,
+        detail: Option<DispatchFailureDetail>,
     },
 }
 
@@ -138,6 +139,7 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::FirstParty { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
                 safe_summary: dispatch_error_safe_summary(&other),
+                detail: dispatch_error_detail(&other),
             },
         }
     }
@@ -149,7 +151,15 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
 
 fn dispatch_error_safe_summary(error: &DispatchError) -> Option<String> {
     match error {
-        DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
+        DispatchError::FirstParty { safe_summary, .. }
+        | DispatchError::Wasm { safe_summary, .. } => safe_summary.clone(),
+        _ => None,
+    }
+}
+
+fn dispatch_error_detail(error: &DispatchError) -> Option<DispatchFailureDetail> {
+    match error {
+        DispatchError::FirstParty { detail, .. } => detail.clone(),
         _ => None,
     }
 }
@@ -158,7 +168,8 @@ fn dispatch_error_safe_summary(error: &DispatchError) -> Option<String> {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+        DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, ExtensionId,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
         RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     };
 
@@ -232,6 +243,7 @@ mod tests {
     fn dispatch_error_kind_forwards_wasm_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Memory,
+            safe_summary: None,
         });
         assert_eq!(kind.as_str(), "Memory");
     }
@@ -241,6 +253,7 @@ mod tests {
         let kind = dispatch_error_kind(&DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::UndeclaredCapability,
             safe_summary: None,
+            detail: None,
         });
         assert_eq!(kind.as_str(), "UndeclaredCapability");
     }
@@ -261,6 +274,7 @@ mod tests {
     fn from_dispatch_error_preserves_redacted_runtime_kind() {
         let err = CapabilityInvocationError::from(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
+            safe_summary: None,
         });
         match err {
             CapabilityInvocationError::Dispatch { kind, .. } => {
@@ -268,6 +282,32 @@ mod tests {
                     kind,
                     DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
                 )
+            }
+            other => panic!("expected Dispatch variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_dispatch_error_preserves_first_party_detail() {
+        let issue =
+            DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::MissingRequired)
+                .expected("cron or once");
+        let err = CapabilityInvocationError::from(DispatchError::FirstParty {
+            kind: RuntimeDispatchErrorKind::InputEncode,
+            safe_summary: Some("trigger_create input failed validation".to_string()),
+            detail: Some(DispatchFailureDetail::InvalidInput {
+                issues: vec![issue.clone()],
+            }),
+        });
+
+        match err {
+            CapabilityInvocationError::Dispatch { detail, .. } => {
+                assert_eq!(
+                    detail,
+                    Some(DispatchFailureDetail::InvalidInput {
+                        issues: vec![issue]
+                    })
+                );
             }
             other => panic!("expected Dispatch variant, got {other:?}"),
         }
@@ -309,6 +349,9 @@ mod tests {
     fn from_dispatch_auth_required_round_trips_credential_requirements() {
         let requirement = RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+            },
             requester_extension: ExtensionId::new("gmail").unwrap(),
             provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         };

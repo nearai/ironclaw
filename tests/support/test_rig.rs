@@ -785,7 +785,6 @@ pub struct TestRigBuilder {
     test_tool_overrides: Vec<Arc<dyn Tool>>,
     wasm_tools: Vec<WasmToolSpec>,
     keep_bootstrap: bool,
-    engine_v2: bool,
     channel_name_override: Option<String>,
     seeded_secrets: Option<SeededSecretsConfig>,
     /// Pre-seed the SecretsStore with `(name, value)` pairs before the
@@ -825,7 +824,6 @@ impl TestRigBuilder {
             test_tool_overrides: Vec::new(),
             wasm_tools: Vec::new(),
             keep_bootstrap: false,
-            engine_v2: false,
             channel_name_override: None,
             seeded_secrets: None,
             pre_seed_secrets: Vec::new(),
@@ -1046,12 +1044,6 @@ impl TestRigBuilder {
         self
     }
 
-    /// Route messages through the engine v2 pipeline instead of the v1 agentic loop.
-    pub fn with_engine_v2(mut self) -> Self {
-        self.engine_v2 = true;
-        self
-    }
-
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
@@ -1100,7 +1092,6 @@ impl TestRigBuilder {
             test_tool_overrides,
             wasm_tools,
             keep_bootstrap,
-            engine_v2,
             channel_name_override,
             seeded_secrets,
             pre_seed_secrets,
@@ -1261,19 +1252,9 @@ impl TestRigBuilder {
                 components.config.agent.auto_approve_tools = v;
             }
             // allow_local_tools comes from the provided config.
-            // engine_v2: honour the builder's explicit override if set.
-            if engine_v2 {
-                components.config.agent.engine_v2 = true;
-            }
         } else {
             components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
             components.config.agent.allow_local_tools = true;
-            components.config.agent.engine_v2 = engine_v2;
-        }
-
-        // Reset engine v2 global state so each test gets a clean engine instance.
-        if components.config.agent.engine_v2 {
-            ironclaw::bridge::reset_engine_state().await;
         }
 
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
@@ -1694,7 +1675,6 @@ pub async fn run_recorded_trace_v2(filename: &str) {
     let trace = LlmTrace::from_file(&path)
         .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
     let rig = TestRigBuilder::new()
-        .with_engine_v2()
         .with_trace(trace.clone())
         .build()
         .await;

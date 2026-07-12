@@ -37,6 +37,22 @@ impl WebUiV2HttpError {
             );
             StatusCode::INTERNAL_SERVER_ERROR
         });
+        // Single choke point for every WebChat v2 error response: a sanitized
+        // 5xx must never leave the gateway without a server-side log line, or an
+        // operator sees a bare "Internal" 500 with no trail. This is the safety
+        // net that makes surfacing internal errors a property of the boundary,
+        // not of each call site remembering to log before it maps. The
+        // underlying cause (when a backend error was converted) is logged at the
+        // construction site — see `RebornServicesError::internal_from`.
+        if status.is_server_error() {
+            tracing::error!(
+                status = status.as_u16(),
+                code = ?self.0.code,
+                kind = ?self.0.kind,
+                retryable = self.0.retryable,
+                "WebChat v2 handler returned a server error",
+            );
+        }
         let body = WebUiV2HttpErrorBody {
             error: self.0.code,
             kind: self.0.kind,

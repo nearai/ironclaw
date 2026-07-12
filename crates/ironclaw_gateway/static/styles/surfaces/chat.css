@@ -384,6 +384,15 @@
   color: var(--danger);
 }
 
+.activity-tool-card[data-status="fail"][data-emphasis="subtle"] {
+  border-color: var(--border);
+}
+
+.activity-tool-card[data-status="fail"][data-emphasis="subtle"] .activity-tool-name,
+.activity-tool-card[data-status="fail"][data-emphasis="subtle"] .activity-icon-fail {
+  color: var(--text-secondary);
+}
+
 .activity-tool-header {
   display: flex;
   align-items: center;
@@ -528,6 +537,10 @@
 
 .activity-summary:hover {
   background: var(--bg-tertiary);
+}
+
+.activity-summary[data-status="fail"] {
+  color: var(--danger);
 }
 
 .activity-summary:focus-visible {
@@ -1563,4 +1576,3 @@
   font-size: 13px;
   line-height: 1.4;
 }
-

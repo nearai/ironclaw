@@ -543,6 +543,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
                 invocation_id,
                 capability_id: capability_id(),
                 scope: context.resource_scope.clone(),
+                authenticated_actor_user_id: None,
             })
             .await
             .unwrap();
@@ -703,6 +704,7 @@ async fn default_runtime_status_reports_running_invocations_only() {
             invocation_id: context.invocation_id,
             capability_id: capability_id(),
             scope: context.resource_scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -745,6 +747,7 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
             invocation_id: context.invocation_id,
             capability_id: capability_id(),
             scope: context.resource_scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -948,6 +951,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
             invocation_id: context.invocation_id,
             capability_id: capability_id(),
             scope: context.resource_scope.clone(),
+            authenticated_actor_user_id: None,
         })
         .await
         .unwrap();
@@ -1047,6 +1051,7 @@ fn process_start(context: &ExecutionContext, process_id: ProcessId) -> ProcessSt
         parent_process_id: context.process_id,
         invocation_id: context.invocation_id,
         scope: context.resource_scope.clone(),
+        authenticated_actor_user_id: context.authenticated_actor_user_id.clone(),
         extension_id: extension_id(),
         capability_id: capability_id(),
         runtime: RuntimeKind::Wasm,
@@ -1535,7 +1540,31 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalAuthorizer {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = parse_manifest(ECHO_MANIFEST);
+    registry_with_echo_capability_permission("allow")
+}
+
+fn registry_with_echo_capability_permission(permission: &str) -> ExtensionRegistry {
+    let manifest = format!(
+        r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Echo test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "echo.wasm"
+
+[[capabilities]]
+id = "echo.say"
+description = "Echoes input"
+effects = ["dispatch_capability"]
+default_permission = "{permission}"
+parameters_schema = {{}}
+"#
+    );
+    let manifest = parse_manifest(&manifest);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -1626,22 +1655,3 @@ fn capability_id() -> CapabilityId {
 fn extension_id() -> ExtensionId {
     ExtensionId::new("echo").unwrap()
 }
-
-const ECHO_MANIFEST: &str = r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-description = "Echo test extension"
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "echo.wasm"
-
-[[capabilities]]
-id = "echo.say"
-description = "Echoes input"
-effects = ["dispatch_capability"]
-default_permission = "allow"
-parameters_schema = {}
-"#;

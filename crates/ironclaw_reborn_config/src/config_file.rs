@@ -37,7 +37,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
@@ -67,6 +68,11 @@ pub struct RebornConfigFile {
     pub runner: Option<RunnerSection>,
     /// Skill activation selection settings for local-dev runtime skill context.
     pub skills: Option<SkillsSection>,
+    /// Durable storage selection for production Reborn boot.
+    ///
+    /// Credential-bearing database URLs must stay env-only. This section names
+    /// the backend and the environment variable that contains the URL.
+    pub storage: Option<StorageSection>,
     /// Per-slot LLM selection. Keyed by Reborn model slot name. Today
     /// composition wires only the `default` slot; the `mission` slot
     /// becomes live when the planned driver lands. Operators are free
@@ -97,7 +103,9 @@ pub struct RebornConfigFile {
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
     /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
-    /// `"local-dev-yolo"`, `"production"`, `"migration-dry-run"`.
+    /// `"local-dev-yolo"`, `"hosted-single-tenant"`,
+    /// `"hosted-single-tenant-volume"`, `"production"`,
+    /// `"migration-dry-run"`.
     pub profile: Option<String>,
 }
 
@@ -108,6 +116,28 @@ pub struct IdentitySection {
     pub default_agent: Option<String>,
     pub default_owner: Option<String>,
     pub default_project: Option<String>,
+}
+
+impl IdentitySection {
+    pub fn set_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    pub fn set_default_agent(mut self, default_agent: impl Into<String>) -> Self {
+        self.default_agent = Some(default_agent.into());
+        self
+    }
+
+    pub fn set_default_owner(mut self, default_owner: impl Into<String>) -> Self {
+        self.default_owner = Some(default_owner.into());
+        self
+    }
+
+    pub fn set_default_project(mut self, default_project: impl Into<String>) -> Self {
+        self.default_project = Some(default_project.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -148,6 +178,20 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+    /// Number of concurrent turn-runner slots (scheduler semaphore permits).
+    /// `None` (absent) → compiled default (16). `0` → unlimited (no global
+    /// throttle). Positive values are used verbatim as the scheduler-semaphore
+    /// permit count; values above `tokio::sync::Semaphore::MAX_PERMITS` are
+    /// rejected as a config error (they would otherwise panic semaphore
+    /// construction). Overridable at runtime by
+    /// `IRONCLAW_REBORN_RUNNER_WORKER_COUNT`.
+    pub worker_count: Option<usize>,
+    /// Max concurrent runs in `TurnStatus::Running` per (tenant_id, owner user_id). `None` or `0` = unlimited.
+    pub max_concurrent_runs_per_user: Option<u32>,
+    /// Max concurrent runs in `TurnStatus::Running` for `ScheduledTrigger` origin. `None` or `0` = unlimited.
+    pub max_concurrent_trigger_runs: Option<u32>,
+    /// Max concurrent runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin. `None` or `0` = unlimited.
+    pub max_concurrent_conversation_runs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -156,6 +200,73 @@ pub struct SkillsSection {
     /// When false, regex activation criteria no longer auto-load full skill context.
     /// Keyword/tag activation and explicit skill mentions still work.
     pub regex_activation_enabled: Option<bool>,
+}
+
+/// Durable storage backend names accepted by the Reborn production boot config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageBackend {
+    Postgres,
+    #[doc(hidden)]
+    Unknown(String),
+}
+
+impl Serialize for StorageBackend {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Postgres => "postgres",
+            Self::Unknown(candidate) => candidate,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for StorageBackend {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StorageBackendVisitor;
+
+        impl Visitor<'_> for StorageBackendVisitor {
+            type Value = StorageBackend;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a storage backend name such as `postgres`")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "postgres" => Ok(StorageBackend::Postgres),
+                    candidate => Ok(StorageBackend::Unknown(candidate.to_string())),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(StorageBackendVisitor)
+    }
+}
+
+/// Durable storage selection for production Reborn boot.
+///
+/// `url_env` and `secret_master_key_env` are environment variable NAMES, not
+/// credential-bearing values. The parser rejects raw URL-shaped values so
+/// credentials cannot be pasted into `config.toml`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSection {
+    /// Storage backend name. First production slice supports `"postgres"`.
+    pub backend: Option<StorageBackend>,
+    /// Environment variable name containing the PostgreSQL connection URL.
+    pub url_env: Option<String>,
+    /// Environment variable name containing the Reborn secret master key.
+    pub secret_master_key_env: Option<String>,
+    /// PostgreSQL connection pool size for production storage. Defaults to 2.
+    pub pool_max_size: Option<usize>,
 }
 
 /// WebChat v2 HTTP gateway configuration.
@@ -222,46 +333,95 @@ pub struct WebuiSection {
     pub canonical_host: Option<String>,
 }
 
-/// Slack Events API host-beta configuration.
+/// Slack Events API host-beta enablement.
 ///
-/// `enabled = true` is required before the standalone Reborn listener mounts
-/// `/webhooks/slack/events`; the route is never enabled by ambient Slack
-/// environment variables alone. Signing secret and bot token values stay
-/// env-only: `signing_secret_env` and `bot_token_env` are variable names.
+/// `enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` mounts the Slack
+/// route. The env var overrides only this enablement gate. Installation
+/// identifiers, channel routing, and Slack secrets are configured through the
+/// WebUI channel setup surface. The deprecated fields below are accepted as a
+/// startup migration bridge for existing `config.toml` files; secret values
+/// still stay env-only.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
     /// Explicit host-beta enablement gate. Omitted/false means the Slack route
-    /// is not mounted by `ironclaw-reborn serve`.
+    /// is not mounted by `ironclaw-reborn serve` unless
+    /// `IRONCLAW_REBORN_SLACK_ENABLED` overrides it.
     pub enabled: Option<bool>,
-    /// Adapter installation id for this Slack workspace/app installation.
+    /// Deprecated: adapter installation id for legacy config-backed setup.
     pub installation_id: Option<String>,
-    /// Slack team id used to select this installation from signed envelopes.
+    /// Deprecated: Slack team id for legacy config-backed setup.
     pub team_id: Option<String>,
-    /// Slack app id for tenant app-scoped pairing. Required by the
-    /// host-beta personal-binding pairing path.
+    /// Deprecated: Slack app id for legacy config-backed setup.
     pub api_app_id: Option<String>,
-    /// Optional legacy static Slack user id to map directly to `user_id`.
-    /// Omit this for the pairing-code flow, where unknown Slack actors are
-    /// prompted to bind in WebUI.
+    /// Deprecated: optional Slack user id for legacy static personal binding.
     pub slack_user_id: Option<String>,
-    /// Reborn user id the configured legacy Slack user maps to, and the local
-    /// host owner used for Slack host-mediated egress. Defaults in the CLI to
-    /// the same user as the WebUI env-bearer authenticator.
+    /// Deprecated: Reborn user id for legacy Slack setup.
     pub user_id: Option<String>,
-    /// Optional Reborn user id whose scope owns shared Slack channel turns.
-    /// Omit to require explicit channel-route configuration instead of
-    /// silently inheriting a personal/default user scope.
+    /// Deprecated: Reborn user id whose scope owns shared Slack channel turns.
     pub shared_subject_user_id: Option<String>,
-    /// Optional channel-specific shared subjects for Slack app mentions and
-    /// thread replies. Each route maps one Slack channel id to a Reborn user
-    /// scope that owns tools, skills, memory, and conversation context.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Deprecated: channel-specific shared subjects for Slack app mentions.
+    #[serde(default)]
     pub channel_routes: Vec<SlackChannelRouteSection>,
-    /// Environment variable name containing the Slack signing secret.
+    /// Deprecated: environment variable name containing the Slack signing secret.
     pub signing_secret_env: Option<String>,
-    /// Environment variable name containing the Slack bot token.
+    /// Deprecated: environment variable name containing the Slack bot token.
     pub bot_token_env: Option<String>,
+}
+
+impl SlackSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn set_installation_id(mut self, installation_id: impl Into<String>) -> Self {
+        self.installation_id = Some(installation_id.into());
+        self
+    }
+
+    pub fn set_team_id(mut self, team_id: impl Into<String>) -> Self {
+        self.team_id = Some(team_id.into());
+        self
+    }
+
+    pub fn set_api_app_id(mut self, api_app_id: impl Into<String>) -> Self {
+        self.api_app_id = Some(api_app_id.into());
+        self
+    }
+
+    pub fn set_slack_user_id(mut self, slack_user_id: impl Into<String>) -> Self {
+        self.slack_user_id = Some(slack_user_id.into());
+        self
+    }
+
+    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    pub fn set_shared_subject_user_id(mut self, shared_subject_user_id: impl Into<String>) -> Self {
+        self.shared_subject_user_id = Some(shared_subject_user_id.into());
+        self
+    }
+
+    pub fn set_channel_routes(
+        mut self,
+        channel_routes: impl IntoIterator<Item = SlackChannelRouteSection>,
+    ) -> Self {
+        self.channel_routes = channel_routes.into_iter().collect();
+        self
+    }
+
+    pub fn set_signing_secret_env(mut self, signing_secret_env: impl Into<String>) -> Self {
+        self.signing_secret_env = Some(signing_secret_env.into());
+        self
+    }
+
+    pub fn set_bot_token_env(mut self, bot_token_env: impl Into<String>) -> Self {
+        self.bot_token_env = Some(bot_token_env.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -306,6 +466,78 @@ pub struct BudgetSection {
     pub overestimate_factor: Option<f64>,
 }
 
+impl BudgetSection {
+    pub fn set_user_daily_usd(mut self, user_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.user_daily_usd = user_daily_usd.into();
+        self
+    }
+
+    pub fn set_project_daily_usd(mut self, project_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.project_daily_usd = project_daily_usd.into();
+        self
+    }
+
+    pub fn set_mission_per_tick_usd(
+        mut self,
+        mission_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.mission_per_tick_usd = mission_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_heartbeat_per_tick_usd(
+        mut self,
+        heartbeat_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.heartbeat_per_tick_usd = heartbeat_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_routine_lightweight_usd(
+        mut self,
+        routine_lightweight_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_lightweight_usd = routine_lightweight_usd.into();
+        self
+    }
+
+    pub fn set_routine_standard_usd(
+        mut self,
+        routine_standard_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_standard_usd = routine_standard_usd.into();
+        self
+    }
+
+    pub fn set_background_job_default_usd(
+        mut self,
+        background_job_default_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.background_job_default_usd = background_job_default_usd.into();
+        self
+    }
+
+    pub fn set_default_tz(mut self, default_tz: impl Into<String>) -> Self {
+        self.default_tz = Some(default_tz.into());
+        self
+    }
+
+    pub fn set_warn_at(mut self, warn_at: impl Into<Option<f64>>) -> Self {
+        self.warn_at = warn_at.into();
+        self
+    }
+
+    pub fn set_pause_at(mut self, pause_at: impl Into<Option<f64>>) -> Self {
+        self.pause_at = pause_at.into();
+        self
+    }
+
+    pub fn set_overestimate_factor(mut self, overestimate_factor: impl Into<Option<f64>>) -> Self {
+        self.overestimate_factor = overestimate_factor.into();
+        self
+    }
+}
+
 /// `[trigger_poller]` section. Controls the background trigger-poller worker.
 ///
 /// All fields are optional so a sparse or absent section is valid; the
@@ -337,6 +569,41 @@ pub struct TriggerPollerConfigSection {
     /// Prevents synchronized thundering-herd across instances. Default 0.
     /// Range `0..=3600` is enforced at boot by the CLI settings layer.
     pub tick_jitter_max_secs: Option<u64>,
+}
+
+impl TriggerPollerConfigSection {
+    pub fn set_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn set_poll_interval_secs(mut self, poll_interval_secs: u64) -> Self {
+        self.poll_interval_secs = Some(poll_interval_secs);
+        self
+    }
+
+    pub fn set_fires_per_tick(mut self, fires_per_tick: u32) -> Self {
+        self.fires_per_tick = Some(fires_per_tick);
+        self
+    }
+
+    pub fn set_max_concurrent_fires_per_trigger(
+        mut self,
+        max_concurrent_fires_per_trigger: u32,
+    ) -> Self {
+        self.max_concurrent_fires_per_trigger = Some(max_concurrent_fires_per_trigger);
+        self
+    }
+
+    pub fn set_startup_jitter_max_secs(mut self, startup_jitter_max_secs: u64) -> Self {
+        self.startup_jitter_max_secs = Some(startup_jitter_max_secs);
+        self
+    }
+
+    pub fn set_tick_jitter_max_secs(mut self, tick_jitter_max_secs: u64) -> Self {
+        self.tick_jitter_max_secs = Some(tick_jitter_max_secs);
+        self
+    }
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -642,6 +909,45 @@ impl RebornConfigFile {
                 }
             }
         }
+        if let Some(storage) = &self.storage {
+            if let Some(StorageBackend::Unknown(backend)) = &storage.backend {
+                check_non_empty_trimmed(Cow::Borrowed("storage.backend"), backend)?;
+                let reason = if backend.contains("://") {
+                    "must be a backend name, not a URL or inline secret value".to_string()
+                } else {
+                    format!("supports only \"postgres\" in this slice; got `{backend}`")
+                };
+                return Err(RebornConfigFileError::InvalidField {
+                    path: attributed_path.display().to_string(),
+                    field: "storage.backend".to_string(),
+                    reason,
+                });
+            }
+            if let Some(url_env) = &storage.url_env {
+                check_non_empty_trimmed(Cow::Borrowed("storage.url_env"), url_env)?;
+                validate_env_var_reference("storage.url_env", url_env, attributed_path)?;
+            }
+            if let Some(secret_master_key_env) = &storage.secret_master_key_env {
+                check_non_empty_trimmed(
+                    Cow::Borrowed("storage.secret_master_key_env"),
+                    secret_master_key_env,
+                )?;
+                validate_env_var_reference(
+                    "storage.secret_master_key_env",
+                    secret_master_key_env,
+                    attributed_path,
+                )?;
+            }
+            if let Some(pool_max_size) = storage.pool_max_size
+                && pool_max_size == 0
+            {
+                return Err(RebornConfigFileError::InvalidField {
+                    path: attributed_path.display().to_string(),
+                    field: "storage.pool_max_size".to_string(),
+                    reason: "must be greater than 0".to_string(),
+                });
+            }
+        }
         if let Some(webui) = &self.webui {
             if let Some(host) = &webui.listen_host {
                 check(Cow::Borrowed("webui.listen_host"), host)?;
@@ -703,13 +1009,19 @@ impl RebornConfigFile {
                 }
             }
             if let Some(signing_secret_env) = &slack.signing_secret_env {
-                check(
+                check_non_empty_trimmed(
                     Cow::Borrowed("slack.signing_secret_env"),
                     signing_secret_env,
                 )?;
+                validate_env_var_reference(
+                    "slack.signing_secret_env",
+                    signing_secret_env,
+                    attributed_path,
+                )?;
             }
             if let Some(bot_token_env) = &slack.bot_token_env {
-                check(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
+                check_non_empty_trimmed(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
+                validate_env_var_reference("slack.bot_token_env", bot_token_env, attributed_path)?;
             }
         }
         if let Some(budget) = &self.budget {
@@ -807,8 +1119,6 @@ pub fn begin_default_llm_slot_update(
 }
 
 fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateError> {
-    use fs4::FileExt as _;
-
     let lock_path = config_update_lock_path(path);
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Lock {
@@ -826,7 +1136,7 @@ fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateEr
             path: lock_path.clone(),
             source,
         })?;
-    file.lock_exclusive()
+    file.lock()
         .map_err(|source| RebornConfigFileUpdateError::Lock {
             path: lock_path,
             source,
@@ -979,6 +1289,26 @@ fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFile
     Ok(())
 }
 
+fn validate_env_var_reference(
+    field: &str,
+    value: &str,
+    path: &Path,
+) -> Result<(), RebornConfigFileError> {
+    let mut chars = value.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_');
+    if valid {
+        return Ok(());
+    }
+    Err(RebornConfigFileError::InvalidField {
+        path: path.display().to_string(),
+        field: field.to_string(),
+        reason: "must be an environment variable name, not an inline secret or URL".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,8 +1336,55 @@ mod tests {
         assert!(cfg.harness.is_none());
         assert!(cfg.runner.is_none());
         assert!(cfg.skills.is_none());
+        assert!(cfg.storage.is_none());
         assert!(cfg.llm.is_none());
         assert!(cfg.slack.is_none());
+    }
+
+    #[test]
+    fn runner_section_new_fields_round_trip() {
+        let toml = r#"
+[runner]
+heartbeat_interval_secs = 10
+poll_interval_ms = 100
+worker_count = 3
+max_concurrent_runs_per_user = 2
+max_concurrent_trigger_runs = 5
+max_concurrent_conversation_runs = 4
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
+        let runner = cfg.runner.as_ref().expect("runner section present");
+        assert_eq!(runner.heartbeat_interval_secs, Some(10));
+        assert_eq!(runner.poll_interval_ms, Some(100));
+        assert_eq!(runner.worker_count, Some(3));
+        assert_eq!(runner.max_concurrent_runs_per_user, Some(2));
+        assert_eq!(runner.max_concurrent_trigger_runs, Some(5));
+        assert_eq!(runner.max_concurrent_conversation_runs, Some(4));
+    }
+
+    #[test]
+    fn absent_runner_leaves_new_fields_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML is valid");
+        assert!(cfg.runner.is_none());
+    }
+
+    #[test]
+    fn runner_section_with_only_new_fields() {
+        let toml = r#"
+[runner]
+worker_count = 8
+max_concurrent_runs_per_user = 1
+max_concurrent_trigger_runs = 10
+max_concurrent_conversation_runs = 5
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
+        let runner = cfg.runner.as_ref().expect("runner section present");
+        assert_eq!(runner.heartbeat_interval_secs, None);
+        assert_eq!(runner.poll_interval_ms, None);
+        assert_eq!(runner.worker_count, Some(8));
+        assert_eq!(runner.max_concurrent_runs_per_user, Some(1));
+        assert_eq!(runner.max_concurrent_trigger_runs, Some(10));
+        assert_eq!(runner.max_concurrent_conversation_runs, Some(5));
     }
 
     #[test]
@@ -1042,6 +1419,12 @@ poll_interval_ms = 200
 [skills]
 regex_activation_enabled = false
 
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 32
+
 [llm.default]
 provider_id = "openai"
 model = "gpt-4o-mini"
@@ -1054,18 +1437,6 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 [slack]
 enabled = true
-installation_id = "install-alpha"
-team_id = "T123"
-api_app_id = "A123"
-slack_user_id = "U123"
-user_id = "operator"
-shared_subject_user_id = "team-agent"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
-
-[[slack.channel_routes]]
-channel_id = "CENG"
-subject_user_id = "eng-team-agent"
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1085,6 +1456,17 @@ subject_user_id = "eng-team-agent"
             cfg.skills.as_ref().unwrap().regex_activation_enabled,
             Some(false)
         );
+        let storage = cfg.storage.as_ref().expect("storage section present");
+        assert_eq!(storage.backend, Some(StorageBackend::Postgres));
+        assert_eq!(
+            storage.url_env.as_deref(),
+            Some("IRONCLAW_REBORN_POSTGRES_URL")
+        );
+        assert_eq!(
+            storage.secret_master_key_env.as_deref(),
+            Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
+        );
+        assert_eq!(storage.pool_max_size, Some(32));
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));
         assert_eq!(default_slot.model.as_deref(), Some("gpt-4o-mini"));
@@ -1093,17 +1475,6 @@ subject_user_id = "eng-team-agent"
         assert!(llm.contains_key("mission"));
         let slack = cfg.slack.as_ref().expect("slack section present");
         assert_eq!(slack.enabled, Some(true));
-        assert_eq!(slack.team_id.as_deref(), Some("T123"));
-        assert_eq!(slack.shared_subject_user_id.as_deref(), Some("team-agent"));
-        assert_eq!(slack.channel_routes.len(), 1);
-        assert_eq!(
-            slack.channel_routes[0].subject_user_id.as_deref(),
-            Some("eng-team-agent")
-        );
-        assert_eq!(
-            slack.signing_secret_env.as_deref(),
-            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
-        );
     }
 
     #[test]
@@ -1244,58 +1615,221 @@ api_key_env = "sk-proj-1234567890abcdef1234567890"
     }
 
     #[test]
-    fn rejects_inline_secret_in_slack_secret_env_name() {
+    fn parses_legacy_slack_setup_fields() {
+        let toml = r#"
+[slack]
+enabled = true
+installation_id = "install-alpha"
+team_id = "T123"
+api_app_id = "A123"
+slack_user_id = "U123"
+user_id = "user:operator"
+shared_subject_user_id = "user:slack-shared"
+signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+
+[[slack.channel_routes]]
+channel_id = "CENG"
+subject_user_id = "user:eng-team-agent"
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("legacy Slack setup fields should remain parse-compatible");
+        let slack = cfg.slack.expect("slack section");
+        assert_eq!(slack.enabled, Some(true));
+        assert_eq!(slack.installation_id.as_deref(), Some("install-alpha"));
+        assert_eq!(slack.team_id.as_deref(), Some("T123"));
+        assert_eq!(slack.api_app_id.as_deref(), Some("A123"));
+        assert_eq!(slack.slack_user_id.as_deref(), Some("U123"));
+        assert_eq!(slack.user_id.as_deref(), Some("user:operator"));
+        assert_eq!(
+            slack.shared_subject_user_id.as_deref(),
+            Some("user:slack-shared")
+        );
+        assert_eq!(
+            slack.signing_secret_env.as_deref(),
+            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
+        );
+        assert_eq!(slack.channel_routes.len(), 1);
+        assert_eq!(slack.channel_routes[0].channel_id.as_deref(), Some("CENG"));
+        assert_eq!(
+            slack.channel_routes[0].subject_user_id.as_deref(),
+            Some("user:eng-team-agent")
+        );
+    }
+
+    #[test]
+    fn parses_storage_postgres_env_reference() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 24
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("storage env reference must parse");
+        let storage = cfg.storage.expect("storage section");
+        assert_eq!(storage.backend, Some(StorageBackend::Postgres));
+        assert_eq!(
+            storage.url_env.as_deref(),
+            Some("IRONCLAW_REBORN_POSTGRES_URL")
+        );
+        assert_eq!(
+            storage.secret_master_key_env.as_deref(),
+            Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
+        );
+        assert_eq!(storage.pool_max_size, Some(24));
+    }
+
+    #[test]
+    fn rejects_zero_storage_pool_max_size() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+pool_max_size = 0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("zero pool_max_size must be rejected");
+        assert!(
+            err.to_string().contains("storage.pool_max_size"),
+            "error should identify storage.pool_max_size: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_storage_backend() {
+        let toml = r#"
+[storage]
+backend = "   "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("whitespace-only backend must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.backend"),
+            "error should identify storage.backend: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_url_shaped_storage_backend_without_echoing_credentials() {
+        let toml = r#"
+[storage]
+backend = "postgres://user:password@db.example.com/ironclaw"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("backend must not accept raw URLs");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.backend"),
+            "error should identify storage.backend: {err}"
+        );
+        assert!(
+            !err.to_string().contains("password"),
+            "error must not echo credential-bearing backend value: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_storage_secret_master_key_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "   "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("whitespace-only secret_master_key_env must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.secret_master_key_env"),
+            "error should identify storage.secret_master_key_env: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_storage_url_env() {
+        let toml = r#"
+[storage]
+url_env = "   "
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("whitespace-only url_env must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.url_env"),
+            "error should identify storage.url_env: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_postgres_url_in_storage_url_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "postgres://user:password@db.example.com/ironclaw?sslmode=require"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("storage url_env must not accept raw URLs");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.url_env"),
+            "error should identify storage.url_env: {err}"
+        );
+        assert!(
+            !err.to_string().contains("password"),
+            "error must not echo credential-bearing URL: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_secret_in_storage_secret_master_key_env() {
+        let toml = r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "postgres://user:password.example.com/ironclaw"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("storage secret_master_key_env must not accept raw secrets");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("storage.secret_master_key_env"),
+            "error should identify storage.secret_master_key_env: {err}"
+        );
+        assert!(
+            !err.to_string().contains("password"),
+            "error must not echo credential-bearing value: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_secret_in_legacy_slack_secret_env_name() {
         let toml = r#"
 [slack]
 enabled = true
 signing_secret_env = "sk-proj-1234567890abcdef1234567890"
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("inline Slack secret must be rejected");
-        assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
+            .expect_err("legacy Slack env name must not accept raw secrets");
         assert!(
             err.to_string().contains("slack.signing_secret_env"),
-            "error should identify Slack field: {err}"
+            "error should identify legacy Slack field: {err}"
         );
     }
 
     #[test]
-    fn rejects_padded_slack_channel_route_channel_id() {
+    fn rejects_inline_secret_in_legacy_slack_bot_token_env_name() {
         let toml = r#"
 [slack]
 enabled = true
-
-[[slack.channel_routes]]
-channel_id = " CENG"
-subject_user_id = "eng-team-agent"
+bot_token_env = "sk-proj-1234567890abcdef1234567890"
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("padded Slack channel route id must be rejected");
-        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+            .expect_err("legacy Slack bot token env name must not accept raw secrets");
         assert!(
-            err.to_string()
-                .contains("slack.channel_routes[0].channel_id"),
-            "error should identify Slack channel route field: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_empty_slack_channel_route_subject_user_id() {
-        let toml = r#"
-[slack]
-enabled = true
-
-[[slack.channel_routes]]
-channel_id = "CENG"
-subject_user_id = " "
-"#;
-        let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("empty Slack channel route subject must be rejected");
-        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
-        assert!(
-            err.to_string()
-                .contains("slack.channel_routes[0].subject_user_id"),
-            "error should identify Slack channel route subject field: {err}"
+            err.to_string().contains("slack.bot_token_env"),
+            "error should identify legacy Slack field: {err}"
         );
     }
 

@@ -14,7 +14,7 @@ use ironclaw_host_api::{
 use ironclaw_network::{network_target_for_url, target_matches_pattern};
 use ironclaw_secrets::SecretStore;
 use ironclaw_wasm::{WasmHostError, WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest};
-use tokio::runtime::{Handle, RuntimeFlavor};
+use tokio::runtime::Handle;
 
 use crate::{
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
@@ -151,7 +151,7 @@ impl RuntimeCredentialRestager {
         request: &WasmRuntimeCredentialRequest,
         credential: &HostWasmRuntimeCredential,
     ) -> Result<(), CredentialStageError> {
-        let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } =
+        let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
             &credential.source
         else {
             return Ok(());
@@ -161,6 +161,7 @@ impl RuntimeCredentialRestager {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &request.scope,
                 provider,
+                setup,
                 provider_scopes: &credential.provider_scopes,
                 requester_extension: &credential.requester_extension,
             })
@@ -238,7 +239,14 @@ impl HostWasmRuntimeCredentials {
             if let Some(restager) = restager {
                 restager
                     .stage_for_request(request.clone(), credential.clone())
-                    .map_err(|_| {
+                    .map_err(|error| {
+                        tracing::warn!(
+                            capability_id = %credential.capability_id,
+                            requester_extension = %credential.requester_extension,
+                            handle = %credential.handle,
+                            ?error,
+                            "failed to restage WASM runtime credential"
+                        );
                         WasmHostError::Unavailable("credential_unavailable".to_string())
                     })?;
             }
@@ -286,10 +294,14 @@ where
     F: Future<Output = Result<T, CredentialStageError>> + Send + 'static,
     T: Send + 'static,
 {
+    // Credential restaging is driven from inside the synchronous WASM guest
+    // call, which the host runtime now runs on the blocking thread pool via
+    // `spawn_blocking`. `block_in_place` is the wrong tool from there (it
+    // targets tokio worker threads and, on a worker, would park it for the
+    // whole restage). Always route the on-runtime case through the dedicated
+    // single-thread restage runtime so the synchronous thread only blocks on a
+    // channel recv, never a turn worker.
     match Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(future))
-        }
         Ok(_) => run_credential_restage_on_worker(future),
         Err(_) => run_credential_restage_future(future),
     }
@@ -304,8 +316,17 @@ where
         .as_ref()
         .map_err(|error| *error)?;
     let (sender, receiver) = mpsc::sync_channel(1);
+    // Spawn on the worker runtime and recover the result via the join handle on
+    // a watchdog task, so a panicking restage future maps to
+    // `CredentialStageError::Backend` rather than dropping the sender and
+    // surfacing a misleading "recv on closed channel" error — consistent with
+    // the watchdog/panic-mapping pattern used by `run_runtime_http_egress_on_worker`.
+    let restage = runtime.spawn(future);
     runtime.spawn(async move {
-        let _ = sender.send(future.await);
+        let result = restage.await.unwrap_or(Err(CredentialStageError::Backend));
+        #[allow(clippy::let_underscore_must_use)]
+        // receiver may have dropped after recv timeout; nothing to signal
+        let _ = sender.send(result);
     });
     receiver.recv().map_err(|_| CredentialStageError::Backend)?
 }
@@ -614,5 +635,21 @@ runtime_credentials = [
             thread_id: None,
             invocation_id: InvocationId::new(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_on_credential_restage_maps_panicking_future_to_backend_on_worker_runtime() {
+        // The multi-thread runtime means Handle::try_current() succeeds, so
+        // block_on_credential_restage routes through run_credential_restage_on_worker.
+        // That function spawns the future on the dedicated restage runtime and wraps
+        // a panicking / join-failed join handle with `.unwrap_or(Err(CredentialStageError::Backend))`,
+        // so a panic must surface as Backend rather than poisoning the process.
+        let result = block_on_credential_restage(async {
+            panic!("simulated restage panic");
+            #[allow(unreachable_code)]
+            Ok::<(), CredentialStageError>(())
+        });
+
+        assert_eq!(result, Err(CredentialStageError::Backend));
     }
 }

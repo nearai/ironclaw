@@ -47,8 +47,22 @@ fn validate_scope_id(kind: &'static str, value: &str) -> Result<(), HostApiError
             "NUL/control characters are not allowed",
         ));
     }
+    if value.starts_with(RESERVED_SENTINEL_PREFIX) {
+        return Err(HostApiError::invalid_id(
+            kind,
+            value,
+            "the `__ironclaw_` prefix is reserved for host sentinel identities",
+        ));
+    }
     Ok(())
 }
+
+/// Scope-id namespace reserved for host-minted sentinel identities (e.g.
+/// [`crate::TENANT_SHARED_MANAGED_USER_ID`]). Rejected by [`validate_scope_id`]
+/// so no caller-supplied identifier — env bearer, SSO directory, OIDC claims,
+/// request payloads — can ever collide with a sentinel; sentinels are minted
+/// exclusively via `from_trusted`.
+const RESERVED_SENTINEL_PREFIX: &str = "__ironclaw_";
 
 fn is_name_char(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
@@ -206,6 +220,85 @@ string_id!(
     validate_name_segment
 );
 string_id!(SystemServiceId, "system_service", validate_name_segment);
+
+/// Provider-facing tool/function name.
+///
+/// Unlike [`CapabilityId`], this is the exact name advertised to or returned by
+/// model providers. It deliberately excludes dots because OpenAI Responses-style
+/// tool/function names accept only ASCII letters, digits, `_`, and `-`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProviderToolName(String);
+
+impl ProviderToolName {
+    pub const MAX_BYTES: usize = 64;
+
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        validate_provider_tool_name(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ProviderToolName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for ProviderToolName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderToolName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_provider_tool_name(value: &str) -> Result<(), HostApiError> {
+    if value.is_empty() {
+        return Err(HostApiError::invalid_id(
+            "provider_tool_name",
+            value,
+            "must not be empty",
+        ));
+    }
+    if value.len() > ProviderToolName::MAX_BYTES {
+        return Err(HostApiError::invalid_id(
+            "provider_tool_name",
+            value,
+            "must be at most 64 bytes",
+        ));
+    }
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(HostApiError::invalid_id(
+            "provider_tool_name",
+            value,
+            "only ASCII letters, digits, '_', and '-' are allowed",
+        ));
+    }
+    Ok(())
+}
 
 /// Extension-prefixed capability identifier.
 ///

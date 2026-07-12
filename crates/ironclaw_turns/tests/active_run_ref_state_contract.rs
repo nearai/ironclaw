@@ -26,6 +26,16 @@ impl TurnStateStore for FailingTurnStateStore {
         unreachable!("active_run_ref_state only calls get_run_state")
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
+
     async fn request_cancel(
         &self,
         _request: ironclaw_turns::CancelRunRequest,
@@ -74,6 +84,7 @@ fn submit_request_for(
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
+        product_context: None,
     }
 }
 

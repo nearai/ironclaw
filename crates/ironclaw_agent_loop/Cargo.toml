@@ -2,13 +2,16 @@
 name = "ironclaw_agent_loop"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Agent-loop framework state and strategy contracts for IronClaw Reborn"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
+
+[package.metadata.ironclaw]
+layer = "loops"
 
 [features]
 default = []
@@ -19,6 +22,7 @@ async-trait = "0.1"
 blake3 = "1"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -9,6 +9,7 @@
 pub mod client;
 pub mod contribution;
 pub mod conversation_message;
+pub mod onboarding;
 pub mod redaction;
 
 pub use conversation_message::ConversationMessage;

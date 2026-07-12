@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
+    CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProcessId, RuntimeKind, ThreadId,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -15,7 +15,7 @@ use crate::identity::{AdapterInstallationId, ProductAdapterId};
 const PROJECTION_CURSOR_MAX_BYTES: usize = 1024;
 const PROJECTION_THREAD_ID_MAX_BYTES: usize = 512;
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
-const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
+pub const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
 const PROJECTION_WORK_SUMMARY_MAX_BYTES: usize = 1024;
 /// Maximum byte length for a projected skill activation name.
 pub const PROJECTION_SKILL_NAME_MAX_BYTES: usize = 128;
@@ -30,6 +30,8 @@ pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
+const APPROVAL_PROMPT_TEXT_MAX_BYTES: usize = 2 * 1024;
+const APPROVAL_PROMPT_DETAIL_MAX_ITEMS: usize = 16;
 
 fn serialize_failure_category<S>(
     value: &Option<SanitizedFailure>,
@@ -225,7 +227,18 @@ pub struct CapabilityActivityView {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Bounded, sanitized failure summary for a failed activity (e.g. a
+    /// builtin's `"invalid JSON: ..."` message), so the live per-tool card can
+    /// show the real reason instead of only `error_kind`.
+    pub error_detail: Option<String>,
+    /// Inline primary-argument detail for the activity row, surfaced while the
+    /// invocation is still running (the completed card carries its own).
+    pub subtitle: Option<String>,
+    /// Per-tool parameter summary, surfaced while the invocation is still
+    /// running so the row's Parameters tab is populated before the result.
+    pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl Serialize for CapabilityActivityView {
@@ -248,7 +261,15 @@ impl Serialize for CapabilityActivityView {
             process_id: &'a Option<ProcessId>,
             output_bytes: Option<u64>,
             error_kind: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error_detail: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            subtitle: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            input_summary: &'a Option<String>,
             updated_at: &'a DateTime<Utc>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            activity_order: Option<u64>,
         }
 
         Wire {
@@ -262,7 +283,11 @@ impl Serialize for CapabilityActivityView {
             process_id: &self.process_id,
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
+            error_detail: &self.error_detail,
+            subtitle: &self.subtitle,
+            input_summary: &self.input_summary,
             updated_at: &self.updated_at,
+            activity_order: self.activity_order,
         }
         .serialize(serializer)
     }
@@ -281,7 +306,11 @@ impl CapabilityActivityView {
             process_id: input.process_id,
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
+            error_detail: input.error_detail,
+            subtitle: input.subtitle,
+            input_summary: input.input_summary,
             updated_at: input.updated_at,
+            activity_order: input.activity_order,
         };
         value.validate()?;
         Ok(value)
@@ -291,6 +320,27 @@ impl CapabilityActivityView {
         if let Some(error_kind) = self.error_kind.as_deref() {
             validate_error_kind("capability_activity_error_kind", error_kind)?;
         }
+        // Sanitized/bounded upstream; re-validate at the product boundary so an
+        // upstream regression can't leak unbounded/control-char text.
+        validate_optional_display_text(
+            "capability_activity_error_detail",
+            self.error_detail.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
+        // The running-frame input fields are sanitized/byte-bounded upstream;
+        // re-validate them at the product boundary (as `error_kind` is) so an
+        // upstream regression can't leak unbounded/control-char text to the
+        // browser.
+        validate_optional_display_text(
+            "capability_activity_subtitle",
+            self.subtitle.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "capability_activity_input_summary",
+            self.input_summary.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
         Ok(())
     }
 }
@@ -307,7 +357,11 @@ pub struct CapabilityActivityViewInput {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_detail: Option<String>,
+    pub subtitle: Option<String>,
+    pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for CapabilityActivityView {
@@ -328,7 +382,14 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: Option<ProcessId>,
             output_bytes: Option<u64>,
             error_kind: Option<String>,
+            #[serde(default)]
+            error_detail: Option<String>,
+            #[serde(default)]
+            subtitle: Option<String>,
+            #[serde(default)]
+            input_summary: Option<String>,
             updated_at: DateTime<Utc>,
+            activity_order: Option<u64>,
         }
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityActivityViewInput {
@@ -342,7 +403,11 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: wire.process_id,
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
+            error_detail: wire.error_detail,
+            subtitle: wire.subtitle,
+            input_summary: wire.input_summary,
             updated_at: wire.updated_at,
+            activity_order: wire.activity_order,
         })
         .map_err(serde::de::Error::custom)
     }
@@ -366,6 +431,7 @@ pub struct CapabilityDisplayPreviewView {
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
+    pub error_kind: Option<String>,
     pub title: String,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
@@ -376,6 +442,7 @@ pub struct CapabilityDisplayPreviewView {
     pub result_ref: Option<String>,
     pub truncated: bool,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl CapabilityDisplayPreviewView {
@@ -387,6 +454,7 @@ impl CapabilityDisplayPreviewView {
             thread_id: input.thread_id,
             capability_id: input.capability_id,
             status: input.status,
+            error_kind: input.error_kind,
             title: input.title,
             subtitle: input.subtitle,
             input_summary: input.input_summary,
@@ -397,6 +465,7 @@ impl CapabilityDisplayPreviewView {
             result_ref: input.result_ref,
             truncated: input.truncated,
             updated_at: input.updated_at,
+            activity_order: input.activity_order,
         };
         value.validate()?;
         Ok(value)
@@ -425,6 +494,9 @@ impl CapabilityDisplayPreviewView {
         )?;
         validate_display_preview(self.output_preview.as_deref())?;
         validate_display_kind(self.output_kind.as_deref())?;
+        if let Some(error_kind) = self.error_kind.as_deref() {
+            validate_error_kind("capability_display_error_kind", error_kind)?;
+        }
         validate_optional_display_text(
             "capability_display_timeline_message_id",
             self.timeline_message_id.as_deref(),
@@ -455,6 +527,8 @@ impl Serialize for CapabilityDisplayPreviewView {
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error_kind: &'a Option<String>,
             title: &'a str,
             subtitle: &'a Option<String>,
             input_summary: &'a Option<String>,
@@ -465,6 +539,8 @@ impl Serialize for CapabilityDisplayPreviewView {
             result_ref: &'a Option<String>,
             truncated: bool,
             updated_at: &'a DateTime<Utc>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            activity_order: Option<u64>,
         }
 
         Wire {
@@ -474,6 +550,7 @@ impl Serialize for CapabilityDisplayPreviewView {
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
             status: self.status,
+            error_kind: &self.error_kind,
             title: &self.title,
             subtitle: &self.subtitle,
             input_summary: &self.input_summary,
@@ -484,6 +561,7 @@ impl Serialize for CapabilityDisplayPreviewView {
             result_ref: &self.result_ref,
             truncated: self.truncated,
             updated_at: &self.updated_at,
+            activity_order: self.activity_order,
         }
         .serialize(serializer)
     }
@@ -497,6 +575,7 @@ pub struct CapabilityDisplayPreviewViewInput {
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
+    pub error_kind: Option<String>,
     pub title: String,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
@@ -507,6 +586,7 @@ pub struct CapabilityDisplayPreviewViewInput {
     pub result_ref: Option<String>,
     pub truncated: bool,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
@@ -524,6 +604,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
             status: CapabilityActivityStatusView,
+            error_kind: Option<String>,
             title: String,
             subtitle: Option<String>,
             input_summary: Option<String>,
@@ -534,6 +615,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             result_ref: Option<String>,
             truncated: bool,
             updated_at: DateTime<Utc>,
+            activity_order: Option<u64>,
         }
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityDisplayPreviewViewInput {
@@ -543,6 +625,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
             status: wire.status,
+            error_kind: wire.error_kind,
             title: wire.title,
             subtitle: wire.subtitle,
             input_summary: wire.input_summary,
@@ -553,6 +636,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             result_ref: wire.result_ref,
             truncated: wire.truncated,
             updated_at: wire.updated_at,
+            activity_order: wire.activity_order,
         })
         .map_err(serde::de::Error::custom)
     }
@@ -562,8 +646,307 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
 pub struct GatePromptView {
     pub turn_run_id: TurnRunId,
     pub gate_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<InvocationId>,
     pub headline: String,
     pub body: String,
+    #[serde(default)]
+    pub allow_always: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_context: Option<ApprovalPromptContextView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptContextView {
+    pub tool_name: String,
+    pub action: ApprovalPromptActionView,
+    pub scope: ApprovalPromptScopeView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ApprovalPromptDestinationView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ApprovalPromptDetailView>,
+}
+
+impl ApprovalPromptContextView {
+    pub fn new(
+        tool_name: impl Into<String>,
+        action: ApprovalPromptActionView,
+        scope: ApprovalPromptScopeView,
+        reason: Option<String>,
+        destination: Option<ApprovalPromptDestinationView>,
+        details: Vec<ApprovalPromptDetailView>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            tool_name: tool_name.into(),
+            action,
+            scope,
+            reason,
+            destination,
+            details,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_tool_name",
+            &self.tool_name,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        self.action.validate()?;
+        self.scope.validate()?;
+        validate_optional_display_text(
+            "approval_prompt_reason",
+            self.reason.as_deref(),
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        if let Some(destination) = &self.destination {
+            destination.validate()?;
+        }
+        if self.details.len() > APPROVAL_PROMPT_DETAIL_MAX_ITEMS {
+            return Err(invalid(
+                "approval_prompt_details",
+                format!("must contain at most {APPROVAL_PROMPT_DETAIL_MAX_ITEMS} items"),
+            ));
+        }
+        for detail in &self.details {
+            detail.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptContextView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            tool_name: String,
+            action: ApprovalPromptActionView,
+            scope: ApprovalPromptScopeView,
+            #[serde(default)]
+            reason: Option<String>,
+            #[serde(default)]
+            destination: Option<ApprovalPromptDestinationView>,
+            #[serde(default)]
+            details: Vec<ApprovalPromptDetailView>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptContextView::new(
+            wire.tool_name,
+            wire.action,
+            wire.scope,
+            wire.reason,
+            wire.destination,
+            wire.details,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptActionView {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<NetworkMethod>,
+}
+
+impl ApprovalPromptActionView {
+    pub fn new(
+        label: impl Into<String>,
+        method: Option<NetworkMethod>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            method,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_action_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptActionView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            #[serde(default)]
+            method: Option<NetworkMethod>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptActionView::new(wire.label, wire.method).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptScopeView {
+    pub label: String,
+    pub reusable: bool,
+}
+
+impl ApprovalPromptScopeView {
+    pub fn new(label: impl Into<String>, reusable: bool) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            reusable,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_scope_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptScopeView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            reusable: bool,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptScopeView::new(wire.label, wire.reusable).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptDestinationView {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl ApprovalPromptDestinationView {
+    pub fn new(
+        label: impl Into<String>,
+        url: Option<String>,
+        domain: Option<String>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            url,
+            domain,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_destination_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "approval_prompt_destination_url",
+            self.url.as_deref(),
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "approval_prompt_destination_domain",
+            self.domain.as_deref(),
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptDestinationView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            domain: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptDestinationView::new(wire.label, wire.url, wire.domain)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalPromptDetailView {
+    pub label: String,
+    pub value: String,
+}
+
+impl ApprovalPromptDetailView {
+    pub fn new(
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            label: label.into(),
+            value: value.into(),
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_bounded_text(
+            "approval_prompt_detail_label",
+            &self.label,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )?;
+        validate_bounded_text(
+            "approval_prompt_detail_value",
+            &self.value,
+            APPROVAL_PROMPT_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalPromptDetailView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            label: String,
+            value: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        ApprovalPromptDetailView::new(wire.label, wire.value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Discriminator for the kind of auth challenge surfaced in an `AuthPromptView`.
@@ -574,21 +957,64 @@ pub struct GatePromptView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthPromptChallengeKind {
-    /// Browser must open `authorization_url` in a new tab and wait for the
-    /// OAuth callback to resume the run server-side.
+    /// Browser-based OAuth relay challenge. When `authorization_url` is present,
+    /// the browser can open it in a new tab and wait for the OAuth callback to
+    /// resume the run server-side. When the provider is unavailable or
+    /// unconfigured, the URL may be absent so UI can still render an
+    /// OAuth-specific unavailable state instead of the generic auth fallback.
+    ///
+    /// Wire value is `oauth_url` (for browser OAuth). The challenge kind is
+    /// always re-derived at projection time from the persisted credential
+    /// setup, never deserialized back from the wire.
     #[serde(rename = "oauth_url")]
     OAuthUrl,
-    /// User must type a manual token (PAT, API key) into the chat form.
+    /// User pastes a secret string into the chat form. Wire value is
+    /// `manual_token` (via `rename_all = "snake_case"`): paste a secret. Covers
+    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Telegram): the
+    /// interaction modality — "paste a string" — is identical; what differs is
+    /// the resolve route, which rides in `connection` context (present for
+    /// channel pairing, absent for a stored-credential secret).
     ManualToken,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,
 }
 
+/// Connection context for a channel-pairing challenge riding the `manual_token`
+/// modality. Present on an auth prompt when the paste is a pairing code that
+/// connects an inbound channel (e.g. Telegram), carrying the render copy and the
+/// resolve-route discriminator (`channel`) so one paste card serves both a
+/// stored-credential secret and a channel pairing code. Additive + serde-default
+/// so rows written before this field deserialize as `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConnectionPromptContext {
+    /// Connectable channel id (e.g. `slack`). Doubles as the resolve-route
+    /// discriminator: "this paste is a pairing code for channel X".
+    pub channel: String,
+    /// Connect strategy wire value (e.g. `inbound_proof_code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Backend-authored connect instructions for the pairing card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Placeholder for the paste input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_placeholder: Option<String>,
+    /// Submit button label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_label: Option<String>,
+    /// Error copy shown when the pasted code is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthPromptView {
     pub turn_run_id: TurnRunId,
     pub auth_request_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<InvocationId>,
     pub headline: String,
     pub body: String,
     /// Challenge kind — present when the projection layer has auth-flow
@@ -613,6 +1039,168 @@ pub struct AuthPromptView {
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Channel-pairing connection context. Present only for a `manual_token`
+    /// challenge whose paste is a pairing code (channel connection), carrying
+    /// the render copy + resolve route. Absent for stored-credential secrets and
+    /// OAuth. Additive + serde-default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionPromptContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthPromptContextView {
+    pub challenge_kind: AuthPromptChallengeKind,
+    /// Short provider id (e.g. `"google"`, `"github"`, `"notion"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Human-readable account label (e.g. `"work@example.com"`, `"GitHub PAT"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
+    /// Opaque IDP authorization URL. Only present for `OAuthUrl` challenges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    /// Challenge expiry. Present when the auth flow has a bounded TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Channel-pairing connection context — see [`AuthPromptView::connection`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionPromptContext>,
+}
+
+impl AuthPromptContextView {
+    pub fn new(
+        challenge_kind: AuthPromptChallengeKind,
+        provider: Option<String>,
+        account_label: Option<String>,
+        authorization_url: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        connection: Option<ConnectionPromptContext>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            challenge_kind,
+            provider,
+            account_label,
+            authorization_url,
+            expires_at,
+            connection,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    pub fn from_auth_prompt(prompt: &AuthPromptView) -> Result<Option<Self>, ProductAdapterError> {
+        let Some(challenge_kind) = prompt.challenge_kind else {
+            return Ok(None);
+        };
+        Self::new(
+            challenge_kind,
+            prompt.provider.clone(),
+            prompt.account_label.clone(),
+            prompt.authorization_url.clone(),
+            prompt.expires_at,
+            prompt.connection.clone(),
+        )
+        .map(Some)
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_optional_display_text(
+            "auth_prompt_provider",
+            self.provider.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "auth_prompt_account_label",
+            self.account_label.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "auth_prompt_authorization_url",
+            self.authorization_url.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        if let Some(connection) = self.connection.as_ref() {
+            connection.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl ConnectionPromptContext {
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_optional_display_text(
+            "connection_channel",
+            Some(self.channel.as_str()),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_strategy",
+            self.strategy.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_instructions",
+            self.instructions.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_input_placeholder",
+            self.input_placeholder.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_submit_label",
+            self.submit_label.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_error_message",
+            self.error_message.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthPromptContextView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            challenge_kind: AuthPromptChallengeKind,
+            #[serde(default)]
+            provider: Option<String>,
+            #[serde(default)]
+            account_label: Option<String>,
+            #[serde(default)]
+            authorization_url: Option<String>,
+            #[serde(default)]
+            expires_at: Option<DateTime<Utc>>,
+            #[serde(default)]
+            connection: Option<ConnectionPromptContext>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        AuthPromptContextView::new(
+            wire.challenge_kind,
+            wire.provider,
+            wire.account_label,
+            wire.authorization_url,
+            wire.expires_at,
+            wire.connection,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductGateKind {
+    Approval,
+    Auth,
+    Resource,
+    Generic,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -620,6 +1208,8 @@ pub struct AuthPromptView {
 pub enum ProductProjectionItem {
     Text {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<TurnRunId>,
         body: String,
     },
     Thinking {
@@ -649,10 +1239,29 @@ pub enum ProductProjectionItem {
         /// User-facing sanitized explanation for terminal failure states.
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_summary: Option<String>,
+        /// Present only for failed runs: whether the run recorded a resumable
+        /// checkpoint and can be retried via the run retry endpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
     },
     Gate {
+        run_id: TurnRunId,
+        gate_kind: ProductGateKind,
         gate_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<InvocationId>,
         headline: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default)]
+        allow_always: bool,
+        /// Auth challenge context. For a `manual_token` gate whose paste is a
+        /// pairing code, its `connection` field carries the channel-connection
+        /// render copy + resolve route — the single canonical place the
+        /// projection-gate consumer reads it (no duplicate top-level field, per
+        /// the wire-contract no-duplicate-fields rule).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_context: Option<AuthPromptContextView>,
     },
     SkillActivation {
         id: String,
@@ -665,7 +1274,7 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body } | Self::Thinking { id, body, .. } => {
+            Self::Text { id, body, .. } | Self::Thinking { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
@@ -682,6 +1291,7 @@ impl ProductProjectionItem {
                 status,
                 failure_category: _,
                 failure_summary,
+                retryable,
                 ..
             } => {
                 validate_bounded_text(
@@ -689,6 +1299,12 @@ impl ProductProjectionItem {
                     status,
                     PROJECTION_ITEM_ID_MAX_BYTES,
                 )?;
+                if retryable.is_some() && status != "failed" {
+                    return Err(invalid(
+                        "projection_run_retryable",
+                        "retryable is only valid for failed run status entries",
+                    ));
+                }
                 if let Some(summary) = failure_summary {
                     validate_bounded_text(
                         "projection_failure_summary",
@@ -698,7 +1314,13 @@ impl ProductProjectionItem {
                 }
                 Ok(())
             }
-            Self::Gate { gate_ref, headline } => {
+            Self::Gate {
+                gate_ref,
+                headline,
+                body,
+                auth_context,
+                ..
+            } => {
                 validate_bounded_text(
                     "projection_gate_ref",
                     gate_ref,
@@ -708,7 +1330,14 @@ impl ProductProjectionItem {
                     "projection_gate_headline",
                     headline,
                     PROJECTION_TEXT_MAX_BYTES,
-                )
+                )?;
+                if let Some(body) = body {
+                    validate_bounded_text("projection_gate_body", body, PROJECTION_TEXT_MAX_BYTES)?;
+                }
+                if let Some(context) = auth_context {
+                    context.validate()?;
+                }
+                Ok(())
             }
             Self::SkillActivation {
                 id,
@@ -759,6 +1388,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         enum Wire {
             Text {
                 id: String,
+                #[serde(default)]
+                run_id: Option<TurnRunId>,
                 body: String,
             },
             Thinking {
@@ -781,10 +1412,22 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 failure_category: Option<String>,
                 #[serde(default)]
                 failure_summary: Option<String>,
+                #[serde(default)]
+                retryable: Option<bool>,
             },
             Gate {
+                run_id: TurnRunId,
+                gate_kind: ProductGateKind,
                 gate_ref: String,
+                #[serde(default)]
+                invocation_id: Option<InvocationId>,
                 headline: String,
+                #[serde(default)]
+                body: Option<String>,
+                #[serde(default)]
+                allow_always: bool,
+                #[serde(default)]
+                auth_context: Option<AuthPromptContextView>,
             },
             SkillActivation {
                 id: String,
@@ -794,7 +1437,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             },
         }
         let value = match Wire::deserialize(deserializer)? {
-            Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
+            Wire::Text { id, run_id, body } => ProductProjectionItem::Text { id, run_id, body },
             Wire::Thinking { id, run_id, body } => {
                 ProductProjectionItem::Thinking { id, run_id, body }
             }
@@ -817,6 +1460,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 status,
                 failure_category,
                 failure_summary,
+                retryable,
             } => ProductProjectionItem::RunStatus {
                 run_id,
                 status,
@@ -825,8 +1469,27 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                     .transpose()
                     .map_err(serde::de::Error::custom)?,
                 failure_summary,
+                retryable,
             },
-            Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
+            Wire::Gate {
+                run_id,
+                gate_kind,
+                gate_ref,
+                invocation_id,
+                headline,
+                body,
+                allow_always,
+                auth_context,
+            } => ProductProjectionItem::Gate {
+                run_id,
+                gate_kind,
+                gate_ref,
+                invocation_id,
+                headline,
+                body,
+                allow_always,
+                auth_context,
+            },
             Wire::SkillActivation {
                 id,
                 run_id,
@@ -978,6 +1641,8 @@ mod tests {
 
     #[test]
     fn auth_prompt_challenge_kind_all_variants_roundtrip() {
+        // Stable wire values: `oauth_url` (browser OAuth) and `manual_token`
+        // (paste a secret — PAT / API key / channel pairing code).
         for (variant, expected) in [
             (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
             (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
@@ -989,6 +1654,65 @@ mod tests {
                 serde_json::from_str(&serialized).expect("deserialize challenge kind");
             assert_eq!(decoded, variant);
         }
+    }
+
+    #[test]
+    fn auth_prompt_context_round_trips_channel_connection() {
+        // A manual_token challenge whose paste is a pairing code carries the
+        // connection context (channel + copy). Round-trip it through the wire.
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Auth,
+                gate_ref: "gate:connect-slack".to_string(),
+                invocation_id: None,
+                headline: "Connect Slack".to_string(),
+                body: Some("Message the app to get a pairing code.".to_string()),
+                allow_always: false,
+                auth_context: Some(
+                    AuthPromptContextView::new(
+                        AuthPromptChallengeKind::ManualToken,
+                        Some("telegram".to_string()),
+                        None,
+                        None,
+                        None,
+                        Some(ConnectionPromptContext {
+                            channel: "telegram".to_string(),
+                            strategy: Some("inbound_proof_code".to_string()),
+                            instructions: Some(
+                                "Message the app to get a pairing code.".to_string(),
+                            ),
+                            input_placeholder: Some("Enter Telegram pairing code...".to_string()),
+                            submit_label: Some("Connect".to_string()),
+                            error_message: Some("Invalid or expired pairing code.".to_string()),
+                        }),
+                    )
+                    .expect("valid connection auth context"),
+                ),
+            }],
+        )
+        .expect("valid connection gate projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+
+        // Connection context rides the gate's auth_context (single canonical
+        // place); there is no duplicate top-level Gate.connection field.
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["challenge_kind"],
+            "manual_token"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["connection"]["channel"],
+            "telegram"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["connection"]["input_placeholder"],
+            "Enter Telegram pairing code..."
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize connection gate projection");
+        assert_eq!(decoded, state);
     }
 
     #[test]
@@ -1046,7 +1770,11 @@ mod tests {
                     process_id: None,
                     output_bytes: None,
                     error_kind: None,
+                    error_detail: None,
+                    subtitle: None,
+                    input_summary: None,
                     updated_at: Utc::now(),
+                    activity_order: None,
                 })
                 .expect("valid capability activity"),
             )],
@@ -1102,6 +1830,7 @@ mod tests {
                 failure_summary: Some(
                     "The run failed because its runner lease expired.".to_string(),
                 ),
+                retryable: None,
             }],
         )
         .expect("valid run status projection");
@@ -1117,6 +1846,47 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize run status projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_allows_retryable_failed_run_status() {
+        ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "failed".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect("failed run status may carry retryability");
+    }
+
+    #[test]
+    fn projection_state_rejects_retryable_non_failed_run_status() {
+        let error = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id: TurnRunId::new(),
+                status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
+                retryable: Some(true),
+            }],
+        )
+        .expect_err("running run status must not carry retryability");
+
+        assert!(
+            matches!(
+                error,
+                ProductAdapterError::InvalidIdentifier {
+                    kind: "projection_run_retryable",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]
@@ -1141,8 +1911,219 @@ mod tests {
                 status: "failed".to_string(),
                 failure_category: None,
                 failure_summary: None,
+                retryable: None,
             }]
         );
+    }
+
+    #[test]
+    fn projection_state_round_trips_gate_item_with_stable_identity() {
+        let run_id = TurnRunId::new();
+        let invocation_id = InvocationId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Approval,
+                gate_ref: "gate:approval-test".to_string(),
+                invocation_id: Some(invocation_id),
+                headline: "Approval required".to_string(),
+                body: Some("capability requires approval".to_string()),
+                allow_always: true,
+                auth_context: None,
+            }],
+        )
+        .expect("valid gate projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+
+        assert_eq!(value["items"][0]["gate"]["run_id"], run_id.to_string());
+        assert_eq!(value["items"][0]["gate"]["gate_kind"], "approval");
+        assert_eq!(value["items"][0]["gate"]["gate_ref"], "gate:approval-test");
+        assert_eq!(
+            value["items"][0]["gate"]["invocation_id"],
+            invocation_id.to_string()
+        );
+        assert_eq!(value["items"][0]["gate"]["headline"], "Approval required");
+        assert_eq!(
+            value["items"][0]["gate"]["body"],
+            "capability requires approval"
+        );
+        assert_eq!(value["items"][0]["gate"]["allow_always"], true);
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize gate projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_auth_gate_context() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Auth,
+                gate_ref: "gate:auth-test".to_string(),
+                invocation_id: None,
+                headline: "Authentication required".to_string(),
+                body: Some("Authenticate to continue this run.".to_string()),
+                allow_always: false,
+                auth_context: Some(
+                    AuthPromptContextView::new(
+                        AuthPromptChallengeKind::OAuthUrl,
+                        Some("github".to_string()),
+                        None,
+                        Some("https://github.com/login/oauth/authorize".to_string()),
+                        None,
+                        None,
+                    )
+                    .expect("valid auth context"),
+                ),
+            }],
+        )
+        .expect("valid auth gate projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["challenge_kind"],
+            "oauth_url"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["provider"],
+            "github"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["authorization_url"],
+            "https://github.com/login/oauth/authorize"
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize auth gate projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn auth_prompt_context_from_prompt_rejects_invalid_prompt_context() {
+        let prompt = AuthPromptView {
+            turn_run_id: TurnRunId::new(),
+            auth_request_ref: "gate:auth-test".to_string(),
+            invocation_id: None,
+            headline: "Authentication required".to_string(),
+            body: "Authenticate to continue this run.".to_string(),
+            challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
+            provider: Some("github".to_string()),
+            account_label: None,
+            authorization_url: Some("x".repeat(PROJECTION_TEXT_MAX_BYTES + 1)),
+            expires_at: None,
+            connection: None,
+        };
+
+        assert!(AuthPromptContextView::from_auth_prompt(&prompt).is_err());
+    }
+
+    #[test]
+    fn projection_state_rejects_gate_item_without_run_identity() {
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "gate": {
+                    "gate_kind": "approval",
+                    "gate_ref": "gate:approval-test",
+                    "headline": "Approval required"
+                }
+            }]
+        });
+
+        assert!(serde_json::from_value::<ProductProjectionState>(json).is_err());
+    }
+
+    #[test]
+    fn gate_prompt_view_round_trips_approval_context() {
+        let view = GatePromptView {
+            turn_run_id: TurnRunId::new(),
+            gate_ref: "gate:approval-test".to_string(),
+            invocation_id: Some(InvocationId::new()),
+            headline: "Approval required".to_string(),
+            body: "capability requires approval".to_string(),
+            allow_always: true,
+            approval_context: Some(
+                ApprovalPromptContextView::new(
+                    "builtin.http",
+                    ApprovalPromptActionView::new("Network request", Some(NetworkMethod::Post))
+                        .expect("valid action"),
+                    ApprovalPromptScopeView::new("Reusable grant", true).expect("valid scope"),
+                    Some("capability requires approval".to_string()),
+                    Some(
+                        ApprovalPromptDestinationView::new(
+                            "POST https://example.com",
+                            Some("https://example.com".to_string()),
+                            Some("example.com".to_string()),
+                        )
+                        .expect("valid destination"),
+                    ),
+                    vec![
+                        ApprovalPromptDetailView::new("Method", "POST").expect("valid detail"),
+                        ApprovalPromptDetailView::new("Estimated transfer", "4096 bytes")
+                            .expect("valid detail"),
+                    ],
+                )
+                .expect("valid approval context"),
+            ),
+        };
+
+        let value = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(
+            value["approval_context"]["action"]["method"],
+            serde_json::json!("post")
+        );
+        assert_eq!(
+            value["approval_context"]["destination"]["domain"],
+            "example.com"
+        );
+
+        let decoded: GatePromptView =
+            serde_json::from_value(value).expect("deserialize approval prompt");
+        assert_eq!(decoded, view);
+    }
+
+    #[test]
+    fn approval_prompt_context_rejects_oversized_display_text() {
+        let json = serde_json::json!({
+            "tool_name": "x".repeat(APPROVAL_PROMPT_TEXT_MAX_BYTES + 1),
+            "action": {
+                "label": "Run tool"
+            },
+            "scope": {
+                "label": "This request only",
+                "reusable": false
+            },
+            "details": []
+        });
+
+        assert!(serde_json::from_value::<ApprovalPromptContextView>(json).is_err());
+    }
+
+    #[test]
+    fn approval_prompt_context_rejects_excessive_details() {
+        let details = (0..=APPROVAL_PROMPT_DETAIL_MAX_ITEMS)
+            .map(|index| {
+                serde_json::json!({
+                    "label": format!("Detail {index}"),
+                    "value": "value"
+                })
+            })
+            .collect::<Vec<_>>();
+        let json = serde_json::json!({
+            "tool_name": "builtin.http",
+            "action": {
+                "label": "Run tool"
+            },
+            "scope": {
+                "label": "This request only",
+                "reusable": false
+            },
+            "details": details
+        });
+
+        assert!(serde_json::from_value::<ApprovalPromptContextView>(json).is_err());
     }
 
     #[test]
@@ -1239,7 +2220,11 @@ mod tests {
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_detail: None,
+            subtitle: None,
+            input_summary: None,
             updated_at: Utc::now(),
+            activity_order: None,
         })
         .expect("valid activity");
         let json = serde_json::to_value(&view).expect("serialize");
@@ -1273,6 +2258,7 @@ mod tests {
             thread_id: Some(ThreadId::new("thread-tool-preview").expect("thread id")),
             capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),
             status: CapabilityActivityStatusView::Completed,
+            error_kind: None,
             title: "read_file".to_string(),
             subtitle: Some("src/main.rs".to_string()),
             input_summary: Some("path: src/main.rs".to_string()),
@@ -1283,6 +2269,7 @@ mod tests {
             result_ref: Some("result:tool-output".to_string()),
             truncated: false,
             updated_at: Utc::now(),
+            activity_order: None,
         })
         .expect("valid preview");
 
@@ -1291,6 +2278,29 @@ mod tests {
         assert_eq!(json["turn_run_id"], run_id.to_string());
         assert_eq!(json["subtitle"], "src/main.rs");
         assert_eq!(json["output_kind"], "text");
+    }
+
+    #[test]
+    fn capability_display_preview_view_round_trips_error_kind() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.extension_activate",
+            "status": "failed",
+            "error_kind": "gate_declined",
+            "title": "extension_activate",
+            "output_summary": "tool failed: gate_declined",
+            "output_preview": "tool failed: gate_declined",
+            "output_kind": "text",
+            "truncated": false,
+            "updated_at": Utc::now(),
+        });
+
+        let view = serde_json::from_value::<CapabilityDisplayPreviewView>(json)
+            .expect("preview error kind is valid");
+        assert_eq!(view.error_kind.as_deref(), Some("gate_declined"));
+        let serialized = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(serialized["error_kind"], "gate_declined");
     }
 
     #[test]
@@ -1467,7 +2477,11 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
+            error_detail: None,
+            subtitle: None,
+            input_summary: None,
             updated_at: Utc::now(),
+            activity_order: None,
         };
 
         assert!(serde_json::to_value(view).is_err());
@@ -1494,5 +2508,53 @@ mod tests {
             view.error_kind.as_deref(),
             Some(CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND)
         );
+    }
+
+    fn capability_activity_view_input_for_detail_test() -> CapabilityActivityViewInput {
+        CapabilityActivityViewInput {
+            invocation_id: InvocationId::new(),
+            turn_run_id: Some(TurnRunId::new()),
+            thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
+            capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
+            status: CapabilityActivityStatusView::Started,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+            error_detail: None,
+            subtitle: None,
+            input_summary: None,
+            updated_at: Utc::now(),
+            activity_order: None,
+        }
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_oversized_running_input_fields() {
+        let oversized = "a".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1);
+
+        let subtitle_input = CapabilityActivityViewInput {
+            subtitle: Some(oversized.clone()),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(subtitle_input).is_err());
+
+        let summary_input = CapabilityActivityViewInput {
+            input_summary: Some(oversized),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(summary_input).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_control_char_running_input_on_serialize() {
+        let view = CapabilityActivityView {
+            subtitle: Some("query\u{0}with-nul".to_string()),
+            ..CapabilityActivityView::new(capability_activity_view_input_for_detail_test())
+                .expect("base view")
+        };
+
+        assert!(serde_json::to_value(view).is_err());
     }
 }

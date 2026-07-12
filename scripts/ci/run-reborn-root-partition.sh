@@ -3,6 +3,7 @@ set -euo pipefail
 
 partition_count="${REBORN_ROOT_TEST_PARTITIONS:?REBORN_ROOT_TEST_PARTITIONS must be set}"
 partition_index="${REBORN_ROOT_TEST_PARTITION:?REBORN_ROOT_TEST_PARTITION must be set}"
+test_timeout="${REBORN_ROOT_TEST_TIMEOUT:-12m}"
 
 if ! [[ "${partition_count}" =~ ^[0-9]+$ ]] || [ "${partition_count}" -lt 1 ]; then
   echo "REBORN_ROOT_TEST_PARTITIONS must be a positive integer; got '${partition_count}'" >&2
@@ -48,7 +49,7 @@ for index in "${!test_names[@]}"; do
   selected=true
   test_name="${test_names[$index]}"
   echo "::group::cargo test --test ${test_name}"
-  timeout --signal=INT --kill-after=30s 12m \
+  timeout --signal=INT --kill-after=30s "${test_timeout}" \
     cargo test --test "${test_name}" -- --nocapture
   echo "::endgroup::"
 done

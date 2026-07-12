@@ -195,6 +195,7 @@ pub fn update_account_from_exchange(
     account.access_secret = Some(exchange.access_secret.clone());
     account.refresh_secret = exchange.refresh_secret.clone();
     account.scopes = exchange.scopes.clone();
+    account.provider_identity = exchange.provider_identity.clone();
     account.updated_at = now;
 }
 
@@ -210,6 +211,7 @@ pub fn update_account_from_request(
     account.access_secret = request.access_secret;
     account.refresh_secret = request.refresh_secret;
     account.scopes = request.scopes;
+    account.provider_identity = None;
     account.updated_at = now;
     Ok(account.clone())
 }
@@ -231,6 +233,34 @@ pub fn validate_account_update_target(
         request.ownership,
         request.owner_extension.as_ref(),
         &request.granted_extensions,
+    )
+}
+
+/// Validate that a stored `account` may be updated by a reconnect carrying
+/// `binding`, at durable OWNER granularity (#4935 defect A).
+///
+/// Unlike [`validate_account_update_target`] — which compares the request scope
+/// to the account scope with full `scope_matches` equality and is correct for a
+/// fresh, same-scope write — this is the *bound reconnect apply* check. The flow
+/// / manual-token `scope` carries a fresh per-flow `invocation_id` (and possibly
+/// a thread/mission) the account does not share, so the apply step must compare
+/// at owner granularity exactly as the setup-time binding validation
+/// ([`validate_manual_token_update_binding`] / [`validate_flow_update_binding`])
+/// does. Applying `validate_account_update_target` on a bound apply path accepts
+/// the binding at setup but then rejects it at apply for every cross-thread
+/// reconnect — re-introducing the #4935 fork on the manual-token path.
+pub fn validate_bound_account_update_target(
+    account: &CredentialAccount,
+    scope: &crate::AuthProductScope,
+    provider: &crate::AuthProviderId,
+    binding: &CredentialAccountUpdateBinding,
+) -> Result<(), AuthProductError> {
+    validate_scoped_update_binding(
+        account,
+        scope,
+        provider,
+        binding,
+        "credential account update target provider mismatch",
     )
 }
 
@@ -271,7 +301,16 @@ fn validate_scoped_update_binding(
     binding: &CredentialAccountUpdateBinding,
     provider_mismatch: &'static str,
 ) -> Result<(), AuthProductError> {
-    if !scope_matches(scope, &account.scope) {
+    // Validate the bind at durable OWNER granularity (#4935 defect A). The
+    // flow / manual-token `scope` carries a fresh per-flow `invocation_id` (and
+    // possibly a thread/mission) that the account — created in an earlier flow
+    // — does not share. The old `scope_matches` full-equality compared those
+    // transient fields and so rejected every legitimate reconnect, forking a
+    // duplicate account each time. tenant/user/agent/project stay hard-required
+    // via `CredentialAccountOwnerScope`; session_id stays matched; the
+    // requester-authority check below is unchanged, so an unauthorized
+    // requester still cannot bind another owner's account.
+    if !crate::binding_scope_owns_account(scope, account) {
         return Err(AuthProductError::CrossScopeDenied);
     }
     if &account.provider != provider {
@@ -312,6 +351,33 @@ pub fn account_is_authorized_for_requester(
     requester_extension: Option<&ExtensionId>,
 ) -> bool {
     account.is_authorized_for_requester(requester_extension)
+}
+
+/// Selects the runtime default from duplicate reusable accounts for one provider.
+///
+/// Runtime credential gates cannot show an account picker, and historical OAuth
+/// setup can store the same login under capability-derived labels. When every
+/// candidate is reusable, unbound, and configured with an access secret, recency
+/// is the setup-time choice signal; mixed ownership still requires explicit
+/// account selection.
+pub fn select_latest_duplicate_user_reusable_account(
+    accounts: &[CredentialAccount],
+) -> Option<CredentialAccount> {
+    let first = accounts.first()?;
+    if !accounts.iter().all(|account| {
+        account.provider == first.provider
+            && account.status == crate::CredentialAccountStatus::Configured
+            && account.ownership == CredentialOwnership::UserReusable
+            && account.owner_extension.is_none()
+            && account.granted_extensions.is_empty()
+            && account.access_secret.is_some()
+    }) {
+        return None;
+    }
+    accounts
+        .iter()
+        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
+        .cloned()
 }
 
 pub fn validate_new_credential_account(
@@ -474,7 +540,8 @@ mod tests {
     use super::*;
     use crate::{
         AuthProviderId, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
-        OAuthAuthorizationCode, OAuthProviderExchange, PkceVerifierSecret, ProviderScope,
+        OAuthAuthorizationCode, OAuthProviderExchange, OAuthProviderIdentity, PkceVerifierSecret,
+        ProviderScope,
     };
     use chrono::Utc;
     use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
@@ -501,6 +568,7 @@ mod tests {
                 ProviderScope::new("repo").unwrap(),
                 ProviderScope::new("admin:org").unwrap(),
             ],
+            provider_identity: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -519,6 +587,7 @@ mod tests {
             refresh_secret: Some(SecretHandle::new("new-refresh").unwrap()),
             scopes: vec![ProviderScope::new("repo").unwrap()],
             account_id: None,
+            provider_identity: None,
         };
 
         update_account_from_exchange(&mut account, &exchange, Utc::now());
@@ -531,5 +600,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["repo"]
         );
+    }
+
+    #[test]
+    fn update_account_from_request_clears_provider_identity() {
+        let scope = crate::AuthProductScope::new(
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap(),
+            crate::AuthSurface::Api,
+        );
+        let mut account = CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: scope.clone(),
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("github").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("old-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("repo").unwrap()],
+            provider_identity: Some(
+                OAuthProviderIdentity::new("user-123", None, None, None)
+                    .expect("valid provider identity"),
+            ),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let request = NewCredentialAccount {
+            scope,
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("github manual").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("manual-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("read:user").unwrap()],
+        };
+
+        update_account_from_request(&mut account, request, Utc::now())
+            .expect("manual account update succeeds");
+
+        assert!(account.provider_identity.is_none());
     }
 }

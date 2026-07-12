@@ -248,7 +248,11 @@ fn google_callback_state_round_trips_through_validated_encoded_state() {
 
 #[test]
 fn google_callback_state_rejects_unapproved_requested_scopes() {
-    let invalid_scope = ProviderScope::new("https://www.googleapis.com/auth/drive").unwrap();
+    // `gmail.insert` is a real, sensitive Gmail scope deliberately kept out of
+    // the approved GSuite set (`is_allowed_google_scope`). The approved set grew
+    // to include the Drive/Docs/Sheets/Slides scopes in #4326, so this guards the
+    // boundary with a scope that is still outside it.
+    let invalid_scope = ProviderScope::new("https://www.googleapis.com/auth/gmail.insert").unwrap();
 
     assert_invalid_request(GoogleOAuthCallbackState::new(
         AuthFlowId::new(),

@@ -5,6 +5,22 @@ use rust_decimal_macros::dec;
 use serde_json::json;
 
 #[test]
+fn dispatch_input_issue_code_wire_strings_cover_all_variants() {
+    for (code, wire) in [
+        (DispatchInputIssueCode::MissingRequired, "missing_required"),
+        (DispatchInputIssueCode::UnexpectedField, "unexpected_field"),
+        (DispatchInputIssueCode::TypeMismatch, "type_mismatch"),
+        (DispatchInputIssueCode::InvalidValue, "invalid_value"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<DispatchInputIssueCode>(json!(wire)).unwrap(),
+            code
+        );
+    }
+}
+
+#[test]
 fn runtime_credential_targets_validate_declaration_shape() {
     assert!(
         RuntimeCredentialTarget::Header {
@@ -276,6 +292,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
     assert_eq!(
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
+            safe_summary: None,
         }
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
@@ -768,11 +785,9 @@ fn principal_agent_serializes_as_first_class_principal() {
 fn invocation_fingerprint_is_stable_and_input_hashed() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_output_bytes(10_000);
     let input = json!({"message": "secret payload"});
     let mut reordered = serde_json::Map::new();
     reordered.insert("z".to_string(), json!(1));
@@ -900,20 +915,14 @@ fn invocation_fingerprint_changes_when_authorized_invocation_changes() {
 fn actions_and_decisions_serialize_with_stable_snake_case_tags() {
     let action = Action::Dispatch {
         capability: CapabilityId::new("github.search_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            usd: Some(dec!(0.01)),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_usd(dec!(0.01)),
     };
     let json = serde_json::to_value(&action).unwrap();
     assert_eq!(json["type"], "dispatch");
 
     let spawn = Action::SpawnCapability {
         capability: CapabilityId::new("github.watch_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_concurrency_slots(1),
     };
     let json = serde_json::to_value(&spawn).unwrap();
     assert_eq!(json["type"], "spawn_capability");
@@ -1658,6 +1667,7 @@ fn sample_context() -> ExecutionContext {
         parent_process_id: None,
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: None,
         project_id: Some(project_id.clone()),
         mission_id: None,
@@ -1725,6 +1735,32 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
 }
 
 #[test]
+fn runtime_credential_auth_requirement_defaults_setup_and_round_trips_oauth() {
+    let old_payload = json!({
+        "provider": "github",
+        "requester_extension": "github",
+        "provider_scopes": []
+    });
+    let parsed: RuntimeCredentialAuthRequirement =
+        serde_json::from_value(old_payload).expect("old auth requirement payload parses");
+    assert_eq!(parsed.setup, RuntimeCredentialAccountSetup::ManualToken);
+
+    let oauth = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
+        requester_extension: ExtensionId::new("gmail").unwrap(),
+        provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+    };
+    let round_trip: RuntimeCredentialAuthRequirement =
+        serde_json::from_value(serde_json::to_value(&oauth).expect("auth requirement serializes"))
+            .expect("oauth auth requirement parses");
+
+    assert_eq!(round_trip, oauth);
+}
+
+#[test]
 fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     let handle = SecretHandle::new("google-access-token").unwrap();
     let error = DispatchError::AuthRequired {
@@ -1754,6 +1790,9 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     );
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
         requester_extension: ExtensionId::new("gmail").unwrap(),
         provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
     };

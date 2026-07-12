@@ -1,28 +1,29 @@
 use async_trait::async_trait;
-use ironclaw_turns::LoopFailureKind;
 use ironclaw_turns::{
     LoopExit,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopModelCapabilityView, LoopModelMessage,
-        LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopContextCompactionMetadata, LoopInlineMessage, LoopModelCapabilityView,
+        LoopModelMessage, LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
-use std::time::Duration;
 use tracing::debug;
 
 use crate::state::{
     CheckpointKind, CompactionPromptSnapshot, DeferredCompactionWatermark, IndexedMessageKind,
     LoopExecutionState, MessageIndexEntry,
 };
-use crate::strategies::CompactionDecision;
+use crate::strategies::{
+    CompactionDecision, RetryAlteration, invalid_model_output_repair_control_message,
+};
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
     PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
-    failed_exit,
+    pending_approval_resume_candidate, pending_auth_resume_candidate,
+    pending_external_tool_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -44,12 +45,36 @@ pub(super) struct PromptOutput {
     pub(super) pending_input_ack: PendingInputAck,
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
+    pub(super) inline_messages: Vec<LoopInlineMessage>,
     pub(super) capability_view: LoopModelCapabilityView,
     pub(super) rendered_repeated_call_warning: bool,
 }
 
+pub(super) struct ApprovalResumePromptOutput {
+    pub(super) state: LoopExecutionState,
+    pub(super) pending_input_ack: PendingInputAck,
+    pub(super) surface: VisibleCapabilitySurface,
+    pub(super) call: ironclaw_turns::run_profile::CapabilityCallCandidate,
+}
+
 pub(super) enum PromptStep {
     Prepared(Box<PromptOutput>),
+    ResumeApproval(Box<ApprovalResumePromptOutput>),
+    /// Re-dispatch an auth-gated capability call without a model turn.
+    ///
+    /// Emitted when `pending_auth_resume` is set on the incoming state. The original
+    /// capability call is re-dispatched as a plain invocation (no approval token).
+    /// The `pending_auth_resume` slot is cleared at every capability-outcome site
+    /// (Completed, SpawnedChild, AuthRequired, error/retry paths) and at gate
+    /// SkipAndContinue/Abort outcomes — never consumed via `take_if` here.
+    ResumeAuth(Box<ApprovalResumePromptOutput>),
+    /// Re-dispatch a client-supplied ("external") tool call without a model turn.
+    ///
+    /// Emitted when `pending_external_tool_resume` is set on the incoming state
+    /// (the client has resumed a parked `BlockedExternalTool` run). The parked
+    /// call is re-dispatched as a plain invocation; the host's external-tool
+    /// decorator completes it from the run-scoped catalog's submitted output.
+    ResumeExternalTool(Box<ApprovalResumePromptOutput>),
     Exit(LoopExit),
     /// Compaction-only turn: PromptCompactionStep ran (forced by the
     /// `skip_model_this_iteration` flag), no prompt was assembled, no
@@ -69,6 +94,7 @@ pub(super) enum PromptStep {
 
 pub(super) struct BuiltPromptBundle {
     messages: Vec<LoopModelMessage>,
+    inline_messages: Vec<LoopInlineMessage>,
     compaction_message_index: Vec<LoopContextCompactionMetadata>,
     rendered_reply_admission_control: bool,
     rendered_repeated_call_warning: bool,
@@ -82,7 +108,8 @@ impl BuiltPromptBundle {
         capability_view: LoopModelCapabilityView,
     ) -> Result<Self, AgentLoopExecutorError> {
         let bundle =
-            build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view).await?;
+            build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view, None)
+                .await?;
         refresh_compaction_prompt_from_index(state, &bundle.compaction_message_index);
         Ok(bundle)
     }
@@ -93,6 +120,10 @@ impl BuiltPromptBundle {
     ) -> Vec<LoopModelMessage> {
         refresh_compaction_prompt_from_index(state, &self.compaction_message_index);
         self.messages
+    }
+
+    pub(super) fn inline_messages(&self) -> Vec<LoopInlineMessage> {
+        self.inline_messages.clone()
     }
 }
 
@@ -145,8 +176,8 @@ impl FinalPromptBundle {
         Ok(Self { bundle })
     }
 
-    fn into_messages(self) -> Vec<LoopModelMessage> {
-        self.bundle.messages
+    fn into_model_parts(self) -> (Vec<LoopModelMessage>, Vec<LoopInlineMessage>) {
+        (self.bundle.messages, self.bundle.inline_messages)
     }
 
     fn rendered_reply_admission_control(&self) -> bool {
@@ -217,16 +248,75 @@ impl<'a> PromptPlanningPipeline<'a> {
         }
 
         let surface = self.visible_surface(surface_filter).await?;
-        let capability_view = LoopModelCapabilityView {
-            visible_capability_ids: surface
+        // The capability view drives call-time authorization (the model-visible
+        // capability filter), which must permit every tool the model can legitimately
+        // invoke this turn — not just the advertised subset. Under progressive tool
+        // disclosure the surface narrows `descriptors` to the advertised set but
+        // carries the full reachable catalog in `callable_capability_ids`; use that
+        // wider set so bridge / forgiving-direct calls to disclosed-but-unadvertised
+        // tools aren't rejected as "outside the model-visible capability view".
+        // Advertising and prompt rendering still use the narrow `descriptors`.
+        // `None` callable_capability_ids means no narrowing is in effect, so fall
+        // back to `descriptors` (preserves non-disclosure behavior exactly). A
+        // `Some(_)` set is used verbatim, even when empty.
+        let visible_capability_ids = match &surface.callable_capability_ids {
+            Some(callable) => callable.clone(),
+            None => surface
                 .descriptors
                 .iter()
                 .map(|descriptor| descriptor.capability_id.clone())
                 .collect(),
         };
+        let capability_view = LoopModelCapabilityView {
+            visible_capability_ids,
+        };
         self.state.surface_version = Some(surface.version.clone());
         if let Some(exit) = self.cancel_boundary().await? {
             return Ok(PromptStep::Exit(exit));
+        }
+        if let Some(resume) = self.state.pending_approval_resume.as_ref() {
+            let call = pending_approval_resume_candidate(resume, surface.version.clone());
+            return Ok(PromptStep::ResumeApproval(Box::new(
+                ApprovalResumePromptOutput {
+                    state: self.state,
+                    pending_input_ack: self.pending_input_ack,
+                    surface,
+                    call,
+                },
+            )));
+        }
+        // Auth-resume check runs after approval (approval takes priority; both set
+        // simultaneously is impossible today, but this ordering is defensive).
+        if let Some(resume) = self.state.pending_auth_resume.as_ref() {
+            let call =
+                pending_auth_resume_candidate(self.ctx.host, resume, surface.version.clone())
+                    .await?;
+            return Ok(PromptStep::ResumeAuth(Box::new(
+                ApprovalResumePromptOutput {
+                    state: self.state,
+                    pending_input_ack: self.pending_input_ack,
+                    surface,
+                    call,
+                },
+            )));
+        }
+        // External-tool resume: re-dispatch the parked client-tool call so the
+        // host decorator completes it from the catalog's submitted output.
+        if let Some(resume) = self.state.pending_external_tool_resume.as_ref() {
+            let call = pending_external_tool_resume_candidate(
+                self.ctx.host,
+                resume,
+                surface.version.clone(),
+            )
+            .await?;
+            return Ok(PromptStep::ResumeExternalTool(Box::new(
+                ApprovalResumePromptOutput {
+                    state: self.state,
+                    pending_input_ack: self.pending_input_ack,
+                    surface,
+                    call,
+                },
+            )));
         }
 
         let candidate_bundle = PromptBundleCandidate::build(
@@ -269,11 +359,14 @@ impl<'a> PromptPlanningPipeline<'a> {
         }
         let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
+        let (messages, inline_messages) = final_bundle.into_model_parts();
+
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
             pending_input_ack: self.pending_input_ack,
             surface,
-            messages: final_bundle.into_messages(),
+            messages,
+            inline_messages,
             capability_view,
             rendered_repeated_call_warning,
         })))
@@ -301,14 +394,26 @@ impl<'a> PromptPlanningPipeline<'a> {
         &self,
         surface_filter: crate::strategies::CapabilityFilter,
     ) -> Result<VisibleCapabilitySurface, AgentLoopExecutorError> {
-        let mut surface = self
+        let map_capability_error = |error| {
+            debug_host_unavailable(HostStage::Capability, &error);
+            AgentLoopExecutorError::HostUnavailable {
+                stage: HostStage::Capability,
+            }
+        };
+        let mut surface = match self
             .ctx
             .host
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Capability,
-            })?;
+            .current_visible_capabilities()
+            .map_err(&map_capability_error)?
+        {
+            Some(surface) => surface,
+            None => self
+                .ctx
+                .host
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .map_err(map_capability_error)?,
+        };
         apply_capability_filter(&mut surface, &surface_filter);
         if tracing::enabled!(tracing::Level::DEBUG) {
             let visible_capability_sample = surface
@@ -400,7 +505,6 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
         let compaction_result = await_compaction_with_cancellation(
             self.ctx,
-            Duration::from_millis(deadline_ms),
             self.ctx.host.compact_loop_context(compaction_request),
         )
         .await;
@@ -415,49 +519,20 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                     %safe_summary,
                     "agent loop compaction deferred; continuing with the existing prompt"
                 );
-                state.compaction_state.force_compact_on_next_iteration = false;
-                state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
-                    through_seq: drop_through_seq,
-                    prompt_fingerprint: state.compaction_prompt.fingerprint(),
-                });
-                state = match CheckpointStage
-                    .cancel_if_requested_after_pending_input_ack(
-                        self.ctx,
-                        state,
-                        self.pending_input_ack,
-                    )
-                    .await?
-                {
-                    CancelCheck::Continue(state) => *state,
-                    CancelCheck::Exit(exit) => {
-                        return Ok(PromptCompactionOutcome::Exited(exit));
-                    }
-                };
-                return Ok(PromptCompactionOutcome::Skipped(state));
+                return defer_compaction(self.ctx, state, self.pending_input_ack, drop_through_seq)
+                    .await;
             }
             CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
             | CompactionCallOutcome::Cancelled => {
                 return compaction_cancelled_exit(self.ctx, state, self.pending_input_ack).await;
             }
             CompactionCallOutcome::Completed(Err(error)) => {
-                return compaction_failed_exit(
+                return compaction_failed_continue(
                     self.ctx,
                     state,
                     self.pending_input_ack,
                     task_id,
-                    &error,
-                )
-                .await;
-            }
-            CompactionCallOutcome::TimedOut => {
-                let error = LoopCompactionError::InferenceFailed {
-                    safe_summary: safe("compaction deadline exceeded"),
-                };
-                return compaction_failed_exit(
-                    self.ctx,
-                    state,
-                    self.pending_input_ack,
-                    task_id,
+                    drop_through_seq,
                     &error,
                 )
                 .await;
@@ -499,13 +574,18 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
 
 enum CompactionCallOutcome {
     Completed(Result<LoopCompactionOutcome, ironclaw_turns::run_profile::LoopCompactionError>),
-    TimedOut,
     Cancelled,
 }
 
+/// Races the compaction call against run cancellation only. The deadline is
+/// enforced solely by the inner `ModelGatewayBackedSystemInferencePort`
+/// timeout (which surfaces as `SystemInferenceError::Timeout` ->
+/// `LoopCompactionError::InferenceFailed`); a second, outer timeout here
+/// would drop the call future on the same deadline and detach the
+/// `GuardedSystemInferencePort` worker it spawned, leaking a task per
+/// timed-out compaction.
 async fn await_compaction_with_cancellation<F>(
     ctx: StageContext<'_>,
-    deadline: Duration,
     call: F,
 ) -> CompactionCallOutcome
 where
@@ -513,14 +593,11 @@ where
 {
     let call = call;
     tokio::pin!(call);
-    let timeout = tokio::time::sleep(deadline);
-    tokio::pin!(timeout);
     let cancellation = ctx.host.cancellation_requested();
     tokio::pin!(cancellation);
 
     tokio::select! {
         result = &mut call => CompactionCallOutcome::Completed(result),
-        _ = &mut timeout => CompactionCallOutcome::TimedOut,
         _signal = &mut cancellation => {
             CompactionCallOutcome::Cancelled
         }
@@ -540,33 +617,57 @@ async fn compaction_cancelled_exit(
     Ok(PromptCompactionOutcome::Exited(exit))
 }
 
-async fn compaction_failed_exit(
+async fn compaction_failed_continue(
     ctx: StageContext<'_>,
     state: LoopExecutionState,
     pending_input_ack: &mut PendingInputAck,
     task_id: SystemInferenceTaskId,
+    drop_through_seq: u64,
     error: &LoopCompactionError,
 ) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
+    let reason_kind = loop_compaction_reason(error);
+    tracing::debug!(
+        task_id = ?task_id,
+        %reason_kind,
+        "compaction failed; continuing run with uncompacted prompt"
+    );
     CheckpointStage
         .emit_progress(
             ctx,
             LoopProgressEvent::CompactionFailed {
                 task_id,
-                reason_kind: loop_compaction_reason(error),
+                reason_kind,
             },
         )
         .await;
-    let checked = CheckpointStage
-        .write(ctx, state, CheckpointKind::Final)
-        .await?;
-    pending_input_ack.ack(ctx.host).await?;
-    let exit = failed_exit(
-        ctx.host,
-        checked.state,
-        LoopFailureKind::CompactionUnavailable,
-        Some(checked.checkpoint_id),
-    )?;
-    Ok(PromptCompactionOutcome::Exited(exit))
+    defer_compaction(ctx, state, pending_input_ack, drop_through_seq).await
+}
+
+/// Shared tail for both compaction-deferral paths (explicit `Deferred`
+/// outcome and failure-fallback continue): clears the force-compact flag,
+/// records the deferred watermark, and honors cancellation. The
+/// mutate-then-cancel-check order is intentional — the watermark persists
+/// via the `Final` checkpoint even if the run is cancelled right after.
+async fn defer_compaction(
+    ctx: StageContext<'_>,
+    state: LoopExecutionState,
+    pending_input_ack: &mut PendingInputAck,
+    drop_through_seq: u64,
+) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
+    let mut state = state;
+    state.compaction_state.force_compact_on_next_iteration = false;
+    state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+        through_seq: drop_through_seq,
+        prompt_fingerprint: state.compaction_prompt.fingerprint(),
+    });
+    state = match CheckpointStage
+        .cancel_if_requested_after_pending_input_ack(ctx, state, pending_input_ack)
+        .await?
+    {
+        CancelCheck::Continue(state) => *state,
+        CancelCheck::Exit(exit) => return Ok(PromptCompactionOutcome::Exited(exit)),
+    };
+    Ok(PromptCompactionOutcome::Skipped(state))
 }
 
 pub(super) async fn build_prompt_bundle_for_surface(
@@ -574,11 +675,21 @@ pub(super) async fn build_prompt_bundle_for_surface(
     state: &LoopExecutionState,
     surface_version: CapabilitySurfaceVersion,
     capability_view: LoopModelCapabilityView,
+    retry_alteration: Option<&RetryAlteration>,
 ) -> Result<BuiltPromptBundle, AgentLoopExecutorError> {
     let context_plan = ctx.planner.context().plan_context_request(state).await;
     let mut context_request = context_plan.request;
     context_request.surface_version = Some(surface_version);
     context_request.capability_view = Some(capability_view);
+    if matches!(
+        retry_alteration,
+        Some(RetryAlteration::RepairInvalidModelOutput)
+    ) {
+        context_request
+            .inline_messages
+            .push(invalid_model_output_repair_control_message());
+    }
+    let inline_messages = context_request.inline_messages.clone();
     let prompt_mode = context_request.mode;
     let rendered_reply_admission_control = context_plan.emitted_admission_control;
     let rendered_repeated_call_warning = context_plan.emitted_repeated_call_warning;
@@ -609,6 +720,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
 
     Ok(BuiltPromptBundle {
         messages: prompt_bundle.messages,
+        inline_messages,
         compaction_message_index: prompt_bundle.compaction_message_index,
         rendered_reply_admission_control,
         rendered_repeated_call_warning,
@@ -646,9 +758,5 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::Cancelled => "cancelled",
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
-    LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
-}
-
-fn safe(value: &'static str) -> LoopSafeSummary {
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
 }

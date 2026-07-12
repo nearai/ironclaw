@@ -140,6 +140,7 @@ fn suspicious_error_params_are_dropped_instead_of_normalized() {
         "input[12].content",
         "response_id",
         "idempotency_key",
+        "temperature",
     ] {
         let error = OpenAiCompatHttpError::from_kind(
             400,
@@ -200,6 +201,13 @@ fn workflow_rejection_maps_each_kind_to_stable_openai_error() {
         ),
         (
             K::Conflict,
+            409,
+            false,
+            OpenAiCompatErrorType::ConflictError,
+            OpenAiCompatErrorCode::Conflict,
+        ),
+        (
+            K::Ambiguous,
             409,
             false,
             OpenAiCompatErrorType::ConflictError,

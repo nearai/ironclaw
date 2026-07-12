@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
     ExternalSubjectId, LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
-    ProviderKind, RebornIdentityResolver, RebornLibSqlLocalTriggerAccessStore,
+    LocalTriggerAccessStore, ProviderKind, RebornIdentityError, RebornIdentityResolver,
     ResolveExternalIdentity, SurfaceKind,
 };
 use ironclaw_reborn_webui_ingress::{
@@ -102,7 +102,7 @@ impl WebuiUserDirectory {
 
 /// Local-dev trigger access seed configuration for users admitted through SSO.
 pub(crate) struct LocalTriggerAccessBootstrap {
-    store: Arc<RebornLibSqlLocalTriggerAccessStore>,
+    store: Arc<dyn LocalTriggerAccessStore>,
     tenant_id: TenantId,
     agent_id: AgentId,
     project_id: Option<ProjectId>,
@@ -110,7 +110,7 @@ pub(crate) struct LocalTriggerAccessBootstrap {
 
 impl LocalTriggerAccessBootstrap {
     pub(crate) fn new(
-        store: Arc<RebornLibSqlLocalTriggerAccessStore>,
+        store: Arc<dyn LocalTriggerAccessStore>,
         tenant_id: TenantId,
         agent_id: AgentId,
         project_id: Option<ProjectId>,
@@ -193,7 +193,14 @@ impl UserDirectory for WebuiUserDirectory {
                 display_name: profile.display_name.clone(),
             })
             .await
-            .map_err(|err| UserDirectoryError::Backend(err.to_string()))?;
+            .map_err(|err| match err {
+                // A suspended account resolved its identity but must not mint a
+                // session: fail closed with a 403 (login refused), never a 503.
+                // The admin who suspended them sees the account stay locked out
+                // even across a fresh SSO attempt.
+                RebornIdentityError::UserSuspended(_) => UserDirectoryError::Unknown,
+                other => UserDirectoryError::Backend(other.to_string()),
+            })?;
         if let Some(local_trigger_access) = &self.local_trigger_access {
             local_trigger_access.seed_for_user(&user_id).await?;
         }

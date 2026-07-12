@@ -1,10 +1,14 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::LoopDiagnosticRef;
+use crate::{LoopDiagnosticRef, LoopGateRef};
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
@@ -13,6 +17,24 @@ use super::host::{
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
+
+/// Hard ceiling on a single primary assistant model call.
+///
+/// This is a defense-in-depth bound that wraps the entire gateway call (every
+/// provider, not just NEAR AI). It MUST stay below the runner lease
+/// ([`crate::memory::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
+/// provider is surfaced as a retryable `Unavailable` error before the lease
+/// reclaims the runner mid-flight — the failure mode that wedged the Reborn
+/// runtime on 2026-06-24. The invariant is enforced by
+/// `primary_model_call_timeout_is_below_runner_lease` below.
+///
+/// Layered ordering: provider HTTP timeout (`ironclaw_llm`
+/// `DEFAULT_REQUEST_TIMEOUT_SECS` = 60s) < this wrapper (75s) < runner lease
+/// (90s). The provider bound fires first on the common path so the precise
+/// provider error surfaces; this wrapper catches gateway-layer stalls the inner
+/// bound misses.
+const PRIMARY_MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(75);
+const FALLBACK_TEXT_DELTA_MILESTONE_STEP: usize = 15;
 
 /// Outcome passed to [`LoopModelBudgetAccountant::post_model_call`] so the
 /// accountant can record usage on success or note the failure kind.
@@ -109,6 +131,9 @@ pub struct LoopModelGatewayError {
     pub safe_summary: LoopSafeSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -121,12 +146,33 @@ impl LoopModelGatewayError {
             kind,
             safe_summary: LoopSafeSummary::new(safe_summary)?,
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         })
     }
 
+    /// Build the gateway error for a primary model call that exceeded its
+    /// timeout. Surfaces as `AgentLoopHostErrorKind::Unavailable`, which the
+    /// recovery strategy treats as retryable — the correct disposition for a
+    /// transient provider/gateway stall. Infallible: the safe summary is a
+    /// known-good literal.
+    pub fn timed_out() -> Self {
+        Self {
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary: LoopSafeSummary::model_gateway_timed_out(),
+            reason_kind: None,
+            gate_ref: None,
+            diagnostic_ref: None,
+        }
+    }
+
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 
@@ -139,6 +185,9 @@ impl LoopModelGatewayError {
         let mut error = AgentLoopHostError::new(self.kind, self.safe_summary.as_str().to_string());
         if let Some(reason_kind) = self.reason_kind {
             error = error.with_reason_kind(reason_kind);
+        }
+        if let Some(gate_ref) = self.gate_ref {
+            error = error.with_gate_ref(gate_ref);
         }
         if let Some(diagnostic_ref) = self.diagnostic_ref {
             error = error.with_diagnostic_ref(diagnostic_ref);
@@ -153,6 +202,19 @@ pub trait LoopModelGateway: Send + Sync {
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError>;
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        _progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model(request).await
+    }
+}
+
+#[async_trait]
+pub trait LoopModelProgressSink: Send + Sync {
+    async fn model_text_update(&self, safe_text: String);
 }
 
 /// Provider/model policy guard consulted before dispatching a model call.
@@ -290,7 +352,7 @@ where
 impl<G, S> LoopModelPort for HostManagedLoopModelPort<G, S>
 where
     G: LoopModelGateway + ?Sized,
-    S: LoopHostMilestoneSink + ?Sized,
+    S: LoopHostMilestoneSink + ?Sized + 'static,
 {
     async fn stream_model(
         &self,
@@ -335,14 +397,25 @@ where
             );
         }
 
-        let gateway_result = self
-            .gateway
-            .stream_model(LoopModelGatewayRequest {
+        // Bound the primary model call so a hung provider/gateway surfaces as a
+        // retryable error before the runner lease reclaims this run mid-flight.
+        // See `PRIMARY_MODEL_CALL_TIMEOUT`.
+        let progress_sink = Arc::new(MilestoneModelProgressSink {
+            milestones: self.milestones.clone(),
+            emitted_text: AtomicBool::new(false),
+        });
+        let gateway_call = self.gateway.stream_model_with_progress(
+            LoopModelGatewayRequest {
                 context: self.context.clone(),
                 request: request.clone(),
-            })
-            .await
-            .map(sanitize_model_response);
+            },
+            progress_sink.clone(),
+        );
+        let gateway_result =
+            match tokio::time::timeout(PRIMARY_MODEL_CALL_TIMEOUT, gateway_call).await {
+                Ok(result) => result.map(sanitize_model_response),
+                Err(_elapsed) => Err(LoopModelGatewayError::timed_out()),
+            };
 
         // Post-call accounting fires on BOTH success and failure. The
         // RAII guard stays armed across this await — if the future is
@@ -405,6 +478,38 @@ where
                 );
             }
         }
+        if matches!(response.output, ParentLoopOutput::AssistantReply(_))
+            && !progress_sink.emitted_text()
+        {
+            let text_chunk_count = response
+                .chunks
+                .iter()
+                .filter(|chunk| !chunk.safe_text_delta.is_empty())
+                .count();
+            let mut text_chunk_index = 0;
+            let mut accumulated_text = String::new();
+            for chunk in &response.chunks {
+                if chunk.safe_text_delta.is_empty() {
+                    continue;
+                }
+                accumulated_text.push_str(&chunk.safe_text_delta);
+                text_chunk_index += 1;
+                if !should_emit_fallback_text_delta(text_chunk_index, text_chunk_count) {
+                    continue;
+                }
+                if let Err(error) = self
+                    .milestones
+                    .model_text_delta(accumulated_text.clone())
+                    .await
+                {
+                    tracing::debug!(
+                        kind = ?error.kind,
+                        diagnostic_ref = ?error.diagnostic_ref,
+                        "loop model text milestone failed after successful model response"
+                    );
+                }
+            }
+        }
         if let Err(error) = self
             .milestones
             .model_completed(response.effective_model_profile_id.clone())
@@ -417,6 +522,40 @@ where
             );
         }
         Ok(response)
+    }
+}
+
+struct MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    milestones: LoopHostMilestoneEmitter<S>,
+    emitted_text: AtomicBool,
+}
+
+impl<S> MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    fn emitted_text(&self) -> bool {
+        self.emitted_text.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl<S> LoopModelProgressSink for MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    async fn model_text_update(&self, safe_text: String) {
+        self.emitted_text.store(true, Ordering::SeqCst);
+        if let Err(error) = self.milestones.model_text_delta(safe_text).await {
+            tracing::debug!(
+                kind = ?error.kind,
+                diagnostic_ref = ?error.diagnostic_ref,
+                "loop model text progress milestone failed during model stream"
+            );
+        }
     }
 }
 
@@ -472,4 +611,40 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
         reply.content = sanitize_model_visible_text(std::mem::take(&mut reply.content));
     }
     response
+}
+
+fn should_emit_fallback_text_delta(chunk_index: usize, chunk_count: usize) -> bool {
+    chunk_index == chunk_count || chunk_index.is_multiple_of(FALLBACK_TEXT_DELTA_MILESTONE_STEP)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The primary model-call timeout must fire before the runner lease can
+    /// reclaim the run mid-flight. This guards against a silent regression of
+    /// the 2026-06-24 wedge, where the provider timeout (120s) exceeded the
+    /// lease (90s) and the lease killed runners before any timeout fired.
+    #[test]
+    fn primary_model_call_timeout_is_below_runner_lease() {
+        let lease_secs = u64::try_from(crate::memory::DEFAULT_RUNNER_LEASE_TTL_SECONDS)
+            .expect("runner lease TTL is non-negative");
+        assert!(
+            PRIMARY_MODEL_CALL_TIMEOUT.as_secs() < lease_secs,
+            "primary model-call timeout ({}s) must be below the runner lease ({}s)",
+            PRIMARY_MODEL_CALL_TIMEOUT.as_secs(),
+            lease_secs,
+        );
+    }
+
+    #[test]
+    fn fallback_model_text_delta_emission_is_throttled_and_final() {
+        let emitted = (1..=32)
+            .filter(|chunk_index| should_emit_fallback_text_delta(*chunk_index, 32))
+            .collect::<Vec<_>>();
+
+        assert_eq!(emitted, vec![15, 30, 32]);
+        assert!(should_emit_fallback_text_delta(14, 14));
+        assert!(!should_emit_fallback_text_delta(1, 14));
+    }
 }

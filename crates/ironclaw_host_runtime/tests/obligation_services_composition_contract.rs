@@ -82,6 +82,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
             context.resource_scope.clone(),
             secret_handle,
             SecretMaterial::from("runtime-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -255,6 +256,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::NetworkDenied,
+                safe_summary: None,
             })?;
         assert_eq!(egress_response.status, 200);
 

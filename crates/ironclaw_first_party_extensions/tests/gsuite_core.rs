@@ -3,6 +3,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, CredentialAccount,
     CredentialAccountChoiceRequest, CredentialAccountLabel, CredentialAccountListPage,
@@ -27,8 +28,9 @@ use ironclaw_first_party_extensions::{
     gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    ExtensionId, NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
-    RuntimeDispatchErrorKind, RuntimeHttpEgressError, SecretHandle,
+    ExtensionId, InvocationId, NetworkMethod, NetworkScheme,
+    RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceScope, RuntimeDispatchErrorKind,
+    RuntimeHttpEgressError, SecretHandle, UserId,
 };
 use serde_json::json;
 use support::*;
@@ -114,6 +116,43 @@ async fn calendar_handler_integration_tests() {
     );
 }
 
+// C-WIREFMT: format-matrix coverage for the empty-body (HTTP 204) framing of
+// `response_body_json` in handlers.rs. Google's events.delete legitimately
+// returns a 204 with no body on every live call, but no existing test drove
+// that branch through a real capability handler.
+#[tokio::test]
+async fn calendar_delete_event_handles_empty_204_response() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::empty(204),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_DELETE_EVENT_CAPABILITY_ID,
+        json!({"calendar_id":"primary","event_id":"evt-1"}),
+        egress.clone(),
+    )
+    .await;
+
+    // response_body_json maps the empty body to Value::Null instead of erroring;
+    // a mutation that made it reject empty bodies would flip this assertion.
+    assert_eq!(output["status"], 204);
+    assert_eq!(output["body"], serde_json::Value::Null);
+    assert_eq!(output["redaction_applied"], true);
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Delete);
+    assert!(requests[0].url.contains("/events/evt-1"));
+}
+
 #[tokio::test]
 async fn calendar_create_event_does_not_forward_list_query_fields() {
     let scope = scope();
@@ -146,6 +185,336 @@ async fn calendar_create_event_does_not_forward_list_query_fields() {
         requests[0].url,
         "https://www.googleapis.com/calendar/v3/calendars/primary/events"
     );
+}
+
+#[tokio::test]
+async fn calendar_list_events_defaults_to_upcoming_ordered_request() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({}),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let url = &requests[0].url;
+    assert!(url.contains("/calendars/primary/events"));
+    assert!(url.contains("singleEvents=true"));
+    assert!(url.contains("orderBy=startTime"));
+    assert!(url.contains("timeMin="));
+    assert!(url.contains("maxResults=25"));
+    assert!(!url.contains("timeMax="));
+}
+
+#[tokio::test]
+async fn calendar_list_events_can_merge_all_calendar_results() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(fixture("calendar", "calendar_list.json")),
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "primary-later",
+                "summary": "Primary later sync",
+                "start": { "dateTime": "2026-05-21T16:00:00Z" },
+                "end": { "dateTime": "2026-05-21T16:30:00Z" }
+            }]
+        })),
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "team-earlier",
+                "summary": "Team earlier sync",
+                "start": { "dateTime": "2026-05-21T10:00:00Z" },
+                "end": { "dateTime": "2026-05-21T10:30:00Z" }
+            }]
+        })),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({
+            "include_all_calendars": true,
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "max_results": 10,
+            "query": "sync"
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0]
+            .url
+            .ends_with("/users/me/calendarList?maxResults=250")
+    );
+    assert!(requests[1].url.contains("/calendars/primary/events"));
+    assert!(
+        requests[2]
+            .url
+            .contains("/calendars/team%40example.com/events")
+    );
+    for request in &requests[1..] {
+        assert!(request.url.contains("singleEvents=true"));
+        assert!(request.url.contains("orderBy=startTime"));
+        assert!(request.url.contains("timeMin=2026-05-21T00%3A00%3A00Z"));
+        assert!(request.url.contains("timeMax=2026-05-22T00%3A00%3A00Z"));
+        assert!(request.url.contains("maxResults=10"));
+        assert!(request.url.contains("q=sync"));
+    }
+
+    let items = output["body"]["items"]
+        .as_array()
+        .expect("merged events array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["summary"], "Team earlier sync");
+    assert_eq!(items[0]["calendarId"], "team@example.com");
+    assert_eq!(items[1]["summary"], "Primary later sync");
+    assert_eq!(items[1]["calendarId"], "primary");
+    assert_eq!(
+        output["body"]["calendarIds"],
+        json!(["primary", "team@example.com"])
+    );
+}
+
+#[tokio::test]
+async fn calendar_list_events_marks_discovery_truncation_at_calendar_cap() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let calendar_items: Vec<_> = (0..51)
+        .map(|index| json!({ "id": format!("calendar-{index}@example.com") }))
+        .collect();
+    let mut responses = vec![RecordingEgress::json(json!({ "items": calendar_items }))];
+    responses.extend(
+        (0..50).map(|_| RecordingEgress::json(json!({ "kind": "calendar#events", "items": [] }))),
+    );
+    let egress = Arc::new(RecordingEgress::with_responses(responses));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({ "include_all_calendars": true }),
+        egress,
+    )
+    .await;
+
+    assert_eq!(
+        output["body"]["calendarIds"]
+            .as_array()
+            .expect("calendar ids")
+            .len(),
+        50
+    );
+    assert_eq!(output["body"]["calendarDiscoveryTruncated"], json!(true));
+}
+
+#[tokio::test]
+async fn calendar_list_events_can_merge_explicit_calendar_ids_without_discovery() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "nextPageToken": "primary-next",
+            "items": [{
+                "id": "primary-later",
+                "summary": "Primary later sync",
+                "start": { "dateTime": "2026-05-21T09:30:00-07:00" },
+                "end": { "dateTime": "2026-05-21T10:00:00-07:00" }
+            }]
+        })),
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "nextPageToken": "team-next",
+            "items": [{
+                "id": "team-earlier",
+                "calendarId": "wrong-calendar@example.com",
+                "summary": "Team earlier sync",
+                "start": { "dateTime": "2026-05-21T18:00:00+02:00" },
+                "end": { "dateTime": "2026-05-21T18:30:00+02:00" }
+            }]
+        })),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({
+            "calendar_ids": ["primary", "team@example.com"],
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "max_results": 10,
+            "page_tokens": {
+                "primary": "primary-page",
+                "team@example.com": "team-page"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.contains("/users/me/calendarList"))
+    );
+    assert!(requests[0].url.contains("/calendars/primary/events"));
+    assert!(requests[0].url.contains("pageToken=primary-page"));
+    assert!(
+        requests[1]
+            .url
+            .contains("/calendars/team%40example.com/events")
+    );
+    assert!(requests[1].url.contains("pageToken=team-page"));
+
+    let items = output["body"]["items"]
+        .as_array()
+        .expect("merged events array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["summary"], "Team earlier sync");
+    assert_eq!(items[0]["calendarId"], "team@example.com");
+    assert_eq!(items[1]["summary"], "Primary later sync");
+    assert_eq!(items[1]["calendarId"], "primary");
+    assert_eq!(
+        output["body"]["calendarIds"],
+        json!(["primary", "team@example.com"])
+    );
+    assert_eq!(
+        output["body"]["nextPageTokens"],
+        json!({
+            "primary": "primary-next",
+            "team@example.com": "team-next"
+        })
+    );
+}
+
+#[tokio::test]
+async fn calendar_list_events_rejects_overlapping_calendar_selectors() {
+    let inputs = [
+        json!({
+            "calendar_id": "primary",
+            "calendar_ids": ["team@example.com"]
+        }),
+        json!({
+            "calendar_id": "primary",
+            "include_all_calendars": true
+        }),
+        json!({
+            "calendar_ids": ["primary"],
+            "include_all_calendars": true
+        }),
+    ];
+
+    for input in inputs {
+        let scope = scope();
+        let auth =
+            auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+                .await;
+        let egress = Arc::new(RecordingEgress::permissive_success());
+
+        let error = dispatch_error(
+            auth,
+            scope,
+            CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+            input,
+            egress.clone(),
+        )
+        .await;
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn calendar_list_events_sanitizes_partial_failure_body() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "primary",
+                "summary": "Primary sync",
+                "start": { "dateTime": "2026-05-21T16:00:00Z" }
+            }]
+        })),
+        RecordingEgress::json_status(
+            403,
+            json!({
+                "error": {
+                    "status": "PERMISSION_DENIED",
+                    "message": "private backend detail",
+                    "errors": [{ "reason": "forbidden" }]
+                }
+            }),
+        ),
+        RecordingEgress::json_status(
+            500,
+            json!({
+                "error": {
+                    "status": "private backend detail",
+                    "message": "proxy leaked details",
+                    "errors": [{ "reason": "sql: private backend detail" }]
+                }
+            }),
+        ),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({
+            "calendar_ids": ["primary", "private@example.com", "unknown@example.com"],
+            "time_min": "2026-05-21T00:00:00Z"
+        }),
+        egress,
+    )
+    .await;
+
+    assert_eq!(
+        output["body"]["partialFailures"],
+        json!([{
+            "calendarId": "private@example.com",
+            "status": 403,
+            "reason": "PERMISSION_DENIED"
+        }, {
+            "calendarId": "unknown@example.com",
+            "status": 500
+        }])
+    );
+    assert!(output["body"]["partialFailures"][0]["body"].is_null());
+    let rendered = serde_json::to_string(&output).expect("output serializes");
+    assert!(!rendered.contains("private backend detail"));
+    assert!(!rendered.contains("proxy leaked details"));
 }
 
 #[tokio::test]
@@ -376,12 +745,21 @@ async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
         .await
         .expect_err("retry auth expiry should fail");
 
-    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Backend);
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+    assert!(
+        error.is_auth_required(),
+        "refreshed credential rejected by Google must trigger auth reauthorization; got {error:?}"
+    );
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    let refreshed_access = requests[1].credential_injections[0].handle.clone();
     assert_eq!(
         error.reason(),
-        Some(&GsuiteCredentialDispatchReason::BackendAuth)
+        Some(&GsuiteCredentialDispatchReason::AuthRequired {
+            required_secrets: vec![refreshed_access.clone()]
+        })
     );
-    assert_eq!(egress.requests().len(), 2);
+    assert_eq!(error.auth_requirement(), Some(vec![refreshed_access]));
     assert_eq!(
         error.usage().map(|usage| usage.network_egress_bytes),
         Some(246)
@@ -703,6 +1081,241 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
         requests[0].credential_injections[0].handle,
         SecretHandle::new("google-access-token").unwrap()
     );
+}
+
+#[tokio::test]
+async fn gsuite_handler_uses_trigger_owner_account_not_other_active_user() {
+    let owner_scope =
+        ResourceScope::local_default(UserId::new("routine-owner").unwrap(), InvocationId::new())
+            .unwrap();
+    let other_scope = ResourceScope::local_default(
+        UserId::new("interactive-user").unwrap(),
+        InvocationId::new(),
+    )
+    .unwrap();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+
+    for (scope, label, handle) in [
+        (
+            &owner_scope,
+            "routine owner Google",
+            "routine-owner-google-token",
+        ),
+        (
+            &other_scope,
+            "interactive user Google",
+            "interactive-user-google-token",
+        ),
+    ] {
+        ironclaw_auth::CredentialAccountService::create_account(
+            auth.as_ref(),
+            NewCredentialAccount {
+                scope: auth_scope(scope),
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new(label).unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new(handle).unwrap()),
+                refresh_secret: None,
+                scopes: vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)],
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let executor = GsuiteExecutor::new(auth.clone(), auth, noop_credential_stager());
+    let capability_id = capability_id(GMAIL_LIST_MESSAGES_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::permissive_success());
+    let result = executor
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &owner_scope,
+            input: &json!({"query": "is:unread"}),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output["status"], 200);
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].credential_injections.len(), 1);
+    assert_eq!(
+        requests[0].credential_injections[0].handle,
+        SecretHandle::new("routine-owner-google-token").unwrap(),
+        "a scheduled run must use its owner's Google account"
+    );
+    assert_ne!(
+        requests[0].credential_injections[0].handle,
+        SecretHandle::new("interactive-user-google-token").unwrap(),
+        "the other active user's account must remain isolated"
+    );
+}
+
+#[tokio::test]
+async fn gmail_send_message_accepts_structured_fields_and_encodes_raw_body() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "to": ["qa@example.test", "ops@example.test"],
+                "cc": "lead@example.test",
+                "subject": "Reborn QA marker",
+                "body": "REBORN_QA_GMAIL_MARKER"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(body.get("to").is_none());
+    assert!(body.get("subject").is_none());
+    let raw = body["raw"].as_str().expect("raw body");
+    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(raw).unwrap()).unwrap();
+    assert!(decoded.contains("To: qa@example.test, ops@example.test\r\n"));
+    assert!(decoded.contains("Cc: lead@example.test\r\n"));
+    assert!(decoded.contains("Subject: Reborn QA marker\r\n"));
+    assert!(decoded.contains("\r\n\r\nREBORN_QA_GMAIL_MARKER"));
+}
+
+#[tokio::test]
+async fn gmail_send_message_encodes_non_ascii_structured_headers() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "from": "José <jose@example.test>",
+                "to": "Zoë <zoe@example.test>",
+                "subject": "Résumé ready",
+                "body": "REBORN_QA_GMAIL_MARKER"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let raw = body["raw"].as_str().expect("raw body");
+    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(raw).unwrap()).unwrap();
+    assert!(decoded.contains("From: =?UTF-8?B?Sm9zw6k=?= <jose@example.test>\r\n"));
+    assert!(decoded.contains("To: =?UTF-8?B?Wm/Dqw==?= <zoe@example.test>\r\n"));
+    assert!(decoded.contains("Subject: =?UTF-8?B?"));
+    assert!(!decoded.contains("From: José"));
+    assert!(!decoded.contains("To: Zoë"));
+    assert!(!decoded.contains("Subject: Résumé ready"));
+}
+
+#[tokio::test]
+async fn gmail_send_message_raw_payload_drops_structured_fields_before_egress() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "raw": "base64url-rfc822",
+                "threadId": "thread-123",
+                "to": "qa@example.test",
+                "subject": "must not leak",
+                "body": "must not leak"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["raw"], "base64url-rfc822");
+    assert_eq!(body["threadId"], "thread-123");
+    assert!(body.get("to").is_none());
+    assert!(body.get("subject").is_none());
+    assert!(body.get("body").is_none());
+}
+
+#[tokio::test]
+async fn gmail_send_message_infers_subject_when_structured_subject_is_omitted() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "to": "qa@example.test",
+                "body": "Deployment finished successfully.\n\nAll checks passed."
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let raw = body["raw"].as_str().expect("raw body");
+    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(raw).unwrap()).unwrap();
+    assert!(decoded.contains("To: qa@example.test\r\n"));
+    assert!(decoded.contains("Subject: Deployment finished successfully.\r\n"));
+    assert!(decoded.contains("\r\n\r\nDeployment finished successfully.\n\nAll checks passed."));
+}
+
+#[tokio::test]
+async fn gmail_send_message_rejects_structured_header_injection_before_egress() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "to": "qa@example.test\r\nBcc: leaked@example.test",
+                "subject": "Reborn QA marker",
+                "body": "REBORN_QA_GMAIL_MARKER"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]
@@ -1038,7 +1651,7 @@ async fn gsuite_handler_maps_panicking_runtime_egress_to_backend() {
 }
 
 #[tokio::test]
-async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_ambiguous() {
+async fn gsuite_handler_handles_missing_hidden_and_duplicate_google_accounts() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let egress = Arc::new(RecordingEgress::permissive_success());
@@ -1102,7 +1715,7 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
         true,
     )
     .await;
-    let error = dispatch_error(
+    let output = dispatch_ok(
         auth,
         scope,
         GMAIL_SEND_MESSAGE_CAPABILITY_ID,
@@ -1111,8 +1724,8 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     )
     .await;
 
-    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
-    assert!(egress.requests().is_empty());
+    assert_eq!(output["status"], 200);
+    assert_eq!(egress.requests().len(), 1);
 }
 
 #[tokio::test]

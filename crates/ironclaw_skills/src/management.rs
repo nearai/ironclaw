@@ -11,8 +11,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RootFilesystem,
-    ScopedFilesystem,
+    BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RecordVersion,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, VirtualPath};
 
@@ -144,6 +144,18 @@ impl RootFilesystem for SkillManagementRootFilesystem {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
     }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Review fix (PR #5749, round 3): this wrapper forwards `capabilities()`
+        // to the inner backend verbatim, so if the inner backend declares CAS
+        // delete support, `delete_if_version` must delegate too instead of
+        // falling through to the trait default `Unsupported`.
+        self.inner.delete_if_version(path, expected_version).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +167,9 @@ pub struct SkillSummary {
     pub keywords: Vec<String>,
     pub tags: Vec<String>,
     pub requires_skills: Vec<String>,
+    /// Whether the skill participates in automatic activation (mirrors
+    /// `SkillManifest::auto_activate`). `false` means explicit-mention only.
+    pub auto_activate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -786,6 +801,7 @@ async fn read_skill_summary(
         keywords: parsed.manifest.activation.keywords,
         tags: parsed.manifest.activation.tags,
         requires_skills: parsed.manifest.requires.skills,
+        auto_activate: parsed.manifest.auto_activate,
     }))
 }
 

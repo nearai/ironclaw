@@ -50,6 +50,7 @@ struct State {
     entries: HashMap<VirtualPath, StoredEntry>,
     indexes: HashMap<String, Vec<IndexSpec>>,
     event_logs: HashMap<String, Vec<EventRecord>>,
+    sequences: HashMap<String, SeqNo>,
 }
 
 /// In-memory backend serving the full unified [`RootFilesystem`] surface.
@@ -64,6 +65,7 @@ impl InMemoryBackend {
                 entries: HashMap::new(),
                 indexes: HashMap::new(),
                 event_logs: HashMap::new(),
+                sequences: HashMap::new(),
             }),
         }
     }
@@ -145,6 +147,8 @@ impl RootFilesystem for InMemoryBackend {
             state
                 .entries
                 .retain(|key, _| !key.as_str().starts_with(&prefix));
+            clear_event_logs_under(&mut state.event_logs, path.as_str(), &prefix);
+            clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
             return Ok(());
         }
         let prefix = with_trailing_slash(path.as_str());
@@ -152,12 +156,41 @@ impl RootFilesystem for InMemoryBackend {
         state
             .entries
             .retain(|key, _| !key.as_str().starts_with(&prefix));
+        clear_event_logs_under(&mut state.event_logs, path.as_str(), &prefix);
+        clear_sequences_under(&mut state.sequences, path.as_str(), &prefix);
         if state.entries.len() == before {
             return Err(FilesystemError::NotFound {
                 path: path.clone(),
                 operation: FilesystemOperation::Delete,
             });
         }
+        Ok(())
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Deliberately not `check_cas`: its Version arm collapses an absent
+        // row into VersionMismatch{found: None}, but delete callers must see
+        // absent as NotFound (already gone) vs present-at-another-version as
+        // VersionMismatch (gone stale). Single-key: no subtree/log sweep.
+        let mut state = self.state.lock().await;
+        let Some(current) = state.entries.get(path).map(|stored| stored.version) else {
+            return Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Delete,
+            });
+        };
+        if expected_version != current {
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(expected_version),
+                found: Some(current),
+            });
+        }
+        state.entries.remove(path);
         Ok(())
     }
 
@@ -374,6 +407,30 @@ impl RootFilesystem for InMemoryBackend {
         Ok(next)
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        // Single lock acquisition for the whole batch — the in-memory analogue
+        // of one round-trip — preserving append order.
+        let mut state = self.state.lock().await;
+        let log = state
+            .event_logs
+            .entry(path.as_str().to_string())
+            .or_default();
+        let mut seqs = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            let next = log
+                .last()
+                .map(|rec| rec.seq.next())
+                .unwrap_or_else(|| SeqNo::ZERO.next());
+            log.push(EventRecord { seq: next, payload });
+            seqs.push(next);
+        }
+        Ok(seqs)
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,
@@ -388,6 +445,35 @@ impl RootFilesystem for InMemoryBackend {
             .filter(|record| record.seq > from)
             .cloned()
             .collect())
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let state = self.state.lock().await;
+        let Some(log) = state.event_logs.get(path.as_str()) else {
+            return Ok(Vec::new());
+        };
+        Ok(log
+            .iter()
+            .filter(|record| record.seq > from)
+            .take(max_records)
+            .cloned()
+            .collect())
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let mut state = self.state.lock().await;
+        let next = state
+            .sequences
+            .entry(path.as_str().to_string())
+            .or_insert_with(|| SeqNo::ZERO.next());
+        let reserved = *next;
+        *next = next.next();
+        Ok(reserved)
     }
 
     // Legacy bytes ops — default impls in the trait route them through put/get
@@ -546,6 +632,28 @@ fn with_trailing_slash(s: &str) -> String {
     }
 }
 
+/// Drop any reserved sequence counter for `exact` and every path under
+/// `prefix` (the trailing-slash form of `exact`). Mirrors the entries-delete
+/// subtree semantics so a delete/recreate of the same path restarts its
+/// sequence from 1 instead of resuming stale state. The exact match is kept
+/// separate from the prefix scan so a sibling sharing a string prefix
+/// (`/a/b` vs `/a/bc`) is not swept.
+fn clear_sequences_under(sequences: &mut HashMap<String, SeqNo>, exact: &str, prefix: &str) {
+    sequences.retain(|key, _| key.as_str() != exact && !key.starts_with(prefix));
+}
+
+/// Drop the append-event log for `exact` and every log under `prefix`. Append-only
+/// finalized assistant messages live in `event_logs`, so a delete/recreate of the
+/// same thread path would otherwise rehydrate stale append-log history. Mirrors
+/// the entries/sequences subtree semantics.
+fn clear_event_logs_under(
+    event_logs: &mut HashMap<String, Vec<EventRecord>>,
+    exact: &str,
+    prefix: &str,
+) {
+    event_logs.retain(|key, _| key.as_str() != exact && !key.starts_with(prefix));
+}
+
 fn first_segment(s: &str) -> (&str, bool) {
     match s.find('/') {
         Some(idx) => (&s[..idx], true),
@@ -595,6 +703,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_batch_assigns_contiguous_ordered_seqs_matching_single_append() {
+        let fs = InMemoryBackend::new();
+        let log = vpath("/events/runtime/t/u/a");
+
+        // Seed one single append so the batch must continue the sequence.
+        let s0 = fs.append(&log, b"e0".to_vec()).await.unwrap();
+
+        let seqs = fs
+            .append_batch(&log, vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(seqs.len(), 3);
+        // Monotonic, contiguous, and continuing past the seeded append.
+        assert!(seqs[0] > s0);
+        assert!(seqs[0] < seqs[1] && seqs[1] < seqs[2]);
+
+        // Order + content preserved on read-back.
+        let records = fs.tail(&log, SeqNo::ZERO).await.unwrap();
+        let payloads: Vec<&[u8]> = records
+            .iter()
+            .map(|record| record.payload.as_slice())
+            .collect();
+        assert_eq!(payloads, vec![b"e0", b"e1", b"e2", b"e3"]);
+        assert_eq!(records[1].seq, seqs[0]);
+        assert_eq!(records[3].seq, seqs[2]);
+
+        // Empty batch is a no-op that returns no seqs.
+        assert!(fs.append_batch(&log, Vec::new()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reserve_sequence_assigns_path_local_monotonic_values() {
+        let fs = InMemoryBackend::new();
+        let thread_a = vpath("/threads/a/message_sequence");
+        let thread_b = vpath("/threads/b/message_sequence");
+
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 2);
+        assert_eq!(fs.reserve_sequence(&thread_b).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&thread_a).await.unwrap().get(), 3);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_subtree_clears_its_reserved_sequences() {
+        // Counters are now path-scoped in a side table rather than embedded in
+        // the thread record, so delete must sweep them or a delete/recreate of
+        // the same path would resume from stale state. A sibling that merely
+        // shares a string prefix must NOT be swept.
+        let fs = InMemoryBackend::new();
+        let seq_path = vpath("/threads/a/message_sequence");
+        let sibling = vpath("/threads/ab/message_sequence");
+        let thread_dir = vpath("/threads/a");
+
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 1);
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 2);
+        assert_eq!(fs.reserve_sequence(&sibling).await.unwrap().get(), 1);
+
+        // Materialize an entry so the directory delete has something to remove,
+        // then delete the whole /threads/a subtree.
+        fs.put(&seq_path, Entry::bytes(vec![1]), CasExpectation::Any)
+            .await
+            .unwrap();
+        fs.delete(&thread_dir).await.unwrap();
+
+        // The deleted subtree's counter restarts from 1.
+        assert_eq!(fs.reserve_sequence(&seq_path).await.unwrap().get(), 1);
+        // The string-prefix sibling /threads/ab is untouched.
+        assert_eq!(fs.reserve_sequence(&sibling).await.unwrap().get(), 2);
+    }
+
+    #[tokio::test]
     async fn cas_absent_rejects_when_present() {
         let fs = InMemoryBackend::new();
         let path = vpath("/secrets/leases/L1");
@@ -627,6 +806,107 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_if_version_distinguishes_missing_stale_and_current() {
+        let fs = InMemoryBackend::new();
+        let path = vpath("/secrets/leases/cas-delete");
+
+        // Missing path is NotFound (already gone), never VersionMismatch.
+        let err = fs
+            .delete_if_version(&path, RecordVersion::from_backend(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
+
+        // Simulates the state a concurrent writer would leave behind (this
+        // is a sequential script, not a real race — see
+        // concurrent_cas_storm.rs for genuine parallel coverage): the
+        // version the deleter read (v1) is bumped by a put before the
+        // delete lands. The stale delete loses with the observed version
+        // and the entry survives at v2.
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let log_seq = fs.append(&path, b"kept".to_vec()).await.unwrap();
+        let v2 = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+            .await
+            .unwrap();
+        let err = fs.delete_if_version(&path, v1).await.unwrap_err();
+        match err {
+            FilesystemError::VersionMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(found, Some(v2));
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v2);
+        assert_eq!(got.entry.body, vec![2]);
+
+        // Correct version deletes exactly the entry — single-key, so the
+        // event log at the same path survives (blind delete would sweep it).
+        fs.delete_if_version(&path, v2).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+        let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].seq, log_seq);
+    }
+
+    /// Pins the ABA hazard `delete_if_version`'s doc comment warns about:
+    /// version tokens are not generation-stable, so a version captured
+    /// before a delete+recreate cycle can match a *different* incarnation
+    /// of the same path. This is documented, known behavior — not a bug —
+    /// but was previously asserted only in prose. Round-A review finding
+    /// (PR #5749): pin it with a real assertion so a future change to this
+    /// contract (e.g. generation-stable versions) breaks a test loudly
+    /// instead of silently.
+    #[tokio::test]
+    async fn delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+        let fs = InMemoryBackend::new();
+        let path = vpath("/secrets/leases/cas-delete-aba");
+
+        // First incarnation: created and fully deleted.
+        let v1_first = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+
+        // Second incarnation restarts the version counter at the same raw
+        // value as the first (version is not generation-stable).
+        let v1_second = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        assert_eq!(
+            v1_first, v1_second,
+            "version must restart after a full delete, or this ABA hazard doesn't apply"
+        );
+
+        // The stale `v1_first` token — captured against the first
+        // incarnation — incorrectly authorizes deleting the second
+        // incarnation's live data. This is the documented hazard, not a
+        // regression: callers that recreate paths must pair every
+        // successful delete with an unconditional postcondition recheck,
+        // per the trait doc comment.
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(
+            fs.get(&path).await.unwrap().is_none(),
+            "stale version token wrongly matched and deleted the second incarnation"
+        );
     }
 
     #[tokio::test]
@@ -824,6 +1104,48 @@ mod tests {
         // Now NotFound — the subtree is gone.
         let err = fs.delete(&dir).await.unwrap_err();
         assert!(matches!(err, FilesystemError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_sweeps_append_event_logs_under_path() {
+        // Append-only finalized assistant messages live in the per-thread
+        // append log. Deleting a thread must clear that log so a later
+        // recreate of the same path does not replay stale history. This covers
+        // both delete branches: an exact append-log path, and a thread-root
+        // directory delete whose log lives under the subtree.
+        let fs = InMemoryBackend::new();
+
+        // Exact-entry branch: an entry and an append log share the deleted
+        // path. Deleting the entry must also sweep the co-located log.
+        let exact = vpath("/threads/exact");
+        fs.put(&exact, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.append(&exact, b"finalized-a".to_vec()).await.unwrap();
+        assert_eq!(fs.tail(&exact, SeqNo::ZERO).await.unwrap().len(), 1);
+        fs.delete(&exact).await.unwrap();
+        assert!(fs.tail(&exact, SeqNo::ZERO).await.unwrap().is_empty());
+
+        // Directory branch: the thread root has no exact entry, but a child
+        // entry and an append log live under it. Deleting the root must sweep
+        // the log too.
+        let thread_root = vpath("/threads/t1");
+        let thread_doc = vpath("/threads/t1/thread.json");
+        let message_log = vpath("/threads/t1/messages_append.log");
+        fs.put(&thread_doc, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.append(&message_log, b"finalized-b".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(fs.tail(&message_log, SeqNo::ZERO).await.unwrap().len(), 1);
+
+        fs.delete(&thread_root).await.unwrap();
+
+        // History is gone, and recreating the same thread starts from an empty
+        // log rather than resurrecting the finalized message.
+        assert!(fs.get(&thread_doc).await.unwrap().is_none());
+        assert!(fs.tail(&message_log, SeqNo::ZERO).await.unwrap().is_empty());
     }
 
     #[tokio::test]

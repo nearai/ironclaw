@@ -12,7 +12,7 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
-use crate::{ProductCommandContext, ProductWorkflowError};
+use crate::{ProductCommandContext, ProductWorkflowError, RebornChannelConnectStrategy};
 
 pub(crate) const LIFECYCLE_ID_MAX_BYTES: usize = 256;
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
@@ -294,11 +294,25 @@ impl LifecycleProductAction {
     }
 }
 
+/// Structured "the caller must connect this channel" affordance attached to a
+/// channel-extension activation result. Carried verbatim (snake_case) to the
+/// WebChat as a capability display preview so the in-chat pairing panel is
+/// driven by structured state, never by parsing the activation message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelConnectionRequirement {
+    pub channel: String,
+    pub strategy: RebornChannelConnectStrategy,
+    pub instructions: String,
+    pub input_placeholder: String,
+    pub submit_label: String,
+    pub error_message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleProductPayload {
     ExtensionSearch {
-        extensions: Vec<LifecycleExtensionSummary>,
+        extensions: Vec<LifecycleSearchExtensionSummary>,
         count: usize,
     },
     ExtensionList {
@@ -308,9 +322,15 @@ pub enum LifecycleProductPayload {
     ExtensionInstall {
         installed: bool,
         visible_capability_ids: Vec<String>,
+        #[serde(default)]
+        next_step: String,
     },
     ExtensionActivate {
         activated: bool,
+        #[serde(default)]
+        visible_capability_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_required: Option<ChannelConnectionRequirement>,
     },
     ExtensionRemove {
         removed: bool,
@@ -340,6 +360,8 @@ pub struct LifecycleExtensionSummary {
     pub source: LifecycleExtensionSource,
     pub runtime_kind: LifecycleExtensionRuntimeKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visible_capability_ids: Vec<String>,
     pub visible_read_only_capability_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -349,9 +371,33 @@ pub struct LifecycleExtensionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleSearchExtensionSummary {
+    #[serde(flatten)]
+    pub summary: LifecycleExtensionSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_phase: Option<LifecyclePhase>,
+}
+
+/// Whether an installed extension is tenant-shared or private to the caller
+/// (#5459 P1). Serialized on the wire; `#[serde(default)]`-friendly via
+/// `Option` on the summary so pre-#5459 payloads keep deserializing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleInstallScope {
+    /// Installed for the whole tenant (admin install) — visible to every user.
+    Shared,
+    /// Installed privately by the caller — visible only to them.
+    Private,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     pub phase: LifecyclePhase,
+    /// `None` only when the caller has no visible installation (projection of
+    /// an uninstalled package); list responses always carry `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_scope: Option<LifecycleInstallScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +433,12 @@ pub enum LifecycleExtensionCredentialSetup {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSource {
     HostBundled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleExtensionSurfaceKind {
+    ExternalChannel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +539,19 @@ pub trait LifecycleProductFacade: Send + Sync {
         context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
+
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
+    /// facade implements it.
+    async fn import_extension_bundle(
+        &self,
+        _context: LifecycleProductContext,
+        _bundle: Vec<u8>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension import is not supported by this runtime".to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]

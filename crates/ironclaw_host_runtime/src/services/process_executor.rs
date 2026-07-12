@@ -1,10 +1,117 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
 };
+
+struct ProcessLatencyFields {
+    capability_id: String,
+    runtime: String,
+    tenant_id: String,
+    user_id: String,
+    agent_id: String,
+    project_id: String,
+    mission_id: String,
+    thread_id: String,
+    invocation_id: String,
+}
+
+impl ProcessLatencyFields {
+    fn from_request(
+        started_at: Option<Instant>,
+        request: &ProcessExecutionRequest,
+    ) -> Option<Self> {
+        started_at?;
+        Some(Self {
+            capability_id: request.capability_id.to_string(),
+            runtime: format!("{:?}", request.runtime),
+            tenant_id: request.scope.tenant_id.as_str().to_string(),
+            user_id: request.scope.user_id.as_str().to_string(),
+            agent_id: request
+                .scope
+                .agent_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            project_id: request
+                .scope
+                .project_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            mission_id: request
+                .scope
+                .mission_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            thread_id: request
+                .scope
+                .thread_id
+                .as_ref()
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_default(),
+            invocation_id: request.scope.invocation_id.to_string(),
+        })
+    }
+}
+
+fn trace_process_latency_ok(
+    operation: &'static str,
+    fields: Option<&ProcessLatencyFields>,
+    started_at: Option<Instant>,
+) {
+    let (Some(fields), Some(started_at)) = (fields, started_at) else {
+        return;
+    };
+
+    ironclaw_observability::live_latency_trace_ok!(
+        "process_executor",
+        operation,
+        Some(started_at),
+        capability_id = fields.capability_id.as_str(),
+        runtime = fields.runtime.as_str(),
+        tenant_id = fields.tenant_id.as_str(),
+        user_id = fields.user_id.as_str(),
+        agent_id = fields.agent_id.as_str(),
+        project_id = fields.project_id.as_str(),
+        mission_id = fields.mission_id.as_str(),
+        thread_id = fields.thread_id.as_str(),
+        invocation_id = fields.invocation_id.as_str(),
+        "process execution operation completed",
+    );
+}
+
+fn trace_process_latency_error<E: ?Sized>(
+    operation: &'static str,
+    fields: Option<&ProcessLatencyFields>,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    let (Some(fields), Some(started_at)) = (fields, started_at) else {
+        return;
+    };
+
+    ironclaw_observability::live_latency_trace_error!(
+        "process_executor",
+        operation,
+        Some(started_at),
+        "process_execution_error",
+        capability_id = fields.capability_id.as_str(),
+        runtime = fields.runtime.as_str(),
+        tenant_id = fields.tenant_id.as_str(),
+        user_id = fields.user_id.as_str(),
+        agent_id = fields.agent_id.as_str(),
+        project_id = fields.project_id.as_str(),
+        mission_id = fields.mission_id.as_str(),
+        thread_id = fields.thread_id.as_str(),
+        invocation_id = fields.invocation_id.as_str(),
+        "process execution operation failed",
+    );
+}
 
 #[derive(Clone)]
 pub(super) struct HostProcessExecutor {
@@ -30,15 +137,44 @@ impl ProcessExecutor for HostProcessExecutor {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        let started_at = live_latency_started_at();
+        let fields = ProcessLatencyFields::from_request(started_at, &request);
         if is_process_sandbox_request(&request) {
             let Some(executor) = &self.process_sandbox_executor else {
-                return Err(ProcessExecutionError::new(
-                    "missing_process_sandbox_executor",
-                ));
+                let error = ProcessExecutionError::new("missing_process_sandbox_executor");
+                trace_process_latency_error(
+                    "host_process_execute",
+                    fields.as_ref(),
+                    started_at,
+                    &error,
+                );
+                return Err(error);
             };
-            return executor.execute(request).await;
+            let result = executor.execute(request).await;
+            match &result {
+                Ok(_) => {
+                    trace_process_latency_ok("host_process_execute", fields.as_ref(), started_at)
+                }
+                Err(error) => trace_process_latency_error(
+                    "host_process_execute",
+                    fields.as_ref(),
+                    started_at,
+                    error,
+                ),
+            }
+            return result;
         }
-        self.dispatch_executor.execute(request).await
+        let result = self.dispatch_executor.execute(request).await;
+        match &result {
+            Ok(_) => trace_process_latency_ok("host_process_execute", fields.as_ref(), started_at),
+            Err(error) => trace_process_latency_error(
+                "host_process_execute",
+                fields.as_ref(),
+                started_at,
+                error,
+            ),
+        }
+        result
     }
 }
 
@@ -64,14 +200,24 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        let started_at = live_latency_started_at();
+        let fields = ProcessLatencyFields::from_request(started_at, &request);
         if request.cancellation.is_cancelled() {
-            return Err(ProcessExecutionError::new("cancelled"));
+            let error = ProcessExecutionError::new("cancelled");
+            trace_process_latency_error(
+                "runtime_dispatch_execute",
+                fields.as_ref(),
+                started_at,
+                &error,
+            );
+            return Err(error);
         }
         let result = self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
                 capability_id: request.capability_id,
                 scope: request.scope,
+                authenticated_actor_user_id: request.authenticated_actor_user_id,
                 estimate: request.estimate,
                 mounts: Some(request.mounts),
                 resource_reservation: request.resource_reservation,
@@ -80,11 +226,20 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
             .await
             .map_err(|error| ProcessExecutionError::new(error.event_kind()))?;
         if request.cancellation.is_cancelled() {
-            return Err(ProcessExecutionError::new("cancelled"));
+            let error = ProcessExecutionError::new("cancelled");
+            trace_process_latency_error(
+                "runtime_dispatch_execute",
+                fields.as_ref(),
+                started_at,
+                &error,
+            );
+            return Err(error);
         }
-        Ok(ProcessExecutionResult {
+        let result = Ok(ProcessExecutionResult {
             output: result.output,
-        })
+        });
+        trace_process_latency_ok("runtime_dispatch_execute", fields.as_ref(), started_at);
+        result
     }
 }
 
@@ -146,6 +301,48 @@ mod tests {
     #[derive(Clone)]
     struct CancellingDispatcher {
         cancellation: ProcessCancellationToken,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingCapabilityDispatcher {
+        calls: Arc<Mutex<Vec<CapabilityDispatchRequest>>>,
+    }
+
+    impl RecordingCapabilityDispatcher {
+        fn calls(&self) -> Vec<CapabilityDispatchRequest> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityDispatcher for RecordingCapabilityDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.clone());
+            Ok(CapabilityDispatchResult {
+                capability_id: request.capability_id,
+                provider: ExtensionId::new("demo").unwrap(),
+                runtime: RuntimeKind::Script,
+                output: json!({"ok": true}),
+                display_preview: None,
+                usage: ResourceUsage::default(),
+                receipt: ResourceReceipt {
+                    id: ResourceReservationId::new(),
+                    scope: request.scope,
+                    status: ReservationStatus::Reconciled,
+                    estimate: ResourceEstimate::default(),
+                    actual: Some(ResourceUsage::default()),
+                },
+            })
+        }
     }
 
     #[async_trait]
@@ -287,6 +484,26 @@ mod tests {
         assert_eq!(error.kind, "cancelled");
     }
 
+    #[tokio::test]
+    async fn runtime_dispatch_executor_preserves_authenticated_actor() {
+        // safety: test dispatcher call is in-memory and does not execute an external capability.
+        let dispatcher = Arc::new(RecordingCapabilityDispatcher::default());
+        let executor = RuntimeDispatchProcessExecutor::new(dispatcher.clone());
+        let mut request = sample_process_request("demo.background", RuntimeKind::Script);
+        let actor = UserId::new("slack-alice").unwrap();
+        request.authenticated_actor_user_id = Some(actor.clone());
+        let expected_scope = request.scope.clone();
+        let expected_capability_id = request.capability_id.clone();
+
+        executor.execute(request).await.unwrap();
+
+        let calls = dispatcher.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].authenticated_actor_user_id, Some(actor));
+        assert_eq!(calls[0].scope, expected_scope);
+        assert_eq!(calls[0].capability_id, expected_capability_id);
+    }
+
     #[test]
     fn dispatch_error_kind_maps_dispatch_variants() {
         let capability = CapabilityId::new("demo.background").unwrap();
@@ -342,6 +559,7 @@ mod tests {
             (
                 DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
+                    safe_summary: None,
                 },
                 "output_decode",
             ),
@@ -368,6 +586,7 @@ mod tests {
                 thread_id: Some(ThreadId::new("thread").unwrap()),
                 invocation_id: InvocationId::new(),
             },
+            authenticated_actor_user_id: None,
             extension_id: ExtensionId::new("system").unwrap(),
             capability_id: CapabilityId::new(capability_id).unwrap(),
             runtime,

@@ -3,6 +3,15 @@ use thiserror::Error;
 
 use crate::{MessageStatus, ThreadMessageId};
 
+/// Specific timestamp contract violation on a transcript message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TimestampViolation {
+    #[error("missing durable timestamps")]
+    MissingDurableTimestamps,
+    #[error("cleared durable timestamps")]
+    ClearedDurableTimestamps,
+}
+
 /// Canonical thread/transcript service errors.
 #[derive(Debug, Error)]
 pub enum SessionThreadError {
@@ -45,6 +54,14 @@ pub enum SessionThreadError {
     OverlappingSummaryRange {
         start_sequence: u64,
         end_sequence: u64,
+    },
+    #[error("invalid attachment on inbound message: {0}")]
+    InvalidAttachment(String),
+    #[error("{context} timestamp violation on message {message_id}: {violation}")]
+    InvalidMessageTimestamp {
+        message_id: ThreadMessageId,
+        context: &'static str,
+        violation: TimestampViolation,
     },
     #[error("failed to create generated thread id: {0}")]
     GeneratedThreadId(String),

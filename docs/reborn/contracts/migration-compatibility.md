@@ -203,6 +203,10 @@ Cutover requirements:
 - one config-driven production composition root for `HostRuntimeServices` and adjacent shipped reference/userland services;
 - caller-level tests across `CapabilityHost -> Dispatcher -> Adapter -> Process/Event/Memory` paths;
 - explicit migration/backfill path for reused legacy schemas;
+- RootFilesystem physical-layout migrations that replace a hot production blob
+  with rows, such as turn state `/turns/state.json` to `/turns/rows/v1`, are the
+  final stack step before production exposure; the stack must not go live until
+  the migration has run idempotently and row readback is verified;
 - rollback notes for any bridge that can affect production state;
 - no accidental dual source of truth between legacy `src/` services and Reborn repositories.
 

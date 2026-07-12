@@ -1,6 +1,7 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
 use std::{
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -10,8 +11,18 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::{
+    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
+    AutoApproveSettingStore, CapabilityPermissionStoreError, PersistentApprovalAction,
+    PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+};
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
+    PermissionMode, Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
@@ -19,43 +30,70 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
-    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
-    AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
+    AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
+    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
+    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller, ProjectService,
+    ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornOutboundDeliveryModality,
+    RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetProjectRequest,
+    RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
+    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
+    RebornOperatorToolInfo, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
+    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
+};
+use ironclaw_product_workflow::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, InMemorySessionThreadService, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
@@ -65,15 +103,27 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
+use secrecy::SecretString;
 use serde_json::json;
 use tokio::sync::{Notify, oneshot};
 
 fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
+}
+
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
 }
 
 fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
@@ -134,6 +184,8 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             title: Some("M2 facade contract thread".to_string()),
             metadata_json: None,
             goal: None,
+            created_at: None,
+            updated_at: None,
         },
         messages: vec![ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
@@ -141,6 +193,8 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             sequence: 1,
             kind: MessageKind::User,
             status: MessageStatus::Submitted,
+            created_at: None,
+            updated_at: None,
             actor_id: Some(owner.user_id.as_str().to_string()),
             source_binding_id: Some("webui-src:test".to_string()),
             reply_target_binding_id: Some("webui-reply:test".to_string()),
@@ -149,6 +203,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some("timeline from fake M2 port".to_string()),
+            attachments: Vec::new(),
             redaction_ref: None,
         }],
         summary_artifacts: vec![],
@@ -200,14 +255,18 @@ struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
+    retries: Mutex<Vec<RetryTurnRequest>>,
+    retry_attempts: Mutex<usize>,
     run_state_requests: Mutex<Vec<GetRunStateRequest>>,
     submit_error: Mutex<Option<TurnError>>,
+    retry_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
+    run_state_failure: Mutex<Option<SanitizedFailure>>,
 }
 
 impl Default for FakeTurnCoordinator {
@@ -216,14 +275,18 @@ impl Default for FakeTurnCoordinator {
             submissions: Mutex::default(),
             cancellations: Mutex::default(),
             resumptions: Mutex::default(),
+            retries: Mutex::default(),
+            retry_attempts: Mutex::default(),
             run_state_requests: Mutex::default(),
             submit_error: Mutex::default(),
+            retry_error: Mutex::default(),
             run_state_error: Mutex::default(),
             run_state_actor: Mutex::new(Some(turn_actor_for_user("user-alpha"))),
             explicit_run_status: Mutex::default(),
             parked_gate_ref: Mutex::default(),
             parked_auth_gate: Mutex::default(),
             parked_approval_gate: Mutex::default(),
+            run_state_failure: Mutex::default(),
         }
     }
 }
@@ -239,6 +302,13 @@ impl FakeTurnCoordinator {
     fn with_run_state_error(error: TurnError) -> Self {
         Self {
             run_state_error: Mutex::new(Some(error)),
+            ..Self::default()
+        }
+    }
+
+    fn with_retry_error(error: TurnError) -> Self {
+        Self {
+            retry_error: Mutex::new(Some(error)),
             ..Self::default()
         }
     }
@@ -273,6 +343,10 @@ impl FakeTurnCoordinator {
         *self.explicit_run_status.lock().expect("lock") = Some(status);
     }
 
+    fn set_run_state_failure(&self, failure: SanitizedFailure) {
+        *self.run_state_failure.lock().expect("lock") = Some(failure);
+    }
+
     fn submission_count(&self) -> usize {
         self.submissions.lock().expect("lock").len()
     }
@@ -283,6 +357,14 @@ impl FakeTurnCoordinator {
 
     fn resumption_count(&self) -> usize {
         self.resumptions.lock().expect("lock").len()
+    }
+
+    fn retry_count(&self) -> usize {
+        self.retries.lock().expect("lock").len()
+    }
+
+    fn retry_attempt_count(&self) -> usize {
+        *self.retry_attempts.lock().expect("lock")
     }
 
     fn run_state_request_count(&self) -> usize {
@@ -305,8 +387,51 @@ impl FakeTurnCoordinator {
             .map(|request| request.precondition)
     }
 
+    fn last_retry(&self) -> Option<RetryTurnRequest> {
+        self.retries.lock().expect("lock").last().cloned()
+    }
+
     fn last_submission_scope(&self) -> Option<ironclaw_turns::TurnScope> {
         self.submissions
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.scope.clone())
+    }
+
+    fn last_submission_origin_kind(&self) -> Option<TurnOriginKind> {
+        self.submissions
+            .lock()
+            .expect("lock")
+            .last()
+            .and_then(|request| request.product_context.as_ref().map(|c| c.origin))
+    }
+
+    fn last_cancellation_scope(&self) -> Option<TurnScope> {
+        self.cancellations
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.scope.clone())
+    }
+
+    fn last_cancellation_actor(&self) -> Option<TurnActor> {
+        self.cancellations
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.actor.clone())
+    }
+
+    /// Returns the `TurnScope` from the most recent `get_run_state` call.
+    ///
+    /// Used by trigger-thread tests to assert that `resolve_gate`,
+    /// `cancel_run`, and `get_run_state` receive the trigger-owned scope
+    /// (with `owner_user_id = Some(creator_user_id)`) rather than the
+    /// WebUI caller's session scope.  This distinction is what #4754 ("Part A")
+    /// and the `check_automation_trigger_access` reconstruction guarantee.
+    fn last_run_state_scope(&self) -> Option<TurnScope> {
+        self.run_state_requests
             .lock()
             .expect("lock")
             .last()
@@ -349,6 +474,19 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id: TurnRunId::new(),
             status: TurnStatus::Queued,
             event_cursor: EventCursor(11),
+        })
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        *self.retry_attempts.lock().expect("lock") += 1;
+        if let Some(error) = self.retry_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.retries.lock().expect("lock").push(request);
+        Ok(RetryTurnResponse {
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(19),
         })
     }
 
@@ -402,9 +540,12 @@ impl TurnCoordinator for FakeTurnCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: self.run_state_failure.lock().expect("lock").clone(),
             event_cursor: EventCursor(17),
+            product_context: None,
+            resume_disposition: None,
         })
     }
 }
@@ -474,6 +615,13 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
         panic!("resume_turn is not used by delete submit serialization tests")
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by delete submit serialization tests")
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         panic!("cancel_run is not used by delete submit serialization tests")
     }
@@ -496,9 +644,12 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(29),
+            product_context: None,
+            resume_disposition: None,
         })
     }
 }
@@ -536,7 +687,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         let decision = request.decision;
         self.resolutions.lock().expect("lock").push(request);
         Ok(match decision {
-            ApprovalInteractionDecision::ApproveOnce => {
+            ApprovalInteractionDecision::ApproveOnce | ApprovalInteractionDecision::AlwaysAllow => {
                 ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
                     run_id,
                     status: TurnStatus::Queued,
@@ -544,15 +695,95 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 })
             }
             ApprovalInteractionDecision::Deny => {
-                ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                ResolveApprovalInteractionResponse::Resumed(ResumeTurnResponse {
                     run_id,
-                    status: TurnStatus::Cancelled,
+                    status: TurnStatus::Queued,
                     event_cursor: EventCursor(23),
-                    already_terminal: false,
-                    actor: None,
                 })
             }
         })
+    }
+}
+
+struct ThreadScopedApprovalInteractionService {
+    pending_thread_ids: HashSet<ThreadId>,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        if !self.pending_thread_ids.contains(&request.scope.thread_id) {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        let approval_request_id = ApprovalRequestId::new();
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id: TurnRunId::new(),
+                gate_ref: approval_gate_ref(approval_request_id).expect("approval gate ref"),
+                approval_request_id,
+                summary: "Approval required".to_string(),
+                action: ApprovalInteractionActionView::Dispatch {
+                    capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+                },
+            }],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        panic!("resolve is not used by thread approval filter tests")
+    }
+}
+
+struct ActorFallbackApprovalInteractionService {
+    pending_thread_id: ThreadId,
+    tenant_id: TenantId,
+    owner_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        let is_expected_scope = request.scope.thread_id == self.pending_thread_id
+            && request.scope.tenant_id == self.tenant_id
+            && request.scope.agent_id.as_ref() == Some(&self.agent_id)
+            && request.scope.project_id == self.project_id
+            && !request.scope.has_explicit_thread_owner()
+            && request.actor.user_id == self.owner_user_id;
+        if !is_expected_scope {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        let approval_request_id = ApprovalRequestId::new();
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id: TurnRunId::new(),
+                gate_ref: approval_gate_ref(approval_request_id).expect("approval gate ref"),
+                approval_request_id,
+                summary: "Approval required".to_string(),
+                action: ApprovalInteractionActionView::Dispatch {
+                    capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+                },
+            }],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        panic!("resolve is not used by actor-fallback approval list tests")
     }
 }
 
@@ -667,6 +898,7 @@ impl RecordingLifecycleFacade {
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+            surface_kinds: Vec::new(),
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: self.credential_requirements.clone(),
@@ -676,6 +908,7 @@ impl RecordingLifecycleFacade {
             extensions: vec![LifecycleInstalledExtensionSummary {
                 summary,
                 phase: LifecyclePhase::Configured,
+                install_scope: None,
             }],
             count: 1,
         })
@@ -756,16 +989,37 @@ struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
     limit: usize,
     run_limit: usize,
+    include_completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AutomationMutationAction {
+    Pause,
+    Resume,
+    Rename { name: AutomationName },
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+struct AutomationMutationCall {
+    caller: ProductAgentBoundCaller,
+    automation_id: String,
+    action: AutomationMutationAction,
 }
 
 #[derive(Default)]
 struct RecordingAutomationFacade {
     list_calls: Mutex<Vec<ListAutomationCall>>,
+    mutation_calls: Mutex<Vec<AutomationMutationCall>>,
 }
 
 impl RecordingAutomationFacade {
     fn list_calls(&self) -> Vec<ListAutomationCall> {
         self.list_calls.lock().expect("lock").clone()
+    }
+
+    fn mutation_calls(&self) -> Vec<AutomationMutationCall> {
+        self.mutation_calls.lock().expect("lock").clone()
     }
 }
 
@@ -783,6 +1037,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
                 caller,
                 limit: request.limit,
                 run_limit: request.run_limit,
+                include_completed: request.include_completed,
             });
         Ok(vec![automation_info(
             "trigger-listed",
@@ -791,21 +1046,283 @@ impl AutomationProductFacade for RecordingAutomationFacade {
             Some(RebornAutomationRunStatus::Ok),
         )])
     }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        // Trigger-thread access is not wired in the recording facade.
+        Ok(None)
+    }
+
+    async fn pause_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Pause,
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-paused",
+                "Daily status",
+                "0 9 * * *",
+                None,
+            )),
+        })
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Resume,
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-resumed",
+                "Daily status",
+                "0 9 * * *",
+                None,
+            )),
+        })
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        name: AutomationName,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Rename { name },
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-renamed",
+                "Renamed status",
+                "0 9 * * *",
+                None,
+            )),
+        })
+    }
+
+    async fn delete_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Delete,
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: None,
+        })
+    }
 }
 
 #[derive(Clone)]
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
+    scheduler_enabled: bool,
+    list_calls: Arc<Mutex<Vec<ListAutomationCall>>>,
+    /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
+    /// thread id so tests prove the lookup contract rather than accepting a
+    /// cached scope for any request.
+    resolve_scopes: HashMap<ThreadId, TriggerRunThreadScope>,
+    resolve_calls: Arc<Mutex<Vec<ThreadId>>>,
+}
+
+impl StaticAutomationFacade {
+    fn new(output: Vec<RebornAutomationInfo>) -> Self {
+        Self {
+            output,
+            scheduler_enabled: true,
+            list_calls: Arc::new(Mutex::new(Vec::new())),
+            resolve_scopes: HashMap::new(),
+            resolve_calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
+        self.scheduler_enabled = scheduler_enabled;
+        self
+    }
+
+    fn with_resolve_scope_for_thread(
+        mut self,
+        thread_id: ThreadId,
+        scope: TriggerRunThreadScope,
+    ) -> Self {
+        self.resolve_scopes.insert(thread_id, scope);
+        self
+    }
+
+    fn resolve_calls(&self) -> Vec<ThreadId> {
+        self.resolve_calls.lock().expect("lock").clone()
+    }
+
+    fn list_calls(&self) -> Vec<ListAutomationCall> {
+        self.list_calls.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
 impl AutomationProductFacade for StaticAutomationFacade {
+    fn scheduler_enabled(&self) -> bool {
+        self.scheduler_enabled
+    }
+
+    async fn list_automations(
+        &self,
+        caller: ProductAgentBoundCaller,
+        request: AutomationListRequest,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        self.list_calls
+            .lock()
+            .expect("lock")
+            .push(ListAutomationCall {
+                caller,
+                limit: request.limit,
+                run_limit: request.run_limit,
+                include_completed: request.include_completed,
+            });
+        Ok(self.output.clone())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        self.resolve_calls
+            .lock()
+            .expect("lock")
+            .push(thread_id.clone());
+        Ok(self.resolve_scopes.get(thread_id).cloned())
+    }
+}
+
+/// An automation facade that initially exposes one trigger thread scope but can
+/// have that scope revoked via `revoke()`. Used to verify that the service
+/// revalidates authorization on every call rather than caching the result.
+struct RevocableAutomationFacade {
+    thread_id: ThreadId,
+    scope: TriggerRunThreadScope,
+    revoked: Mutex<bool>,
+}
+
+impl RevocableAutomationFacade {
+    fn new(thread_id: ThreadId, caller: &WebUiAuthenticatedCaller) -> Self {
+        let scope = TriggerRunThreadScope {
+            agent_id: caller.agent_id.clone(),
+            project_id: caller.project_id.clone(),
+            creator_user_id: caller.user_id.clone(),
+        };
+        Self {
+            thread_id,
+            scope,
+            revoked: Mutex::new(false),
+        }
+    }
+
+    fn revoke(&self) {
+        *self.revoked.lock().expect("lock") = true;
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for RevocableAutomationFacade {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
         _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-        Ok(self.output.clone())
+        Ok(Vec::new())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        if *self.revoked.lock().expect("lock") {
+            return Ok(None);
+        }
+        if thread_id == &self.thread_id {
+            Ok(Some(self.scope.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// An automation facade whose `resolve_run_thread_scope` always returns a
+/// backend error (503 Unavailable, retryable). Used to verify that the timeline
+/// call surfaces the backend error rather than masking it as a 404.
+struct ErroringAutomationFacade {
+    error: RebornServicesError,
+}
+
+impl ErroringAutomationFacade {
+    fn unavailable() -> Self {
+        Self {
+            error: RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for ErroringAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationListRequest,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        Err(self.error.clone())
     }
 }
 
@@ -908,14 +1425,17 @@ fn automation_info(
     RebornAutomationInfo {
         automation_id: trigger_id.to_string(),
         name: name.into(),
-        source: RebornAutomationSource::Schedule { cron: cron.into() },
+        source: RebornAutomationSource::Schedule {
+            cron: cron.into(),
+            timezone: "UTC".to_string(),
+        },
         state: RebornAutomationState::Active,
         next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
         last_run_at: None,
         last_status,
         recent_runs: vec![RebornAutomationRecentRunInfo {
             run_id: Some(automation_run_id()),
-            thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+            thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
             fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
             status: RebornAutomationRecentRunStatus::Ok,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
@@ -1095,13 +1615,13 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         panic!("ScopeMismatchThreadStub::mark_message_submitted should not be reached")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
+        panic!("ScopeMismatchThreadStub::mark_message_rejected_busy should not be reached")
     }
 
     async fn append_assistant_draft(
@@ -1182,7 +1702,28 @@ enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
     ListPages,
-    SubmittedReplay { turn_run_id: Option<String> },
+    SubmittedReplay {
+        turn_run_id: Option<String>,
+    },
+    RejectedBusyReplay,
+    /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
+    /// message as RejectedBusy so no error surfaces to the caller.
+    RejectedBusyMarkFails {
+        /// Message id assigned by `accept_inbound_message`, shared so that
+        /// `reconcile_terminal_duplicate` can match it against the handoff.
+        message_id: ThreadMessageId,
+    },
+    /// `mark_message_rejected_busy` fails; reconcile path replays the accepted
+    /// message as legacy DeferredBusy.  Unlike `RejectedBusyMarkFails`,
+    /// `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate` accepts
+    /// only `RejectedBusy` as settled, so this replay does NOT satisfy
+    /// reconciliation.  The original mark failure surfaces as a retryable error
+    /// (Unavailable / 503) rather than a false-terminal RejectedBusy.
+    DeferredBusyMarkFails {
+        /// Message id assigned by `accept_inbound_message`, shared so that
+        /// `reconcile_terminal_duplicate` can match it against the handoff.
+        message_id: ThreadMessageId,
+    },
 }
 
 struct ScriptedThreadService {
@@ -1190,6 +1731,11 @@ struct ScriptedThreadService {
     history_requests: Mutex<Vec<ThreadHistoryRequest>>,
     list_requests: Mutex<Vec<ListThreadsForScopeRequest>>,
     list_responses: Mutex<Vec<ListThreadsForScopeResponse>>,
+    /// Tracks `replay_accepted_inbound_message` call count; used by
+    /// `RejectedBusyMarkFails` (and `DeferredBusyMarkFails`) to return `None`
+    /// on the first two calls (idempotency probes) and `Some(…)` on the third
+    /// call (reconcile probe) onward.
+    replay_call_count: Mutex<usize>,
 }
 
 impl ScriptedThreadService {
@@ -1199,6 +1745,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1208,6 +1755,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1217,6 +1765,7 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(responses),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1226,6 +1775,57 @@ impl ScriptedThreadService {
             history_requests: Mutex::new(Vec::new()),
             list_requests: Mutex::new(Vec::new()),
             list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    fn rejected_busy_replay() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyReplay,
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    /// Scripted service for the mark-failure reconcile path:
+    /// - `accept_inbound_message` accepts the message
+    /// - `mark_message_rejected_busy` returns a backend error
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(RejectedBusy)` on the third
+    ///   call (reconcile probe), so `reconcile_terminal_duplicate` settles
+    ///   without error
+    fn rejected_busy_mark_fails() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::RejectedBusyMarkFails {
+                message_id: ThreadMessageId::new(),
+            },
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    /// Scripted service for the legacy DeferredBusy mark-failure path:
+    /// - `accept_inbound_message` accepts the message
+    /// - `mark_message_rejected_busy` returns a backend error
+    /// - `replay_accepted_inbound_message` returns `None` on the first two
+    ///   calls (idempotency probes) and `Some(DeferredBusy)` on the reconcile
+    ///   probe.  `DeferredBusy` is non-terminal: `reconcile_terminal_duplicate`
+    ///   no longer accepts it as settled (only `RejectedBusy` qualifies), so the
+    ///   mark failure propagates as a retryable Unavailable error rather than
+    ///   silently producing a false-terminal RejectedBusy.
+    fn deferred_busy_mark_fails() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::DeferredBusyMarkFails {
+                message_id: ThreadMessageId::new(),
+            },
+            history_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
         }
     }
 
@@ -1254,7 +1854,10 @@ impl SessionThreadService for ScriptedThreadService {
             )),
             ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
             ScriptedThreadBehavior::ListPages => scripted_stub_unreachable("list_thread_history"),
-            ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
+            ScriptedThreadBehavior::SubmittedReplay { .. }
+            | ScriptedThreadBehavior::RejectedBusyReplay
+            | ScriptedThreadBehavior::RejectedBusyMarkFails { .. }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
                     thread_id: request.thread_id,
@@ -1262,6 +1865,8 @@ impl SessionThreadService for ScriptedThreadService {
                     title: None,
                     metadata_json: None,
                     goal: None,
+                    created_at: None,
+                    updated_at: None,
                 },
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
@@ -1278,9 +1883,20 @@ impl SessionThreadService for ScriptedThreadService {
 
     async fn accept_inbound_message(
         &self,
-        _request: AcceptInboundMessageRequest,
+        request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
-        scripted_stub_unreachable("accept_inbound_message")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { message_id } => {
+                Ok(AcceptedInboundMessage {
+                    thread_id: request.thread_id,
+                    message_id: *message_id,
+                    sequence: 1,
+                    idempotent_replay: false,
+                })
+            }
+            _ => scripted_stub_unreachable("accept_inbound_message"),
+        }
     }
 
     async fn replay_accepted_inbound_message(
@@ -1301,6 +1917,68 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
+            ScriptedThreadBehavior::RejectedBusyReplay => Ok(Some(AcceptedInboundMessageReplay {
+                scope: request.scope,
+                thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                message_id: ThreadMessageId::new(),
+                sequence: 1,
+                status: MessageStatus::RejectedBusy,
+                actor_id: Some(request.actor_id),
+                source_binding_id: Some(request.source_binding_id),
+                reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                turn_run_id: None,
+            })),
+            ScriptedThreadBehavior::RejectedBusyMarkFails { message_id } => {
+                // replay_webui_send_message probes with two source-binding variants
+                // (main + legacy) before accepting the message, so calls 1 and 2
+                // are the initial idempotency probes — both must return None so
+                // accept_inbound_message is reached.  Call 3+ comes from
+                // reconcile_terminal_duplicate after mark_message_rejected_busy
+                // fails; return the already-settled RejectedBusy so reconciliation
+                // succeeds without propagating the mark error.
+                let mut count = self.replay_call_count.lock().expect("lock");
+                *count += 1;
+                if *count <= 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(AcceptedInboundMessageReplay {
+                        scope: request.scope,
+                        thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                        message_id: *message_id,
+                        sequence: 1,
+                        status: MessageStatus::RejectedBusy,
+                        actor_id: Some(request.actor_id),
+                        source_binding_id: Some(request.source_binding_id),
+                        reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                        turn_run_id: None,
+                    }))
+                }
+            }
+            ScriptedThreadBehavior::DeferredBusyMarkFails { message_id } => {
+                // Same two-phase probe as RejectedBusyMarkFails: calls 1 and 2 are
+                // the initial idempotency probes and must return None.  Call 3+
+                // comes from reconcile_terminal_duplicate; return legacy DeferredBusy.
+                // DeferredBusy is non-terminal — reconcile_terminal_duplicate accepts
+                // only RejectedBusy as settled, so this replay does NOT satisfy
+                // reconciliation.  The original mark failure surfaces as an error.
+                let mut count = self.replay_call_count.lock().expect("lock");
+                *count += 1;
+                if *count <= 2 {
+                    Ok(None)
+                } else {
+                    Ok(Some(AcceptedInboundMessageReplay {
+                        scope: request.scope,
+                        thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                        message_id: *message_id,
+                        sequence: 1,
+                        status: MessageStatus::DeferredBusy,
+                        actor_id: Some(request.actor_id),
+                        source_binding_id: Some(request.source_binding_id),
+                        reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                        turn_run_id: None,
+                    }))
+                }
+            }
             ScriptedThreadBehavior::BackendHistory
             | ScriptedThreadBehavior::History(_)
             | ScriptedThreadBehavior::ListPages => {
@@ -1320,13 +1998,21 @@ impl SessionThreadService for ScriptedThreadService {
         scripted_stub_unreachable("mark_message_submitted")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        scripted_stub_unreachable("mark_message_deferred_busy")
+        match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { .. }
+            | ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => {
+                Err(SessionThreadError::Backend(
+                    "simulated backend failure in mark_message_rejected_busy".to_string(),
+                ))
+            }
+            _ => scripted_stub_unreachable("mark_message_rejected_busy"),
+        }
     }
 
     async fn append_assistant_draft(
@@ -1495,6 +2181,207 @@ async fn create_thread_metadata_is_serialized_json() {
     );
 }
 
+/// Project service that authorizes exactly one project id through `get_project`
+/// and fails everything else, so create-thread project authorization can be
+/// driven from the caller without a real repository.
+#[derive(Debug)]
+struct AuthorizingProjectService {
+    allowed_project_id: String,
+}
+
+#[async_trait]
+impl ProjectService for AuthorizingProjectService {
+    async fn list_projects(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn create_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn get_project(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        if request.project_id == self.allowed_project_id {
+            Ok(RebornProjectResponse {
+                project: RebornProjectInfo {
+                    project_id: self.allowed_project_id.clone(),
+                    name: "Authorized".to_string(),
+                    description: String::new(),
+                    icon: None,
+                    color: None,
+                    metadata: serde_json::json!({}),
+                    state: RebornProjectState::Active,
+                    role: RebornProjectRole::Owner,
+                    created_at: "1970-01-01T00:00:00Z".parse().expect("created at"),
+                    updated_at: "1970-01-01T00:00:00Z".parse().expect("updated at"),
+                },
+            })
+        } else {
+            // Mirrors the real service: no access (or unknown) collapses to NotFound.
+            Err(ProjectServiceError::NotFound)
+        }
+    }
+
+    async fn update_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn delete_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornDeleteProjectRequest,
+    ) -> Result<(), ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn list_members(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn add_member(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn update_member_role(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn remove_member(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornRemoveMemberRequest,
+    ) -> Result<(), ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+}
+
+#[tokio::test]
+async fn create_thread_scopes_to_authorized_project() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-scoped".to_string(),
+    }));
+
+    // Caller's default scope is project-alpha; the request proposes a different,
+    // authorized project, which must become the new thread's scope.
+    services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-scoped",
+                "requested_thread_id": "thread-scoped",
+                "project_id": "project-scoped"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("authorized project create succeeds");
+
+    let record = thread_service
+        .read_thread_by_id(ThreadId::new("thread-scoped").expect("thread id"))
+        .await
+        .expect("created thread exists");
+    assert_eq!(
+        record.scope.project_id.as_ref().map(|id| id.as_str()),
+        Some("project-scoped"),
+        "new thread must adopt the authorized project scope"
+    );
+}
+
+#[tokio::test]
+async fn create_thread_rejects_unauthorized_project() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-allowed".to_string(),
+    }));
+
+    let err = services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-denied",
+                "requested_thread_id": "thread-denied",
+                "project_id": "project-forbidden"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("a project the caller cannot access must be rejected");
+
+    // Fail closed on the deny→not-found contract: a project the caller can't
+    // access collapses to NotFound/404 (no existence oracle), not some
+    // unrelated internal error that `expect_err` alone would also accept.
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn create_thread_without_proposed_project_keeps_caller_scope() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    // No proposed project (and no project service wired): behavior is unchanged —
+    // the thread keeps the caller's default project scope.
+    services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-default",
+                "requested_thread_id": "thread-default"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("default create succeeds");
+
+    let record = thread_service
+        .read_thread_by_id(ThreadId::new("thread-default").expect("thread id"))
+        .await
+        .expect("created thread exists");
+    assert_eq!(
+        record.scope.project_id.as_ref().map(|id| id.as_str()),
+        Some("project-alpha"),
+        "without a proposed project the caller's scope is unchanged"
+    );
+}
+
 #[test]
 fn facade_error_taxonomy_serializes_all_stable_wire_names() {
     let error = RebornServicesError {
@@ -1587,13 +2474,7 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(coordinator.submission_count(), 1);
 
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -1614,6 +2495,11 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(
         submission_scope.project_id.expect("project").as_str(),
         "project-alpha"
+    );
+    assert_eq!(
+        coordinator.last_submission_origin_kind(),
+        Some(TurnOriginKind::WebUi),
+        "WebUI submit must produce WebUi origin"
     );
 }
 
@@ -1699,7 +2585,7 @@ async fn busy_submit_clears_skill_activation_message() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
 
-    let deferred = services
+    let rejected = services
         .submit_turn(
             caller(),
             serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -1710,12 +2596,12 @@ async fn busy_submit_clears_skill_activation_message() {
             .expect("request"),
         )
         .await
-        .expect("busy submit is deferred");
+        .expect("busy submit is rejected");
 
     assert!(matches!(
-        deferred,
-        RebornSubmitTurnResponse::DeferredBusy {
-            active_run_id: id,
+        rejected,
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: Some(id),
             ..
         } if id == active_run_id
     ));
@@ -1726,7 +2612,7 @@ async fn busy_submit_clears_skill_activation_message() {
     assert_eq!(
         cleared.as_slice(),
         &[(recorded[0].0.clone(), recorded[0].1.clone())],
-        "deferred submissions must clear their activation input before returning"
+        "rejected submissions must clear their activation input before returning"
     );
 }
 
@@ -1763,13 +2649,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     assert_eq!(err.code, RebornServicesErrorCode::Internal);
     assert_eq!(coordinator.submission_count(), 0);
     let timeline = services
-        .get_timeline(
-            caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
-        )
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
         .await
         .expect("timeline");
     assert_eq!(timeline.messages.len(), 1);
@@ -1795,10 +2675,7 @@ async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_sc
     let timeline = services
         .get_timeline(
             web_caller.clone(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha"),
         )
         .await
         .expect("timeline is served by fake M2 thread port");
@@ -2122,10 +2999,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
     let timeline = services
         .get_timeline(
             caller,
-            RebornTimelineRequest {
-                thread_id: thread_id.as_str().to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new(thread_id.as_str().to_string()),
         )
         .await
         .expect("timeline");
@@ -2176,10 +3050,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let alpha_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("alpha timeline");
@@ -2188,10 +3059,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let beta_timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-beta".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-beta".to_string()),
         )
         .await
         .expect("beta timeline");
@@ -2235,14 +3103,14 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
@@ -2251,10 +3119,7 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let timeline = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("timeline");
@@ -2273,20 +3138,14 @@ async fn refresh_reresolves_thread_to_same_canonical_scope() {
     let first = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("first resolve");
     let refreshed = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("refresh resolve");
@@ -2317,10 +3176,7 @@ async fn get_timeline_rejects_cross_user_access() {
     let err = services
         .get_timeline(
             caller_for_user("user-beta"),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("cross-user timeline read must be rejected");
@@ -2353,10 +3209,7 @@ async fn delete_thread_removes_owned_thread() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("deleted thread must no longer be readable");
@@ -2389,10 +3242,7 @@ async fn delete_thread_rejects_cross_user_access_without_deleting_owner_thread()
     services
         .get_timeline(
             alice,
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("owner thread must remain after rejected cross-user delete");
@@ -2434,10 +3284,7 @@ async fn delete_thread_rejects_thread_with_active_run() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -2501,10 +3348,7 @@ async fn delete_thread_waits_for_in_flight_submit_before_active_run_check() {
     services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect("rejected delete must leave thread readable");
@@ -3001,10 +3845,7 @@ async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
     let err = services
         .get_timeline(
             caller(),
-            RebornTimelineRequest {
-                thread_id: "thread-alpha".to_string(),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-alpha".to_string()),
         )
         .await
         .expect_err("timeline backend failure is stable unavailable taxonomy");
@@ -3046,6 +3887,165 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
     assert_eq!(response.event_cursor, EventCursor(13));
     assert!(!response.already_terminal);
     assert_eq!(coordinator.cancellation_count(), 1);
+}
+
+#[tokio::test]
+async fn retry_run_uses_turn_facade_and_stable_response() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-1",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("retry succeeds");
+
+    assert_eq!(response.status, TurnStatus::Queued);
+    assert_eq!(response.event_cursor, EventCursor(19));
+    assert_eq!(coordinator.retry_count(), 1);
+    let retry = coordinator.last_retry().expect("retry request");
+    assert_eq!(
+        retry.run_id,
+        TurnRunId::parse(&run_id_string()).expect("run id")
+    );
+    assert_eq!(retry.actor, caller().actor());
+    assert_eq!(
+        retry.scope,
+        caller().turn_scope(ThreadId::new("thread-alpha").expect("thread"))
+    );
+    assert!(
+        retry
+            .source_binding_ref
+            .as_str()
+            .contains("webui-retry-src")
+    );
+    assert!(
+        retry
+            .reply_target_binding_ref
+            .as_str()
+            .contains("webui-retry-reply")
+    );
+    assert_eq!(retry.idempotency_key.as_str(), "retry-1");
+}
+
+#[tokio::test]
+async fn retry_run_rejects_invalid_run_id_without_turn_facade() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-invalid-run",
+                "thread_id": "thread-alpha",
+                "run_id": "not-a-run-uuid"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("invalid run id should fail validation");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("run_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidId)
+    );
+    assert_eq!(
+        coordinator.retry_attempt_count(),
+        0,
+        "validation must fail before TurnCoordinator::retry_turn"
+    );
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
+async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let coordinator = Arc::new(FakeTurnCoordinator::with_retry_error(
+        TurnError::RunNotRetryable { run_id },
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-not-retryable",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("not retryable maps to conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert!(!err.retryable);
+    assert_eq!(coordinator.retry_attempt_count(), 1);
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
+async fn retry_run_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    let alice = caller();
+    create_thread_for(&services, alice.clone(), "thread-alice").await;
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            bob,
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-cross",
+                "thread_id": "thread-alice",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-user retry must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.retry_count(),
+        0,
+        "turn coordinator must NOT be called for cross-user retry"
+    );
 }
 
 #[tokio::test]
@@ -3425,7 +4425,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
         .await
         .expect("approval gate denial succeeds");
 
-    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
     assert_eq!(approval_interactions.resolution_count(), 1);
     assert_eq!(coordinator.cancellation_count(), 0);
     assert_eq!(
@@ -3541,6 +4541,75 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
     let resolution = auth_interactions.last_resolution().expect("resolution");
     assert_eq!(resolution.gate_ref.as_str(), "gate:hook-auth-alpha");
     assert_eq!(resolution.decision, AuthInteractionDecision::Deny);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+/// A minimal auth-interaction stub that returns `Resumed` for every
+/// Deny decision, mirroring the production path where the model is resumed
+/// so it can surface the denial to the user.
+struct DeniedResumedAuthInteractionService;
+
+#[async_trait]
+impl AuthInteractionService for DeniedResumedAuthInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingAuthInteractionsRequest,
+    ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: vec![],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        let run_id = request.run_id_hint.expect("webui passes run_id");
+        Ok(ResolveAuthInteractionResponse::Resumed(
+            ResumeTurnResponse {
+                run_id,
+                status: TurnStatus::Queued,
+                event_cursor: EventCursor(37),
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
+    // Verifies that a Deny decision (which produces `Resumed` from
+    // `resume_denied_auth`) maps to `RebornResolveGateResponse::Resumed`
+    // through the facade.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(DeniedResumedAuthInteractionService);
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-denial-resumed",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate:hook-auth-denial-resumed",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect(
+            "Resumed from auth-interaction service must map to RebornResolveGateResponse::Resumed",
+        );
+
+    assert!(
+        matches!(response, RebornResolveGateResponse::Resumed(_)),
+        "expected Resumed, got: {response:?}"
+    );
     assert_eq!(coordinator.cancellation_count(), 0);
 }
 
@@ -3864,11 +4933,8 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     );
 }
 
-// Regression: `Approved { always: true }` requests a persistent approval which
-// this facade cannot honor (no approval-policy port). Reject as Unavailable
-// instead of silently downgrading to one-shot.
 #[tokio::test]
-async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
+async fn generic_gate_resolution_with_persistent_flag_is_rejected() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -3890,7 +4956,7 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
             .expect("request"),
         )
         .await
-        .expect_err("persistent approval must be rejected");
+        .expect_err("generic persistent gate resolution must be rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
     assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
@@ -3898,12 +4964,12 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
     assert_eq!(
         coordinator.resumption_count(),
         0,
-        "resume_turn must NOT be called for unsupported persistent approval"
+        "resume_turn must NOT be called for unsupported generic persistent gate"
     );
 }
 
 #[tokio::test]
-async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_approval_interaction() {
+async fn approval_gate_resolution_with_persistent_flag_uses_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let services = RebornServices::new(
@@ -3914,7 +4980,7 @@ async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_appro
     create_thread_for(&services, caller(), "thread-alpha").await;
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
 
-    let err = services
+    let response = services
         .resolve_gate(
             caller(),
             serde_json::from_value::<WebUiResolveGateRequest>(json!({
@@ -3928,12 +4994,20 @@ async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_appro
             .expect("request"),
         )
         .await
-        .expect_err("persistent approval must be rejected");
+        .expect("persistent approval resolution succeeds");
 
-    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
-    assert_eq!(err.status_code, 503);
-    assert_eq!(approval_interactions.resolution_count(), 0);
+    assert!(matches!(
+        response,
+        RebornResolveGateResponse::Resumed(response) if response.status == TurnStatus::Queued
+    ));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .decision,
+        ApprovalInteractionDecision::AlwaysAllow
+    );
     assert_eq!(coordinator.resumption_count(), 0);
 }
 
@@ -3990,6 +5064,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
                 Some(onboarding_fixture()),
             ),
             phase: LifecyclePhase::Installed,
+            install_scope: None,
         },
     }));
 
@@ -4027,10 +5102,7 @@ async fn list_automation_dispatches_through_product_facade() {
     let listed = services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect("list automations");
@@ -4039,7 +5111,8 @@ async fn list_automation_dispatches_through_product_facade() {
     assert_eq!(
         listed.automations[0].source,
         RebornAutomationSource::Schedule {
-            cron: "0 9 * * *".to_string()
+            cron: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
         }
     );
     assert_eq!(listed.automations[0].state, RebornAutomationState::Active);
@@ -4053,8 +5126,11 @@ async fn list_automation_dispatches_through_product_facade() {
         RebornAutomationRecentRunStatus::Ok
     );
     assert_eq!(
-        listed.automations[0].recent_runs[0].thread_id.as_str(),
-        "thread-listed"
+        listed.automations[0].recent_runs[0]
+            .thread_id
+            .as_ref()
+            .map(|t| t.as_str()),
+        Some("thread-listed")
     );
 
     let list_calls = automation_facade.list_calls();
@@ -4100,18 +5176,18 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     )
     .with_connectable_channels_facade(Arc::new(StaticConnectableChannelsProductFacade::new(vec![
         RebornConnectableChannelInfo {
-            channel: "slack".to_string(),
-            display_name: "Slack".to_string(),
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
             strategy: RebornChannelConnectStrategy::InboundProofCode,
             action: RebornChannelConnectAction {
-                title: "Slack account connection".to_string(),
-                instructions: "Message the Slack app, then enter the code here.".to_string(),
-                input_placeholder: "Enter Slack pairing code...".to_string(),
+                title: "Telegram account connection".to_string(),
+                instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
+                input_placeholder: "Enter Telegram pairing code...".to_string(),
                 submit_label: "Connect".to_string(),
-                success_message: "Slack account connected.".to_string(),
-                error_message: "Invalid or expired Slack pairing code.".to_string(),
+                success_message: "Telegram account connected.".to_string(),
+                error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
             },
-            command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+            command_aliases: vec!["telegram".to_string(), "telegram account".to_string()],
         },
     ])));
 
@@ -4121,25 +5197,24 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
         .expect("connectable channels response");
 
     let channel = response.channels.first().expect("configured channel");
-    assert_eq!(channel.channel, "slack");
-    assert_eq!(channel.display_name, "Slack");
+    assert_eq!(channel.channel, "telegram");
+    assert_eq!(channel.display_name, "Telegram");
     assert_eq!(
         channel.strategy,
         RebornChannelConnectStrategy::InboundProofCode
     );
     assert_eq!(
         channel.action.instructions,
-        "Message the Slack app, then enter the code here."
+        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         channel.command_aliases,
-        vec!["slack".to_string(), "slack account".to_string()]
+        vec!["telegram".to_string(), "telegram account".to_string()]
     );
 }
 
 #[test]
-fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legacy_code_placeholder()
-{
+fn channel_connect_action_serializes_neutral_input_placeholder() {
     let action = RebornChannelConnectAction {
         title: "Slack channel access".to_string(),
         instructions: "Choose allowed channels.".to_string(),
@@ -4151,18 +5226,6 @@ fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legac
 
     let serialized = serde_json::to_value(&action).expect("action serializes");
     assert_eq!(serialized["input_placeholder"], "C0123456789");
-    assert!(serialized.get("code_placeholder").is_none());
-
-    let legacy: RebornChannelConnectAction = serde_json::from_value(serde_json::json!({
-        "title": "Slack account connection",
-        "instructions": "Message the Slack app, then enter the code here.",
-        "code_placeholder": "Enter Slack pairing code...",
-        "submit_label": "Connect",
-        "success_message": "Slack account connected.",
-        "error_message": "Invalid or expired Slack pairing code."
-    }))
-    .expect("legacy action deserializes");
-    assert_eq!(legacy.input_placeholder, "Enter Slack pairing code...");
 }
 
 #[tokio::test]
@@ -4771,10 +5834,7 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = services
         .list_automations(
             caller_without_agent(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect_err("missing agent id should fail closed");
@@ -4796,10 +5856,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(u32::MAX),
-                run_limit: None,
-            },
+            WebUiListAutomationsRequest::default().set_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -4825,10 +5882,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(0),
-                run_limit: None,
-            },
+            WebUiListAutomationsRequest::default().set_limit(0),
         )
         .await
         .expect("list automations");
@@ -4851,13 +5905,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: None,
-            },
-        )
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -4882,10 +5930,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(u32::MAX),
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -4911,10 +5956,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(0),
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(0),
         )
         .await
         .expect("list automations");
@@ -4925,6 +5967,251 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
         list_calls[0].run_limit, 0,
         "explicit zero automation run history limit must disable embedded run history"
     );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_true_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest::default().set_include_completed(true),
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        list_calls[0].include_completed,
+        "include_completed=true must be forwarded to the product facade unchanged"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_false_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        !list_calls[0].include_completed,
+        "include_completed=false must be forwarded to the product facade unchanged"
+    );
+}
+
+#[tokio::test]
+async fn pause_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .pause_automation(caller_without_agent(), "trigger-alpha".to_string())
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
+async fn resume_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .resume_automation(caller_without_agent(), "trigger-alpha".to_string())
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
+async fn rename_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .rename_automation(
+            caller_without_agent(),
+            "trigger-alpha".to_string(),
+            WebUiRenameAutomationRequest {
+                name: Some("Renamed".to_string()),
+            },
+        )
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
+async fn delete_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .delete_automation(caller_without_agent(), "trigger-alpha".to_string())
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
+async fn automation_mutations_forward_caller_scope_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+    let caller = caller();
+    let expected_agent_id = caller.agent_id.clone().expect("agent id");
+
+    let pause = services
+        .pause_automation(caller.clone(), "trigger-alpha".to_string())
+        .await
+        .expect("pause automation");
+    assert!(pause.updated);
+
+    let resume = services
+        .resume_automation(caller.clone(), "trigger-alpha".to_string())
+        .await
+        .expect("resume automation");
+    assert!(resume.updated);
+
+    let rename = services
+        .rename_automation(
+            caller.clone(),
+            "trigger-alpha".to_string(),
+            WebUiRenameAutomationRequest {
+                name: Some("  Renamed status  ".to_string()),
+            },
+        )
+        .await
+        .expect("rename automation");
+    assert!(rename.updated);
+
+    let delete = services
+        .delete_automation(caller.clone(), "trigger-alpha".to_string())
+        .await
+        .expect("delete automation");
+    assert!(delete.updated);
+    assert!(delete.automation.is_none());
+
+    let calls = automation_facade.mutation_calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0].action, AutomationMutationAction::Pause);
+    assert_eq!(calls[0].automation_id, "trigger-alpha");
+    assert_eq!(calls[0].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[0].caller.user_id, caller.user_id);
+    assert_eq!(calls[0].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[0].caller.project_id, caller.project_id);
+    assert_eq!(calls[1].action, AutomationMutationAction::Resume);
+    assert_eq!(calls[1].automation_id, "trigger-alpha");
+    assert_eq!(calls[1].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[1].caller.user_id, caller.user_id);
+    assert_eq!(calls[1].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[1].caller.project_id, caller.project_id);
+    assert_eq!(
+        calls[2].action,
+        AutomationMutationAction::Rename {
+            name: AutomationName::new("Renamed status").expect("valid automation name")
+        }
+    );
+    assert_eq!(calls[2].automation_id, "trigger-alpha");
+    assert_eq!(calls[2].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[2].caller.user_id, caller.user_id);
+    assert_eq!(calls[2].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[2].caller.project_id, caller.project_id);
+    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
+    assert_eq!(calls[3].automation_id, "trigger-alpha");
+    assert_eq!(calls[3].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[3].caller.user_id, caller.user_id);
+    assert_eq!(calls[3].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[3].caller.project_id, caller.project_id);
+}
+
+#[tokio::test]
+async fn rename_automation_validates_name_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    for (request, expected_code) in [
+        (
+            WebUiRenameAutomationRequest { name: None },
+            WebUiInboundValidationCode::MissingField,
+        ),
+        (
+            WebUiRenameAutomationRequest {
+                name: Some("  ".to_string()),
+            },
+            WebUiInboundValidationCode::Blank,
+        ),
+        (
+            WebUiRenameAutomationRequest {
+                name: Some("x".repeat(257)),
+            },
+            WebUiInboundValidationCode::TooLong,
+        ),
+    ] {
+        let err = services
+            .rename_automation(caller(), "trigger-alpha".to_string(), request)
+            .await
+            .expect_err("invalid name should fail before facade");
+
+        assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(err.status_code, 400);
+        assert_eq!(err.field.as_deref(), Some("name"));
+        assert_eq!(err.validation_code, Some(expected_code));
+    }
+
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
 }
 
 #[test]
@@ -4952,7 +6239,7 @@ fn reborn_automation_state_round_trips_serde_for_every_variant() {
 fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown_status() {
     let recent_run = RebornAutomationRecentRunInfo {
         run_id: Some(automation_run_id()),
-        thread_id: ThreadId::new("thread-listed").expect("valid thread id"),
+        thread_id: Some(ThreadId::new("thread-listed").expect("valid thread id")),
         fire_slot: Some("2026-06-03T09:00:00Z".parse().expect("fire slot")),
         status: RebornAutomationRecentRunStatus::Running,
         submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
@@ -5023,13 +6310,1491 @@ fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown
     .expect_err("recent run rejects malformed thread_id");
 }
 
+#[derive(Default)]
+struct RecordingOperatorLogsService {
+    requests: Mutex<Vec<RebornLogQueryRequest>>,
+}
+
+impl RecordingOperatorLogsService {
+    fn requests(&self) -> Vec<RebornLogQueryRequest> {
+        self.requests.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OperatorLogsService for RecordingOperatorLogsService {
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        self.requests.lock().expect("lock").push(request);
+        Ok(RebornLogQueryResponse {
+            source: "test".to_string(),
+            entries: Vec::new(),
+            next_cursor: None,
+            tail_supported: false,
+            follow_supported: false,
+        })
+    }
+}
+
+struct CrateRootLifecycleBackend;
+
+#[async_trait]
+impl OperatorServiceLifecycleService for CrateRootLifecycleBackend {
+    async fn control_service(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornServiceLifecycleRequest,
+    ) -> Result<RebornServiceLifecycleResponse, RebornServicesError> {
+        Ok(RebornServiceLifecycleResponse {
+            action: request.action,
+            state: RebornServiceLifecycleState::Unsupported,
+            message: "not wired".to_string(),
+            remediation: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn query_operator_logs_bounds_query_before_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let oversized_cursor = format!("  {}  ", "c".repeat(2048));
+    let oversized_target = format!("{}é", "t".repeat(512));
+    let oversized_thread_id = format!("{}é", "thread-".repeat(80));
+    let oversized_run_id = format!("{}é", "run-".repeat(100));
+    let boundary_source = format!("{}é", "s".repeat(254));
+    let response = services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: Some(u32::MAX),
+                cursor: Some(oversized_cursor),
+                level: Some(RebornLogLevel::Warn),
+                target: Some(oversized_target),
+                thread_id: Some(oversized_thread_id),
+                run_id: Some(oversized_run_id),
+                turn_id: Some("turn-1".to_string()),
+                tool_call_id: Some("tool-call-1".to_string()),
+                tool_name: Some("shell".to_string()),
+                source: Some(boundary_source),
+                tail: true,
+                follow: false,
+            },
+        )
+        .await
+        .expect("operator logs query");
+
+    assert_eq!(response.status, RebornOperatorSurfaceStatus::Available);
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(500));
+    assert_eq!(requests[0].cursor.as_ref().map(String::len), Some(512));
+    assert_eq!(requests[0].target.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].thread_id.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].run_id.as_ref().map(String::len), Some(256));
+    assert_eq!(requests[0].turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(requests[0].tool_call_id.as_deref(), Some("tool-call-1"));
+    assert_eq!(requests[0].tool_name.as_deref(), Some("shell"));
+    let source = requests[0].source.as_deref().expect("bounded source");
+    assert_eq!(source.len(), 256);
+    assert!(source.ends_with('é'));
+    assert!(source.is_char_boundary(source.len()));
+    let run_id = requests[0].run_id.as_deref().expect("bounded run id");
+    assert_eq!(run_id.len(), 256);
+    assert!(run_id.ends_with(" ... [truncated]"));
+    assert!(run_id.is_char_boundary(run_id.len()));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Warn));
+    assert!(requests[0].tail);
+    assert!(!requests[0].follow);
+}
+
+#[tokio::test]
+async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: Some(25),
+                cursor: Some("after:7".to_string()),
+                level: Some(RebornLogLevel::Info),
+                target: Some("ironclaw".to_string()),
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: false,
+                follow: true,
+            },
+        )
+        .await
+        .expect("operator logs follow query");
+
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(25));
+    assert_eq!(requests[0].cursor.as_deref(), Some("after:7"));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Info));
+    assert_eq!(requests[0].target.as_deref(), Some("ironclaw"));
+    assert!(!requests[0].tail);
+    assert!(requests[0].follow);
+}
+
+#[tokio::test]
+async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: None,
+                cursor: None,
+                level: None,
+                target: None,
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: true,
+                follow: true,
+            },
+        )
+        .await
+        .expect_err("tail and follow cannot be combined");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("follow"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn query_logs_requires_thread_scope() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_logs(caller(), RebornLogQueryRequest::default())
+        .await
+        .expect_err("public logs require a thread scope");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("thread_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::MissingField)
+    );
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn query_logs_rejects_ambiguous_tail_follow_modes() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest::default()
+                .set_thread_id("thread-alpha")
+                .set_tail(true)
+                .set_follow(true),
+        )
+        .await
+        .expect_err("tail and follow cannot be combined");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("follow"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest::default()
+                .set_limit(25)
+                .set_cursor("after:7")
+                .set_level(RebornLogLevel::Info)
+                .set_target("ironclaw")
+                .set_thread_id("thread-alpha")
+                .set_follow(true),
+        )
+        .await
+        .expect("owned thread logs query");
+
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(25));
+    assert_eq!(requests[0].cursor.as_deref(), Some("after:7"));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Info));
+    assert_eq!(requests[0].target.as_deref(), Some("ironclaw"));
+    assert_eq!(requests[0].thread_id.as_deref(), Some("thread-alpha"));
+    assert!(!requests[0].tail);
+    assert!(requests[0].follow);
+}
+
+#[tokio::test]
+async fn query_logs_rejects_thread_owned_by_another_caller() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    setup_owned_thread(&services, caller_for_user("user-bob"), "thread-bob").await;
+
+    let err = services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest::default()
+                .set_limit(25)
+                .set_thread_id("thread-bob"),
+        )
+        .await
+        .expect_err("foreign thread logs are not caller-visible");
+
+    assert_eq!(err.status_code, 404);
+    assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn operator_service_lifecycle_contract_is_implementable_from_crate_root() {
+    let backend = CrateRootLifecycleBackend;
+    let response = backend
+        .control_service(
+            caller(),
+            RebornServiceLifecycleRequest {
+                action: RebornServiceLifecycleAction::Status,
+            },
+        )
+        .await
+        .expect("crate-root lifecycle service implementation");
+
+    assert_eq!(response.action, RebornServiceLifecycleAction::Status);
+    assert_eq!(response.state, RebornServiceLifecycleState::Unsupported);
+}
+
+/// External creator user id used in trigger-thread scope tests.
+///
+/// Trigger threads are stored with the `creator_user_id` of the actor that
+/// fired the trigger (e.g. a Slack user), which is intentionally different
+/// from the WebUI caller (`"user-alpha"`/`"user-alice"`/`"user-bob"`).
+/// Using a distinct value here proves the scope reconstruction uses the
+/// stored creator — not the caller — to build the `ThreadScope`.
+const TRIGGER_CREATOR_USER_ID: &str = "user-trigger-creator";
+
+/// Build a `ThreadScope` matching how `record_trigger_prompt` actually stores
+/// trigger-fired threads: same tenant/agent/project as the trigger record, but
+/// `owner_user_id` = the **external creator** (not the WebUI caller).
+fn trigger_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
+    ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+        owner_user_id: Some(
+            UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid trigger creator user id"),
+        ),
+        mission_id: None,
+    }
+}
+
+/// Build the `TriggerRunThreadScope` that `resolve_run_thread_scope` returns
+/// for a trigger whose thread was stored via `trigger_thread_scope_for`.
+fn trigger_run_thread_scope_for(caller: &WebUiAuthenticatedCaller) -> TriggerRunThreadScope {
+    TriggerRunThreadScope {
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
+            .expect("valid trigger creator user id"),
+    }
+}
+
+// Regression tests for the automation-trigger timeline fallback.
+// Bug: `get_timeline` scoped the thread lookup to the WebUI user's
+// `owner_user_id`, but trigger-fired threads are stored with the external
+// creator's `owner_user_id`.  The user-scoped probe returned `UnknownThread`,
+// and the handler propagated `404` without checking whether the thread
+// belongs to one of the caller's automations.
+
+#[tokio::test]
+async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
+    // Trigger thread stored with the EXTERNAL creator's owner_user_id — not the
+    // WebUI caller's.  The old guessing code would produce a caller-scoped
+    // ThreadScope and miss this thread; the new `resolve_run_thread_scope` path
+    // must reconstruct the true scope and return the history.
+    let trigger_thread_id = ThreadId::new("thread-trigger-alpha").expect("valid trigger thread id");
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    // Store the trigger thread under the external creator's scope (not caller).
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-scheduled-alpha",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The automation facade recognises the thread and returns the trigger scope.
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-scheduled-alpha".to_string(),
+            name: "Morning briefing".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let response = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
+        )
+        .await
+        .expect("owner should be able to read their automation trigger thread timeline");
+
+    assert_eq!(response.thread.thread_id, trigger_thread_id);
+}
+
+/// Records the scope and storage key each byte read is issued under so a test
+/// can assert the reader addressed the right project mount AND resolved the
+/// right attachment key.
+struct RecordingAttachmentReader {
+    bytes: Vec<u8>,
+    reads: Mutex<Vec<(ThreadScope, String)>>,
+}
+
+#[async_trait]
+impl InboundAttachmentReader for RecordingAttachmentReader {
+    async fn read(
+        &self,
+        thread_scope: &ThreadScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, RebornServicesError> {
+        self.reads
+            .lock()
+            .expect("lock")
+            .push((thread_scope.clone(), storage_key.to_string()));
+        Ok(self.bytes.clone())
+    }
+}
+
+// Regression for the trigger-thread byte-read scope. `read_attachment` shares
+// the timeline's automation-trigger fallback, which resolves the thread under
+// the trigger creator's scope (not the WebUI caller's session scope). The bytes
+// must be read back under that same resolved scope — reading under the caller's
+// session scope would address the wrong project mount and 404.
+#[tokio::test]
+async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
+    let trigger_thread_id = ThreadId::new("thread-trigger-bytes").expect("valid trigger thread id");
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json("trigger-bytes")),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // A landed image attachment on the trigger thread, stored under the
+    // creator's scope.
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: trigger_thread_id.clone(),
+            actor_id: "system".to_string(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("trigger-image".to_string()),
+            content: MessageContent::with_attachments(
+                "see image",
+                vec![AttachmentRef {
+                    id: "att-0".to_string(),
+                    kind: AttachmentKind::Image,
+                    mime_type: "image/png".to_string(),
+                    filename: Some("p.png".to_string()),
+                    size_bytes: Some(4),
+                    storage_key: Some("/workspace/attachments/2026-06-14/m-0-p.png".to_string()),
+                    extracted_text: None,
+                }],
+            ),
+        })
+        .await
+        .expect("message with attachment accepted");
+
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-bytes".to_string(),
+            name: "Morning briefing".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let reader = Arc::new(RecordingAttachmentReader {
+        bytes: vec![1, 2, 3, 4],
+        reads: Mutex::new(Vec::new()),
+    });
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade)
+        .with_inbound_attachment_reader(reader.clone());
+
+    let result = services
+        .read_attachment(
+            caller,
+            RebornAttachmentRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                message_id: accepted.message_id.to_string(),
+                attachment_id: "att-0".to_string(),
+            },
+        )
+        .await
+        .expect("owner should be able to read their trigger thread's attachment");
+
+    assert_eq!(result.bytes, vec![1, 2, 3, 4]);
+    assert_eq!(result.mime_type, "image/png");
+
+    // The fix: the read was issued under the trigger creator's scope (not the
+    // caller's session scope) and for the landed attachment's own storage key.
+    let reads = reader.reads.lock().expect("lock");
+    assert_eq!(reads.len(), 1);
+    let (scope, storage_key) = &reads[0];
+    assert_eq!(
+        scope.owner_user_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("trigger creator user id")),
+    );
+    assert_eq!(storage_key, "/workspace/attachments/2026-06-14/m-0-p.png");
+}
+
+#[tokio::test]
+async fn get_timeline_rejects_other_users_automation_trigger_thread() {
+    // A trigger thread owned by alice's automation. Bob tries to read it.
+    let alice = caller_for_user("user-alice");
+    let bob = caller_for_user("user-bob");
+    let trigger_thread_id = ThreadId::new("thread-trigger-beta").expect("valid trigger thread id");
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // Store the thread in alice's trigger scope.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&alice),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Alice's scheduled run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-alices-job",
+            )),
+        })
+        .await
+        .expect("alice trigger thread stored");
+
+    // Bob's facade returns no automations and no resolve_scope — the fallback
+    // must deny him because resolve_run_thread_scope returns None.
+    let automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            bob,
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
+        )
+        .await
+        .expect_err("non-owner must not read another user's trigger thread");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+// Contract: backend errors from `resolve_run_thread_scope` must surface as 503
+// Unavailable, not be masked as 404 NotFound.  A backend outage should never
+// look like an authorization miss to the caller.
+#[tokio::test]
+async fn get_timeline_surfaces_trigger_scope_lookup_backend_error() {
+    // The primary user-scoped lookup will miss (thread stored under trigger
+    // creator scope), then the automation fallback fires.  The facade returns
+    // a 503 Unavailable error — the service must propagate that error rather
+    // than converting it to 404.
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-backend-err").expect("valid trigger thread id");
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // Store the thread under the external creator's scope so the user-scoped
+    // lookup misses and the automation fallback is invoked.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Trigger backend error test thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-backend-err-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The automation facade returns a 503 backend error from resolve_run_thread_scope.
+    let automation_facade = Arc::new(ErroringAutomationFacade::unavailable());
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
+        )
+        .await
+        .expect_err("backend error from facade must propagate, not become 404");
+
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::Unavailable,
+        "backend lookup error must surface as Unavailable, not NotFound"
+    );
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable, "backend outage error must be retryable");
+}
+
+/// A `SessionThreadService` that returns `UnknownThread` on its first
+/// `list_thread_history` call and `Backend(...)` on every subsequent call.
+/// Used to test the error-taxonomy contract when the caller-scoped probe misses
+/// (→ automation fallback fires) but the trigger-owned scope reload then errors.
+struct FirstMissBackendErrorThreadService {
+    call_count: Mutex<usize>,
+}
+
+impl FirstMissBackendErrorThreadService {
+    fn new() -> Self {
+        Self {
+            call_count: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for FirstMissBackendErrorThreadService {
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        let mut count = self.call_count.lock().expect("lock");
+        *count += 1;
+        if *count == 1 {
+            Err(SessionThreadError::UnknownThread {
+                thread_id: request.thread_id,
+            })
+        } else {
+            Err(SessionThreadError::Backend(
+                "backend error on trigger-owned reload".to_string(),
+            ))
+        }
+    }
+
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::ensure_thread should not be reached")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::accept_inbound_message should not be reached")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::replay_accepted_inbound_message should not be reached"
+        )
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::mark_message_submitted should not be reached")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::mark_message_rejected_busy should not be reached"
+        )
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::append_assistant_draft should not be reached")
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        _request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::append_tool_result_reference should not be reached"
+        )
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::append_capability_display_preview should not be reached"
+        )
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::update_tool_result_reference should not be reached"
+        )
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::update_assistant_draft should not be reached")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!(
+            "FirstMissBackendErrorThreadService::finalize_assistant_message should not be reached"
+        )
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::redact_message should not be reached")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::load_context_window should not be reached")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::load_context_messages should not be reached")
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        _request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::list_threads_for_scope should not be reached")
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        panic!("FirstMissBackendErrorThreadService::create_summary_artifact should not be reached")
+    }
+}
+
+// Contract: when the caller-scoped probe misses (UnknownThread → automation
+// fallback fires) and `resolve_run_thread_scope` authorizes access, but the
+// second `list_thread_history` call for the trigger-owned scope returns a
+// backend error, the result must be Unavailable (503) — NOT the 404 NotFound
+// that would have been returned had the automation facade also denied access.
+// A backend outage must never be surfaced as an authorization miss.
+#[tokio::test]
+async fn get_timeline_surfaces_backend_error_from_unscoped_trigger_history_reload() {
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-reload-error").expect("valid trigger thread id");
+
+    // Thread service: first call (caller-scoped probe) → UnknownThread,
+    // second call (trigger-owned scope reload) → Backend error.
+    let thread_service = Arc::new(FirstMissBackendErrorThreadService::new());
+
+    // Automation facade authorizes: the facade resolves a scope for the
+    // thread, so the service proceeds to the trigger-owned reload.
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
+        )
+        .await
+        .expect_err("backend error on trigger-owned reload must surface as 503, not 404");
+
+    // Must be Unavailable, not NotFound: the backend error on the reload
+    // must not be mistaken for an authorization miss.
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::Unavailable,
+        "trigger-owned reload backend error must map to Unavailable, not NotFound"
+    );
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable, "backend outage must be retryable");
+}
+
+// Contract: when `TriggerRunThreadScope.agent_id` is `None` the fallback must
+// substitute the bound caller's `agent_id` so the reconstructed `TurnScope`
+// can locate the thread in storage.
+#[tokio::test]
+async fn get_timeline_uses_caller_agent_when_trigger_scope_omits_agent_id() {
+    // `TriggerRunThreadScope.agent_id` is `Option<AgentId>`.  When it is
+    // `None` (e.g. the trigger record was stored without an explicit agent),
+    // `check_automation_trigger_access` falls back to `bound_caller.agent_id`.
+    // This test seeds the thread under the scope that fallback should produce
+    // (caller's agent, trigger's project, creator's owner) and verifies that
+    // the timeline resolves — proving the fallback actually runs.
+    let caller = caller();
+    let trigger_thread_id =
+        ThreadId::new("thread-trigger-no-agent").expect("valid trigger thread id");
+
+    // The thread is stored under the scope the fallback reconstructs:
+    //   agent_id    = bound_caller.agent_id  (falls back from None)
+    //   project_id  = trigger_scope.project_id
+    //   owner_user_id = Some(creator_user_id)
+    let fallback_scope = ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone().expect("test caller has agent"),
+        project_id: caller.project_id.clone(),
+        owner_user_id: Some(
+            UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid trigger creator user id"),
+        ),
+        mission_id: None,
+    };
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: fallback_scope,
+            thread_id: Some(trigger_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Agent-omitted trigger run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-no-agent-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    // The trigger scope has agent_id = None, exercising the fallback branch.
+    let scope_with_no_agent = TriggerRunThreadScope {
+        agent_id: None,
+        project_id: caller.project_id.clone(),
+        creator_user_id: UserId::new(TRIGGER_CREATOR_USER_ID)
+            .expect("valid trigger creator user id"),
+    };
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![])
+            .with_resolve_scope_for_thread(trigger_thread_id.clone(), scope_with_no_agent),
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let response = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest::new(trigger_thread_id.as_str().to_string()),
+        )
+        .await
+        .expect("timeline must resolve when agent_id is None via caller fallback");
+
+    assert_eq!(
+        response.thread.thread_id, trigger_thread_id,
+        "fallback to caller agent_id must locate the trigger-owned thread"
+    );
+}
+
+// Regression tests for the automation-trigger gate/approval interaction
+// fallback.  Bug: `resolve_gate`, `cancel_run`, `get_run_state`, and
+// `stream_events` all called `resolve_webui_thread_metadata` (user-scoped
+// probe only) rather than `resolve_thread_access_for_caller` (user-scoped
+// probe + automation fallback). Any gate-approval or auth-submit action on a
+// trigger-fired thread therefore returned 404, even when the caller owned the
+// automation that produced the thread.
+
+fn automation_facade_with_trigger_thread(
+    trigger_thread_id: ThreadId,
+    caller: &WebUiAuthenticatedCaller,
+) -> Arc<StaticAutomationFacade> {
+    Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-gate-automation".to_string(),
+            name: "Gate test automation".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 9 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: Some(RebornAutomationRunStatus::Ok),
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(trigger_thread_id.clone()),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-10T09:00:01Z".parse().expect("submitted_at"),
+                completed_at: None,
+            }],
+            is_active: true,
+            created_at: None,
+        }])
+        .with_resolve_scope_for_thread(
+            trigger_thread_id.clone(),
+            trigger_run_thread_scope_for(caller),
+        ),
+    )
+}
+
+/// Set up a trigger thread stored under the external creator's scope and
+/// return the thread_id.  Mirrors `record_trigger_prompt` which sets
+/// `owner_user_id = Some(creator_user_id)`.
+async fn setup_trigger_thread(
+    thread_service: &Arc<InMemorySessionThreadService>,
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+) -> ThreadId {
+    let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(caller),
+            thread_id: Some(tid.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Gate test trigger thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+    tid
+}
+
+async fn setup_ownerless_trigger_thread(
+    thread_service: &Arc<InMemorySessionThreadService>,
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+) -> ThreadId {
+    let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
+    let mut scope = trigger_thread_scope_for(caller);
+    scope.owner_user_id = None;
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope,
+            thread_id: Some(tid.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Legacy trigger thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("legacy trigger thread stored");
+    tid
+}
+
+#[tokio::test]
+async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
+    // The caller owns the automation that produced the trigger thread. Approval
+    // of a gate on that thread must succeed via the automation fallback.
+    //
+    // Post-#4754 ("Part A") verification: `check_automation_trigger_access`
+    // must forward the trigger-owned `TurnScope` (with
+    // `owner_user_id = Some(TRIGGER_CREATOR_USER_ID)`) — not the WebUI
+    // caller's user_id — to the turn coordinator's `get_run_state` call.
+    // The fake coordinator is configured to return `BlockedApproval` only
+    // for any scope it receives; this assertion proves the coordinator
+    // actually gets the trigger-owned scope, not the caller's session scope.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-gate-alpha").await;
+
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    // Program coordinator to report BlockedApproval with an approval gate.
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    coordinator.set_parked_approval_gate(gate_ref.clone());
+    coordinator.set_run_state_actor(Some(turn_actor_for_user(TRIGGER_CREATOR_USER_ID)));
+
+    let services = RebornServices::new(thread_service, coordinator.clone())
+        .with_automation_product_facade(automation_facade_with_trigger_thread(
+            trigger_thread_id.clone(),
+            &caller,
+        ))
+        .with_approval_interactions(approval_interactions.clone());
+
+    let response = services
+        .resolve_gate(
+            caller.clone(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-trigger-1",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("automation owner should be able to approve gate on trigger thread");
+
+    assert!(
+        matches!(response, RebornResolveGateResponse::Resumed(_)),
+        "expected Resumed, got {response:?}"
+    );
+    assert_eq!(
+        approval_interactions.resolution_count(),
+        1,
+        "approval interaction should have been called"
+    );
+
+    // Part A scope assertion: the coordinator must receive the trigger-owned
+    // scope (owner = TRIGGER_CREATOR_USER_ID), not the WebUI caller's scope
+    // (owner = "user-alpha"). This confirms `check_automation_trigger_access`
+    // reconstructs the scope from `TriggerRunThreadScope.creator_user_id` and
+    // that the reconstructed scope flows through to the turn coordinator.
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id.clone(),
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_run_state_scope(),
+        Some(expected_trigger_scope),
+        "get_run_state must receive the trigger-owned scope (owner = TRIGGER_CREATOR_USER_ID), \
+         not the WebUI caller's session scope (owner = user-alpha)"
+    );
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("approval resolution")
+            .actor
+            .user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "approval resolution must resume the run as the trigger creator, not the WebUI caller"
+    );
+}
+
+#[tokio::test]
+async fn cancel_run_succeeds_for_own_automation_trigger_thread() {
+    // The caller owns the automation, but the run itself belongs to the trigger
+    // creator. cancel_run must forward both the trigger-owned scope and the run
+    // actor to the turn coordinator.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-cancel-alpha").await;
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+
+    let services =
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
+            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        );
+
+    let response = services
+        .cancel_run(
+            caller.clone(),
+            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+                "client_action_id": "cancel-trigger-1",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "reason": "user_requested"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("automation owner should be able to cancel trigger thread run");
+
+    assert_eq!(response.status, TurnStatus::Cancelled);
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_cancellation_scope(),
+        Some(expected_trigger_scope),
+        "cancel_run must receive the trigger-owned scope"
+    );
+    assert_eq!(
+        coordinator
+            .last_cancellation_actor()
+            .expect("cancel actor")
+            .user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "cancel_run must use the trigger creator actor, not the WebUI caller"
+    );
+}
+
+#[tokio::test]
+async fn get_run_state_succeeds_for_own_automation_trigger_thread() {
+    // get_run_state is read-only, but it still must resolve the browser thread
+    // id to the trigger-owned scope before querying the coordinator.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-state-alpha").await;
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+
+    let services =
+        RebornServices::new(thread_service, coordinator.clone()).with_automation_product_facade(
+            automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller),
+        );
+
+    let response = services
+        .get_run_state(
+            caller.clone(),
+            RebornGetRunStateRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("automation owner should be able to read trigger run state");
+
+    assert_eq!(response.status, TurnStatus::Queued);
+    let expected_trigger_scope = TurnScope::new_with_owner(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        trigger_thread_id,
+        Some(UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id")),
+    );
+    assert_eq!(
+        coordinator.last_run_state_scope(),
+        Some(expected_trigger_scope),
+        "get_run_state must query the trigger-owned scope"
+    );
+}
+
+#[tokio::test]
+async fn resolve_gate_rejects_other_users_automation_trigger_thread() {
+    // Alice owns the trigger thread. Bob should get 404, not a gate resolution.
+    let alice = caller_for_user("user-alice");
+    let bob = caller_for_user("user-bob");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &alice, "thread-trigger-gate-beta").await;
+
+    // Bob has no automations — resolve_run_thread_scope returns None, fallback denies him.
+    let bob_automation_facade = Arc::new(StaticAutomationFacade::new(Vec::new()));
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(bob_automation_facade)
+        .with_approval_interactions(approval_interactions.clone());
+
+    let err = services
+        .resolve_gate(
+            bob,
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-trigger-rejected",
+                "thread_id": trigger_thread_id.as_str(),
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("non-owner must not resolve gate on another user's trigger thread");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        approval_interactions.resolution_count(),
+        0,
+        "approval interaction must not be called for unauthorized caller"
+    );
+}
+
+// Regression: stream_events used the WebUI caller's user_id as the projection
+// identity even after resolve_thread_access_for_caller succeeded via the
+// automation fallback. For a trigger-fired thread the run events are keyed
+// under the trigger creator's user_id, not the WebUI caller's; passing the
+// caller's id caused the turn-event replay filter (owner_user_id) and the
+// runtime event stream key (EventStreamKey) to select the wrong bucket —
+// approval-gate events were invisible to the chat page.
+//
+// The fix: after authorization succeeds, derive the projection identity from
+// scope.explicit_owner_user_id() (the creator for trigger threads; falls back
+// to caller for normal session threads where thread_owner = ActorFallback).
+#[tokio::test]
+async fn stream_events_uses_trigger_creator_as_projection_identity() {
+    // The caller ("user-alpha") owns the automation. The trigger thread was
+    // stored under the external creator's scope ("user-trigger-creator").
+    // stream_events must pass the CREATOR's identity to the projection drain,
+    // not the caller's, so the correct event stream bucket is selected.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-trigger-stream-alpha").await;
+
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade_with_trigger_thread(
+            trigger_thread_id.clone(),
+            &caller,
+        ))
+        .with_event_stream(event_stream.clone());
+
+    services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("automation owner should be able to stream trigger thread events");
+
+    // The projection drain must have been called with the trigger CREATOR's
+    // user_id, not the WebUI caller's user_id. Events are owned by the
+    // run's submitting identity (the creator); using the caller's id
+    // filters to the wrong stream/event bucket.
+    let requests = event_stream.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "projection drain must be called exactly once"
+    );
+    assert_eq!(
+        requests[0].actor.user_id,
+        UserId::new(TRIGGER_CREATOR_USER_ID).expect("valid creator user id"),
+        "projection actor must be the trigger creator (owner of the run events), \
+         not the WebUI caller (who proved visibility via automation ownership)"
+    );
+    // The scope must still carry the thread_id correctly.
+    assert_eq!(
+        requests[0].scope.thread_id, trigger_thread_id,
+        "projection scope thread_id must match the trigger thread"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_revalidates_facade_on_every_poll() {
+    // Every stream_events poll must call resolve_run_thread_scope — there is no
+    // authorization cache. This ensures a caller that loses automation
+    // visibility between polls cannot keep draining the trigger-owned stream.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-stream-revalidate-alpha",
+    )
+    .await;
+
+    let automation_facade =
+        automation_facade_with_trigger_thread(trigger_thread_id.clone(), &caller);
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade.clone())
+        .with_event_stream(event_stream.clone());
+
+    for _ in 0..3 {
+        services
+            .stream_events(
+                caller.clone(),
+                RebornStreamEventsRequest {
+                    thread_id: trigger_thread_id.as_str().to_string(),
+                    after_cursor: None,
+                },
+            )
+            .await
+            .expect("automation owner should be able to repeatedly stream trigger events");
+    }
+
+    assert_eq!(
+        automation_facade.resolve_calls(),
+        vec![
+            trigger_thread_id.clone(),
+            trigger_thread_id.clone(),
+            trigger_thread_id.clone()
+        ],
+        "every stream_events poll must call resolve_run_thread_scope (no authz caching)"
+    );
+    assert_eq!(
+        event_stream.requests().len(),
+        3,
+        "event polling must not be suppressed"
+    );
+}
+
+#[tokio::test]
+async fn stream_events_fails_when_visibility_revoked_between_polls() {
+    // If the caller's automation visibility is revoked between polls,
+    // the next poll must fail with not_found — the authz result is not cached.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let trigger_thread_id = setup_trigger_thread(
+        &thread_service,
+        &caller,
+        "thread-trigger-stream-revoke-alpha",
+    )
+    .await;
+
+    // A facade that starts with the scope available but can revoke it.
+    let revocable_facade = Arc::new(RevocableAutomationFacade::new(
+        trigger_thread_id.clone(),
+        &caller,
+    ));
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(revocable_facade.clone())
+        .with_event_stream(event_stream.clone());
+
+    // First poll succeeds — caller still has automation visibility.
+    services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("first poll must succeed while scope is visible");
+
+    // Revoke visibility.
+    revocable_facade.revoke();
+
+    // Second poll must fail — visibility was revoked and there is no cached authz.
+    let err = services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: trigger_thread_id.as_str().to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("second poll must fail after visibility is revoked");
+
+    assert_eq!(
+        err.code,
+        RebornServicesErrorCode::NotFound,
+        "revoked visibility must surface as not_found, not a stale cached grant"
+    );
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
+    // The thread_id does not appear in the caller's automation run history at
+    // all — `resolve_run_thread_scope` returns `None`.  The service must return
+    // 404 and must NOT fall back to guessing the thread scope.
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    // No threads stored anywhere.
+
+    // Automation facade knows about a DIFFERENT thread, not the requested one.
+    let unrelated_thread_id =
+        ThreadId::new("thread-unrelated-xyz").expect("valid unrelated thread id");
+    let automation_facade = Arc::new(
+        StaticAutomationFacade::new(vec![RebornAutomationInfo {
+            automation_id: "trigger-other".to_string(),
+            name: "Other automation".to_string(),
+            source: RebornAutomationSource::Schedule {
+                cron: "0 12 * * *".to_string(),
+                timezone: "UTC".to_string(),
+            },
+            state: RebornAutomationState::Active,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            recent_runs: vec![RebornAutomationRecentRunInfo {
+                run_id: Some(automation_run_id()),
+                thread_id: Some(unrelated_thread_id),
+                fire_slot: None,
+                status: RebornAutomationRecentRunStatus::Ok,
+                submitted_at: "2026-06-10T12:00:00Z".parse().expect("submitted_at"),
+                completed_at: Some("2026-06-10T12:01:00Z".parse().expect("completed_at")),
+            }],
+            is_active: true,
+            created_at: None,
+        }]), // resolve_scope is None — the facade does not recognise the requested thread.
+    );
+
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_facade(automation_facade);
+
+    let err = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest::new("thread-absent-from-automations".to_string()),
+        )
+        .await
+        .expect_err("unknown thread_id must return 404");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
 #[tokio::test]
 async fn list_automations_returns_empty_list() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
-    .with_automation_product_facade(Arc::new(StaticAutomationFacade { output: Vec::new() }));
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade::new(Vec::new())));
 
     let listed = services
         .list_automations(caller(), WebUiListAutomationsRequest::default())
@@ -5037,6 +7802,29 @@ async fn list_automations_returns_empty_list() {
         .expect("list automations");
 
     assert!(listed.automations.is_empty());
+    // Default facade reports the scheduler as running.
+    assert!(listed.scheduler_enabled);
+}
+
+#[tokio::test]
+async fn list_automations_surfaces_disabled_scheduler() {
+    // Regression: when the trigger poller is off, the response must report
+    // scheduler_enabled=false so the browser can warn that listed automations
+    // will not fire. Previously the wire response had no such signal.
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
+    ));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert!(!listed.scheduler_enabled);
 }
 
 #[tokio::test]
@@ -5186,6 +7974,1693 @@ fn setup_services_with_requirements(
     ))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SetupUpsertCall {
+    id: String,
+    adapter: String,
+    base_url: Option<String>,
+    default_model: Option<String>,
+    api_key_set: bool,
+    set_active: bool,
+    model: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SetupSetActiveCall {
+    provider_id: String,
+    model: Option<String>,
+}
+
+struct SetupRecordingLlmConfigService {
+    snapshot_calls: Mutex<usize>,
+    snapshot_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
+    set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
+    test_connection_calls: Mutex<usize>,
+    list_models_calls: Mutex<usize>,
+    snapshot: Mutex<LlmConfigSnapshot>,
+    next_snapshot_error: Mutex<Option<LlmConfigServiceError>>,
+    next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
+    next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
+}
+
+impl Default for SetupRecordingLlmConfigService {
+    fn default() -> Self {
+        Self {
+            snapshot_calls: Mutex::new(0),
+            snapshot_callers: Mutex::new(Vec::new()),
+            upsert_provider_calls: Mutex::new(Vec::new()),
+            set_active_calls: Mutex::new(Vec::new()),
+            test_connection_calls: Mutex::new(0),
+            list_models_calls: Mutex::new(0),
+            snapshot: Mutex::new(Self::empty_snapshot()),
+            next_snapshot_error: Mutex::new(None),
+            next_upsert_error: Mutex::new(None),
+            next_set_active_error: Mutex::new(None),
+        }
+    }
+}
+
+impl SetupRecordingLlmConfigService {
+    fn snapshot_count(&self) -> usize {
+        *self.snapshot_calls.lock().expect("lock")
+    }
+
+    fn snapshot_callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.snapshot_callers.lock().expect("lock").clone()
+    }
+
+    fn upsert_provider_count(&self) -> usize {
+        self.upsert_provider_calls.lock().expect("lock").len()
+    }
+
+    fn set_active_count(&self) -> usize {
+        self.set_active_calls.lock().expect("lock").len()
+    }
+
+    fn test_connection_count(&self) -> usize {
+        *self.test_connection_calls.lock().expect("lock")
+    }
+
+    fn list_models_count(&self) -> usize {
+        *self.list_models_calls.lock().expect("lock")
+    }
+
+    fn use_active_snapshot(&self, provider_id: &str, model: &str) {
+        *self.snapshot.lock().expect("lock") = Self::active_snapshot(provider_id, model);
+    }
+
+    fn fail_next_snapshot(&self, error: LlmConfigServiceError) {
+        *self.next_snapshot_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_upsert(&self, error: LlmConfigServiceError) {
+        *self.next_upsert_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_set_active(&self, error: LlmConfigServiceError) {
+        *self.next_set_active_error.lock().expect("lock") = Some(error);
+    }
+
+    fn empty_snapshot() -> LlmConfigSnapshot {
+        LlmConfigSnapshot {
+            providers: Vec::new(),
+            active: None,
+        }
+    }
+
+    fn active_snapshot(provider_id: &str, model: &str) -> LlmConfigSnapshot {
+        LlmConfigSnapshot {
+            providers: vec![LlmProviderView {
+                id: provider_id.to_string(),
+                description: "configured provider".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                default_model: model.to_string(),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                builtin: false,
+                active: true,
+                active_model: Some(model.to_string()),
+                api_key_required: true,
+                accepts_api_key: true,
+                api_key_set: true,
+                can_list_models: true,
+            }],
+            active: Some(LlmActiveSelection {
+                provider_id: provider_id.to_string(),
+                model: Some(model.to_string()),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for SetupRecordingLlmConfigService {
+    async fn snapshot(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        *self.snapshot_calls.lock().expect("lock") += 1;
+        self.snapshot_callers.lock().expect("lock").push(caller);
+        if let Some(error) = self.next_snapshot_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn upsert_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        if let Some(error) = self.next_upsert_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.upsert_provider_calls
+            .lock()
+            .expect("lock")
+            .push(SetupUpsertCall {
+                id: request.id,
+                adapter: request.adapter,
+                base_url: request.base_url,
+                default_model: request.default_model,
+                api_key_set: request.api_key.is_some(),
+                set_active: request.set_active,
+                model: request.model,
+            });
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn delete_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        panic!("delete_provider is not used by operator setup tests")
+    }
+
+    async fn set_active(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        if let Some(error) = self.next_set_active_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.set_active_calls
+            .lock()
+            .expect("lock")
+            .push(SetupSetActiveCall {
+                provider_id: request.provider_id,
+                model: request.model,
+            });
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        *self.test_connection_calls.lock().expect("lock") += 1;
+        Ok(LlmProbeResult {
+            ok: true,
+            message: "ok".to_string(),
+        })
+    }
+
+    async fn list_models(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        *self.list_models_calls.lock().expect("lock") += 1;
+        Ok(LlmModelsResult {
+            ok: true,
+            models: vec!["model-a".to_string()],
+            message: String::new(),
+        })
+    }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        panic!("start_nearai_login is not used by operator setup tests")
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        panic!("complete_nearai_wallet_login is not used by operator setup tests")
+    }
+
+    async fn start_codex_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        panic!("start_codex_login is not used by operator setup tests")
+    }
+}
+
+struct RecordingOperatorStatusService {
+    response: RebornOperatorStatusResponse,
+    callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+}
+
+impl RecordingOperatorStatusService {
+    fn new(response: RebornOperatorStatusResponse) -> Self {
+        Self {
+            response,
+            callers: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.callers.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for RecordingOperatorStatusService {
+    async fn status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        self.callers.lock().expect("lock").push(caller);
+        Ok(self.response.clone())
+    }
+}
+
+fn services_with_setup_llm_config(
+    llm_config: Arc<SetupRecordingLlmConfigService>,
+) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_llm_config_service(llm_config)
+}
+
+#[derive(Clone)]
+struct StaticOperatorToolCatalogForTest {
+    tools: Vec<RebornOperatorToolInfo>,
+}
+
+#[async_trait]
+impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
+    async fn list_operator_tools(
+        &self,
+        _caller: &ironclaw_host_api::UserId,
+    ) -> Vec<RebornOperatorToolInfo> {
+        // Ownership filtering is exercised by the composition-tier catalog
+        // test; this static catalog is caller-agnostic on purpose.
+        self.tools.clone()
+    }
+}
+
+struct FailingAllowPersistentApprovalPolicyStore;
+
+#[async_trait]
+impl PersistentApprovalPolicyStore for FailingAllowPersistentApprovalPolicyStore {
+    async fn allow(
+        &self,
+        _input: PersistentApprovalPolicyInput,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::Filesystem(
+            "persistent policy store unavailable".to_string(),
+        ))
+    }
+
+    async fn lookup(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+
+    async fn revoke(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::UnknownPolicy)
+    }
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+        _source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingAutoApproveSettingStore {
+    get_keys: Mutex<Vec<AutoApproveSettingKey>>,
+}
+
+impl RecordingAutoApproveSettingStore {
+    fn get_keys(&self) -> Vec<AutoApproveSettingKey> {
+        self.get_keys.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AutoApproveSettingStore for RecordingAutoApproveSettingStore {
+    async fn set(
+        &self,
+        input: AutoApproveSettingInput,
+    ) -> Result<AutoApproveSettingRecord, CapabilityPermissionStoreError> {
+        let key = AutoApproveSettingKey::from_resource_scope(&input.scope);
+        let now = Utc::now();
+        Ok(AutoApproveSettingRecord {
+            key,
+            enabled: input.enabled,
+            updated_by: input.updated_by,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    async fn get(
+        &self,
+        key: &AutoApproveSettingKey,
+    ) -> Result<Option<AutoApproveSettingRecord>, CapabilityPermissionStoreError> {
+        self.get_keys.lock().expect("lock").push(key.clone());
+        Ok(None)
+    }
+}
+
+fn services_with_operator_approval_config() -> RebornServices {
+    services_with_operator_approval_config_parts().0
+}
+
+fn services_with_operator_approval_config_parts() -> (
+    RebornServices,
+    Arc<ironclaw_approvals::InMemoryPersistentApprovalPolicyStore>,
+) {
+    let persistent_policies =
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = persistent_policies.clone();
+    let services = services_with_operator_approval_config_policy_store(policy_store);
+    (services, persistent_policies)
+}
+
+fn services_with_operator_approval_config_policy_store(
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+) -> RebornServices {
+    services_with_operator_approval_config_stores(
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        persistent_policies,
+    )
+}
+
+fn services_with_operator_approval_config_stores(
+    auto_approve: Arc<dyn AutoApproveSettingStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_approval_config(
+        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        auto_approve,
+        persistent_policies.clone(),
+        Arc::new(StaticOperatorToolCatalogForTest {
+            tools: vec![
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.alpha").expect("capability id"),
+                    provider: ExtensionId::new("extension.alpha").expect("extension id"),
+                    description: Arc::from("Alpha tool"),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::ExecuteCode]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.default_allow").expect("capability id"),
+                    provider: ExtensionId::new("extension.default_allow").expect("extension id"),
+                    description: Arc::from("Default-allow tool"),
+                    default_permission: PermissionMode::Allow,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.locked").expect("capability id"),
+                    provider: ExtensionId::new("extension.locked").expect("extension id"),
+                    description: Arc::from("Locked tool"),
+                    default_permission: PermissionMode::Deny,
+                    effects: Arc::from([]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.financial").expect("capability id"),
+                    provider: ExtensionId::new("extension.financial").expect("extension id"),
+                    description: Arc::from("Financial tool"),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::Financial]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
+                    provider: ExtensionId::new("nearai").expect("extension id"),
+                    description: Arc::from("Search through the NEAR AI MCP server."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("github.get_repo").expect("capability id"),
+                    provider: ExtensionId::new("github").expect("extension id"),
+                    description: Arc::from("Read GitHub repository metadata."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("google-calendar.list_events")
+                        .expect("capability id"),
+                    provider: ExtensionId::new("google-calendar").expect("extension id"),
+                    description: Arc::from("List Google Calendar events."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+            ],
+        }),
+    )
+}
+
+fn operator_config_entry_value<'a>(
+    response: &'a ironclaw_product_workflow::RebornOperatorConfigListResponse,
+    key: &str,
+) -> &'a serde_json::Value {
+    &response
+        .entries
+        .iter()
+        .find(|entry| entry.key == key)
+        .unwrap_or_else(|| panic!("{key} entry"))
+        .value
+}
+
+fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new(tenant_id).expect("tenant id"),
+        user_id: UserId::new(user_id).expect("user id"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+#[tokio::test]
+async fn operator_config_reads_provider_grantee_policies_as_always_allow() {
+    let (services, persistent_policies) = services_with_operator_approval_config_parts();
+    let operator_scope = operator_policy_scope_for_test("tenant-alpha", "user-alpha");
+
+    for (capability_id, provider) in [
+        ("nearai.web_search", "nearai"),
+        ("github.get_repo", "github"),
+        ("google-calendar.list_events", "google-calendar"),
+    ] {
+        persistent_policies
+            .allow(PersistentApprovalPolicyInput {
+                scope: operator_scope.clone(),
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: CapabilityId::new(capability_id).expect("capability id"),
+                grantee: Principal::Extension(ExtensionId::new(provider).expect("extension id")),
+                approved_by: Principal::User(UserId::new("user-alpha").expect("user id")),
+                constraints: ironclaw_host_api::GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+                source_approval_request_id: Some(ApprovalRequestId::new()),
+            })
+            .await
+            .expect("seed provider-grantee always-allow policy");
+    }
+
+    let config = services
+        .list_operator_config(caller())
+        .await
+        .expect("operator config");
+    for capability_id in [
+        "nearai.web_search",
+        "github.get_repo",
+        "google-calendar.list_events",
+    ] {
+        let value = operator_config_entry_value(&config, &format!("tool.{capability_id}"));
+        assert_eq!(value["state"], "always_allow");
+        assert_eq!(value["effective_source"], "override");
+    }
+}
+
+#[tokio::test]
+async fn global_auto_approve_enabled_scopes_read_by_caller_tenant_and_user() {
+    let auto_approve = Arc::new(RecordingAutoApproveSettingStore::default());
+    let services = services_with_operator_approval_config_stores(
+        auto_approve.clone(),
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+    );
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-scope").expect("tenant"),
+        UserId::new("user-scope").expect("user"),
+        Some(AgentId::new("agent-scope").expect("agent")),
+        Some(ProjectId::new("project-scope").expect("project")),
+    );
+
+    let enabled = services
+        .global_auto_approve_enabled(caller)
+        .await
+        .expect("global auto approve read");
+
+    assert!(
+        enabled,
+        "unset auto-approve should resolve through the default"
+    );
+    let keys = auto_approve.get_keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].tenant_id.as_str(), "tenant-scope");
+    assert_eq!(keys[0].user_id.as_str(), "user-scope");
+}
+
+#[tokio::test]
+async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
+    let (services, persistent_policies) = services_with_operator_approval_config_parts();
+
+    let initial = services
+        .list_operator_config(caller())
+        .await
+        .expect("operator config");
+    assert_eq!(
+        operator_config_entry_value(&initial, "agent.auto_approve_tools"),
+        &json!(true)
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.alpha")["state"],
+        "always_allow"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.alpha")["effective_source"],
+        "global"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.default_allow")["state"],
+        "always_allow",
+        "follow-global tools auto-approve while global auto-approve defaults on"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.default_allow")["effective_source"],
+        "global"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.locked")["state"],
+        "disabled"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["state"],
+        "ask_each_time"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["locked"],
+        true
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["effective_source"],
+        "locked"
+    );
+
+    let financial_error = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.financial".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect_err("hard-floor tool cannot be made always-allow");
+    assert_eq!(
+        financial_error.code,
+        RebornServicesErrorCode::InvalidRequest
+    );
+    assert_eq!(financial_error.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(
+        financial_error.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+
+    services
+        .set_operator_config_key(
+            caller(),
+            "agent.auto_approve_tools".to_string(),
+            RebornOperatorConfigSetRequest { value: json!(true) },
+        )
+        .await
+        .expect("enable global auto approve");
+
+    let globally_allowed = services
+        .get_operator_config_key(caller(), "tool.tool.alpha".to_string())
+        .await
+        .expect("tool config");
+    assert_eq!(globally_allowed.entry.value["state"], "always_allow");
+    assert_eq!(globally_allowed.entry.value["effective_source"], "global");
+
+    let default_allow_global = services
+        .get_operator_config_key(caller(), "tool.tool.default_allow".to_string())
+        .await
+        .expect("default-allow tool config");
+    assert_eq!(default_allow_global.entry.value["state"], "always_allow");
+    assert_eq!(
+        default_allow_global.entry.value["effective_source"],
+        "global"
+    );
+
+    let ask_override = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "ask_each_time" }),
+            },
+        )
+        .await
+        .expect("ask each time override");
+    assert_eq!(ask_override.entry.value["state"], "ask_each_time");
+    assert_eq!(ask_override.entry.value["effective_source"], "override");
+
+    let follows_global = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "default" }),
+            },
+        )
+        .await
+        .expect("clear tool override");
+    assert_eq!(follows_global.entry.value["state"], "always_allow");
+    assert_eq!(follows_global.entry.value["effective_source"], "global");
+
+    let disabled = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "disabled" }),
+            },
+        )
+        .await
+        .expect("disable tool");
+    assert_eq!(disabled.entry.value["state"], "disabled");
+    assert_eq!(disabled.entry.value["effective_source"], "override");
+
+    let allowed = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect("always allow tool");
+    assert_eq!(allowed.entry.value["state"], "always_allow");
+    assert_eq!(allowed.entry.value["effective_source"], "override");
+
+    let operator_scope = operator_policy_scope_for_test("tenant-alpha", "user-alpha");
+    let extension_key = PersistentApprovalPolicyKey::new(
+        &operator_scope,
+        PersistentApprovalAction::Dispatch,
+        CapabilityId::new("tool.alpha").expect("capability id"),
+        Principal::Extension(ExtensionId::new("extension.alpha").expect("extension id")),
+    );
+    assert!(
+        persistent_policies
+            .lookup(&extension_key)
+            .await
+            .expect("lookup extension-grantee policy")
+            .and_then(|policy| policy.active_grant())
+            .is_some(),
+        "settings-page always_allow must write the provider extension grantee"
+    );
+
+    let user_key = PersistentApprovalPolicyKey::new(
+        &operator_scope,
+        PersistentApprovalAction::Dispatch,
+        CapabilityId::new("tool.alpha").expect("capability id"),
+        Principal::User(UserId::new("user-alpha").expect("user id")),
+    );
+    assert!(
+        persistent_policies
+            .lookup(&user_key)
+            .await
+            .expect("lookup user-grantee policy")
+            .is_none(),
+        "settings-page always_allow must not write a user-grantee policy"
+    );
+
+    let reset = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "default" }),
+            },
+        )
+        .await
+        .expect("clear persistent always-allow");
+    assert_eq!(reset.entry.value["state"], "always_allow");
+    assert_eq!(reset.entry.value["effective_source"], "global");
+    assert!(
+        persistent_policies
+            .lookup(&extension_key)
+            .await
+            .expect("lookup extension-grantee policy after reset")
+            .and_then(|policy| policy.active_grant())
+            .is_none(),
+        "default must clear the settings-page persistent always-allow policy"
+    );
+}
+
+#[tokio::test]
+async fn operator_config_is_scoped_by_tenant_and_user() {
+    let services = services_with_operator_approval_config();
+    let alice_tenant_a = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+    let bob_tenant_a = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("bob").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+    let alice_tenant_a_other_project = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-beta").expect("agent")),
+        Some(ProjectId::new("project-beta").expect("project")),
+    );
+    let alice_tenant_b = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-beta").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+
+    services
+        .set_operator_config_key(
+            alice_tenant_a.clone(),
+            "agent.auto_approve_tools".to_string(),
+            // Set the non-default (off) so isolation is provable: other
+            // users/tenants must still read the default (on), not this value.
+            RebornOperatorConfigSetRequest {
+                value: json!(false),
+            },
+        )
+        .await
+        .expect("alice disables auto approve in tenant alpha");
+    services
+        .set_operator_config_key(
+            alice_tenant_a.clone(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "disabled" }),
+            },
+        )
+        .await
+        .expect("alice disables tool in tenant alpha");
+
+    let alice_alpha = services
+        .get_operator_config_key(alice_tenant_a, "tool.tool.alpha".to_string())
+        .await
+        .expect("alice alpha tool config");
+    assert_eq!(alice_alpha.entry.value["state"], "disabled");
+    assert_eq!(alice_alpha.entry.value["effective_source"], "override");
+
+    let alice_alpha_other_project = services
+        .list_operator_config(alice_tenant_a_other_project)
+        .await
+        .expect("same tenant/user operator config");
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "agent.auto_approve_tools"),
+        &json!(false),
+        "auto-approve settings are scoped by tenant/user, not agent/project"
+    );
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "tool.tool.alpha")["state"],
+        "disabled",
+        "tool overrides are scoped by tenant/user, not agent/project"
+    );
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "tool.tool.alpha")["effective_source"],
+        "override"
+    );
+
+    for caller in [bob_tenant_a, alice_tenant_b] {
+        let config = services
+            .list_operator_config(caller)
+            .await
+            .expect("isolated operator config");
+        assert_eq!(
+            operator_config_entry_value(&config, "agent.auto_approve_tools"),
+            &json!(true),
+            "auto-approve must not leak across user or tenant"
+        );
+        assert_eq!(
+            operator_config_entry_value(&config, "tool.tool.alpha")["state"],
+            "always_allow",
+            "tool override must not leak across user or tenant (follows global default-on)"
+        );
+        assert_eq!(
+            operator_config_entry_value(&config, "tool.tool.alpha")["effective_source"],
+            "global"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operator_config_preserves_override_when_always_allow_policy_write_fails() {
+    let services = services_with_operator_approval_config_policy_store(Arc::new(
+        FailingAllowPersistentApprovalPolicyStore,
+    ));
+
+    let ask_override = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "ask_each_time" }),
+            },
+        )
+        .await
+        .expect("ask each time override");
+    assert_eq!(ask_override.entry.value["state"], "ask_each_time");
+    assert_eq!(ask_override.entry.value["effective_source"], "override");
+
+    let error = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect_err("persistent policy write failure");
+    assert_eq!(error.code, RebornServicesErrorCode::Internal);
+
+    let preserved = services
+        .get_operator_config_key(caller(), "tool.tool.alpha".to_string())
+        .await
+        .expect("tool config after failed always_allow");
+    assert_eq!(preserved.entry.value["state"], "ask_each_time");
+    assert_eq!(
+        preserved.entry.value["effective_source"], "override",
+        "failed policy writes must not clear the existing per-tool override"
+    );
+}
+
+#[tokio::test]
+async fn operator_config_reports_unknown_keys_distinct_from_invalid_values() {
+    let services = services_with_operator_approval_config();
+
+    let unknown_key = services
+        .get_operator_config_key(caller(), "tool.tool.missing".to_string())
+        .await
+        .expect_err("unknown tool key");
+    assert_eq!(
+        unknown_key.validation_code,
+        Some(WebUiInboundValidationCode::UnknownKey)
+    );
+
+    let invalid_value = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "sometimes" }),
+            },
+        )
+        .await
+        .expect_err("invalid tool state");
+    assert_eq!(
+        invalid_value.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+}
+
+#[tokio::test]
+async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let status_service = Arc::new(RecordingOperatorStatusService::new(
+        RebornOperatorStatusResponse {
+            generated_at: Utc::now(),
+            overall: RebornOperatorStatusState::Blocked,
+            checks: vec![
+                RebornOperatorStatusCheck {
+                    id: "storage".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Critical,
+                    summary: "storage backend is unavailable".to_string(),
+                    remediation: Some("repair storage configuration".to_string()),
+                },
+                RebornOperatorStatusCheck {
+                    id: "provider_model".to_string(),
+                    status: RebornOperatorStatusState::Ready,
+                    severity: RebornOperatorStatusSeverity::Info,
+                    summary: "provider and model are configured".to_string(),
+                    remediation: None,
+                },
+                RebornOperatorStatusCheck {
+                    id: "sk-secret-token".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Critical,
+                    summary: "failed with sk-test1234567890 at /home/alice/.env".to_string(),
+                    remediation: Some(
+                        "inspect /home/alice/.ssh/id_ed25519 and credential token".to_string(),
+                    ),
+                },
+                RebornOperatorStatusCheck {
+                    id: "workspace_path".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Warning,
+                    summary: "artifact staged at /workspace/ironclaw/.env".to_string(),
+                    remediation: Some("remove /workspace/ironclaw/secrets.env".to_string()),
+                },
+            ],
+        },
+    ));
+    let services = services_with_setup_llm_config(llm_config.clone())
+        .with_operator_status_service(status_service.clone());
+    let diagnostics_caller =
+        caller_for_user_with_project("user-diagnostics", Some("project-diagnostics"));
+
+    let response = services
+        .get_operator_diagnostics(diagnostics_caller.clone())
+        .await
+        .expect("operator diagnostics");
+
+    assert_eq!(response.area.as_str(), "diagnostics");
+    assert_eq!(response.status, RebornOperatorSurfaceStatus::Unavailable);
+    assert!(response.operator_status.is_some());
+    let reason_codes = response
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.reason_code.as_str())
+        .collect::<Vec<_>>();
+    assert!(reason_codes.contains(&"operator_doctor_storage_blocked"));
+    assert!(reason_codes.contains(&"operator_doctor_status_blocked"));
+    assert!(reason_codes.contains(&"operator_doctor_workspace_path_blocked"));
+    assert!(reason_codes.contains(&"operator_config_service_not_wired"));
+    assert!(!reason_codes.contains(&"operator_doctor_provider_model_ready"));
+    let rendered = serde_json::to_string(&response).expect("serialize diagnostics");
+    assert!(!rendered.contains("sk-"));
+    assert!(!rendered.contains("/home/"));
+    assert!(!rendered.contains("/workspace/"));
+    assert!(!rendered.contains(".ssh"));
+    assert!(!rendered.contains("credential token"));
+    assert!(
+        response.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == "operator_doctor_status_blocked"
+                && diagnostic.key == "[redacted operator status detail]"
+                && diagnostic.message == "[redacted operator status detail]"
+                && diagnostic.remediation == "[redacted operator status detail]"
+        }),
+        "sensitive status-derived diagnostic details should be redacted"
+    );
+    assert!(
+        response.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == "operator_doctor_workspace_path_blocked"
+                && diagnostic.key == "workspace_path"
+                && diagnostic.message == "[redacted operator status detail]"
+                && diagnostic.remediation == "[redacted operator status detail]"
+        }),
+        "/workspace/ status-derived diagnostic details should be redacted"
+    );
+    assert_eq!(status_service.callers(), vec![diagnostics_caller.clone()]);
+    assert_eq!(llm_config.snapshot_callers(), vec![diagnostics_caller]);
+}
+
+#[tokio::test]
+async fn operator_diagnostics_reports_setup_service_absence_without_failing_route() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_status_service(Arc::new(StaticOperatorStatusService::new(
+        RebornOperatorStatusResponse {
+            generated_at: Utc::now(),
+            overall: RebornOperatorStatusState::Ready,
+            checks: Vec::new(),
+        },
+    )));
+
+    let response = services
+        .get_operator_diagnostics(caller())
+        .await
+        .expect("operator diagnostics");
+
+    assert_eq!(response.area.as_str(), "diagnostics");
+    assert!(response.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == "operator_setup_service_not_wired"
+            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Error
+    }));
+}
+
+#[tokio::test]
+async fn get_operator_setup_returns_snapshot_from_llm_config() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .get_operator_setup(caller())
+        .await
+        .expect("setup response");
+
+    assert_eq!(llm_config.snapshot_count(), 1);
+    assert_eq!(response.active_provider_id.as_deref(), Some("openai"));
+    assert_eq!(response.active_model.as_deref(), Some("gpt-5-mini"));
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert!(response.diagnostics.is_empty());
+    assert!(response.steps.iter().any(|step| {
+        step.name == "profile"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "webui_access"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+}
+
+#[tokio::test]
+async fn get_operator_setup_without_llm_config_returns_service_unavailable() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .get_operator_setup(caller())
+        .await
+        .expect_err("setup service is unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+}
+
+#[tokio::test]
+async fn setup_response_reflects_active_provider_and_model() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.active_provider_id.as_deref(), Some("openai"));
+    assert_eq!(response.active_model.as_deref(), Some("gpt-5-mini"));
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert!(response.steps.iter().any(|step| {
+        step.name == "provider"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "model"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "profile"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "webui_access"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+}
+
+#[tokio::test]
+async fn run_operator_setup_without_llm_config_returns_service_unavailable() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect_err("setup service is unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+}
+
+#[tokio::test]
+async fn run_operator_setup_requires_provider_id_for_provider_changes() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_adapter("open_ai_completions")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
+        )
+        .await
+        .expect_err("provider changes require provider_id");
+
+    assert_setup_validation(err, "provider_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_model_without_provider_id() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default().set_model("gpt-5-mini"),
+        )
+        .await
+        .expect_err("model requires provider_id");
+
+    assert_setup_validation(err, "model", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_base_url_without_adapter() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_base_url("https://api.example.test/v1"),
+        )
+        .await
+        .expect_err("base_url requires adapter");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_api_key_without_adapter() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
+        )
+        .await
+        .expect_err("api_key requires adapter");
+
+    assert_setup_validation(err, "api_key", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_internal_base_url_before_upsert() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_base_url("http://169.254.169.254/latest/meta-data/"),
+        )
+        .await
+        .expect_err("metadata endpoint is rejected");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_blank_profile_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("   "),
+        )
+        .await
+        .expect_err("blank profile id is rejected");
+
+    assert_setup_validation(err, "profile_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_oversized_profile_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("x".repeat(129)),
+        )
+        .await
+        .expect_err("oversized profile id is rejected");
+
+    assert_setup_validation(err, "profile_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_short_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("too-short".to_string())),
+        )
+        .await
+        .expect_err("short WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_serve_weak_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("x".repeat(16))),
+        )
+        .await
+        .expect_err("16-byte WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_oversized_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from("x".repeat(4097))),
+        )
+        .await
+        .expect_err("oversized WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
+    // Loopback/private endpoints are the primary self-hosted use case (Ollama,
+    // vLLM): the guard must let them through to the service, not reject them as
+    // "internal". Only the always-blocked classes (metadata/link-local,
+    // multicast, unspecified) are rejected — see the metadata cases above.
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .upsert_llm_provider(
+            caller(),
+            UpsertLlmProviderRequest {
+                id: "ollama".to_string(),
+                name: None,
+                adapter: "ollama".to_string(),
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                default_model: None,
+                api_key: None,
+                set_active: false,
+                model: None,
+            },
+        )
+        .await
+        .expect("loopback endpoint reaches the service");
+
+    assert_eq!(llm_config.upsert_provider_count(), 1);
+}
+
+#[tokio::test]
+async fn test_llm_connection_allows_loopback_base_url_for_self_hosted() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .test_llm_connection(
+            caller(),
+            LlmProbeRequest {
+                adapter: "ollama".to_string(),
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                provider_id: "ollama".to_string(),
+                model: Some("qwen3:latest".to_string()),
+                api_key: None,
+            },
+        )
+        .await
+        .expect("loopback probe reaches the service");
+
+    assert_eq!(llm_config.test_connection_count(), 1);
+}
+
+#[tokio::test]
+async fn list_llm_models_allows_localhost_base_url_for_self_hosted() {
+    // Regression: `validate_llm_base_url` used to reject `localhost`, breaking
+    // the "Fetch models" button for self-hosted Ollama (the dialog showed
+    // "Invalid value (base_url)").
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .list_llm_models(
+            caller(),
+            LlmProbeRequest {
+                adapter: "ollama".to_string(),
+                base_url: Some("http://localhost:11434".to_string()),
+                provider_id: "ollama".to_string(),
+                model: None,
+                api_key: None,
+            },
+        )
+        .await
+        .expect("localhost probe reaches the service");
+
+    assert_eq!(llm_config.list_models_count(), 1);
+}
+
+#[tokio::test]
+async fn list_llm_models_rejects_internal_base_url_before_service() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .list_llm_models(
+            caller(),
+            LlmProbeRequest {
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
+                provider_id: "openai".to_string(),
+                model: Some("gpt-5-mini".to_string()),
+                api_key: Some(SecretString::from("sk-secret".to_string())),
+            },
+        )
+        .await
+        .expect_err("metadata probe endpoint is rejected");
+
+    assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.list_models_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_upserts_and_activates_provider_config() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_base_url("https://api.example.test/v1")
+                .set_model("gpt-5-mini")
+                .set_api_key(SecretString::from("sk-secret".to_string())),
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(
+        llm_config
+            .upsert_provider_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [SetupUpsertCall {
+            id: "openai".to_string(),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some("https://api.example.test/v1".to_string()),
+            default_model: Some("gpt-5-mini".to_string()),
+            api_key_set: true,
+            set_active: true,
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_ignores_redacted_webui_access_token_sentinel() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_model("gpt-5-mini")
+                .set_webui_access_token(SecretString::from("••••••••".to_string())),
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    let webui_step = response
+        .steps
+        .iter()
+        .find(|step| step.name == "webui_access")
+        .expect("webui access step");
+    assert_eq!(
+        webui_step.status,
+        ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    );
+    assert_eq!(
+        llm_config.set_active_calls.lock().expect("lock").as_slice(),
+        [SetupSetActiveCall {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    let serialized = serde_json::to_string(&response).expect("serialize setup response");
+    assert!(!serialized.contains("••••••••"));
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("production")
+                .set_webui_access_token(SecretString::from(
+                    "webui-secret-token-value-32-bytes".to_string(),
+                )),
+        )
+        .await
+        .expect_err("unwired host mutations fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_profile_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_profile_id("production"),
+        )
+        .await
+        .expect_err("unwired profile mutation fails closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_token_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions")
+                .set_webui_access_token(SecretString::from(
+                    "webui-secret-token-value-32-bytes".to_string(),
+                )),
+        )
+        .await
+        .expect_err("unwired WebUI token mutation fails closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_selects_existing_provider_without_adapter() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_model("gpt-5-mini"),
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(llm_config.snapshot_count(), 0);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(
+        llm_config.set_active_calls.lock().expect("lock").as_slice(),
+        [SetupSetActiveCall {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn run_operator_setup_without_provider_change_returns_snapshot() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    assert_eq!(llm_config.snapshot_count(), 1);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_propagates_llm_config_service_error() {
+    let upsert_config = Arc::new(SetupRecordingLlmConfigService::default());
+    upsert_config.fail_next_upsert(LlmConfigServiceError::Unavailable);
+    let upsert_services = services_with_setup_llm_config(upsert_config);
+    let upsert_err = upsert_services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default()
+                .set_provider_id("openai")
+                .set_adapter("open_ai_completions"),
+        )
+        .await
+        .expect_err("upsert error propagates");
+    assert_eq!(upsert_err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(upsert_err.status_code, 503);
+
+    let set_active_config = Arc::new(SetupRecordingLlmConfigService::default());
+    set_active_config.fail_next_set_active(LlmConfigServiceError::Unavailable);
+    let set_active_services = services_with_setup_llm_config(set_active_config);
+    let set_active_err = set_active_services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest::default().set_provider_id("openai"),
+        )
+        .await
+        .expect_err("set_active error propagates");
+    assert_eq!(set_active_err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(set_active_err.status_code, 503);
+
+    let snapshot_config = Arc::new(SetupRecordingLlmConfigService::default());
+    snapshot_config.fail_next_snapshot(LlmConfigServiceError::Unavailable);
+    let snapshot_services = services_with_setup_llm_config(snapshot_config);
+    let snapshot_err = snapshot_services
+        .run_operator_setup(caller(), RebornOperatorSetupRequest::default())
+        .await
+        .expect_err("snapshot error propagates");
+    assert_eq!(snapshot_err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(snapshot_err.status_code, 503);
+}
+
 fn lifecycle_package_ref(package_id: &str) -> LifecyclePackageRef {
     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
         .expect("valid package ref")
@@ -5203,6 +9678,7 @@ fn extension_summary(
         description: "test extension".to_string(),
         source: LifecycleExtensionSource::HostBundled,
         runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+        surface_kinds: Vec::new(),
         visible_capability_ids: vec![format!("{package_id}.read"), format!("{package_id}.write")],
         visible_read_only_capability_ids: Vec::new(),
         credential_requirements,
@@ -5261,6 +9737,16 @@ fn assert_setup_validation(
 #[tokio::test]
 async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A failed run carries a model-visible `detail` (free-form backend cause
+    // text, scrubbed only for secret VALUES). The public run-state DTO must
+    // keep the user-facing `category` but strip `detail` so internal
+    // diagnostics never reach the browser (see
+    // `SanitizedFailure::public_projection`).
+    coordinator.set_run_state_failure(
+        SanitizedFailure::new("model_unavailable")
+            .expect("valid category")
+            .with_detail("HTTP 500 from provider at /internal/models/route-xyz"),
+    );
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
@@ -5288,12 +9774,19 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
         RunProfileId::default_profile().as_str()
     );
     assert!(response.gate_ref.is_none());
-    assert!(response.failure.is_none());
+    // The user-facing category survives; the model-visible detail is stripped.
+    let failure = response.failure.as_ref().expect("failure present");
+    assert_eq!(failure.category(), "model_unavailable");
+    assert_eq!(
+        failure.detail(),
+        None,
+        "public run-state DTO must not expose the model-visible failure detail"
+    );
     assert!(response.checkpoint_id.is_none());
     assert_eq!(coordinator.run_state_request_count(), 1);
 
-    // Stable DTO must not surface M3-internal binding refs, model route, or
-    // raw turn scope to WebUI consumers.
+    // Stable DTO must not surface M3-internal binding refs, model route, raw
+    // turn scope, or the internal failure detail to WebUI consumers.
     let rendered = serde_json::to_string(&response).expect("json");
     assert!(!rendered.contains("source_binding_ref"));
     assert!(!rendered.contains("reply_target_binding_ref"));
@@ -5301,6 +9794,8 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     assert!(!rendered.contains("webui-src:replayed"));
     assert!(!rendered.contains("webui-reply:replayed"));
     assert!(!rendered.contains("\"scope\""));
+    assert!(!rendered.contains("\"detail\""));
+    assert!(!rendered.contains("/internal/models/route-xyz"));
 }
 
 #[tokio::test]
@@ -5482,11 +9977,7 @@ async fn get_timeline_pages_messages_with_cursor() {
     let first = services
         .get_timeline(
             alice.clone(),
-            RebornTimelineRequest {
-                thread_id: "thread-paginate".to_string(),
-                limit: Some(10),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-paginate".to_string()).set_limit(10),
         )
         .await
         .expect("first page");
@@ -5571,11 +10062,7 @@ async fn get_timeline_clamps_oversize_limit_to_hard_ceiling() {
     let response = services
         .get_timeline(
             alice,
-            RebornTimelineRequest {
-                thread_id: "thread-cap".to_string(),
-                limit: Some(u32::MAX),
-                ..Default::default()
-            },
+            RebornTimelineRequest::new("thread-cap".to_string()).set_limit(u32::MAX),
         )
         .await
         .expect("clamped timeline");
@@ -5763,6 +10250,290 @@ async fn list_threads_hides_automation_trigger_threads() {
 }
 
 #[tokio::test]
+async fn list_threads_needs_approval_returns_only_automation_threads_with_pending_approval() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let pending_thread_id = ThreadId::new("thread-pending").expect("pending thread id");
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-pending").await;
+    let approval_service = Arc::new(ThreadScopedApprovalInteractionService {
+        pending_thread_ids: [
+            pending_thread_id.clone(),
+            automation_pending_thread_id.clone(),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(pending_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Normal chat pending approval".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("normal pending thread");
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest::default().set_needs_approval(true),
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification thread filter must exclude non-automation approval threads",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-run-scope").await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest::default().set_needs_approval(true),
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification approval lookup must use the same actor-fallback turn scope shape as blocked run state",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_uses_bounded_run_candidates() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-bounded").await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let automation_facade =
+        automation_facade_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone())
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest::default().set_needs_approval(true),
+        )
+        .await
+        .expect("list approval threads");
+
+    assert_eq!(response.threads.len(), 1);
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].limit, 20);
+    assert_eq!(list_calls[0].run_limit, 20);
+    assert!(list_calls[0].include_completed);
+    assert_eq!(
+        automation_facade.resolve_calls(),
+        vec![automation_pending_thread_id],
+        "notification lookup should still resolve the thread id once to recover the true trigger creator scope",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_ownerless_trigger_thread(&thread_service, &caller, "thread-automation-ownerless")
+            .await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest::default().set_needs_approval(true),
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification approval lookup must include legacy ownerless automation run threads",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_uses_automation_name_when_thread_title_missing() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        ThreadId::new("thread-automation-titleless").expect("valid trigger thread id");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(automation_pending_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: None,
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("titleless trigger thread stored");
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest::default().set_needs_approval(true),
+        )
+        .await
+        .expect("list approval threads");
+
+    assert_eq!(response.threads.len(), 1);
+    assert_eq!(
+        response.threads[0].title.as_deref(),
+        Some("Gate test automation"),
+        "notification approval thread fallback title should use the automation name",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_checks_candidate_automation_thread() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-candidate").await;
+    let approval_service = Arc::new(ThreadScopedApprovalInteractionService {
+        pending_thread_ids: [automation_pending_thread_id.clone()].into_iter().collect(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+            automation_pending_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest::default()
+                .set_needs_approval(true)
+                .set_candidate_thread_id(automation_pending_thread_id.as_str()),
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "candidate thread must still be automation-authorized before entering notifications",
+    );
+}
+
+#[tokio::test]
 async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_threads() {
     let caller = caller();
     let scope = thread_scope_for(&caller);
@@ -5775,6 +10546,8 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
             "trigger-scheduled-summary",
         )),
         goal: None,
+        created_at: None,
+        updated_at: None,
     };
     let stalled_cursor = "cursor-stalled".to_string();
     let thread_service = Arc::new(ScriptedThreadService::list_pages(vec![
@@ -5794,13 +10567,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
 
     let response = tokio::time::timeout(
         Duration::from_secs(1),
-        services.list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(2),
-                cursor: None,
-            },
-        ),
+        services.list_threads(caller, WebUiListThreadsRequest::default().set_limit(2)),
     )
     .await
     .expect("list_threads should terminate when backend cursor stalls")
@@ -5838,6 +10605,8 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
             "trigger-scheduled-summary",
         )),
         goal: None,
+        created_at: None,
+        updated_at: None,
     };
     let responses = (0..20)
         .map(|index| ListThreadsForScopeResponse {
@@ -5852,13 +10621,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
     );
 
     let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-            },
-        )
+        .list_threads(caller, WebUiListThreadsRequest::default().set_limit(1))
         .await
         .expect("list threads");
 
@@ -5898,6 +10661,34 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_visible_thread_id =
         ThreadId::new("thread-c-visible").expect("second visible thread id");
 
+    // Threads list newest-activity first, so create them oldest → newest:
+    // second visible, then first visible, then the automation thread last.
+    // That yields a candidate order of [automation, first, second], so the
+    // facade has to skip the leading hidden automation thread while filling
+    // the first page — the behavior under test. Waiting past each stamp
+    // keeps the `created_at` order strict regardless of clock resolution.
+    let second = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(second_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Second visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("second visible thread");
+    wait_until_after(second.updated_at.expect("activity stamp")).await;
+    let first = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(first_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("First visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("first visible thread");
+    wait_until_after(first.updated_at.expect("activity stamp")).await;
     thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: thread_scope_for(&caller),
@@ -5910,34 +10701,11 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         })
         .await
         .expect("automation thread");
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope_for(&caller),
-            thread_id: Some(first_visible_thread_id.clone()),
-            created_by_actor_id: caller.user_id.as_str().to_string(),
-            title: Some("First visible chat".to_string()),
-            metadata_json: Some(json!({ "source": "webui" }).to_string()),
-        })
-        .await
-        .expect("first visible thread");
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope_for(&caller),
-            thread_id: Some(second_visible_thread_id.clone()),
-            created_by_actor_id: caller.user_id.as_str().to_string(),
-            title: Some("Second visible chat".to_string()),
-            metadata_json: Some(json!({ "source": "webui" }).to_string()),
-        })
-        .await
-        .expect("second visible thread");
 
     let first_page = services
         .list_threads(
             caller.clone(),
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-            },
+            WebUiListThreadsRequest::default().set_limit(1),
         )
         .await
         .expect("list first visible page");
@@ -5954,10 +10722,9 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_page = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: first_page.next_cursor,
-            },
+            WebUiListThreadsRequest::default()
+                .set_limit(1)
+                .set_cursor(first_page.next_cursor.expect("first visible page cursor")),
         )
         .await
         .expect("list second visible page");
@@ -5970,4 +10737,1277 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         vec![second_visible_thread_id],
     );
     assert_eq!(second_page.next_cursor, None);
+}
+
+// ---------------------------------------------------------------------------
+// Notice-text mapping: rejected_busy_notice maps TurnStatus to the right copy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_approval_contains_approval_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedApproval,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-approval",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedApproval);
+            assert_eq!(
+                notice,
+                "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_blocked_auth_contains_auth_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedAuth,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-auth",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::BlockedAuth);
+            assert_eq!(
+                notice,
+                "An authentication gate is open on this thread — complete authentication before continuing, then resend your message."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rejected_busy_notice_generic_status_contains_generic_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(5),
+        }),
+    ));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-notice").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-notice-generic",
+                "thread_id": "thread-notice",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with RejectedBusy");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            status: Some(status),
+            notice,
+            ..
+        } => {
+            assert_eq!(status, TurnStatus::Running);
+            assert_eq!(
+                notice,
+                "Ironclaw is still working on a previous message — resend yours once the current task finishes."
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay regression: a replayed RejectedBusy must return RejectedBusy again,
+// never submit a new run (contract from PR #4838)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_rejected_busy_without_new_submission() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // ScriptedThreadService pre-seeds the message as RejectedBusy — simulates
+    // the client retrying after the original rejection response was lost.
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-rejected-busy",
+                "thread_id": "thread-alpha",
+                "content": "hello from webui"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed (not error)");
+
+    assert!(
+        matches!(response, RebornSubmitTurnResponse::RejectedBusy { .. }),
+        "replay of RejectedBusy must return RejectedBusy, got {response:?}"
+    );
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "a replayed RejectedBusy must not produce a new turn submission"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Option<> run-metadata contract: replay path yields None; fresh path yields Some
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replayed_rejected_busy_returns_none_run_metadata() {
+    // Replay: the original blocking run is gone — run metadata must be None,
+    // not a fabricated run-id or status that the client cannot query.
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_replay()),
+        coordinator.clone(),
+    );
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-replay-none-metadata",
+                "thread_id": "thread-alpha",
+                "content": "replay with none metadata"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("replayed RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id,
+            status,
+            event_cursor,
+            notice,
+            ..
+        } => {
+            assert!(
+                active_run_id.is_none(),
+                "replayed RejectedBusy must not fabricate active_run_id, got {active_run_id:?}"
+            );
+            assert!(
+                status.is_none(),
+                "replayed RejectedBusy must not fabricate status, got {status:?}"
+            );
+            assert!(
+                event_cursor.is_none(),
+                "replayed RejectedBusy must not fabricate event_cursor, got {event_cursor:?}"
+            );
+            assert!(
+                !notice.is_empty(),
+                "replayed RejectedBusy must carry a notice"
+            );
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+    assert_eq!(
+        coordinator.submission_count(),
+        0,
+        "replay must not produce a new turn submission"
+    );
+}
+
+#[tokio::test]
+async fn fresh_rejected_busy_returns_some_run_metadata() {
+    // Fresh ThreadBusy: the blocking run is live — run metadata must be Some
+    // with the real values so the client can poll the existing run.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(7),
+        }),
+    ));
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-busy-fresh").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-fresh-busy-metadata",
+                "thread_id": "thread-busy-fresh",
+                "content": "hello busy"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("fresh RejectedBusy must succeed");
+
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "fresh RejectedBusy must carry the real blocking run id"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "fresh RejectedBusy must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(7)),
+                "fresh RejectedBusy must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "fresh RejectedBusy must carry a notice");
+        }
+        other => panic!("expected RejectedBusy, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mark-failure reconcile path: mark_message_rejected_busy errors → replay
+// confirms RejectedBusy → no error surfaces, RejectedBusy returned
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejected_busy_mark_failure_reconciles_via_replay_and_returns_rejected_busy() {
+    // Arrange: coordinator returns ThreadBusy so the busy path fires; the
+    // scripted thread service makes mark_message_rejected_busy fail and then
+    // supplies a RejectedBusy replay on the reconcile probe so
+    // reconcile_terminal_duplicate settles the race without propagating the error.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::rejected_busy_mark_fails()),
+        coordinator,
+    );
+
+    // Act: submit a fresh turn against thread-alpha (which the scripted service
+    // owns); coordinator fires ThreadBusy, mark fails, reconcile replays.
+    let response = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-mark-fail-reconcile",
+                "thread_id": "thread-alpha",
+                "content": "hello mark-fail"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("mark-failure reconcile must succeed (not error)");
+
+    // Assert: the mark error must NOT propagate to the caller — reconcile_terminal_duplicate
+    // replays the accepted message, sees RejectedBusy, and returns Ok(()).
+    // The response is built from the original ThreadBusy metadata (active_run_id,
+    // status, event_cursor), proving the full path ran without dropping state.
+    match response {
+        RebornSubmitTurnResponse::RejectedBusy {
+            active_run_id: returned_run_id,
+            status: returned_status,
+            event_cursor: returned_cursor,
+            notice,
+            ..
+        } => {
+            assert_eq!(
+                returned_run_id,
+                Some(active_run_id),
+                "mark-failure reconcile must carry the real blocking run id from ThreadBusy"
+            );
+            assert_eq!(
+                returned_status,
+                Some(TurnStatus::Running),
+                "mark-failure reconcile must carry the real blocking run status"
+            );
+            assert_eq!(
+                returned_cursor,
+                Some(EventCursor(3)),
+                "mark-failure reconcile must carry the real event cursor"
+            );
+            assert!(!notice.is_empty(), "RejectedBusy must carry a notice");
+        }
+        other => {
+            panic!("mark-failure reconcile must return RejectedBusy (not error), got {other:?}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy DeferredBusy mark-failure reconcile path: mark_message_rejected_busy errors
+// → replay returns legacy DeferredBusy (non-terminal) → predicate does NOT match
+// → original mark error surfaces as Unavailable, not a false-terminal RejectedBusy
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
+    // Arrange: coordinator returns ThreadBusy so the busy path fires; the
+    // scripted thread service makes mark_message_rejected_busy fail and then
+    // supplies a legacy DeferredBusy replay on the reconcile probe.
+    // DeferredBusy is non-terminal — reconcile_terminal_duplicate must NOT
+    // accept it as settled.  The predicate now matches only RejectedBusy, so
+    // the `_ =>` arm propagates the original mark failure as an error.
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::deferred_busy_mark_fails()),
+        coordinator,
+    );
+
+    // Act: submit a fresh turn against thread-alpha; coordinator fires ThreadBusy,
+    // mark_message_rejected_busy fails, reconcile sees legacy DeferredBusy which
+    // no longer matches → the original mark error must propagate.
+    let error = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-deferred-busy-mark-fail-reconcile",
+                "thread_id": "thread-alpha",
+                "content": "hello deferred-busy mark-fail"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err(
+            "legacy DeferredBusy reconcile must surface the mark failure as an error, \
+             not silently return a false-terminal RejectedBusy",
+        );
+
+    // Assert: SessionThreadError::Backend maps to service_unavailable(true) —
+    // code=Unavailable, status_code=503, retryable=true.
+    assert_eq!(
+        error.code,
+        RebornServicesErrorCode::Unavailable,
+        "DeferredBusy reconcile miss must surface the backend mark failure (Unavailable), got {error:?}",
+    );
+    assert_eq!(
+        error.status_code, 503,
+        "DeferredBusy reconcile miss must return 503, got {error:?}",
+    );
+    assert!(
+        error.retryable,
+        "backend mark failure is retryable, got {error:?}",
+    );
+}
+
+/// Test lander that records what it was asked to land and returns a ref per
+/// attachment with a deterministic `storage_key`, so the facade test can assert
+/// both that decode→land ran and that the returned refs reach the transcript.
+#[derive(Default)]
+struct RecordingLander {
+    landed: Mutex<Vec<(ThreadScope, String, Vec<InboundAttachment>)>>,
+}
+
+#[async_trait]
+impl InboundAttachmentLander for RecordingLander {
+    async fn land(
+        &self,
+        thread_scope: &ThreadScope,
+        message_id: &str,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+        let refs = attachments
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| AttachmentRef {
+                id: attachment.id.clone(),
+                // The real bridge derives kind from the MIME type; mirror that.
+                kind: ironclaw_common::kind_for_mime(&attachment.mime_type),
+                mime_type: attachment.mime_type.clone(),
+                filename: attachment.filename.clone(),
+                size_bytes: Some(attachment.bytes.len() as u64),
+                storage_key: Some(format!(
+                    "/workspace/attachments/test/{message_id}-{index}-landed"
+                )),
+                extracted_text: None,
+            })
+            .collect();
+        self.landed.lock().expect("lander mutex").push((
+            thread_scope.clone(),
+            message_id.to_string(),
+            attachments,
+        ));
+        Ok(refs)
+    }
+}
+
+#[tokio::test]
+async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
+    use base64::Engine;
+
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lander = Arc::new(RecordingLander::default());
+    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+        .with_inbound_attachments(lander.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7 body");
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "see attached",
+                "attachments": [{
+                    "mime_type": "application/pdf",
+                    "filename": "report.pdf",
+                    "data_base64": pdf_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    // The lander was invoked with the caller-derived thread scope plus the
+    // decoded attachment bytes + metadata.
+    {
+        let landed = lander.landed.lock().expect("lander mutex");
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].0, thread_scope_for(&caller()));
+        assert_eq!(landed[0].2.len(), 1);
+        assert_eq!(landed[0].2[0].mime_type, "application/pdf");
+        assert_eq!(landed[0].2[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(landed[0].2[0].bytes, b"%PDF-1.7 body");
+    }
+
+    // The returned refs are persisted on the accepted user message.
+    let history = threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope_for(&caller()),
+            thread_id: ThreadId::new("thread-alpha").unwrap(),
+        })
+        .await
+        .expect("history");
+    let user_message = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::User)
+        .expect("user message present");
+    assert_eq!(user_message.content.as_deref(), Some("see attached"));
+    assert_eq!(user_message.attachments.len(), 1);
+    let attachment_ref = &user_message.attachments[0];
+    assert_eq!(attachment_ref.kind, AttachmentKind::Document);
+    assert_eq!(attachment_ref.mime_type, "application/pdf");
+    assert_eq!(attachment_ref.filename.as_deref(), Some("report.pdf"));
+    assert!(
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with("-landed")),
+        "expected landed storage_key, got {:?}",
+        attachment_ref.storage_key
+    );
+}
+
+#[tokio::test]
+async fn get_timeline_returns_attachment_refs_on_the_user_message() {
+    use base64::Engine;
+
+    // The browser renders attachment cards from the timeline, and they must
+    // survive a page refresh. The browser's surface is `get_timeline`, not
+    // `list_thread_history`, so drive that path (test through the caller) and
+    // assert the projected `ThreadMessageRecord` still carries the refs.
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let lander = Arc::new(RecordingLander::default());
+    let services = RebornServices::new(Arc::clone(&threads), coordinator.clone())
+        .with_inbound_attachments(lander.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let csv_b64 = base64::engine::general_purpose::STANDARD.encode(b"a,b\n1,2\n");
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "spreadsheet attached",
+                "attachments": [{
+                    "mime_type": "text/csv",
+                    "filename": "data.csv",
+                    "data_base64": csv_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    let timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest::new("thread-alpha".to_string()),
+        )
+        .await
+        .expect("timeline");
+
+    let user_message = timeline
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::User)
+        .expect("user message present in timeline");
+    assert_eq!(user_message.attachments.len(), 1);
+    let attachment_ref = &user_message.attachments[0];
+    assert_eq!(attachment_ref.kind, AttachmentKind::Document);
+    assert_eq!(attachment_ref.mime_type, "text/csv");
+    assert_eq!(attachment_ref.filename.as_deref(), Some("data.csv"));
+    assert!(
+        attachment_ref
+            .storage_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty()),
+        "timeline ref must carry a non-empty storage_key so the agent can re-read it later"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
+    use base64::Engine;
+
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // No `.with_inbound_attachments(...)`: a deployment without attachment
+    // support must reject rather than silently drop the files.
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7");
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-att",
+                "thread_id": "thread-alpha",
+                "content": "see attached",
+                "attachments": [{
+                    "mime_type": "application/pdf",
+                    "data_base64": pdf_b64,
+                }],
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("attachments without a lander must be rejected");
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+}
+
+// ---------------------------------------------------------------------------
+// Admin user management: facade authorization + last-admin protection.
+//
+// Drives the facade methods through a fake `AdminUserService` port so the
+// load-bearing NEW logic — role-based authorization (read every request),
+// operator bypass, and last-admin protection — is tested through the caller.
+// The composition adapter over the real identity store is thin mapping;
+// crate-tier is the reachable tier here because the integration harness does
+// not wire the admin service (no token minter in-harness).
+// ---------------------------------------------------------------------------
+
+fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> AdminUserRecord {
+    AdminUserRecord {
+        user_id: UserId::new(user_id).expect("user id"),
+        email: None,
+        display_name: None,
+        status,
+        role,
+        created_at: "2026-07-07T00:00:00Z".to_string(),
+        updated_at: "2026-07-07T00:00:00Z".to_string(),
+        created_by: None,
+        last_login_at: None,
+        metadata: std::collections::BTreeMap::new(),
+    }
+}
+
+#[derive(Default)]
+struct FakeAdminUsers {
+    users: Mutex<HashMap<String, AdminUserRecord>>,
+}
+
+impl FakeAdminUsers {
+    fn with(records: impl IntoIterator<Item = AdminUserRecord>) -> Self {
+        let map = records
+            .into_iter()
+            .map(|record| (record.user_id.as_str().to_string(), record))
+            .collect();
+        Self {
+            users: Mutex::new(map),
+        }
+    }
+}
+
+#[async_trait]
+impl AdminUserService for FakeAdminUsers {
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        status: Option<AdminUserStatus>,
+        after: Option<&UserId>,
+        limit: usize,
+    ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
+        // Mirror the real port contract: status filter, then user_id-ascending
+        // order, then the `after` cursor, then bound to `limit`.
+        let mut records: Vec<AdminUserRecord> = self
+            .users
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| status.is_none_or(|want| record.status == want))
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| a.user_id.as_str().cmp(b.user_id.as_str()));
+        let after = after.map(UserId::as_str);
+        Ok(records
+            .into_iter()
+            .filter(|record| after.is_none_or(|cursor| record.user_id.as_str() > cursor))
+            .take(limit)
+            .collect())
+    }
+
+    async fn get_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        Ok(self.users.lock().unwrap().get(user_id.as_str()).cloned())
+    }
+
+    async fn create_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        fields: AdminCreateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        let record = admin_record("created-user", fields.role, AdminUserStatus::Active);
+        self.users
+            .lock()
+            .unwrap()
+            .insert("created-user".to_string(), record.clone());
+        Ok(AdminCreatedUser {
+            record,
+            api_token: SecretString::from("minted-token"),
+        })
+    }
+
+    async fn update_profile(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        display_name: Option<String>,
+        _metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        if display_name.is_some() {
+            record.display_name = display_name;
+        }
+        Ok(record.clone())
+    }
+
+    async fn set_status(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        status: AdminUserStatus,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        record.status = status;
+        Ok(record.clone())
+    }
+
+    async fn set_role(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        role: AdminUserRole,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        record.role = role;
+        Ok(record.clone())
+    }
+
+    async fn delete_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<(), AdminUserError> {
+        self.users.lock().unwrap().remove(user_id.as_str());
+        Ok(())
+    }
+
+    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| record.status == AdminUserStatus::Active && record.role.is_admin())
+            .count())
+    }
+
+    async fn list_secrets(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        Ok(Vec::new())
+    }
+
+    async fn put_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        handle: SecretHandle,
+        _material: SecretString,
+    ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        Ok(AdminUserSecretMeta {
+            handle: handle.as_str().to_string(),
+            created_at: None,
+            updated_at: None,
+        })
+    }
+
+    async fn delete_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: SecretHandle,
+    ) -> Result<bool, AdminUserError> {
+        Ok(true)
+    }
+}
+
+fn admin_services(fake: FakeAdminUsers) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(fake))
+}
+
+fn assert_forbidden(err: RebornServicesError) {
+    assert_eq!(err.status_code, 403, "expected a 403 authorization failure");
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+}
+
+/// Drive EVERY admin verb through the facade and assert each is a 403.
+/// `authorize_admin` is a predicate that gates side effects, so it must be
+/// tested at every call site — not just `list` (.claude/rules/testing.md,
+/// "test through the caller"): a verb that forgot to call it would be an
+/// unauthorized read/mutation hole invisible to a single-endpoint test.
+async fn assert_every_admin_verb_forbidden(services: &RebornServices) {
+    let target = UserId::new("some-target").expect("user");
+    assert_forbidden(
+        services
+            .list_admin_users(caller(), RebornAdminUserListQuery::default())
+            .await
+            .expect_err("list"),
+    );
+    assert_forbidden(
+        services
+            .get_admin_user(caller(), target.clone())
+            .await
+            .expect_err("get"),
+    );
+    assert_forbidden(
+        services
+            .create_admin_user(
+                caller(),
+                RebornAdminCreateUserRequest {
+                    email: None,
+                    display_name: None,
+                    role: AdminUserRole::Member,
+                },
+            )
+            .await
+            .expect_err("create"),
+    );
+    assert_forbidden(
+        services
+            .update_admin_user(
+                caller(),
+                target.clone(),
+                RebornAdminUpdateUserRequest::default(),
+            )
+            .await
+            .expect_err("update"),
+    );
+    assert_forbidden(
+        services
+            .set_admin_user_status(
+                caller(),
+                target.clone(),
+                RebornAdminSetStatusRequest {
+                    status: AdminUserStatus::Suspended,
+                },
+            )
+            .await
+            .expect_err("status"),
+    );
+    assert_forbidden(
+        services
+            .set_admin_user_role(
+                caller(),
+                target.clone(),
+                RebornAdminSetRoleRequest {
+                    role: AdminUserRole::Admin,
+                },
+            )
+            .await
+            .expect_err("role"),
+    );
+    assert_forbidden(
+        services
+            .delete_admin_user(caller(), target.clone())
+            .await
+            .expect_err("delete"),
+    );
+    assert_forbidden(
+        services
+            .list_admin_user_secrets(caller(), target.clone())
+            .await
+            .expect_err("list_secrets"),
+    );
+    assert_forbidden(
+        services
+            .put_admin_user_secret(
+                caller(),
+                target.clone(),
+                SecretHandle::new("handle").unwrap(),
+                RebornAdminPutSecretRequest {
+                    value: "v".to_string(),
+                },
+            )
+            .await
+            .expect_err("put_secret"),
+    );
+    assert_forbidden(
+        services
+            .delete_admin_user_secret(caller(), target, SecretHandle::new("handle").unwrap())
+            .await
+            .expect_err("delete_secret"),
+    );
+}
+
+#[tokio::test]
+async fn admin_member_caller_is_forbidden_on_every_verb() {
+    // caller() resolves to user-alpha; seeded as a plain member → 403 on EVERY
+    // admin verb, not just list.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Member,
+        AdminUserStatus::Active,
+    )]));
+    assert_every_admin_verb_forbidden(&services).await;
+    // Self-privilege-escalation: a member cannot promote their own record.
+    assert_forbidden(
+        services
+            .set_admin_user_role(
+                caller(),
+                UserId::new("user-alpha").expect("user"),
+                RebornAdminSetRoleRequest {
+                    role: AdminUserRole::Admin,
+                },
+            )
+            .await
+            .expect_err("a member must not promote themselves"),
+    );
+}
+
+#[tokio::test]
+async fn admin_unknown_caller_is_forbidden_on_every_verb() {
+    // The caller has no user record at all. Same 403 as a member — the facade
+    // must never leak (via a different status/code) whether the caller record
+    // exists but is under-privileged vs. does not exist.
+    let services = admin_services(FakeAdminUsers::default());
+    assert_every_admin_verb_forbidden(&services).await;
+}
+
+#[tokio::test]
+async fn admin_suspended_admin_is_forbidden_on_every_verb() {
+    // Regression: `authorize_admin` used to check `role` only, so a SUSPENDED
+    // admin kept full control (the role field still reads Admin). Status now
+    // gates authorization, so suspending an admin revokes their admin API
+    // access immediately — on every verb.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Suspended,
+    )]));
+    assert_every_admin_verb_forbidden(&services).await;
+
+    // A suspended OWNER is likewise locked out (owner also clears the role
+    // boundary, so status must gate it too).
+    let services_owner = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Owner,
+        AdminUserStatus::Suspended,
+    )]));
+    assert_forbidden(
+        services_owner
+            .list_admin_users(caller(), RebornAdminUserListQuery::default())
+            .await
+            .expect_err("a suspended owner must not reach the admin surface"),
+    );
+}
+
+#[tokio::test]
+async fn admin_caller_lists_and_creates_with_one_time_token() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    services
+        .list_admin_users(caller(), RebornAdminUserListQuery::default())
+        .await
+        .expect("an admin may list users");
+    let created = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: Some("new@acme.com".to_string()),
+                display_name: Some("New".to_string()),
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect("an admin may create a user");
+    assert_eq!(created.api_token, "minted-token");
+}
+
+#[tokio::test]
+async fn admin_list_forwards_status_filter_to_the_port() {
+    // A dropped `query.status` extractor or a broken active/suspended mapping
+    // would silently return every user. Seed one active + one suspended admin
+    // and assert `?status=` narrows the caller-visible result.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-active", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record(
+            "user-suspended",
+            AdminUserRole::Admin,
+            AdminUserStatus::Suspended,
+        ),
+    ]));
+
+    let suspended = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                status: Some(AdminUserStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list suspended");
+    assert_eq!(suspended.users.len(), 1, "only the suspended user matches");
+    assert_eq!(suspended.users[0].user_id.as_str(), "user-suspended");
+
+    let active = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                status: Some(AdminUserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list active");
+    assert_eq!(active.users.len(), 1, "only the active user matches");
+    assert_eq!(active.users[0].user_id.as_str(), "user-active");
+
+    let all = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery::default(),
+        )
+        .await
+        .expect("list all");
+    assert_eq!(all.users.len(), 2, "no filter returns both");
+}
+
+#[tokio::test]
+async fn admin_list_bounds_pages_and_threads_the_cursor() {
+    // The facade must clamp the page and derive a `next_cursor` from a full
+    // page, then honor that cursor on the next call — so a large tenant is
+    // paged, not returned (and scanned) in one unbounded response.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-a", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-b", AdminUserRole::Member, AdminUserStatus::Active),
+        admin_record("user-c", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+
+    let page1 = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page 1");
+    assert_eq!(page1.users.len(), 2, "the page honors the limit");
+    assert_eq!(page1.users[0].user_id.as_str(), "user-a");
+    assert_eq!(page1.users[1].user_id.as_str(), "user-b");
+    let cursor = page1.next_cursor.expect("a full page yields a next cursor");
+    assert_eq!(cursor, "user-b", "the cursor is the last id on the page");
+
+    let page2 = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                limit: Some(2),
+                cursor: Some(cursor),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page 2");
+    assert_eq!(page2.users.len(), 1, "the final page holds the remainder");
+    assert_eq!(page2.users[0].user_id.as_str(), "user-c");
+    assert!(
+        page2.next_cursor.is_none(),
+        "a short page means no more users"
+    );
+}
+
+#[tokio::test]
+async fn admin_list_rejects_a_malformed_cursor() {
+    let services = admin_services(FakeAdminUsers::default());
+    let err = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                cursor: Some("not a valid user id \u{7f}".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a malformed cursor is caller input at fault");
+    assert_eq!(err.status_code, 400);
+}
+
+#[tokio::test]
+async fn admin_operator_bypasses_role_check() {
+    // An env-bearer operator has no user record but is an implicit admin.
+    let services = admin_services(FakeAdminUsers::default());
+    let operator = caller().with_operator_webui_config(true);
+    services
+        .list_admin_users(operator, RebornAdminUserListQuery::default())
+        .await
+        .expect("an operator token clears the admin boundary without a user record");
+}
+
+#[tokio::test]
+async fn admin_last_admin_protection_blocks_demote_suspend_and_delete() {
+    // caller() (user-alpha) is the SOLE active admin. Demote, suspend, AND
+    // delete must all be blocked — any of the three would otherwise strand the
+    // tenant with zero active admins. `delete` has its own guard distinct from
+    // the demote/suspend path, so it is covered here explicitly.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    let target = UserId::new("user-alpha").expect("user");
+
+    let demote = services
+        .set_admin_user_role(
+            caller(),
+            target.clone(),
+            RebornAdminSetRoleRequest {
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect_err("demoting the sole admin must be blocked");
+    assert_eq!(demote.status_code, 409);
+    assert_eq!(demote.field.as_deref(), Some("last_admin"));
+
+    let suspend = services
+        .set_admin_user_status(
+            caller(),
+            target.clone(),
+            RebornAdminSetStatusRequest {
+                status: AdminUserStatus::Suspended,
+            },
+        )
+        .await
+        .expect_err("suspending the sole admin must be blocked");
+    assert_eq!(suspend.status_code, 409);
+    assert_eq!(suspend.field.as_deref(), Some("last_admin"));
+
+    let delete = services
+        .delete_admin_user(caller(), target)
+        .await
+        .expect_err("deleting the sole admin must be blocked");
+    assert_eq!(delete.status_code, 409);
+    assert_eq!(delete.field.as_deref(), Some("last_admin"));
+}
+
+#[tokio::test]
+async fn admin_last_admin_protection_allows_demote_with_a_second_admin() {
+    // With two active admins, demoting one is allowed.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Admin, AdminUserStatus::Active),
+    ]));
+    services
+        .set_admin_user_role(
+            caller(),
+            UserId::new("user-beta").expect("user"),
+            RebornAdminSetRoleRequest {
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect("demoting one of two admins is allowed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_last_admin_protection_survives_concurrent_demotion() {
+    // Two active admins. Fire both demotions concurrently: without serialization
+    // each `ensure_not_last_admin` reads "2 admins", both pass, and both land →
+    // 0 admins (a TOCTOU race). The per-tenant admin-mutation lock serializes
+    // the check+mutation, so exactly one demotion succeeds and the other is a
+    // 409 — the tenant always keeps an admin. Runs on a multi-thread runtime so
+    // the two calls are genuinely parallel.
+    let services = std::sync::Arc::new(admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Admin, AdminUserStatus::Active),
+    ])));
+
+    // Both demotions run as an OPERATOR caller (bypasses the role check and is
+    // never itself demoted), so the second failure is deterministically the
+    // 409 last-admin block — not a 403 from the caller losing its own role.
+    let demote = |uid: &'static str| {
+        let services = std::sync::Arc::clone(&services);
+        async move {
+            services
+                .set_admin_user_role(
+                    caller().with_operator_webui_config(true),
+                    UserId::new(uid).expect("user"),
+                    RebornAdminSetRoleRequest {
+                        role: AdminUserRole::Member,
+                    },
+                )
+                .await
+        }
+    };
+
+    let (alpha, beta) = tokio::join!(demote("user-alpha"), demote("user-beta"));
+
+    let successes = [alpha.is_ok(), beta.is_ok()]
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
+    let blocked = [&alpha, &beta]
+        .into_iter()
+        .filter(|result| matches!(result, Err(err) if err.status_code == 409))
+        .count();
+    assert_eq!(successes, 1, "exactly one concurrent demotion may land");
+    assert_eq!(
+        blocked, 1,
+        "the other must be blocked by last-admin protection (never stranded at 0 admins)"
+    );
+
+    let remaining = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery::default(),
+        )
+        .await
+        .expect("list")
+        .users
+        .into_iter()
+        .filter(|u| u.role.is_admin() && u.status == AdminUserStatus::Active)
+        .count();
+    assert_eq!(
+        remaining, 1,
+        "the tenant must never be stranded without an admin"
+    );
 }

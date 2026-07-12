@@ -42,7 +42,11 @@ fn capability_activity() -> CapabilityActivityView {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_detail: None,
+        subtitle: Some("src/main.rs".to_string()),
+        input_summary: Some("path: src/main.rs".to_string()),
         updated_at: Utc::now(),
+        activity_order: Some(42),
     }
 }
 
@@ -61,9 +65,11 @@ fn capability_display_preview() -> CapabilityDisplayPreviewView {
         output_preview: Some("fn main() {}".to_string()),
         output_kind: Some("text".to_string()),
         output_bytes: Some(12),
+        error_kind: None,
         result_ref: Some("result:tool-output".to_string()),
         truncated: false,
         updated_at: Utc::now(),
+        activity_order: Some(43),
     }
 }
 
@@ -79,8 +85,11 @@ fn gate_prompt() -> GatePromptView {
     GatePromptView {
         turn_run_id: run_id(),
         gate_ref: "gate:approval".to_string(),
+        invocation_id: None,
         headline: "Approve action".to_string(),
         body: "Review the requested action.".to_string(),
+        allow_always: true,
+        approval_context: None,
     }
 }
 
@@ -88,6 +97,7 @@ fn auth_prompt() -> AuthPromptView {
     AuthPromptView {
         turn_run_id: run_id(),
         auth_request_ref: "auth:oauth".to_string(),
+        invocation_id: None,
         headline: "Connect account".to_string(),
         body: "Connect before continuing.".to_string(),
         challenge_kind: None,
@@ -95,6 +105,7 @@ fn auth_prompt() -> AuthPromptView {
         account_label: None,
         authorization_url: None,
         expires_at: None,
+        connection: None,
     }
 }
 
@@ -142,6 +153,7 @@ fn projection_state() -> ProductProjectionState {
         vec![
             ProductProjectionItem::Text {
                 id: "message-1".to_string(),
+                run_id: None,
                 body: "hello".to_string(),
             },
             ProductProjectionItem::RunStatus {
@@ -149,6 +161,7 @@ fn projection_state() -> ProductProjectionState {
                 status: "running".to_string(),
                 failure_category: None,
                 failure_summary: None,
+                retryable: None,
             },
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
@@ -159,6 +172,7 @@ fn projection_state() -> ProductProjectionState {
                 failure_summary: Some(
                     "The run failed because the execution driver reported an error.".to_string(),
                 ),
+                retryable: Some(true),
             },
             ProductProjectionItem::WorkSummary {
                 id: "work-summary-1".to_string(),
@@ -182,6 +196,16 @@ fn capability_display_preview_event_serializes_timeline_message_id() {
 
     let json = serde_json::to_value(&frame).expect("serialize frame");
     assert_eq!(json["preview"]["timeline_message_id"], "timeline-message-1");
+    assert_eq!(json["preview"]["activity_order"], 43);
+
+    let frame = WebChatV2EventFrame {
+        cursor: cursor(),
+        event: WebChatV2Event::CapabilityActivity {
+            activity: capability_activity(),
+        },
+    };
+    let json = serde_json::to_value(&frame).expect("serialize frame");
+    assert_eq!(json["activity"]["activity_order"], 42);
 }
 
 #[test]
@@ -273,6 +297,30 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
         assert_eq!(json["type"], expected_type);
         assert_no_forbidden_metadata(&json);
     }
+}
+
+#[test]
+fn projection_state_schema_serializes_run_retryability() {
+    let json = serde_json::to_value(projection_state()).expect("serialize projection state");
+    let items = json["items"].as_array().expect("projection items array");
+    // Select run_status entries by their `status` field rather than fixture
+    // position, so reordering unrelated projection items does not break this
+    // wire-schema assertion.
+    let find_run_status = |status: &str| {
+        items
+            .iter()
+            .filter_map(|item| item.get("run_status"))
+            .find(|run_status| run_status.get("status").and_then(|s| s.as_str()) == Some(status))
+            .unwrap_or_else(|| panic!("expected a {status} run_status item"))
+    };
+    let running_status = find_run_status("running");
+    let failed_status = find_run_status("failed");
+
+    assert!(
+        running_status.get("retryable").is_none(),
+        "running run status should omit retryable: {running_status}"
+    );
+    assert_eq!(failed_status["retryable"], true);
 }
 
 #[test]

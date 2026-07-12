@@ -25,8 +25,9 @@ owns:
    the same path prefix the descriptors declare.
 2. **Bearer-token middleware.** Authenticate `Authorization: Bearer
    …` (or the matching session form) and inject a
-   `WebUiAuthenticatedCaller` as an `axum::Extension` *before* the
-   handler runs. The handlers fail closed (`500`) when this layer is
+   `WebUiAuthenticatedCaller` and request-scoped
+   `WebUiV2Capabilities` as `axum::Extension`s *before* the handler
+   runs. The handlers fail closed (`500`) when this layer is
    missing — verified by
    `missing_caller_extension_returns_500`.
 3. **Query-token path for the SSE route.** The browser's
@@ -56,15 +57,22 @@ browser-reachable.
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | None | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | None | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
+| `webui.v2.logs` | GET | `/api/webchat/v2/logs` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | SSE | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | WebSocket | `ProjectionOnly` |
 | `webui.v2.cancel_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel` | None | `TurnCoordinator` |
+| `webui.v2.retry_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
 | `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N&run_limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.pause_automation` | POST | `/api/webchat/v2/automations/{automation_id}/pause` | None | `ProductWorkflow` |
+| `webui.v2.resume_automation` | POST | `/api/webchat/v2/automations/{automation_id}/resume` | None | `ProductWorkflow` |
+| `webui.v2.rename_automation` | POST | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
+| `webui.v2.delete_automation` | DELETE | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
 | `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | None | `ProjectionOnly` |
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
 | `webui.v2.install_extension` | POST | `/api/webchat/v2/extensions/install` | None | `ProductWorkflow` |
+| `webui.v2.import_extension` | POST | `/api/webchat/v2/extensions/import` (operator-only; raw zip body, 8 MiB cap) | None | `ProductWorkflow` |
 | `webui.v2.activate_extension` | POST | `/api/webchat/v2/extensions/{package_id}/activate` | None | `ProductWorkflow` |
 | `webui.v2.remove_extension` | POST | `/api/webchat/v2/extensions/{package_id}/remove` | None | `ProductWorkflow` |
 | `webui.v2.get_extension_setup` | GET | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProjectionOnly` |
@@ -75,16 +83,94 @@ browser-reachable.
 | `webui.v2.set_active_llm` | POST | `/api/webchat/v2/llm/active` | None | `ProductWorkflow` |
 | `webui.v2.test_llm_connection` | POST | `/api/webchat/v2/llm/test-connection` | None | `ProductWorkflow` |
 | `webui.v2.list_llm_models` | POST | `/api/webchat/v2/llm/list-models` | None | `ProductWorkflow` |
+| `webui.v2.settings.list_tools` | GET | `/api/webchat/v2/settings/tools` | None | `ProjectionOnly` |
+| `webui.v2.settings.set_tools_auto_approve` | POST | `/api/webchat/v2/settings/tools` | None | `ProductWorkflow` |
+| `webui.v2.settings.set_tool_permission` | POST | `/api/webchat/v2/settings/tools/{capability_id}` | None | `ProductWorkflow` |
+| `webui.v2.operator.get_setup` | GET | `/api/webchat/v2/operator/setup` | None | `ProjectionOnly` |
+| `webui.v2.operator.run_setup` | POST | `/api/webchat/v2/operator/setup` | None | `ProductWorkflow` |
+| `webui.v2.operator.list_config` | GET | `/api/webchat/v2/operator/config` | None | `ProjectionOnly` |
+| `webui.v2.operator.get_config_key` | GET | `/api/webchat/v2/operator/config/{key}` | None | `ProjectionOnly` |
+| `webui.v2.operator.set_config_key` | POST | `/api/webchat/v2/operator/config/{key}` | None | `ProductWorkflow` |
+| `webui.v2.operator.validate_config` | POST | `/api/webchat/v2/operator/config/validate` | None | `ProductWorkflow` |
+| `webui.v2.operator.diagnostics` | GET | `/api/webchat/v2/operator/diagnostics` | None | `ProjectionOnly` |
+| `webui.v2.operator.status` | GET | `/api/webchat/v2/operator/status` | None | `ProjectionOnly` |
+| `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
+| `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
+| `webui.v2.admin.list_users` | GET | `/api/webchat/v2/admin/users` (optional `?status=...`) | None | `ProductWorkflow` |
+| `webui.v2.admin.create_user` | POST | `/api/webchat/v2/admin/users` | None | `ProductWorkflow` |
+| `webui.v2.admin.get_user` | GET | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.update_user` | PATCH | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.delete_user` | DELETE | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.set_user_status` | POST | `/api/webchat/v2/admin/users/{user_id}/status` | None | `ProductWorkflow` |
+| `webui.v2.admin.set_user_role` | POST | `/api/webchat/v2/admin/users/{user_id}/role` | None | `ProductWorkflow` |
+| `webui.v2.admin.list_user_secrets` | GET | `/api/webchat/v2/admin/users/{user_id}/secrets` | None | `ProductWorkflow` |
+| `webui.v2.admin.put_user_secret` | PUT | `/api/webchat/v2/admin/users/{user_id}/secrets/{handle}` | None | `ProductWorkflow` |
+| `webui.v2.admin.delete_user_secret` | DELETE | `/api/webchat/v2/admin/users/{user_id}/secrets/{handle}` | None | `ProductWorkflow` |
+
+The `/api/webchat/v2/admin/*` user-management routes are admin/operator-gated:
+authorization (operator token or admin/owner role) and last-admin protection
+are enforced server-side in `ironclaw_product_workflow::AdminUserService`, and a
+non-admin caller receives `403`. `webui.v2.admin.create_user` returns the new
+user's one-time API bearer exactly once in `api_token`; there is no re-issue
+endpoint for existing users.
+| `webui.v2.trace_credits` | GET | `/api/webchat/v2/traces/credit` | None | `ProductWorkflow` |
+| `webui.v2.trace_account_traces` | GET | `/api/webchat/v2/traces/account` (optional `?limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.trace_account_login_link` | POST | `/api/webchat/v2/traces/account-login-link` | None | `ProductWorkflow` |
+| `webui.v2.authorize_trace_hold` | POST | `/api/webchat/v2/traces/holds/{submission_id}/authorize` | None | `ProductWorkflow` |
+
+`webui.v2.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
+query parameters, mutually exclusive boolean `tail` and `follow` flags from
+`RebornOperatorLogsQuery`, plus optional scoped filters for `thread_id`,
+`run_id`, `turn_id`, `tool_call_id`, `tool_name`, and `source`. Responses
+include the same correlation fields when the captured tracing context provides
+them and expose tail/follow capability through `tail_supported` and
+`follow_supported`. `webui.v2.operator.logs` shares the same shape but stays
+operator-gated.
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
-constructing the `WebUiAuthenticatedCaller` and injecting it as an
-axum `Extension` before the handler runs.
+constructing the `WebUiAuthenticatedCaller`, carrying the matched
+token's `WebUiV2Capabilities`, and injecting both as axum
+`Extension`s before the handler runs.
 
-The LLM configuration routes are operator-wide. Host composition must only
-mount them for authenticators that represent a single trusted operator; multi-
-user session/OIDC authenticators should leave those routes unmounted until an
-admin role boundary exists in `WebUiAuthenticatedCaller`.
+The `/api/webchat/v2/settings/tools` routes are authenticated caller routes,
+not operator routes. They expose the caller's tenant/user-scoped tool approval
+settings so regular multi-user sessions can read and update global
+auto-approve plus per-tool overrides without access to the operator command
+plane.
+
+The LLM configuration, operator setup/config/service-control, and extension
+zip-import (`webui.v2.import_extension`, #5499) routes are operator-wide.
+Host composition mounts them only when the authenticator says
+the deployment has an operator configuration surface, and must still authorize
+each request from the matched token's `operator_webui_config` capability.
+Multi-user session/OIDC authenticators should leave those routes unmounted or
+return non-operator capabilities until an admin role boundary exists. The
+route handlers also reject mounted operator config requests with `403` when
+the injected `WebUiV2Capabilities` lacks `operator_webui_config`, so host
+composition and handler dispatch share the same fail-closed capability
+boundary. `webui.v2.operator.logs` follows the same operator-capability
+boundary, while non-operator users use `webui.v2.logs` in the v2 surface and
+the separate gateway logs surface in the main Web UI.
+Unwired operator command-plane write, setup, log, and
+service-control methods fail closed with sanitized `503 service_unavailable`
+responses. Config validation plus read-only config, status, and diagnostics
+surfaces may instead return unavailable command-plane payloads with redacted
+diagnostics so operators can see why a setting is ignored. Stable
+unsupported-config reason codes currently include
+`operator_config_service_not_wired`, `operator_config_secret_not_wired`,
+`operator_config_deprecated`, `operator_config_immutable`,
+`operator_config_not_wired`, and `operator_config_unknown_key`.
+`POST /api/webchat/v2/operator/setup` uses the typed LLM config service for
+provider/model setup. Profile selection and WebUI access inputs are validated
+through the same operator setup facade; unchanged masked tokens (not modified
+by the user) are treated as no-ops, and actual profile/token mutations fail
+closed until an owning persistence service is wired. Token values are never
+echoed.
+`GET /api/webchat/v2/operator/diagnostics` is the Reborn doctor surface: the
+product facade aggregates status/readiness, setup, and config diagnostics into
+one redacted payload instead of making route handlers inspect runtime internals
+or adding a second CLI-only diagnostic path.
 
 ### List-threads
 
@@ -117,9 +203,9 @@ existence oracle.
 ### Stream-events (WebSocket)
 
 `stream_events_ws` is the WebSocket transport variant of
-`stream_events`. It drains the same `RebornServicesApi::stream_events`
-facade and emits each `ProductOutboundEnvelope` as a JSON text frame.
-The descriptor declares
+`stream_events`. It uses the same `RebornServicesApi` event stream
+surface as SSE and emits each `ProductOutboundEnvelope` as a JSON text
+frame. The descriptor declares
 `WebSocketOriginPolicy::SameOriginRequired`; host composition runs
 the same-origin check before the upgrade reaches this crate's
 handler.
@@ -168,24 +254,33 @@ boundary test enforces this.
 
 ## Streaming model
 
-`stream_events` is SSE. The facade is drain-only right now, so the
-handler drains, renders each `ProductOutboundEnvelope` into the
-browser-visible `WebChatV2EventFrame` schema with its projection cursor
-as the SSE `id`, then polls again on a 1-second cadence. The frame
-intentionally excludes adapter routing/delivery metadata. When
-`RebornServicesApi::stream_events` gains a true subscription API the
-handler can migrate without changing the descriptor or browser event
-schema.
+`stream_events` is SSE. When the facade advertises subscription support,
+the handler subscribes once through `RebornServicesApi::subscribe_events`,
+renders each `ProductOutboundEnvelope` into the browser-visible
+`WebChatV2EventFrame` schema with its projection cursor as the SSE `id`,
+and waits on the projection/event subscription instead of polling. The
+frame intentionally excludes adapter routing/delivery metadata. The
+fallback path still calls `RebornServicesApi::stream_events` for facades
+that do not support subscriptions.
 
-The per-poll ownership probe goes through `SessionThreadService::read_thread`
+The fallback ownership probe goes through `SessionThreadService::read_thread`
 (metadata-only) rather than `list_thread_history`, so an active stream does
-not reload the full message transcript every second.
+not reload the full message transcript on each drain. Subscription streams
+revalidate caller access before forwarding each envelope.
 
 `capability_activity` SSE frames are projection-derived lifecycle metadata for
-tool/capability execution. They expose only the safe activity DTO
+tool/capability execution. They expose the safe activity DTO
 (`invocation_id`, `capability_id`, status, provider/runtime/process metadata,
-byte counts, sanitized error kind, timestamp) and must not carry raw tool
-arguments, raw results, command strings, host paths, or provider payloads.
+byte counts, sanitized error kind, timestamp) plus — while the invocation is
+still running — the optional `subtitle` (inline primary argument) and
+`input_summary` (parameter summary). These two carry the **same bounded,
+sanitized input projection the `capability_display_preview` frame already
+exposes** (secret-redacted via `sanitize_text`, host paths rejected/relativized,
+URLs stripped, byte-bounded); they exist so the running tool row can show
+`tool   <arg>` before the result lands instead of a bare tool name. They must
+never carry the *raw, unsanitized* tool arguments, raw results, host paths, or
+provider payloads — only the projection-sanitized summaries. Full output stays
+behind the scoped `result_ref` fetch path.
 
 `capability_display_preview` SSE frames are separate sanitized display artifacts
 for WebUI tool blocks. They may carry bounded summaries/previews only: summaries

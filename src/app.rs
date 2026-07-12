@@ -517,12 +517,7 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
-        let engine_version = if crate::bridge::is_engine_v2_enabled() {
-            crate::tools::EngineVersion::V2
-        } else {
-            crate::tools::EngineVersion::V1
-        };
-        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        let mut registry = ToolRegistry::new().with_engine_version(crate::tools::EngineVersion::V1);
         if let Some(ref db) = self.db {
             registry = registry.with_database(Arc::clone(db));
         }
@@ -1007,16 +1002,13 @@ impl AppBuilder {
             if let Some(ref ss) = settings_store_override {
                 em = em.with_settings_store(Arc::clone(ss));
             }
-            let pairing_store = if let Some(ref db) = self.db {
+            if let Some(ref db) = self.db {
                 let ps = Arc::new(crate::pairing::PairingStore::new(
                     Arc::clone(db),
                     Arc::clone(&ownership_cache),
                 ));
                 em = em.with_pairing_store(Arc::clone(&ps));
-                Some(ps)
-            } else {
-                None
-            };
+            }
             // Wire the Reborn Telegram v2 feature flag so the manager
             // can reject hot-activation of the legacy `telegram` WASM
             // channel when v2 owns the webhook installation (Henry's
@@ -1024,9 +1016,6 @@ impl AppBuilder {
             em.set_reborn_telegram_v2_enabled(self.config.channels.reborn_telegram_v2_enabled);
             let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
-            if let Some(ps) = pairing_store {
-                tools.register_sync(Arc::new(crate::tools::builtin::PairingApproveTool::new(ps)));
-            }
 
             // Register permission management tool and upgrade tool_list with
             // builtin registry support. Prefer the workspace-backed adapter

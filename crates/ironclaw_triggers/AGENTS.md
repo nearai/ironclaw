@@ -11,7 +11,7 @@
 - Trigger records, schedule validation, source-provider evaluation, deterministic fire identity, and repository contracts.
 - In-memory test behavior and durable trigger repository backends.
 - Deterministic poller tick logic behind trigger-owned repository/materializer/submitter/state-lookup ports.
-- Cron validation, including rejection of schedules that can fire more often than once per minute.
+- Cron validation, including rejection of schedules that can fire more often than once per minute, and rejection of invalid IANA timezone strings.
 - Backend-specific trigger repository implementations may accept already-open database handles such as `Arc<libsql::Database>`.
 - This crate must not own database URL/path/env parsing, bootstrap config, or generic database accessors.
 

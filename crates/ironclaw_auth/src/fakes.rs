@@ -6,34 +6,36 @@ use chrono::Utc;
 use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::{
-    AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
-    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
-    AuthProductError, AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest,
-    CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountOwnerScope,
-    CredentialAccountProjection, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSelectionInput,
-    CredentialSetupService, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowManager,
+    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProviderClient, CredentialAccount,
+    CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountListPage,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
+    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryReason,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSelectionInput, CredentialSetupService, ManualTokenCompletionInput,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthExchangeCleanupRequest,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
     OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
     SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, binding_scope_owns_account,
     cleanup::SecretCleanupAction::Deactivate,
     domain::{
         PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
         recovery_projection_for_single_account, recovery_projection_for_unconfigured_accounts,
         update_account_from_exchange, update_account_from_request, validate_account_update_target,
-        validate_bound_update_authority, validate_callback_claim,
-        validate_credential_status_transition, validate_flow_update_binding,
-        validate_manual_token_flow, validate_manual_token_update_binding,
-        validate_new_credential_account, validate_refresh_target, validate_selection_flow,
+        validate_bound_account_update_target, validate_bound_update_authority,
+        validate_callback_claim, validate_credential_status_transition,
+        validate_flow_update_binding, validate_manual_token_flow,
+        validate_manual_token_update_binding, validate_new_credential_account,
+        validate_refresh_target, validate_selection_flow,
     },
     flow::credential_status_for_completed_flow,
-    flow_matches_turn_gate_query,
+    flow_matches_durable_owner, flow_matches_turn_gate_query,
     interaction::PendingSecretInteraction,
     provider::validate_provider_callback_request,
     scope_matches,
@@ -46,6 +48,8 @@ struct AuthState {
     accounts: HashMap<CredentialAccountId, CredentialAccount>,
     continuations: Vec<AuthContinuationEvent>,
     refresh_fails: HashSet<CredentialAccountId>,
+    refresh_backend_fails: HashSet<CredentialAccountId>,
+    refresh_invalid_grants: HashSet<CredentialAccountId>,
     refresh_races: HashMap<CredentialAccountId, (SecretHandle, SecretHandle)>,
     quarantines: HashMap<CredentialAccountId, SecretCleanupQuarantineReason>,
 }
@@ -71,6 +75,23 @@ impl InMemoryAuthProductServices {
 
     pub fn fail_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
         self.lock_state().refresh_fails.insert(account_id);
+    }
+
+    pub fn fail_next_refresh_backend_for_tests(&self, account_id: CredentialAccountId) {
+        self.lock_state().refresh_backend_fails.insert(account_id);
+    }
+
+    pub fn has_pending_refresh_backend_failure_for_tests(
+        &self,
+        account_id: CredentialAccountId,
+    ) -> bool {
+        self.lock_state()
+            .refresh_backend_fails
+            .contains(&account_id)
+    }
+
+    pub fn invalid_grant_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
+        self.lock_state().refresh_invalid_grants.insert(account_id);
     }
 
     pub fn complete_refresh_during_next_provider_call_for_tests(
@@ -121,6 +142,19 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
             .flows
             .values()
             .find(|flow| flow_matches_turn_gate_query(flow, &query))
+            .cloned())
+    }
+
+    async fn flow_for_owner_by_id(
+        &self,
+        owner_scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let state = self.lock_state();
+        Ok(state
+            .flows
+            .get(&flow_id)
+            .filter(|flow| flow_matches_durable_owner(flow, owner_scope))
             .cloned())
     }
 
@@ -235,6 +269,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 return Err(AuthProductError::ProviderDenied);
             }
             ProviderCallbackOutcome::Authorized { exchange } => {
+                let exchange = *exchange;
                 if exchange.provider != record.provider {
                     return Err(AuthProductError::TokenExchangeFailed);
                 }
@@ -266,6 +301,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at: now,
         });
@@ -294,7 +330,12 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .accounts
             .get(&input.credential_account_id)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&flow_scope, &account.scope) || account.provider != flow_provider {
+        // Use owner-granularity for the scope check, mirroring the production
+        // durable path (`flows.rs`). The flow record may carry a different
+        // invocation_id/thread_id/mission_id than the credential account; only
+        // the ownership boundary (tenant/user/agent/project + surface + session)
+        // is meaningful here. See `binding_scope_owns_account` in credential.rs.
+        if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.status != CredentialAccountStatus::Configured {
@@ -313,6 +354,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at: now,
         });
@@ -353,7 +395,16 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .accounts
             .get(&input.credential_account_id)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&flow_scope, &account.scope) || account.provider != flow_provider {
+        // Use owner-granularity for the scope check, mirroring the production
+        // durable path (`flows.rs`). The flow record's scope carries a fresh
+        // per-request `invocation_id` while the credential account may have been
+        // created under a different `invocation_id` (and/or thread/mission) in an
+        // earlier flow. Full `scope_matches` equality would always fail across
+        // requests. The meaningful ownership boundary is enforced by
+        // `binding_scope_owns_account` (tenant/user/agent/project + surface +
+        // session); see the canonical docstring on `binding_scope_owns_account`
+        // in credential.rs.
+        if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.status != CredentialAccountStatus::Configured {
@@ -372,6 +423,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at: now,
         });
@@ -468,7 +520,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if record.status != AuthFlowStatus::Completed {
+        if !crate::is_terminal_status(record.status) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if already marked by a concurrent caller, return existing record.
@@ -921,6 +973,7 @@ impl AuthProviderClient for InMemoryAuthProductServices {
             refresh_secret: Some(generated_secret_handle("oauth-refresh")?),
             scopes: request.scopes,
             account_id: None,
+            provider_identity: None,
         })
     }
 
@@ -931,6 +984,8 @@ impl AuthProviderClient for InMemoryAuthProductServices {
         let should_fail = {
             let mut state = self.lock_state();
             let should_fail = state.refresh_fails.remove(&request.account_id);
+            let should_backend_fail = state.refresh_backend_fails.remove(&request.account_id);
+            let should_invalid_grant = state.refresh_invalid_grants.remove(&request.account_id);
             if let Some((access_secret, refresh_secret)) =
                 state.refresh_races.remove(&request.account_id)
                 && let Some(account) = state.accounts.get_mut(&request.account_id)
@@ -940,10 +995,16 @@ impl AuthProviderClient for InMemoryAuthProductServices {
                 account.status = CredentialAccountStatus::Configured;
                 account.updated_at = Utc::now();
             }
-            should_fail
+            (should_fail, should_backend_fail, should_invalid_grant)
         };
-        if should_fail {
+        if should_fail.0 {
             return Err(AuthProductError::RefreshFailed);
+        }
+        if should_fail.1 {
+            return Err(AuthProductError::BackendUnavailable);
+        }
+        if should_fail.2 {
+            return Err(AuthProductError::InvalidGrant);
         }
         Ok(OAuthProviderRefresh {
             provider: request.provider,
@@ -956,6 +1017,46 @@ impl AuthProviderClient for InMemoryAuthProductServices {
 
 #[async_trait]
 impl SecretCleanupService for InMemoryAuthProductServices {
+    async fn retain_oauth_exchange_for_cleanup(
+        &self,
+        request: OAuthExchangeCleanupRequest,
+    ) -> Result<CredentialAccountId, AuthProductError> {
+        let account_id = CredentialAccountId::from_uuid(request.flow_id.as_uuid());
+        let mut state = self.lock_state();
+        if let Some(existing) = state.accounts.get(&account_id) {
+            if existing.status == CredentialAccountStatus::Revoked
+                && existing.provider == request.exchange.provider
+                && CredentialAccountOwnerScope::from_scope(&request.scope).matches(existing)
+                && existing.access_secret.as_ref() == Some(&request.exchange.access_secret)
+                && existing.refresh_secret == request.exchange.refresh_secret
+            {
+                return Ok(account_id);
+            }
+            return Err(AuthProductError::BackendConflict);
+        }
+        let now = Utc::now();
+        state.accounts.insert(
+            account_id,
+            CredentialAccount {
+                id: account_id,
+                scope: request.scope,
+                provider: request.exchange.provider,
+                label: request.exchange.account_label,
+                status: CredentialAccountStatus::Revoked,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(request.exchange.access_secret),
+                refresh_secret: request.exchange.refresh_secret,
+                scopes: Vec::new(),
+                provider_identity: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        Ok(account_id)
+    }
+
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
@@ -963,8 +1064,12 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         let mut state = self.lock_state();
         let quarantines = state.quarantines.clone();
         let mut report = SecretCleanupReport::default();
+        // Credential-owner granularity, not full scope equality: cleanup
+        // callers mint a fresh invocation (and often a different thread), so
+        // exact matching could never find the account the flow stored.
+        let owner = CredentialAccountOwnerScope::from_scope(&request.scope.to_credential_owner());
         for account in state.accounts.values_mut() {
-            if !scope_matches(&request.scope, &account.scope) {
+            if !owner.matches(account) {
                 continue;
             }
             let owns_extension_account = account.owner_extension.as_ref()
@@ -974,7 +1079,8 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 .granted_extensions
                 .iter()
                 .any(|extension| extension == &request.extension_id);
-            if !(owns_extension_account || had_grant) {
+            let provider_selected = request.provider.as_ref() == Some(&account.provider);
+            if !(owns_extension_account || had_grant || provider_selected) {
                 continue;
             }
             if let Some(reason) = quarantines.get(&account.id).copied() {
@@ -991,7 +1097,7 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 report.removed_grants.push(account.id);
             }
 
-            if owns_extension_account {
+            if owns_extension_account || provider_selected {
                 match request.action {
                     Deactivate => {
                         account.status = CredentialAccountStatus::Inactive;
@@ -1004,10 +1110,48 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                             account.updated_at = Utc::now();
                             report.revoked_accounts.push(account.id);
                         }
+                        account.access_secret = None;
+                        account.refresh_secret = None;
                     }
                 }
             } else if had_grant {
                 report.retained_accounts.push(account.id);
+            }
+        }
+        if matches!(request.action, SecretCleanupAction::Uninstall)
+            && let Some(provider) = request.provider.as_ref()
+        {
+            let owner = &request.scope.resource;
+            for flow in state.flows.values_mut().filter(|flow| {
+                let resource = &flow.scope.resource;
+                &flow.provider == provider
+                    && resource.tenant_id == owner.tenant_id
+                    && resource.user_id == owner.user_id
+                    && resource.agent_id == owner.agent_id
+                    && resource.project_id == owner.project_id
+            }) {
+                if !crate::is_terminal_status(flow.status) {
+                    flow.status = AuthFlowStatus::Canceled;
+                    flow.error = Some(crate::AuthErrorCode::Canceled);
+                    flow.updated_at = Utc::now();
+                }
+                if flow.continuation_emitted_at.is_none()
+                    && matches!(
+                        flow.continuation,
+                        AuthContinuationRef::TurnGateResume { .. }
+                    )
+                {
+                    report
+                        .canceled_turn_gate_continuations
+                        .push(AuthContinuationEvent {
+                            flow_id: flow.id,
+                            scope: flow.scope.clone(),
+                            continuation: flow.continuation.clone(),
+                            provider: flow.provider.clone(),
+                            credential_account_id: flow.credential_account_id,
+                            emitted_at: Utc::now(),
+                        });
+                }
             }
         }
         Ok(report)
@@ -1032,6 +1176,7 @@ fn create_account_in_state(
         access_secret: request.access_secret,
         refresh_secret: request.refresh_secret,
         scopes: request.scopes,
+        provider_identity: None,
         created_at: now,
         updated_at: now,
     };
@@ -1049,7 +1194,17 @@ fn resolve_callback_account(
         Some(account_id) => {
             update_bound_callback_account(state, callback, exchange, account_id, now)
         }
-        None => create_callback_account(state, callback, exchange),
+        // Mirror the production durable callback (flows.rs): an exchange with no
+        // provider account_id but a stored update_binding is a reconnect of the
+        // bound account, not a fresh create. Routing this to
+        // `create_callback_account` (which rejects any binding) left the fake
+        // unable to exercise the reconnect contract.
+        None => match callback.update_binding.as_ref().map(|b| b.account_id) {
+            Some(account_id) => {
+                update_bound_callback_account(state, callback, exchange, account_id, now)
+            }
+            None => create_callback_account(state, callback, exchange),
+        },
     }
 }
 
@@ -1070,7 +1225,10 @@ fn update_bound_callback_account(
         .accounts
         .get_mut(&account_id)
         .ok_or(AuthProductError::CredentialMissing)?;
-    if !scope_matches(&callback.scope, &account.scope) {
+    // Owner-granularity guard (#4935), mirroring production `update_bound_oauth_account`.
+    // The callback `scope` carries the flow's per-flow invocation/thread the bound
+    // account never shared; full `scope_matches` here rejected the legitimate reconnect.
+    if !binding_scope_owns_account(&callback.scope, account) {
         return Err(AuthProductError::CrossScopeDenied);
     }
     if account.provider != exchange.provider {
@@ -1089,7 +1247,7 @@ fn create_callback_account(
     if callback.update_binding.is_some() {
         return Err(AuthProductError::CrossScopeDenied);
     }
-    Ok(create_account_in_state(
+    let account_id = create_account_in_state(
         state,
         NewCredentialAccount {
             scope: callback.scope,
@@ -1104,7 +1262,11 @@ fn create_callback_account(
             scopes: exchange.scopes.clone(),
         },
     )?
-    .id)
+    .id;
+    if let Some(account) = state.accounts.get_mut(&account_id) {
+        account.provider_identity = exchange.provider_identity.clone();
+    }
+    Ok(account_id)
 }
 
 fn create_or_update_manual_token_account(
@@ -1113,7 +1275,7 @@ fn create_or_update_manual_token_account(
 ) -> Result<CredentialAccount, AuthProductError> {
     match pending.update_binding.as_ref() {
         Some(binding) => {
-            let account_request = manual_token_account_request(
+            let mut account_request = manual_token_account_request(
                 &pending,
                 binding.ownership,
                 binding.owner_extension.clone(),
@@ -1124,7 +1286,21 @@ fn create_or_update_manual_token_account(
                 .accounts
                 .get_mut(&binding.account_id)
                 .ok_or(AuthProductError::CredentialMissing)?;
-            validate_account_update_target(account, &account_request)?;
+            // Bound reconnect: authorize at owner granularity (#4935), mirroring
+            // the production durable path; full `scope_matches` would reject every
+            // cross-thread manual-token reconnect.
+            validate_bound_account_update_target(
+                account,
+                &pending.scope,
+                &pending.provider,
+                binding,
+            )?;
+            // Mutate the bound account in place, preserving its own durable scope
+            // (the reconnect arrives from a different thread/invocation; the
+            // account does not move). This keeps the mutation's internal
+            // same-scope check trivially satisfied, exactly as the reusable path
+            // below does.
+            account_request.scope = account.scope.clone();
             update_account_from_request(account, account_request, now)
         }
         None => {

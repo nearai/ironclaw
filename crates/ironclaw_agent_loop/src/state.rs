@@ -7,7 +7,10 @@ mod slots;
 
 pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
-pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
+pub use ironclaw_turns::run_profile::AuthResumeApprovalIdentity;
+pub use signature::{
+    ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError, CapabilityOutputObservation,
+};
 pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
     ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
@@ -17,18 +20,21 @@ pub use slots::{
     ReplyAdmissionStrategyState, StopStrategyState,
 };
 
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
-    run_profile::{CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext},
+    run_profile::{
+        CapabilityActivityId, CapabilityApprovalResume, CapabilityInputRef, CapabilityResumeToken,
+        CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext, ProviderToolCallReplay,
+    },
 };
 
-/// Initial checkpoint payload schema reserved for the default Reborn loop.
+/// Checkpoint payload schema for the default Reborn loop.
 ///
-/// Reborn checkpoint persistence has not shipped yet, so this branch is still
-/// defining the v1 payload shape. Once persisted checkpoints are in use,
-/// changing this layout requires an explicit schema bump and migration plan.
-pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v1";
-pub const CHECKPOINT_SCHEMA_VERSION: u64 = 1;
+/// Required parked-activity ids are part of the v2 payload shape. Older v1
+/// checkpoints are intentionally not migrated by this refactor.
+pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v2";
+pub const CHECKPOINT_SCHEMA_VERSION: u64 = 2;
 
 /// Immutable execution state threaded through the loop.
 ///
@@ -53,6 +59,8 @@ pub struct LoopExecutionState {
 
     // executor-observed (populated by executor; read-only to strategies)
     pub recent_call_signatures: BoundedRing<CapabilityCallSignature, 8>,
+    #[serde(default)]
+    pub seen_capability_output_digests: BoundedRing<CapabilityOutputObservation, 64>,
     pub recent_failure_kinds: BoundedRing<LoopFailureKind, 8>,
     /// Rolling window of assistant-output token counts (from
     /// `LoopModelResponse::usage.output_tokens`). The default stop
@@ -61,6 +69,13 @@ pub struct LoopExecutionState {
     /// below `min_delta_tokens` → `StopKind::NoProgressDetected`
     /// (#3841 follow-up F1).
     pub recent_output_token_counts: BoundedRing<u32, 8>,
+
+    /// Count of final-answer nudges issued this run (driver-specific nudge,
+    /// gated by `SteeringPolicy.allow_driver_specific_nudges`). Capped so the
+    /// loop can't issue unbounded extra model calls. `#[serde(default)]` keeps
+    /// older checkpoints decodable.
+    #[serde(default)]
+    pub final_answer_nudges_used: u32,
 
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
@@ -79,6 +94,152 @@ pub struct LoopExecutionState {
     pub reply_admission_state: ReplyAdmissionStrategyState,
     pub stop_state: StopStrategyState,
     pub gate_state: GateStrategyState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_approval_resume: Option<PendingApprovalResume>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_auth_resume: Option<PendingAuthResume>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_external_tool_resume: Option<PendingExternalToolResume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingApprovalResume {
+    pub gate_ref: LoopGateRef,
+    pub capability_id: CapabilityId,
+    pub approval_request_id: ApprovalRequestId,
+    pub resume_token: CapabilityResumeToken,
+    /// Activity identifier for the parked invocation. Resume handling keys the
+    /// parked UI row by this explicit id, not by capability id or token shape.
+    pub activity_id: CapabilityActivityId,
+    #[serde(default = "CorrelationId::new")]
+    pub correlation_id: CorrelationId,
+    pub surface_version: CapabilitySurfaceVersion,
+    pub input_ref: CapabilityInputRef,
+    pub effective_capability_ids: Vec<CapabilityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderToolCallReplay>,
+    pub input: serde_json::Value,
+    pub estimate: ResourceEstimate,
+    /// Set when the user denied this approval gate. The loop surfaces a
+    /// model-visible failure for the parked call instead of re-dispatching.
+    /// See the field-name note on `PendingAuthResume::disposition`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
+}
+
+impl PendingApprovalResume {
+    pub(crate) fn activity_id_for_resume(&self) -> CapabilityActivityId {
+        self.activity_id
+    }
+
+    /// Converts this pending resume into the neutral wire DTO used by the
+    /// capability port.  Centralising the field-by-field mapping here removes
+    /// the two manual conversion sites in the executor and ensures any new
+    /// fields are propagated consistently.
+    pub(crate) fn to_approval_resume(&self) -> CapabilityApprovalResume {
+        CapabilityApprovalResume {
+            approval_request_id: self.approval_request_id,
+            resume_token: self.resume_token.clone(),
+            correlation_id: self.correlation_id,
+            input_ref: self.input_ref.clone(),
+            input: self.input.clone(),
+            estimate: self.estimate.clone(),
+        }
+    }
+}
+
+/// Auth-gated capability call parked at a blocked-auth checkpoint.
+///
+/// Auth re-dispatch reuses the original invocation identifier when a
+/// `resume_token` is available, so any fingerprinted approval lease whose scope
+/// embeds that identifier can still be matched and claimed. Auth gates also
+/// checkpoint the runtime input replay when available because staged input refs
+/// may be consumed by the first dispatch or scoped to a prior loop run.
+///
+/// The `prior_approval` field collapses the two formerly-independent
+/// `approval_request_id`/`correlation_id` options into a typed all-or-none
+/// value: both sub-fields are present together or neither is.
+///
+/// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
+/// gate-declined failure for the parked call and SKIPS re-dispatch; in that
+/// case `resume_token` and `replay` are unused.
+///
+/// Field-name note: each pending-resume type scopes `disposition` to ONE
+/// parked gate (auth or approval), so the short name is unambiguous within
+/// the struct.  Turn-layer records that are gate-agnostic use the fuller
+/// `resume_disposition` to distinguish the field from other disposition-like
+/// values in a wider context.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingAuthResume {
+    pub gate_ref: LoopGateRef,
+    pub capability_id: CapabilityId,
+    pub surface_version: CapabilitySurfaceVersion,
+    pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_capability_ids: Vec<CapabilityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderToolCallReplay>,
+    /// Original invocation resume token, set when the invocation previously
+    /// reached an auth gate.  Encodes the original invocation identifier so
+    /// re-dispatch can reuse it instead of minting a fresh one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<CapabilityResumeToken>,
+    /// Activity identifier for the parked invocation. Token-less auth gates
+    /// carry this explicitly so a later denial finalizes the same activity
+    /// instead of leaving the UI row running.
+    pub activity_id: CapabilityActivityId,
+    /// Prior-approval identity, set together with `resume_token` when the
+    /// invocation had previously passed a one-shot approval gate.
+    /// `approval_request_id` and `correlation_id` are always set as a pair;
+    /// see [`AuthResumeApprovalIdentity`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_approval: Option<AuthResumeApprovalIdentity>,
+    /// Runtime input captured when the auth gate blocked. This avoids resolving
+    /// a consumed or cross-run input ref after the user completes auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ironclaw_turns::run_profile::CapabilityAuthResumeReplay>,
+    /// Set when the user denied this auth gate. The loop surfaces a
+    /// model-visible failure for the parked call instead of re-dispatching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
+}
+
+impl PendingAuthResume {
+    pub(crate) fn activity_id_for_resume(&self) -> CapabilityActivityId {
+        self.activity_id
+    }
+}
+
+/// Client-supplied ("external") tool call parked at a `BlockedExternalTool`
+/// checkpoint. Unlike auth/approval, external-tool resume carries no resume
+/// token: the run is re-dispatched as a plain invocation and the host's
+/// external-tool decorator completes it from the run-scoped catalog (which holds
+/// the client-submitted output keyed by provider call id). The `provider_replay`
+/// is re-registered on resume so the decorator re-binds `input_ref -> call_id`
+/// and the model's tool arguments are re-staged.
+///
+/// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
+/// failure for the parked call and SKIPS re-dispatch (so a cancelled external
+/// tool cannot re-block forever).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingExternalToolResume {
+    pub gate_ref: LoopGateRef,
+    pub capability_id: CapabilityId,
+    pub activity_id: CapabilityActivityId,
+    pub surface_version: CapabilitySurfaceVersion,
+    pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_capability_ids: Vec<CapabilityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderToolCallReplay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
+}
+
+impl PendingExternalToolResume {
+    pub(crate) fn activity_id_for_resume(&self) -> CapabilityActivityId {
+        self.activity_id
+    }
 }
 
 impl LoopExecutionState {
@@ -99,8 +260,10 @@ impl LoopExecutionState {
             input_cursor: LoopInputCursor::origin_for_run(context),
             surface_version: None,
             recent_call_signatures: BoundedRing::new(),
+            seen_capability_output_digests: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
+            final_answer_nudges_used: 0,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
@@ -112,6 +275,9 @@ impl LoopExecutionState {
             reply_admission_state: ReplyAdmissionStrategyState::default(),
             stop_state: StopStrategyState::default(),
             gate_state: GateStrategyState::default(),
+            pending_approval_resume: None,
+            pending_auth_resume: None,
+            pending_external_tool_resume: None,
         }
     }
 
@@ -133,6 +299,36 @@ impl LoopExecutionState {
             field: "payload",
             reason: error.to_string(),
         })
+    }
+
+    /// Rebinds run-owned host state after loading a checkpoint into a new retry
+    /// run.
+    ///
+    /// Retryable failed runs intentionally reuse the source run's checkpoint
+    /// payload. The input cursor inside that payload is scoped to the source
+    /// `(scope, run_id)`, so it cannot be submitted to the retry host. Durable
+    /// transcript/result refs in the payload are also owned by the source run;
+    /// carrying them into the retry would make the retry's terminal exit claim
+    /// foreign-run evidence. Reset these run-owned fields and let the retry host
+    /// produce its own refs.
+    ///
+    /// Gate-bound resume state (`last_gate`, `pending_approval_resume`,
+    /// `pending_auth_resume`) is deliberately NOT cleared here: this same path
+    /// (`PlannedDriver::resume` -> `from_checkpoint_payload().rebase_for_run()`)
+    /// is what resumes a run after an approval/auth gate is resolved, and the
+    /// pending-resume record is exactly the evidence that tells the loop to
+    /// re-dispatch the gated capability. Clearing it drops the resumed
+    /// invocation (regression: only the pre-gate call runs). The resume host
+    /// re-validates the gate before honoring the record, so this is not a
+    /// trust-boundary leak.
+    pub fn rebase_for_run(mut self, context: &LoopRunContext) -> Self {
+        if self.input_cursor.is_for_run(context) {
+            return self;
+        }
+        self.input_cursor = LoopInputCursor::origin_for_run(context);
+        self.assistant_refs.clear();
+        self.result_refs.clear();
+        self
     }
 }
 
@@ -171,7 +367,8 @@ pub enum CheckpointPayloadError {
 mod tests {
     use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        AgentLoopDriverDescriptor, GateResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
+        TurnRunId, TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
             ConcurrencyClass, ContextProfileId, LoopDriverId, ModelProfileId,
@@ -422,6 +619,68 @@ mod tests {
     }
 
     #[test]
+    fn seen_capability_output_digests_round_trips_through_checkpoint_payload() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"message": "hi"}),
+        )
+        .expect("signature builds");
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature,
+                output_digest: ironclaw_turns::run_profile::ContentDigest(42),
+            });
+
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+
+        assert_eq!(
+            restored.seen_capability_output_digests, state.seen_capability_output_digests,
+            "seen_capability_output_digests must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_output_digest_ring_decodes_to_empty() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"message": "hi"}),
+        )
+        .expect("signature builds");
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature,
+                output_digest: ironclaw_turns::run_profile::ContentDigest(42),
+            });
+
+        let payload = encode_payload(&state);
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("seen_capability_output_digests");
+        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy = LoopExecutionState::from_checkpoint_payload(
+            &stripped_payload,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint payload without seen_capability_output_digests");
+
+        assert!(
+            from_legacy.seen_capability_output_digests.is_empty(),
+            "legacy checkpoint missing seen_capability_output_digests must decode to an empty ring"
+        );
+    }
+
+    #[test]
     fn compaction_prompt_snapshot_round_trips_through_checkpoints() {
         let context = test_run_context();
         let mut state = LoopExecutionState::initial_for_run(&context);
@@ -508,6 +767,99 @@ mod tests {
         let result = LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::Final);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), state);
+    }
+
+    #[test]
+    fn rebase_for_run_resets_run_owned_refs_and_input_cursor() {
+        let source_context = test_run_context();
+        let target_context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&source_context);
+        state.input_cursor = LoopInputCursor::from_host_token(
+            &source_context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:source-seen")
+                .unwrap(),
+        );
+        state
+            .assistant_refs
+            .push(LoopMessageRef::new("msg:source-run").unwrap());
+        state
+            .result_refs
+            .push(ironclaw_turns::LoopResultRef::new("result:source-run").unwrap());
+        state.iteration = 4;
+        // Gate-bound resume state must survive the rebase: this path also
+        // resumes a run after an approval/auth gate, where the pending-resume
+        // record drives re-dispatch of the gated capability.
+        state.last_gate = Some(LoopGateRef::new("gate:source-run").unwrap());
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:source-approval").unwrap(),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").unwrap(),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000002")
+                .unwrap(),
+            activity_id: CapabilityActivityId::new(),
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:source-approval").unwrap(),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            input: json!({ "k": "v" }),
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:source-auth").unwrap(),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").unwrap(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:source").unwrap(),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: None,
+            activity_id: CapabilityActivityId::new(),
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+
+        let rebased = state.clone().rebase_for_run(&target_context);
+
+        assert_eq!(rebased.iteration, state.iteration);
+        assert!(rebased.input_cursor.is_for_run(&target_context));
+        assert_eq!(
+            rebased.input_cursor,
+            LoopInputCursor::origin_for_run(&target_context)
+        );
+        assert!(rebased.assistant_refs.is_empty());
+        assert!(rebased.result_refs.is_empty());
+        // Gate-bound resume state is preserved so an approval/auth resume can
+        // re-dispatch the gated capability.
+        assert_eq!(rebased.last_gate, state.last_gate);
+        assert_eq!(
+            rebased.pending_approval_resume,
+            state.pending_approval_resume
+        );
+        assert_eq!(rebased.pending_auth_resume, state.pending_auth_resume);
+    }
+
+    #[test]
+    fn rebase_for_run_preserves_refs_for_same_run_gate_resume() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.input_cursor = LoopInputCursor::from_host_token(
+            &context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:gate-seen")
+                .unwrap(),
+        );
+        state
+            .assistant_refs
+            .push(LoopMessageRef::new("msg:same-run").unwrap());
+        state
+            .result_refs
+            .push(ironclaw_turns::LoopResultRef::new("result:same-run").unwrap());
+        state.iteration = 3;
+
+        let rebased = state.clone().rebase_for_run(&context);
+
+        assert_eq!(rebased, state);
     }
 
     #[test]
@@ -607,6 +959,244 @@ mod tests {
         assert_eq!(
             restored.post_capability_state, state.post_capability_state,
             "entire PostCapabilityStageState must round-trip without loss"
+        );
+    }
+
+    #[test]
+    fn pending_auth_resume_round_trips_through_checkpoint_payload() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:auth-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: None,
+            activity_id: CapabilityActivityId::new(),
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored.pending_auth_resume, state.pending_auth_resume,
+            "PendingAuthResume must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn pending_auth_resume_denied_disposition_round_trips_through_checkpoint_payload() {
+        // Regression: the `Some(Denied)` disposition stamped by `planned_driver`
+        // before the capability stage must survive the checkpoint encode/decode
+        // cycle so that a resumed run still sees the denial.
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:auth-denied-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:denied-test").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: None,
+            activity_id: CapabilityActivityId::new(),
+            prior_approval: None,
+            replay: None,
+            disposition: Some(GateResumeDisposition::Denied),
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored
+                .pending_auth_resume
+                .as_ref()
+                .and_then(|r| r.disposition.as_ref()),
+            Some(&GateResumeDisposition::Denied),
+            "PendingAuthResume with Denied disposition must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            restored.pending_auth_resume, state.pending_auth_resume,
+            "entire PendingAuthResume must round-trip without loss when disposition is Some(Denied)"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_auth_resume_slot_decodes_to_none() {
+        // Encode a state with no pending_auth_resume; decode must yield None.
+        let context = test_run_context();
+        let state = LoopExecutionState::initial_for_run(&context);
+        assert!(
+            state.pending_auth_resume.is_none(),
+            "initial state must have no pending_auth_resume"
+        );
+
+        // Round-trip through the normal encode/decode path.
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert!(
+            restored.pending_auth_resume.is_none(),
+            "decoded state must have no pending_auth_resume when field was absent from payload"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_final_answer_nudges_slot_decodes_to_zero() {
+        // A checkpoint produced before `final_answer_nudges_used` was added would
+        // lack the field entirely. The `#[serde(default)]` contract must decode it
+        // to 0 rather than failing, so a resumed run still has its one-shot budget.
+        let context = test_run_context();
+        let state = LoopExecutionState::initial_for_run(&context);
+        assert_eq!(
+            state.final_answer_nudges_used, 0,
+            "initial state must start with zero nudges used"
+        );
+
+        let payload = encode_payload(&state);
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("final_answer_nudges_used");
+        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy = LoopExecutionState::from_checkpoint_payload(
+            &stripped_payload,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint payload without final_answer_nudges_used");
+        assert_eq!(
+            from_legacy.final_answer_nudges_used, 0,
+            "legacy checkpoint missing final_answer_nudges_used must decode to 0"
+        );
+    }
+
+    #[test]
+    fn pending_auth_resume_optional_fields_round_trip_through_checkpoint_payload() {
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityResumeToken};
+
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+
+        // Build a PendingAuthResume with all optional fields set.
+        let resume_token = CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
+            .expect("valid resume token");
+        let activity_id = CapabilityActivityId::parse(resume_token.as_str())
+            .expect("resume token fixture is an activity id");
+        let approval_request_id = ApprovalRequestId::new();
+        let correlation_id = CorrelationId::new();
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:auth-with-approval").expect("valid gate ref"),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").expect("valid cap id"),
+            surface_version: CapabilitySurfaceVersion::new("surface-v2")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:approval-auth").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: Some(resume_token.clone()),
+            activity_id,
+            prior_approval: Some(AuthResumeApprovalIdentity {
+                approval_request_id,
+                correlation_id,
+            }),
+            replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
+                input: serde_json::json!({"query": "is:unread"}),
+                estimate: ResourceEstimate::default(),
+            }),
+            disposition: None,
+        });
+
+        // Round-trip: all optional fields must survive encode/decode.
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload with resume_token fields");
+        let pending = restored
+            .pending_auth_resume
+            .expect("pending_auth_resume must be present after round-trip");
+        assert_eq!(
+            pending.resume_token,
+            Some(resume_token),
+            "resume_token must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            pending.activity_id, activity_id,
+            "activity_id must survive checkpoint encode/decode"
+        );
+        let pa = pending
+            .prior_approval
+            .expect("prior_approval must survive checkpoint encode/decode");
+        assert_eq!(
+            pa.approval_request_id, approval_request_id,
+            "prior_approval.approval_request_id must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            pa.correlation_id, correlation_id,
+            "prior_approval.correlation_id must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            pending.replay.as_ref().map(|replay| &replay.input),
+            Some(&serde_json::json!({"query": "is:unread"})),
+            "replay input must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn pending_approval_resume_denied_disposition_round_trips_through_checkpoint_payload() {
+        // Mirror of `pending_auth_resume_denied_disposition_round_trips_through_checkpoint_payload`.
+        // The `Some(Denied)` disposition stamped on `pending_approval_resume` before the
+        // capability stage must survive the checkpoint encode/decode cycle so that a
+        // resumed run still sees the approval denial.
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::run_profile::CapabilityResumeToken;
+
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let resume_token =
+            CapabilityResumeToken::new("00000000-0000-0000-0000-000000000099").expect("valid");
+        let activity_id = CapabilityActivityId::parse(resume_token.as_str())
+            .expect("resume token fixture is an activity id");
+        state.pending_approval_resume = Some(super::PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:approval-denied-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("extensions.install").expect("valid cap id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token,
+            activity_id,
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:approval-denied").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            input: serde_json::json!({"extension_id": "slack"}),
+            estimate: ResourceEstimate::default(),
+            disposition: Some(GateResumeDisposition::Denied),
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored
+                .pending_approval_resume
+                .as_ref()
+                .and_then(|r| r.disposition.as_ref()),
+            Some(&GateResumeDisposition::Denied),
+            "PendingApprovalResume with Denied disposition must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            restored.pending_approval_resume, state.pending_approval_resume,
+            "entire PendingApprovalResume must round-trip without loss when disposition is Some(Denied)"
         );
     }
 }

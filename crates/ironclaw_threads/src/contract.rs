@@ -1,3 +1,5 @@
+use chrono::{DateTime, Utc};
+use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -42,28 +44,101 @@ impl ThreadScope {
     }
 }
 
-/// Safe transcript text accepted by this boundary.
+/// Safe transcript content accepted by this boundary.
 ///
 /// Model visibility is determined by message kind/status at context-read time;
 /// durable UI-only records such as capability previews also store their
-/// sanitized payloads here.
+/// sanitized payloads here. Attachments are carried as references only (see
+/// [`AttachmentRef`]) — never raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageContent {
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<AttachmentRef>,
 }
 
 impl MessageContent {
     pub fn text(value: impl Into<String>) -> Self {
-        Self { text: value.into() }
+        Self {
+            text: value.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Build content carrying both text and attachment references.
+    pub fn with_attachments(value: impl Into<String>, attachments: Vec<AttachmentRef>) -> Self {
+        Self {
+            text: value.into(),
+            attachments,
+        }
     }
 
     pub fn as_text(&self) -> &str {
         &self.text
     }
 
+    pub fn attachments(&self) -> &[AttachmentRef] {
+        &self.attachments
+    }
+
+    /// Consume the content into its text body, **discarding any attachment
+    /// references**. Only correct for content known to be attachment-free
+    /// (assistant drafts, tool results); use [`Self::into_parts`] whenever
+    /// attachments must survive. The debug assertion turns a silent drop into a
+    /// loud failure in debug/test builds.
     pub fn into_text(self) -> String {
+        debug_assert!(
+            self.attachments.is_empty(),
+            "into_text() dropped {} attachment ref(s); use into_parts() to keep them",
+            self.attachments.len()
+        );
         self.text
     }
+
+    /// Consume the content into its text body and attachment references. Use
+    /// this when persisting both parts so neither is dropped (`into_text`
+    /// alone discards attachments).
+    pub fn into_parts(self) -> (String, Vec<AttachmentRef>) {
+        (self.text, self.attachments)
+    }
+}
+
+/// Upper bound on a single attachment's `extracted_text` accepted at the
+/// transcript boundary.
+///
+/// Extraction caps text upstream (~100K chars); this is a generous defensive
+/// ceiling so a misbehaving producer cannot persist an unbounded blob that is
+/// then pulled inline on every message load. The contract rejects loudly at
+/// this layer rather than silently truncating.
+pub(crate) const MAX_EXTRACTED_TEXT_CHARS: usize = 200_000;
+
+/// Validate the attachment references on an inbound message before they are
+/// persisted. Enforces the invariants the doc comments promise but the plain
+/// `String`/`Vec` shapes cannot: ids are unique within the message (so
+/// per-attachment lookup/update/delete is unambiguous) and `extracted_text` is
+/// bounded ([`MAX_EXTRACTED_TEXT_CHARS`]).
+pub(crate) fn validate_attachment_refs(
+    attachments: &[AttachmentRef],
+) -> Result<(), crate::error::SessionThreadError> {
+    let mut seen = std::collections::HashSet::with_capacity(attachments.len());
+    for attachment in attachments {
+        if !seen.insert(attachment.id.as_str()) {
+            return Err(crate::error::SessionThreadError::InvalidAttachment(
+                format!("duplicate attachment id {:?} in one message", attachment.id),
+            ));
+        }
+        if let Some(text) = &attachment.extracted_text
+            && text.chars().count() > MAX_EXTRACTED_TEXT_CHARS
+        {
+            return Err(crate::error::SessionThreadError::InvalidAttachment(
+                format!(
+                    "attachment {:?} extracted_text exceeds {MAX_EXTRACTED_TEXT_CHARS} chars",
+                    attachment.id
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Canonical kind of a transcript message.
@@ -85,6 +160,11 @@ pub enum MessageKind {
 pub enum MessageStatus {
     Accepted,
     Submitted,
+    /// Message arrived while the thread was busy; it will NOT be auto-resubmitted.
+    /// The user must resend the message once the current task finishes.
+    RejectedBusy,
+    /// Legacy status — no longer written by new code; kept for deserializing
+    /// existing rows in storage.
     DeferredBusy,
     Draft,
     Finalized,
@@ -104,6 +184,17 @@ pub struct SessionThreadRecord {
     pub metadata_json: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<ThreadGoal>,
+    /// When the thread was created. `None` for legacy records persisted
+    /// before activity timestamps existed; such records sort oldest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the thread saw durable user-visible transcript activity.
+    /// Drives the sidebar "Recent" ordering — newest activity first. Writers
+    /// that touch both a message and the thread activity stamp reuse one
+    /// timestamp for that logical change; pure idempotent replays remain
+    /// side-effect-free. `None` for legacy records (sorts oldest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Transcript message snapshot for UI/projection reads.
@@ -114,6 +205,16 @@ pub struct ThreadMessageRecord {
     pub sequence: u64,
     pub kind: MessageKind,
     pub status: MessageStatus,
+    /// When this message row was first persisted. `None` for legacy records
+    /// written before per-message timestamps existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the message row was materially changed. Draft finalization
+    /// updates this so UI refreshes can show the reply completion time instead
+    /// of the browser refresh time. Writers capture one timestamp per logical
+    /// message mutation so related message/thread stamps stay atomic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     pub actor_id: Option<String>,
     pub source_binding_id: Option<String>,
     pub reply_target_binding_id: Option<String>,
@@ -126,7 +227,56 @@ pub struct ThreadMessageRecord {
     #[serde(default, skip_serializing)]
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: Option<String>,
+    /// Attachment references for this message. Empty for messages that carry
+    /// no attachments. Cleared on redaction in parity with `content`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
     pub redaction_ref: Option<String>,
+}
+
+/// New transcript rows must carry durable timestamps. Legacy rows persisted
+/// before this field existed still deserialize with `None` and remain readable,
+/// but all current writers should fail loudly if they try to append a fresh
+/// row without both stamps.
+pub(crate) fn validate_new_message_timestamps(
+    message: &ThreadMessageRecord,
+    context: &'static str,
+) -> Result<(), crate::error::SessionThreadError> {
+    if message.created_at.is_none() || message.updated_at.is_none() {
+        return Err(crate::error::SessionThreadError::InvalidMessageTimestamp {
+            message_id: message.message_id,
+            context,
+            violation: crate::error::TimestampViolation::MissingDurableTimestamps,
+        });
+    }
+    Ok(())
+}
+
+/// Existing timestamp values are append-only metadata: once a row has either
+/// stamp, mutation paths may update it but must not erase it. This keeps
+/// legacy `None` values compatible while catching accidental nullification of
+/// newly-written rows.
+/// Lightweight timestamp-only variant for hot mutation paths. Callers usually
+/// already hold a mutable message and should not clone large payloads just to
+/// prove timestamp metadata was not erased.
+pub(crate) fn validate_message_timestamp_fields_not_cleared(
+    message_id: ThreadMessageId,
+    before_created_at: Option<DateTime<Utc>>,
+    before_updated_at: Option<DateTime<Utc>>,
+    after_created_at: Option<DateTime<Utc>>,
+    after_updated_at: Option<DateTime<Utc>>,
+    context: &'static str,
+) -> Result<(), crate::error::SessionThreadError> {
+    let created_at_cleared = before_created_at.is_some() && after_created_at.is_none();
+    let updated_at_cleared = before_updated_at.is_some() && after_updated_at.is_none();
+    if created_at_cleared || updated_at_cleared {
+        return Err(crate::error::SessionThreadError::InvalidMessageTimestamp {
+            message_id,
+            context,
+            violation: crate::error::TimestampViolation::ClearedDurableTimestamps,
+        });
+    }
+    Ok(())
 }
 
 /// Summary artifact over a stable transcript sequence range.
@@ -261,6 +411,14 @@ pub struct AppendAssistantDraftRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendFinalizedAssistantMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: String,
+    pub content: MessageContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendToolResultReferenceRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
@@ -379,6 +537,22 @@ pub struct LoadContextMessagesRequest {
     pub message_ids: Vec<ThreadMessageId>,
 }
 
+/// An image attachment a model-visible message carries, in a form the turn
+/// layer can turn into a multimodal content part for a vision-capable model.
+///
+/// This is a *reference*, never bytes: `storage_key` is the landed scoped path
+/// (e.g. `/workspace/attachments/...`); the turn layer reads the bytes back
+/// through the project filesystem authority and hands them to the model
+/// gateway, which attaches them as image content only for a vision-capable
+/// model (the capability gate lives in the gateway, not at read time). The
+/// textual `<attachments>` pointer in [`ContextMessage::content`] remains the
+/// fallback for text-only models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextImageAttachment {
+    pub mime_type: String,
+    pub storage_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextMessage {
     pub message_id: Option<ThreadMessageId>,
@@ -387,6 +561,35 @@ pub struct ContextMessage {
     pub kind: MessageKind,
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: String,
+    /// Image attachments on this message, for the multimodal path. Empty for
+    /// summaries, tool results, and messages without landed images.
+    pub image_attachments: Vec<ContextImageAttachment>,
+}
+
+impl ContextMessage {
+    /// Project a model-visible transcript message into a [`ContextMessage`],
+    /// given its already-resolved `content`. This is the single place attachment
+    /// projection happens — the `<attachments>` text pointer is folded into
+    /// `content` and image references into `image_attachments` — so the two
+    /// backing stores (in-memory and filesystem) cannot drift on how a stored
+    /// message becomes model context. Callers own the `content` `Option` unwrap
+    /// because the two read paths handle absent content differently.
+    pub(crate) fn from_transcript_message(message: &ThreadMessageRecord, content: String) -> Self {
+        Self {
+            message_id: Some(message.message_id),
+            summary_id: None,
+            sequence: message.sequence,
+            kind: message.kind,
+            tool_result_provider_call: message.tool_result_provider_call.clone(),
+            content: crate::attachment_context::augment_model_content(
+                content,
+                &message.attachments,
+            ),
+            image_attachments: crate::attachment_context::model_image_attachments(
+                &message.attachments,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,4 +621,228 @@ pub struct CreateSummaryArtifactRequest {
 pub struct UpdateThreadGoalRequest {
     pub thread_id: ThreadId,
     pub goal: ThreadGoal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_common::AttachmentKind;
+
+    fn sample_ref() -> AttachmentRef {
+        AttachmentRef {
+            id: "att-1".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "application/pdf".to_string(),
+            filename: Some("report.pdf".to_string()),
+            size_bytes: Some(2048),
+            storage_key: Some("attachments/2026-06-09/m1-report.pdf".to_string()),
+            extracted_text: Some("quarterly numbers".to_string()),
+        }
+    }
+
+    fn sample_message() -> ThreadMessageRecord {
+        let now = Utc::now();
+        ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: ThreadId::new("thread-contract").unwrap(),
+            sequence: 1,
+            kind: MessageKind::User,
+            status: MessageStatus::Accepted,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: Some("actor-a".to_string()),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("hello".to_string()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }
+    }
+
+    #[test]
+    fn text_constructor_carries_no_attachments() {
+        let content = MessageContent::text("hello");
+        assert_eq!(content.as_text(), "hello");
+        assert!(content.attachments().is_empty());
+    }
+
+    #[test]
+    fn into_parts_preserves_text_and_attachments() {
+        let content = MessageContent::with_attachments("see attached", vec![sample_ref()]);
+        assert_eq!(content.attachments().len(), 1);
+        let (text, attachments) = content.into_parts();
+        assert_eq!(text, "see attached");
+        assert_eq!(attachments, vec![sample_ref()]);
+    }
+
+    #[test]
+    fn validate_attachment_refs_accepts_distinct_ids() {
+        let mut second = sample_ref();
+        second.id = "att-2".to_string();
+        assert!(validate_attachment_refs(&[sample_ref(), second]).is_ok());
+    }
+
+    #[test]
+    fn validate_attachment_refs_rejects_duplicate_ids() {
+        let err = validate_attachment_refs(&[sample_ref(), sample_ref()])
+            .expect_err("duplicate attachment ids must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidAttachment(_)
+        ));
+    }
+
+    #[test]
+    fn validate_attachment_refs_rejects_oversized_extracted_text() {
+        let mut oversized = sample_ref();
+        oversized.extracted_text = Some("x".repeat(MAX_EXTRACTED_TEXT_CHARS + 1));
+        let err = validate_attachment_refs(&[oversized])
+            .expect_err("extracted_text past the cap must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidAttachment(_)
+        ));
+    }
+
+    #[test]
+    fn validate_attachment_refs_accepts_extracted_text_at_cap() {
+        let mut at_cap = sample_ref();
+        at_cap.extracted_text = Some("x".repeat(MAX_EXTRACTED_TEXT_CHARS));
+        assert!(validate_attachment_refs(&[at_cap]).is_ok());
+    }
+
+    #[test]
+    fn validate_new_message_timestamps_rejects_missing_stamps() {
+        let mut message = sample_message();
+        message.created_at = None;
+
+        let err = validate_new_message_timestamps(&message, "test message")
+            .expect_err("new messages without created_at must be rejected");
+
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidMessageTimestamp {
+                context: "test message",
+                violation: crate::error::TimestampViolation::MissingDurableTimestamps,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_message_timestamp_fields_not_cleared_rejects_nullification() {
+        let before = sample_message();
+        let mut after = before.clone();
+        after.updated_at = None;
+
+        let err = validate_message_timestamp_fields_not_cleared(
+            after.message_id,
+            before.created_at,
+            before.updated_at,
+            after.created_at,
+            after.updated_at,
+            "test update",
+        )
+        .expect_err("message updates must not clear existing timestamps");
+
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidMessageTimestamp {
+                context: "test update",
+                violation: crate::error::TimestampViolation::ClearedDurableTimestamps,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn into_text_keeps_text_when_attachment_free() {
+        // The non-lossy use: `into_text` is the text-only accessor for content
+        // known to carry no attachments (assistant drafts, tool results).
+        let content = MessageContent::text("body");
+        assert_eq!(content.into_text(), "body");
+    }
+
+    #[test]
+    #[should_panic(expected = "dropped 1 attachment ref")]
+    fn into_text_debug_asserts_when_it_would_drop_attachments() {
+        // Callers that must keep attachments use `into_parts`; `into_text` on
+        // attachment-bearing content is a bug and fails loudly in debug/tests.
+        let content = MessageContent::with_attachments("body", vec![sample_ref()]);
+        let _ = content.into_text();
+    }
+
+    #[test]
+    fn message_content_skips_empty_attachments_on_the_wire() {
+        let json = serde_json::to_string(&MessageContent::text("hi")).unwrap();
+        assert_eq!(json, r#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn attachment_kind_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AttachmentKind::Image).unwrap(),
+            r#""image""#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentKind>(r#""document""#).unwrap(),
+            AttachmentKind::Document
+        );
+    }
+
+    #[test]
+    fn attachment_ref_round_trips_and_omits_empty_optionals() {
+        let minimal = AttachmentRef {
+            id: "att-2".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: None,
+            size_bytes: None,
+            storage_key: None,
+            extracted_text: None,
+        };
+        let json = serde_json::to_string(&minimal).unwrap();
+        assert_eq!(
+            json,
+            r#"{"id":"att-2","kind":"image","mime_type":"image/png"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentRef>(&json).unwrap(),
+            minimal
+        );
+
+        let full = sample_ref();
+        let round =
+            serde_json::from_str::<AttachmentRef>(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(round, full);
+    }
+
+    #[test]
+    fn thread_message_record_attachments_default_when_absent() {
+        // Old persisted rows have no `attachments` field; it must default to
+        // empty rather than failing deserialization.
+        let json = r#"{
+            "message_id": "00000000-0000-0000-0000-000000000001",
+            "thread_id": "thread-x",
+            "sequence": 1,
+            "kind": "user",
+            "status": "accepted",
+            "actor_id": null,
+            "source_binding_id": null,
+            "reply_target_binding_id": null,
+            "turn_id": null,
+            "turn_run_id": null,
+            "content": "legacy row",
+            "redaction_ref": null
+        }"#;
+        let record: ThreadMessageRecord = serde_json::from_str(json).unwrap();
+        assert!(record.attachments.is_empty());
+        assert_eq!(record.created_at, None);
+        assert_eq!(record.updated_at, None);
+        assert_eq!(record.content.as_deref(), Some("legacy row"));
+    }
 }

@@ -1,7 +1,7 @@
 ---
 description: Deep audit of the IronClaw crate for vulnerabilities, bugs, unfinished work, inconsistencies, and oversights
 disable-model-invocation: true
-allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo audit:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(wc:*), Read, Grep, Glob, Task
+allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo audit:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(wc:*), Read, Grep, Glob, Agent
 argument-hint: "[path/to/crate]"
 ---
 
@@ -241,5 +241,5 @@ And a final tally: X Critical, Y High, Z Medium, W Low, V Nit.
 - Respect existing project conventions (check CLAUDE.md). Don't flag patterns the project explicitly endorses.
 - When in doubt about severity, round up.
 - For large crates (>50 files), prioritize: core logic > public API > internal utilities > tests > examples.
-- Use the Task tool to parallelize file reading across modules when the crate is large.
+- Use the Agent tool to parallelize file reading across modules when the crate is large.
 - Do NOT fix anything. This is a read-only audit. Report findings for the user to action.

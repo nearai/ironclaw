@@ -4538,13 +4538,13 @@ fn parse_websocket_hello_heartbeat_interval_ms(text: &str) -> Option<u64> {
 }
 
 fn websocket_reconnect_backoff(attempt: u32) -> Duration {
-    use rand::Rng;
+    use rand::RngExt as _;
 
     let exponent = attempt.min(6);
     let base_ms = (1u64 << exponent) * 1_000;
     // Add 0-25% jitter per Discord's reconnection recommendations to avoid
     // thundering-herd when many bots reconnect after a Discord deploy.
-    let jitter_ms = rand::thread_rng().gen_range(0..=base_ms / 4);
+    let jitter_ms = rand::rng().random_range(0..=base_ms / 4);
     Duration::from_millis(base_ms + jitter_ms)
 }
 
@@ -9167,11 +9167,28 @@ mod tests {
 
     #[test]
     fn test_http_request_allows_private_target_for_telegram_test_rewrite() {
+        use std::io::{Read, Write};
+
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("test HTTP listener binds");
+        let rewrite_base = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test request accepted");
+            let mut buffer = [0; 2048];
+            let len = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..len]).to_string();
+            request_tx.send(request).expect("request observed");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("test response written");
+        });
+
         let _guard = crate::config::helpers::lock_env();
         let original = std::env::var(TELEGRAM_TEST_API_BASE_ENV).ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
-            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "http://127.0.0.1:1");
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, rewrite_base);
         }
 
         let capabilities =
@@ -9200,14 +9217,16 @@ mod tests {
             Some(1_000),
         );
 
+        let response = result.expect("test rewrite should reach local HTTP server");
+        assert_eq!(response.status, 200);
+        let observed_request = request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("test HTTP server should observe request");
         assert!(
-            result.is_err(),
-            "test rewrite should still attempt the request"
+            observed_request.starts_with("GET /bot123/getMe "),
+            "expected Telegram API path to be preserved, got {observed_request:?}"
         );
-        assert!(
-            !result.unwrap_err().contains("private/internal IP"),
-            "test rewrite should bypass private IP guard"
-        );
+        server_thread.join().expect("test HTTP server exits");
 
         // SAFETY: Under ENV_MUTEX, restore original state.
         unsafe {

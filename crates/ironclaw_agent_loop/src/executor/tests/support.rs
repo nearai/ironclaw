@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, RuntimeKind, TenantId, ThreadId};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId};
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopMessageRef, RunProfileId, RunProfileVersion,
     TurnCheckpointId, TurnId, TurnRunId, TurnScope,
@@ -18,10 +18,11 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance,
+        RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy,
+        ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+        SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -31,10 +32,10 @@ use crate::{
     state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-        ContextStrategy, DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome, GateSummary,
-        InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy,
-        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration, RetryScope,
-        StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
+        ContextStrategy, DefaultBudgetStrategy, DefaultCompactionStrategy, GateHandlingStrategy,
+        GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary, RecoveryOutcome,
+        RecoveryStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration,
+        RetryScope, StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
 
@@ -57,11 +58,17 @@ pub(super) struct MockHost {
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
     single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    registered_provider_calls: Arc<Mutex<Vec<ProviderToolCall>>>,
+    provider_registration_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
+    provider_registration_activity_remap: Arc<Mutex<Option<ironclaw_turns::CapabilityActivityId>>>,
     staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
     appended_result_refs: Arc<Mutex<Vec<AppendCapabilityResultRef>>>,
+    finalized_assistant_messages: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<String>>>,
     prompt_surface_version: Option<CapabilitySurfaceVersion>,
     visible_surface_version: CapabilitySurfaceVersion,
+    current_visible_surface: Arc<Mutex<Option<VisibleCapabilitySurface>>>,
+    visible_capability_requests: Arc<Mutex<usize>>,
     progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
     fail_progress_port: bool,
     fail_append_result_ref: bool,
@@ -73,8 +80,12 @@ pub(super) struct MockHost {
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+    fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostErrorKind)>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
+    fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
+    fail_transcript_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
+    extra_capability_descriptors: Vec<CapabilityDescriptorView>,
 }
 
 impl MockHost {
@@ -93,11 +104,17 @@ impl MockHost {
             checkpoints: Arc::new(Mutex::new(Vec::new())),
             batch_invocations: Arc::new(Mutex::new(Vec::new())),
             single_invocations: Arc::new(Mutex::new(Vec::new())),
+            registered_provider_calls: Arc::new(Mutex::new(Vec::new())),
+            provider_registration_errors: Arc::new(Mutex::new(VecDeque::new())),
+            provider_registration_activity_remap: Arc::new(Mutex::new(None)),
             staged_payloads: Arc::new(Mutex::new(Vec::new())),
             appended_result_refs: Arc::new(Mutex::new(Vec::new())),
+            finalized_assistant_messages: Arc::new(Mutex::new(Vec::new())),
             events: Arc::new(Mutex::new(Vec::new())),
             prompt_surface_version: Some(surface_version()),
             visible_surface_version: surface_version(),
+            current_visible_surface: Arc::new(Mutex::new(None)),
+            visible_capability_requests: Arc::new(Mutex::new(0)),
             progress_events: Arc::new(Mutex::new(Vec::new())),
             fail_progress_port: false,
             fail_append_result_ref: false,
@@ -109,9 +126,25 @@ impl MockHost {
             cancel_after_model_response: Arc::new(Mutex::new(false)),
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
+            fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
+            fail_batch_with: Arc::new(Mutex::new(None)),
+            fail_transcript_with: Arc::new(Mutex::new(None)),
+            extra_capability_descriptors: Vec::new(),
         }
+    }
+
+    /// Enable driver-specific nudges on the run profile (gates the final-answer
+    /// nudge at the budget / no-progress exit boundaries).
+    pub(super) fn with_driver_nudges_enabled(mut self) -> Self {
+        // Flip the flag in-place so this composes with other context-level
+        // builders (e.g. `with_require_final_checkpoint`) regardless of order.
+        self.context
+            .resolved_run_profile
+            .steering_policy
+            .allow_driver_specific_nudges = true;
+        self
     }
 
     pub(super) fn with_prompt_surface_version(
@@ -120,6 +153,16 @@ impl MockHost {
     ) -> Self {
         self.prompt_surface_version = version;
         self
+    }
+
+    pub(super) fn with_current_visible_surface(self, surface: VisibleCapabilitySurface) -> Self {
+        *self.current_visible_surface.lock().expect("lock") = Some(surface);
+        self
+    }
+
+    pub(super) fn with_current_default_visible_surface(self) -> Self {
+        let surface = self.default_visible_surface();
+        self.with_current_visible_surface(surface)
     }
 
     pub(super) fn with_batch_outcomes(
@@ -155,9 +198,45 @@ impl MockHost {
         self
     }
 
+    /// Append additional capability descriptors to the surface returned by
+    /// `visible_capabilities`. Use in tests that exercise parallel batches
+    /// containing multiple distinct capability IDs.
+    pub(super) fn with_extra_capability_descriptors(
+        mut self,
+        descriptors: Vec<CapabilityDescriptorView>,
+    ) -> Self {
+        self.extra_capability_descriptors = descriptors;
+        self
+    }
+
     pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
         self.fail_prompt_bundle = true;
         self
+    }
+
+    pub(super) fn fail_batch_with(self, kind: AgentLoopHostErrorKind) -> Self {
+        *self.fail_batch_with.lock().expect("lock") = Some(kind);
+        self
+    }
+
+    pub(super) fn fail_transcript_with(self, kind: AgentLoopHostErrorKind) -> Self {
+        *self.fail_transcript_with.lock().expect("lock") = Some(kind);
+        self
+    }
+
+    pub(super) fn with_provider_registration_errors(self, errors: Vec<AgentLoopHostError>) -> Self {
+        *self.provider_registration_errors.lock().expect("lock") = errors.into();
+        self
+    }
+
+    pub(super) fn set_provider_registration_activity_remap(
+        &self,
+        activity_id: ironclaw_turns::CapabilityActivityId,
+    ) {
+        *self
+            .provider_registration_activity_remap
+            .lock()
+            .expect("lock") = Some(activity_id);
     }
 
     pub(super) fn with_input_batches(self, batches: Vec<LoopInputBatch>) -> Self {
@@ -177,8 +256,16 @@ impl MockHost {
         self.single_invocations.lock().expect("lock").clone()
     }
 
+    pub(super) fn registered_provider_calls(&self) -> Vec<ProviderToolCall> {
+        self.registered_provider_calls.lock().expect("lock").clone()
+    }
+
     pub(super) fn model_requests(&self) -> Vec<LoopModelRequest> {
         self.model_requests.lock().expect("lock").clone()
+    }
+
+    pub(super) fn visible_capability_request_count(&self) -> usize {
+        *self.visible_capability_requests.lock().expect("lock")
     }
 
     pub(super) fn prompt_requests(&self) -> Vec<LoopPromptBundleRequest> {
@@ -195,6 +282,13 @@ impl MockHost {
 
     pub(super) fn appended_result_refs(&self) -> Vec<AppendCapabilityResultRef> {
         self.appended_result_refs.lock().expect("lock").clone()
+    }
+
+    pub(super) fn finalized_assistant_messages(&self) -> Vec<String> {
+        self.finalized_assistant_messages
+            .lock()
+            .expect("lock")
+            .clone()
     }
 
     pub(super) fn events(&self) -> Vec<String> {
@@ -250,12 +344,39 @@ impl MockHost {
         self
     }
 
+    pub(super) fn fail_checkpoint_payload(
+        self,
+        kind: LoopCheckpointKind,
+        error_kind: AgentLoopHostErrorKind,
+    ) -> Self {
+        *self.fail_checkpoint_payload.lock().expect("lock") = Some((kind, error_kind));
+        self
+    }
+
     pub(super) fn with_require_final_checkpoint(mut self, require_final_checkpoint: bool) -> Self {
         self.context
             .resolved_run_profile
             .checkpoint_policy
             .require_final_checkpoint = require_final_checkpoint;
         self
+    }
+
+    fn default_visible_surface(&self) -> VisibleCapabilitySurface {
+        let mut descriptors = vec![CapabilityDescriptorView {
+            capability_id: capability_id(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: "demo".to_string(),
+            safe_description: "demo capability".to_string(),
+            concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+            parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
+        }];
+        descriptors.extend(self.extra_capability_descriptors.clone());
+        VisibleCapabilitySurface {
+            version: self.visible_surface_version.clone(),
+            descriptors,
+            callable_capability_ids: None,
+        }
     }
 }
 
@@ -572,28 +693,74 @@ impl ironclaw_turns::run_profile::LoopModelPort for MockHost {
 
 #[async_trait]
 impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
+    async fn register_provider_tool_call(
+        &self,
+        request: RegisterProviderToolCallRequest,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let tool_call = request.tool_call;
+        if let Some(error) = self
+            .provider_registration_errors
+            .lock()
+            .expect("lock")
+            .pop_front()
+        {
+            return Err(error);
+        }
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call missing turn id",
+            )
+        })?;
+        let mut registered = self.registered_provider_calls.lock().expect("lock");
+        registered.push(tool_call.clone());
+        let input_ref =
+            CapabilityInputRef::new(format!("input:registered-provider-{}", registered.len()))
+                .expect("valid input ref");
+        let activity_id = request.activity_id;
+        Ok(CapabilityCallCandidate {
+            activity_id: (*self
+                .provider_registration_activity_remap
+                .lock()
+                .expect("lock"))
+            .or(activity_id)
+            .unwrap_or_default(),
+            surface_version: self.visible_surface_version.clone(),
+            capability_id: capability_id(),
+            input_ref,
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
+    }
+
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        *self.visible_capability_requests.lock().expect("lock") += 1;
         if self.fail_visible_capabilities {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "visible capabilities unavailable",
             ));
         }
-        Ok(VisibleCapabilitySurface {
-            version: self.visible_surface_version.clone(),
-            descriptors: vec![CapabilityDescriptorView {
-                capability_id: capability_id(),
-                provider: None,
-                runtime: RuntimeKind::FirstParty,
-                safe_name: "demo".to_string(),
-                safe_description: "demo capability".to_string(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
-                parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
-            }],
-        })
+        Ok(self.default_visible_surface())
+    }
+
+    fn current_visible_capabilities(
+        &self,
+    ) -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> {
+        Ok(self.current_visible_surface.lock().expect("lock").clone())
     }
 
     async fn invoke_capability(
@@ -615,6 +782,9 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         request: CapabilityBatchInvocation,
     ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
+        if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
+            return Err(AgentLoopHostError::new(kind, "scripted batch failure"));
+        }
         let outcome = self
             .batch_outcomes
             .lock()
@@ -634,8 +804,15 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
 impl ironclaw_turns::run_profile::LoopTranscriptPort for MockHost {
     async fn finalize_assistant_message(
         &self,
-        _request: FinalizeAssistantMessage,
+        request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        if let Some(kind) = *self.fail_transcript_with.lock().expect("lock") {
+            return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));
+        }
+        self.finalized_assistant_messages
+            .lock()
+            .expect("lock")
+            .push(request.reply.content);
         Ok(LoopMessageRef::new("msg:assistant").expect("valid"))
     }
 
@@ -643,6 +820,9 @@ impl ironclaw_turns::run_profile::LoopTranscriptPort for MockHost {
         &self,
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        if let Some(kind) = *self.fail_transcript_with.lock().expect("lock") {
+            return Err(AgentLoopHostError::new(kind, "scripted transcript failure"));
+        }
         if self.fail_append_result_ref {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,
@@ -698,6 +878,19 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockHost {
         &self,
         request: StageCheckpointPayloadRequest,
     ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        if let Some((_, error_kind)) = self
+            .fail_checkpoint_payload
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .filter(|(kind, _)| *kind == request.kind)
+            .copied()
+        {
+            return Err(AgentLoopHostError::new(
+                error_kind,
+                "scripted checkpoint payload failure",
+            ));
+        }
         self.staged_payloads.lock().expect("lock").push(request);
         LoopCheckpointStateRef::for_run(&self.context, "state")
             .map_err(|error| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, error))
@@ -769,6 +962,7 @@ pub(super) fn calls_response() -> LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -786,6 +980,7 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:first").expect("valid"), // safety: test-only fixture
@@ -793,6 +988,7 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
                 provider_replay: None,
             },
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:second").expect("valid"), // safety: test-only fixture
@@ -810,6 +1006,7 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -819,7 +1016,8 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 arguments: serde_json::json!({"message":"hello"}),
                 response_reasoning: Some("response reasoning".to_string()),
                 reasoning: Some("call reasoning".to_string()),
@@ -837,6 +1035,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:first").expect("valid"),
@@ -846,7 +1045,8 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                     provider_model_id: "test-model".to_string(),
                     provider_turn_id: "turn_1".to_string(),
                     provider_call_id: "call_1".to_string(),
-                    provider_tool_name: "demo__echo".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
                     arguments: serde_json::json!({"message":"first"}),
                     response_reasoning: Some("response reasoning".to_string()),
                     reasoning: Some("first call reasoning".to_string()),
@@ -854,6 +1054,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                 }),
             },
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:second").expect("valid"),
@@ -863,7 +1064,8 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                     provider_model_id: "test-model".to_string(),
                     provider_turn_id: "turn_1".to_string(),
                     provider_call_id: "call_2".to_string(),
-                    provider_tool_name: "demo__echo".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
                     arguments: serde_json::json!({"message":"second"}),
                     response_reasoning: Some("response reasoning".to_string()),
                     reasoning: Some("second call reasoning".to_string()),
@@ -881,6 +1083,7 @@ pub(super) fn stale_surface_calls_response() -> LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: stale_surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -898,6 +1101,7 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: stale_surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:stale").expect("valid"),
@@ -905,6 +1109,7 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
                 provider_replay: None,
             },
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:visible").expect("valid"),
@@ -919,6 +1124,11 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
 
 pub(super) fn capability_id() -> CapabilityId {
     CapabilityId::new("demo.echo").expect("valid")
+}
+
+/// A second, distinct capability ID used in multi-capability batch tests.
+pub(super) fn other_capability_id() -> CapabilityId {
+    CapabilityId::new("demo.list").expect("valid")
 }
 
 pub(super) fn surface_version() -> CapabilitySurfaceVersion {
@@ -990,6 +1200,16 @@ pub(super) fn family_with_stop_after_observed_turns(turns_completed: u32) -> Loo
         .with_stop(Arc::new(StopAfterObservedTurns { turns_completed }));
     let id = LoopFamilyId::new("executor-stop-test").expect("valid test family id");
     let version = ComponentIdentity::from_static("executor-stop-test", ComponentDigest([6; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_budget(Arc::new(DefaultBudgetStrategy {
+        iteration_limit,
+        wall_clock_limit: None,
+    }));
+    let id = LoopFamilyId::new("executor-budget-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static("executor-budget-test", ComponentDigest([10; 32]));
     LoopFamily::new(id, version, Arc::new(planner))
 }
 
@@ -1110,6 +1330,8 @@ pub(super) fn test_run_context() -> LoopRunContext {
         steering_policy: SteeringPolicy {
             allow_steering: false,
             allow_interrupt: true,
+            // Off by default; tests that exercise the nudge flip it in-place via
+            // `MockHost::with_driver_nudges_enabled`.
             allow_driver_specific_nudges: false,
         },
         cancellation_policy: CancellationPolicy {

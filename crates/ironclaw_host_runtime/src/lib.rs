@@ -27,8 +27,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    DispatchFailureDetail, ExecutionContext, ExtensionId, ProcessId, ResourceEstimate,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -37,12 +37,14 @@ use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
 mod capability_catalog;
+mod document_output;
 mod egress;
 mod extension_contracts;
 mod first_party;
 mod first_party_tools;
 mod http_body;
 mod invocation_services;
+mod latency;
 pub mod memory_context;
 mod obligations;
 mod planner;
@@ -53,8 +55,10 @@ mod production;
 mod sandbox_process;
 mod services;
 mod surface;
-mod turn_scheduler;
+mod user_profile_source;
 mod wasm_credentials;
+
+pub use user_profile_source::{MemoryBackedUserProfileSource, PROFILE_DOCUMENT_PATH};
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
@@ -66,7 +70,8 @@ pub use egress::{
 };
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,
-    discover_extensions_tolerant_bounded, discover_extensions_with_default_host_api_contracts,
+    discover_extensions_tolerant_bounded, discover_extensions_tolerant_bounded_with_contracts,
+    discover_extensions_with_default_host_api_contracts,
     discover_extensions_with_default_host_api_contracts_and_catalog,
 };
 pub use first_party::{
@@ -78,12 +83,19 @@ pub use first_party_tools::{
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
     HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TriggerCreateHook, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_package, builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -118,11 +130,6 @@ pub use services::{
     RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
-pub use turn_scheduler::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
-};
-
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(String);
@@ -414,6 +421,53 @@ impl RuntimeCapabilityResumeRequest {
     }
 }
 
+/// Auth-gate resume request.
+///
+/// Re-dispatches a capability that was previously blocked by an auth gate,
+/// reusing the original `invocation_id` encoded in the `context`. When the
+/// invocation also passed a prior approval gate, `approval_request_id` is set
+/// so the host can locate and claim the matching fingerprinted lease.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RuntimeCapabilityAuthResumeRequest {
+    pub context: ExecutionContext,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub trust_decision: TrustDecision,
+    /// Present when the invocation previously passed an approval gate.
+    /// Used to locate and claim the matching fingerprinted approval lease
+    /// so the re-dispatch does not require a second approval.
+    pub approval_request_id: Option<ApprovalRequestId>,
+}
+
+impl RuntimeCapabilityAuthResumeRequest {
+    pub fn new(
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: Value,
+        trust_decision: TrustDecision,
+        approval_request_id: Option<ApprovalRequestId>,
+    ) -> Self {
+        Self {
+            context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key: None,
+            trust_decision,
+            approval_request_id,
+        }
+    }
+
+    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
+        self.idempotency_key = Some(key);
+        self
+    }
+}
+
 /// Request to list host-filtered visible capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -526,6 +580,7 @@ pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
+    pub detail: Option<DispatchFailureDetail>,
 }
 
 /// Explicit fallback for outcome categories that the loop adapter cannot handle
@@ -635,8 +690,14 @@ mod raw_http_diagnostic_policy_tests {
 }
 
 /// Stable, sanitized failure categories.
+///
+// Deliberately NOT `#[non_exhaustive]`: the `Unknown` variant is the open-set
+// escape hatch for unrecognized runtime failures, so the attribute would only
+// force classifiers to keep a wildcard arm that silently buckets a new named
+// variant. Without it, disposition/classification matches are exhaustive and a
+// new named variant fails to compile until classified. See
+// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RuntimeFailureKind {
     Authorization,
     Backend,
@@ -654,7 +715,6 @@ pub enum RuntimeFailureKind {
     Resource,
     Transient,
     Unavailable,
-    Unknown,
 }
 
 impl RuntimeFailureKind {
@@ -677,7 +737,6 @@ impl RuntimeFailureKind {
             Self::Resource => "resource",
             Self::Transient => "transient",
             Self::Unavailable => "unavailable",
-            Self::Unknown => "unknown",
         }
     }
 }
@@ -705,7 +764,13 @@ impl RuntimeCapabilityFailure {
             capability_id,
             kind,
             message,
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
+        self.detail = Some(detail);
+        self
     }
 
     pub fn safe_summary(&self) -> Option<String> {
@@ -893,6 +958,31 @@ pub trait HostRuntime: Send + Sync {
         &self,
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
+    /// Re-dispatch after an auth gate has been resolved.
+    ///
+    /// Production hosts override this to route through
+    /// `CapabilityHost::auth_resume_json` which handles the `BlockedAuth`
+    /// run-state and optionally claims the prior approval lease.
+    ///
+    /// The default implementation returns an explicit `Failed` outcome so that
+    /// test stubs that do not override this method fail loudly instead of
+    /// silently falling back to a fresh `invoke_capability` call (which would
+    /// bypass run-state validation and the approval-lease-claim path).  Any
+    /// `HostRuntime` implementation that participates in auth-resume flows must
+    /// provide an explicit override.
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability auth-resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
 
     async fn resume_spawn_capability(
         &self,

@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceScope, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
+    PermissionMode, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerError, TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
+    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
+    TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -31,12 +32,16 @@ const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
+pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
+pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
+
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs; when the task is to message someone or post somewhere, say so in the prompt and pin the exact recipient conversation ids, resolved while the user is present \u{2014} never leave a recipient as a name to look up at fire time. Do not tell the prompt to send results back to the requesting user; each fire's final reply is delivered automatically \u{2014} to this trigger's delivery_target_id when set, otherwise to the user's default outbound delivery target at fire time. Asks like 'send me the result' are delivery routing, not a task step: satisfy them with delivery_target_id alone and keep every send-to-requester step \u{2014} even one with a pinned conversation id \u{2014} out of the prompt. When the user asks for this trigger's results on a specific product or channel, pass delivery_target_id with an id from builtin__outbound_delivery_targets_list; builtin__outbound_delivery_target_set changes only the user-wide default shared by everything else.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             TRIGGER_CREATE_CAPABILITY_ID,
-            "Create a caller-scoped scheduled trigger",
+            TRIGGER_CREATE_DESCRIPTION,
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
@@ -51,6 +56,20 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         first_party_capability_manifest(
             TRIGGER_REMOVE_CAPABILITY_ID,
             "Remove a caller-scoped scheduled trigger",
+            vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            TRIGGER_PAUSE_CAPABILITY_ID,
+            "Pause a caller-scoped scheduled trigger so it remains retained but does not fire",
+            vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            TRIGGER_RESUME_CAPABILITY_ID,
+            "Resume a caller-scoped paused trigger so it may fire on its stored schedule",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
@@ -108,7 +127,15 @@ fn insert_trigger_handlers(
         CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
         handler.clone(),
     );
-    registry.insert_handler(CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?, handler);
+    registry.insert_handler(
+        CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?, handler);
     Ok(())
 }
 
@@ -125,6 +152,25 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    /// Validate a model-supplied per-trigger delivery target id before the
+    /// record is persisted (ownership, existence, product availability).
+    ///
+    /// The default fails closed: hosts that can resolve outbound delivery
+    /// targets override this to accept caller-owned targets. Rejections must
+    /// use `TriggerRecordValidationKind::DeliveryTargetInvalid` so the tool
+    /// layer maps them to a `delivery_target_id` input issue.
+    async fn validate_delivery_target(
+        &self,
+        scope: &ResourceScope,
+        target: &ironclaw_triggers::TriggerDeliveryTargetId,
+    ) -> Result<(), TriggerError> {
+        let _ = (scope, target);
+        Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+            reason: "per-trigger delivery targets are not supported by this host".to_string(),
+        })
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
 
@@ -178,6 +224,24 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             TRIGGER_REMOVE_CAPABILITY_ID => {
                 remove_trigger(&*self.repository, &request.scope, request.input).await?
             }
+            TRIGGER_PAUSE_CAPABILITY_ID => {
+                set_trigger_state(
+                    &*self.repository,
+                    &request.scope,
+                    request.input,
+                    TriggerState::Paused,
+                )
+                .await?
+            }
+            TRIGGER_RESUME_CAPABILITY_ID => {
+                set_trigger_state(
+                    &*self.repository,
+                    &request.scope,
+                    request.input,
+                    TriggerState::Scheduled,
+                )
+                .await?
+            }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
@@ -193,14 +257,62 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum TriggerScheduleInput {
+    Cron {
+        expression: String,
+        timezone: String,
+    },
+    Once {
+        at: String,
+        timezone: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggerScheduleInputKind {
+    Cron,
+    Once,
+}
+
+impl TriggerScheduleInput {
+    fn kind(&self) -> TriggerScheduleInputKind {
+        match self {
+            Self::Cron { .. } => TriggerScheduleInputKind::Cron,
+            Self::Once { .. } => TriggerScheduleInputKind::Once,
+        }
+    }
+
+    fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
+        match self {
+            Self::Cron {
+                expression,
+                timezone,
+            } => TriggerSchedule::cron_with_timezone(expression, timezone),
+            Self::Once { at, timezone } => TriggerSchedule::once_from_local(&at, &timezone),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TriggerCreateInput {
     name: String,
     prompt: String,
-    cron: String,
+    schedule: TriggerScheduleInput,
+    /// Optional per-trigger outbound delivery target id (from the outbound
+    /// delivery target capabilities). Host-validated before persistence.
+    #[serde(default)]
+    delivery_target_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TriggerRemoveInput {
+    trigger_id: String,
+}
+
+#[derive(Deserialize)]
+struct TriggerStateInput {
     trigger_id: String,
 }
 
@@ -217,9 +329,27 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
-    let schedule = TriggerSchedule::cron(input.cron).map_err(trigger_input_error)?;
-    let next_run_at = next_run_at_for_schedule(&schedule, now)?;
+    let input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
+        .map_err(|error| trigger_create_shape_error(&input, error))?;
+    let schedule_kind = input.schedule.kind();
+    let schedule = input
+        .schedule
+        .into_schedule()
+        .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
+    let next_run_at = next_run_at_for_schedule(&schedule, now)
+        .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
+    let delivery_target = match input.delivery_target_id {
+        Some(raw) => {
+            let target = ironclaw_triggers::TriggerDeliveryTargetId::new(raw)
+                .map_err(trigger_record_error)?;
+            create_hook
+                .validate_delivery_target(scope, &target)
+                .await
+                .map_err(trigger_record_error)?;
+            Some(target)
+        }
+        None => None,
+    };
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -229,8 +359,8 @@ async fn create_trigger(
         name: input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: input.prompt,
+        delivery_target,
         state: TriggerState::Scheduled,
         next_run_at,
         last_run_at: None,
@@ -240,7 +370,7 @@ async fn create_trigger(
         active_run_ref: None,
         created_at: now,
     };
-    record.validate().map_err(trigger_input_error)?;
+    record.validate().map_err(trigger_record_error)?;
     repository
         .upsert_trigger(record.clone())
         .await
@@ -284,6 +414,7 @@ async fn list_triggers(
             scope.agent_id.clone(),
             scope.project_id.clone(),
             limit,
+            &[],
         )
         .await
         .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?;
@@ -330,7 +461,37 @@ async fn remove_trigger(
     }))
 }
 
+async fn set_trigger_state(
+    repository: &dyn TriggerRepository,
+    scope: &ResourceScope,
+    input: Value,
+    state: TriggerState,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let input: TriggerStateInput = serde_json::from_value(input).map_err(|error| {
+        tracing::debug!(%error, "failed to deserialize trigger state input");
+        input_error()
+    })?;
+    let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
+    let updated = repository
+        .set_scoped_trigger_state(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            trigger_id,
+            state,
+        )
+        .await
+        .map_err(|error| trigger_repository_error("set_scoped_trigger_state", error))?;
+    Ok(json!({
+        "updated": updated.is_some(),
+        "trigger": updated.as_ref().map(|record| trigger_output(record, &[])),
+    }))
+}
+
 fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
+    let is_enabled = record.state == TriggerState::Scheduled;
+    let has_active_fire = record.has_active_fire();
     json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
@@ -338,13 +499,17 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
-        "completion_policy": record.completion_policy,
+        "delivery_target_id": record.delivery_target.as_ref().map(|target| target.as_str()),
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
         "last_status": record.last_status,
         "recent_runs": recent_runs.iter().map(trigger_run_output).collect::<Vec<_>>(),
-        "is_active": record.has_active_fire(),
+        // Model-facing trigger status: `is_active` means the trigger is enabled
+        // to fire. In-flight run state is exposed separately as `has_active_fire`.
+        "is_enabled": is_enabled,
+        "is_active": is_enabled,
+        "has_active_fire": has_active_fire,
         "created_at": record.created_at,
     })
 }
@@ -353,7 +518,7 @@ fn trigger_run_output(run: &TriggerRunRecord) -> Value {
     json!({
         "fire_slot": run.fire_slot,
         "run_id": run.run_id.as_ref().map(ToString::to_string),
-        "thread_id": run.thread_id.as_str(),
+        "thread_id": run.thread_id.as_ref().map(|t| t.as_str()),
         "status": run.status,
         "submitted_at": run.submitted_at,
         "completed_at": run.completed_at,
@@ -370,11 +535,238 @@ fn trigger_remove_output(record: &TriggerRecord) -> Value {
 fn next_run_at_for_schedule(
     schedule: &TriggerSchedule,
     now: DateTime<Utc>,
-) -> Result<DateTime<Utc>, FirstPartyCapabilityError> {
-    schedule
-        .next_slot_after(now)
-        .map_err(trigger_input_error)?
-        .ok_or_else(input_error)
+) -> Result<DateTime<Utc>, TriggerError> {
+    schedule.next_slot_after(now).and_then(|next| {
+        next.ok_or_else(|| TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::NoFutureFireTime,
+            reason: "schedule has no future fire time".to_string(),
+        })
+    })
+}
+
+fn trigger_create_shape_error(
+    input: &Value,
+    _error: serde_json::Error,
+) -> FirstPartyCapabilityError {
+    invalid_trigger_input(classify_trigger_create_shape(input))
+}
+
+fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
+    let Some(root) = input.as_object() else {
+        return vec![type_mismatch("input", "object")];
+    };
+
+    let mut issues = Vec::new();
+    required_string(root, "name", "name", "string", &mut issues);
+    required_string(root, "prompt", "prompt", "string", &mut issues);
+    if let Some(value) = root.get("delivery_target_id")
+        && !value.is_null()
+        && !value.is_string()
+    {
+        issues.push(type_mismatch("delivery_target_id", "string"));
+    }
+    unexpected_fields(
+        root,
+        &["name", "prompt", "schedule", "delivery_target_id"],
+        "unexpected_field",
+        &mut issues,
+    );
+
+    let Some(schedule) = root.get("schedule") else {
+        issues.push(missing_required("schedule").expected("object with kind"));
+        return issues;
+    };
+    let Some(schedule) = schedule.as_object() else {
+        issues.push(type_mismatch("schedule", "object"));
+        return issues;
+    };
+
+    match schedule.get("kind") {
+        None | Some(Value::Null) => {
+            issues.push(missing_required("schedule.kind").expected("cron or once"));
+        }
+        Some(Value::String(kind)) if kind == "cron" => {
+            schedule_variant_shape_issues(
+                schedule,
+                &["kind", "expression", "timezone"],
+                &[
+                    ("expression", "schedule.expression", "cron expression"),
+                    ("timezone", "schedule.timezone", "IANA timezone name"),
+                ],
+                &mut issues,
+            );
+        }
+        Some(Value::String(kind)) if kind == "once" => {
+            schedule_variant_shape_issues(
+                schedule,
+                &["kind", "at", "timezone"],
+                &[
+                    ("at", "schedule.at", "YYYY-MM-DDTHH:MM:SS"),
+                    ("timezone", "schedule.timezone", "IANA timezone name"),
+                ],
+                &mut issues,
+            );
+        }
+        Some(Value::String(_)) => {
+            issues.push(invalid_value("schedule.kind").expected("cron or once"));
+        }
+        Some(_) => issues.push(type_mismatch("schedule.kind", "string")),
+    }
+
+    if issues.is_empty() {
+        issues.push(invalid_value("input").expected("valid trigger_create input"));
+    }
+    issues
+}
+
+fn schedule_variant_shape_issues(
+    schedule: &serde_json::Map<String, Value>,
+    allowed_fields: &[&str],
+    required_strings: &[(&'static str, &'static str, &'static str)],
+    issues: &mut Vec<DispatchInputIssue>,
+) {
+    unexpected_fields(
+        schedule,
+        allowed_fields,
+        "schedule.unexpected_field",
+        issues,
+    );
+    for (field, path, expected) in required_strings {
+        required_string(schedule, field, path, expected, issues);
+    }
+}
+
+fn unexpected_fields(
+    object: &serde_json::Map<String, Value>,
+    allowed: &[&str],
+    path: &'static str,
+    issues: &mut Vec<DispatchInputIssue>,
+) {
+    for field in object.keys() {
+        if !allowed.contains(&field.as_str()) {
+            issues.push(unexpected_field(path));
+        }
+    }
+}
+
+fn required_string(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    path: &'static str,
+    expected: &'static str,
+    issues: &mut Vec<DispatchInputIssue>,
+) {
+    match object.get(field) {
+        None | Some(Value::Null) => issues.push(missing_required(path).expected(expected)),
+        Some(Value::String(_)) => {}
+        Some(_) => issues.push(type_mismatch(path, "string")),
+    }
+}
+
+fn missing_required(path: impl Into<String>) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::MissingRequired)
+}
+
+fn unexpected_field(path: impl Into<String>) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::UnexpectedField)
+}
+
+fn type_mismatch(path: impl Into<String>, expected: &'static str) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::TypeMismatch).expected(expected)
+}
+
+fn invalid_value(path: impl Into<String>) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::InvalidValue)
+}
+
+fn invalid_trigger_input(issues: Vec<DispatchInputIssue>) -> FirstPartyCapabilityError {
+    let issue_paths = issues
+        .iter()
+        .map(|issue| issue.path.as_str())
+        .collect::<Vec<_>>();
+    tracing::debug!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::InputEncode,
+        issue_count = issues.len(),
+        issue_paths = ?issue_paths,
+        "trigger management capability input validation failed"
+    );
+    FirstPartyCapabilityError::invalid_input_issues(
+        "trigger_create input failed validation",
+        issues,
+    )
+}
+
+fn trigger_schedule_error(
+    kind: TriggerScheduleInputKind,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    let issue = match error {
+        TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::InvalidTimezone,
+            ..
+        } => invalid_value("schedule.timezone").expected("valid IANA timezone name"),
+        TriggerError::InvalidSchedule { .. } => match kind {
+            TriggerScheduleInputKind::Cron => invalid_value("schedule.expression")
+                .expected("five-, six-, or seven-field cron with at least one-minute cadence"),
+            TriggerScheduleInputKind::Once => invalid_value("schedule.at")
+                .expected("YYYY-MM-DDTHH:MM:SS valid in the selected timezone"),
+        },
+        other => invalid_value("schedule").expected(trigger_error_kind(&other)),
+    };
+    invalid_trigger_input(vec![issue])
+}
+
+fn trigger_record_error(error: TriggerError) -> FirstPartyCapabilityError {
+    match error {
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::NameEmpty,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("name").expected("non-empty trigger name"),
+        ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::PromptEmpty,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("prompt").expected("non-empty trigger prompt"),
+        ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::NameTooLong,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("name").expected("trigger name within the allowed byte limit"),
+        ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::PromptTooLong,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("prompt").expected("trigger prompt within the allowed byte limit"),
+        ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
+            ..
+        } => invalid_trigger_input(vec![invalid_value("delivery_target_id").expected(
+            "an outbound delivery target id available to this caller (from \
+             builtin__outbound_delivery_targets_list)",
+        )]),
+        other => invalid_trigger_input(vec![
+            invalid_value("trigger").expected(trigger_error_kind(&other)),
+        ]),
+    }
+}
+
+fn trigger_next_run_error(
+    kind: TriggerScheduleInputKind,
+    _error: TriggerError,
+) -> FirstPartyCapabilityError {
+    let issue = match kind {
+        TriggerScheduleInputKind::Cron => invalid_value("schedule.expression")
+            .expected("cron expression with at least one future fire time"),
+        TriggerScheduleInputKind::Once => {
+            invalid_value("schedule.at").expected("future local datetime")
+        }
+    };
+    invalid_trigger_input(vec![issue])
 }
 
 fn trigger_input_error(error: TriggerError) -> FirstPartyCapabilityError {
@@ -437,17 +829,16 @@ fn trigger_error_kind(error: &TriggerError) -> &'static str {
         TriggerError::InvalidPollerConfig { .. } => "invalid_poller_config",
         TriggerError::InvalidSchedule { .. } => "invalid_schedule",
         TriggerError::InvalidMaterialization { .. } => "invalid_materialization",
+        TriggerError::BlockedMaterialization { .. } => "blocked_materialization",
         TriggerError::Backend { .. } => "backend",
         TriggerError::NotFound => "not_found",
     }
 }
 
 fn elapsed_usage_with_bytes(started: Instant, output_bytes: u64) -> ResourceUsage {
-    ResourceUsage {
-        wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        output_bytes,
-        ..ResourceUsage::default()
-    }
+    ResourceUsage::default()
+        .set_wall_clock_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+        .set_output_bytes(output_bytes)
 }
 
 #[cfg(test)]
@@ -455,6 +846,52 @@ mod tests {
     use chrono::{Datelike, TimeZone};
 
     use super::*;
+
+    /// Duplicate-delivery contract: the stored trigger prompt is replayed to a
+    /// fresh model at fire time, so the description must teach that each
+    /// fire's final reply is delivered by the host (otherwise the fired model
+    /// both calls a messaging capability and emits a final reply, delivering
+    /// the result twice), while messaging-as-task automations ("send Firat a
+    /// joke every morning") stay expressible with recipients pinned at
+    /// creation time instead of guessed at fire time.
+    #[test]
+    fn trigger_create_description_teaches_task_only_prompt_and_host_owned_delivery() {
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("delivered automatically"),
+            "trigger_create description must state host-owned result delivery: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
+            "trigger_create description must say the prompt is the task, not routing: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION
+                .contains("Do not tell the prompt to send results back to the requesting user"),
+            "trigger_create description must forbid result self-delivery phrasing in the stored prompt: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("resolved while the user is present"),
+            "trigger_create description must require creation-time recipient pinning: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        // Laundering guard: a live QA fire executed a duplicate user-identity
+        // send because the creating model set delivery_target_id AND pinned
+        // the requester's own DM into the prompt as if it were a third-party
+        // recipient. The description must say receiving results is routing,
+        // never a prompt step — pinned conversation id or not.
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("delivery routing, not a task step"),
+            "trigger_create description must frame 'send me the result' as routing: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("even one with a pinned conversation id"),
+            "trigger_create description must forbid laundering a self-send behind a pinned id: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+        assert!(
+            TRIGGER_CREATE_DESCRIPTION.contains("pass delivery_target_id with an id from")
+                && TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_delivery_targets_list"),
+            "trigger_create description must teach per-trigger delivery routing: {TRIGGER_CREATE_DESCRIPTION}"
+        );
+    }
 
     #[test]
     fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
@@ -470,10 +907,125 @@ mod tests {
 
         assert!(matches!(
             error,
-            FirstPartyCapabilityError::Dispatch {
-                kind: RuntimeDispatchErrorKind::InputEncode,
+            TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::NoFutureFireTime,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_missing_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
+        });
+        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
+        assert!(
+            result.is_err(),
+            "missing timezone must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_invalid_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let result = parsed.schedule.into_schedule();
+        assert!(result.is_err(), "invalid timezone must be rejected");
+    }
+
+    #[test]
+    fn trigger_create_input_accepts_cron_schedule() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let schedule = parsed
+            .schedule
+            .into_schedule()
+            .expect("valid cron schedule accepted");
+        match &schedule {
+            TriggerSchedule::Cron { timezone, .. } => {
+                assert_eq!(timezone, "America/Los_Angeles");
+            }
+            TriggerSchedule::Once { .. } => panic!("expected Cron"),
+        }
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_missing_schedule() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail"
+        });
+        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
+        assert!(
+            result.is_err(),
+            "omitting schedule must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
+        // 2099-06-24T17:00:00 UTC is unambiguous and in the future
+        let input = serde_json::json!({
+            "name": "one-off reminder",
+            "prompt": "remind me about the meeting",
+            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
+        });
+        let parsed: TriggerCreateInput =
+            serde_json::from_value(input).expect("deserialize one-shot input");
+        let schedule = parsed
+            .schedule
+            .into_schedule()
+            .expect("valid once schedule accepted");
+        match &schedule {
+            TriggerSchedule::Once { at, timezone } => {
+                assert_eq!(timezone, "UTC");
+                // Wall-clock 17:00:00 UTC → stored UTC timestamp must match
+                assert_eq!(at.to_rfc3339(), "2099-06-24T17:00:00+00:00");
+            }
+            TriggerSchedule::Cron { .. } => panic!("expected Once"),
+        }
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_dst_ambiguous_time() {
+        // 2026-11-01T01:30:00 in America/New_York occurs twice (DST fall-back overlap)
+        let input = serde_json::json!({
+            "name": "ambiguous",
+            "prompt": "test",
+            "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let result = parsed.schedule.into_schedule();
+        assert!(
+            result.is_err(),
+            "DST-ambiguous time must be rejected as input error"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_dst_gap_time() {
+        // 2026-03-08T02:30:00 in America/New_York does not exist (DST spring-forward gap)
+        let input = serde_json::json!({
+            "name": "dst-gap",
+            "prompt": "test",
+            "schedule": { "kind": "once", "at": "2026-03-08T02:30:00", "timezone": "America/New_York" }
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let result = parsed.schedule.into_schedule();
+        assert!(
+            result.is_err(),
+            "DST-gap time must be rejected as input error"
+        );
     }
 }

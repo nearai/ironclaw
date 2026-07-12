@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::UserId;
-use ironclaw_reborn_composition::WebuiAuthenticator;
+use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -657,7 +657,7 @@ fn build_decoding_key(jwk: &Jwk, algorithm: Algorithm) -> Option<DecodingKey> {
 
 #[async_trait]
 impl WebuiAuthenticator for OidcAuthenticator {
-    async fn authenticate(&self, token: &str) -> Option<UserId> {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         let token_data = match self.decode_token(token).await {
             Ok(Some(data)) => data,
             Ok(None) => return None,
@@ -689,7 +689,7 @@ impl WebuiAuthenticator for OidcAuthenticator {
         {
             return None;
         }
-        (self.claim_to_user_id)(&claims)
+        (self.claim_to_user_id)(&claims).map(WebuiAuthentication::user)
     }
 }
 

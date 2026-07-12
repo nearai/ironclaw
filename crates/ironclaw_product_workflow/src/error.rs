@@ -111,6 +111,11 @@ pub enum ProductWorkflowError {
     /// The requested action kind is not supported by this workflow version.
     #[error("unsupported action kind: {kind}")]
     UnsupportedActionKind { kind: String },
+
+    /// The resolved outbound target is not a direct message, but the payload
+    /// requires a DM-only target (e.g. carries an OAuth authorization_url).
+    #[error("outbound target is not a direct message but the payload requires one")]
+    OutboundTargetNotDirectMessage,
 }
 
 fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowRejectionKind {
@@ -238,6 +243,16 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::UnsupportedActionKind { kind } => ProductAdapterError::Internal {
                 detail: RedactedString::new(format!("unsupported action kind: {kind}")),
             },
+            ProductWorkflowError::OutboundTargetNotDirectMessage => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: ProductWorkflowRejectionKind::Unauthorized,
+                    status_code: 403,
+                    retryable: false,
+                    reason: RedactedString::new(
+                        "outbound target is not a direct message but the payload requires one",
+                    ),
+                }
+            }
         }
     }
 }
@@ -323,6 +338,24 @@ mod tests {
                 }
                 other => panic!("expected typed workflow rejection, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn outbound_target_not_direct_message_maps_to_workflow_rejected() {
+        let err: ProductAdapterError = ProductWorkflowError::OutboundTargetNotDirectMessage.into();
+        match err {
+            ProductAdapterError::WorkflowRejected {
+                kind,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(kind, ProductWorkflowRejectionKind::Unauthorized);
+                assert_eq!(status_code, 403);
+                assert!(!retryable);
+            }
+            other => panic!("expected typed workflow rejection, got {other:?}"),
         }
     }
 }

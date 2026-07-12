@@ -31,7 +31,8 @@ pub use auth::EmailUserDirectory;
 pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
-    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError, webui_v2_auth_router,
+    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
+    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
 };
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
@@ -42,7 +43,8 @@ pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStor
 // the standalone `serve` binary supplies env config and calls the
 // builder; the auth/session model lives here, not in the command crate.
 pub use signed_session_login::{
-    SignedSessionLoginConfig, SignedSessionLoginWiring, build_signed_session_login,
+    CompositeAuthenticator, SignedSessionLoginConfig, SignedSessionLoginWiring,
+    build_signed_session_login, signed_session_store,
 };
 // `InMemorySessionStore` is gated behind `dev-in-memory-session` so a
 // production binary cannot accidentally wire a process-local store as
@@ -50,17 +52,27 @@ pub use signed_session_login::{
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use session::InMemorySessionStore;
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::Router;
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{any, get},
+};
 use ironclaw_host_api::UserId;
 use ironclaw_reborn_composition::WebuiAuthenticator;
 use secrecy::{ExposeSecret, SecretString};
+use serde::Serialize;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tower::ServiceExt;
 
 /// Errors raised while running the host serve loop.
 #[derive(Debug, Error)]
@@ -89,6 +101,82 @@ pub struct RebornWebuiServeOptions {
     pub router: Router,
     pub shutdown: tokio::sync::oneshot::Receiver<()>,
     pub bound_addr_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+}
+
+/// Handle used by host startup code to publish the real WebUI router
+/// after runtime assembly finishes.
+#[derive(Clone)]
+pub struct DeferredWebuiRouterHandle {
+    router_tx: watch::Sender<Option<Router>>,
+}
+
+/// Errors raised while publishing the ready router to a deferred
+/// startup listener.
+#[derive(Debug, Error)]
+pub enum DeferredWebuiRouterError {
+    #[error("deferred WebUI startup listener stopped before the runtime router became ready")]
+    ListenerStopped,
+}
+
+/// Build a startup router for orchestrator healthchecks while the
+/// host-owned runtime is still assembling.
+///
+/// `/api/health` returns healthy immediately. Every other route returns
+/// 503 until [`DeferredWebuiRouterHandle::publish_ready_router`] is
+/// called, then delegates each request to the real composed WebUI
+/// router without rebinding the listener.
+pub fn deferred_webui_v2_startup_router() -> (Router, DeferredWebuiRouterHandle) {
+    let (router_tx, router_rx) = watch::channel(None);
+    let state = DeferredWebuiRouterState { router_rx };
+    let router = Router::new()
+        .route("/api/health", get(deferred_webui_health_handler))
+        .fallback(any(deferred_webui_handler))
+        .with_state(state);
+    (router, DeferredWebuiRouterHandle { router_tx })
+}
+
+impl DeferredWebuiRouterHandle {
+    pub fn publish_ready_router(&self, router: Router) -> Result<(), DeferredWebuiRouterError> {
+        self.router_tx
+            .send(Some(router))
+            .map_err(|_| DeferredWebuiRouterError::ListenerStopped)
+    }
+}
+
+#[derive(Clone)]
+struct DeferredWebuiRouterState {
+    router_rx: watch::Receiver<Option<Router>>,
+}
+
+#[derive(Serialize)]
+struct DeferredWebuiHealthResponse {
+    status: &'static str,
+    channel: &'static str,
+}
+
+async fn deferred_webui_health_handler() -> Json<DeferredWebuiHealthResponse> {
+    Json(DeferredWebuiHealthResponse {
+        status: "healthy",
+        channel: "reborn",
+    })
+}
+
+async fn deferred_webui_handler(
+    State(state): State<DeferredWebuiRouterState>,
+    request: Request,
+) -> Response {
+    let Some(router) = state.router_rx.borrow().clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reborn runtime is starting",
+        )
+            .into_response();
+    };
+
+    router
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|err: Infallible| match err {})
 }
 
 /// Bind a `TcpListener` at `opts.addr`, run the axum serve loop with
@@ -179,7 +267,10 @@ pub enum EnvBearerConfigError {
 
 #[async_trait]
 impl WebuiAuthenticator for EnvBearerAuthenticator {
-    async fn authenticate(&self, candidate: &str) -> Option<UserId> {
+    async fn authenticate(
+        &self,
+        candidate: &str,
+    ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
         // Constant-time comparison so an attacker cannot use response
         // timing to learn the prefix of the configured token. Both
         // operands are coerced to `&[u8]` of the same length to make
@@ -189,13 +280,15 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
         let expected = self.token.expose_secret().as_bytes();
         let candidate = candidate.as_bytes();
         if expected.ct_eq(candidate).into() {
-            Some(self.user_id.clone())
+            Some(ironclaw_reborn_composition::WebuiAuthentication::operator(
+                self.user_id.clone(),
+            ))
         } else {
             None
         }
     }
 
-    fn allows_operator_webui_config(&self) -> bool {
+    fn mounts_operator_webui_config_routes(&self) -> bool {
         true
     }
 }
@@ -217,7 +310,16 @@ mod tests {
         )
         .expect("auth");
         let result = auth.authenticate("right-token").await;
-        assert_eq!(result.as_ref().map(|u| u.as_str()), Some("user-alpha"));
+        assert_eq!(
+            result.as_ref().map(|auth| auth.user_id.as_str()),
+            Some("user-alpha")
+        );
+        assert_eq!(
+            result
+                .as_ref()
+                .map(|auth| auth.capabilities.operator_webui_config),
+            Some(true)
+        );
     }
 
     #[tokio::test]

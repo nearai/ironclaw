@@ -31,7 +31,6 @@ scripts/replay-snap.sh review       # interactive diff review (cargo insta revie
 scripts/replay-snap.sh accept       # accept all pending snapshots
 scripts/replay-snap.sh test         # run the replay gate locally (cargo insta test --check)
 scripts/replay-snap.sh record <name>  # record a fresh fixture against a real LLM
-scripts/trace-coverage.sh           # report which EventKind variants have snapshot coverage
 ```
 
 CI runs the gate via `cargo insta test --test-runner nextest` with
@@ -333,12 +332,7 @@ llm_traces/
     memory_save_recall.json # Memory write -> memory search -> confirm
     robust_correct_tool.json
   coverage/                 # Broader tool and feature coverage
-    shell_echo.json         # Shell command execution
-    list_dir.json           # Directory listing
-    apply_patch_chain.json  # File patching workflow
-    json_operations.json    # JSON tool usage
     injection_in_echo.json  # Prompt injection in tool output
-    memory_full_cycle.json  # Full memory write/search/read cycle
     status_events_tool_chain.json
     approval_yes.json              # Approval round-trip: user approves -> tool runs
     approval_no.json               # Approval round-trip: user denies -> tool skipped

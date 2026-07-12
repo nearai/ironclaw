@@ -2,6 +2,8 @@
 #![warn(unreachable_pub)]
 
 mod attachment;
+pub mod attachment_format;
+mod automation;
 pub mod env_helpers;
 mod event;
 pub mod hashing;
@@ -15,7 +17,16 @@ mod timezone;
 mod trust_boundary;
 mod util;
 
-pub use attachment::{AttachmentKind, IncomingAttachment};
+pub use attachment::{AttachmentKind, AttachmentRef, IncomingAttachment, normalize_mime_type};
+pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+// `attachment_format` is also a `pub mod`, but the registry query functions are
+// re-exported at the crate root because the whole attachment pipeline consumes
+// them as `ironclaw_common::is_supported_mime` / `kind_for_mime` / etc.
+pub use attachment_format::{
+    AttachmentFormat, ExtractorId, accept_attribute, accept_tokens, all_formats,
+    canonical_extension, extractor_for_mime, is_supported_mime, kind_for_mime, lookup,
+    mime_for_extension,
+};
 pub use event::{
     AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto, PlanStepDto,
     SelfImprovementPhase, ToolDecisionDto,

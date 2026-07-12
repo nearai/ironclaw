@@ -249,6 +249,7 @@ fn is_transient_validator_error(error: &OutboundError) -> bool {
         // but classify it as transient (retryable) for defence in depth.
         OutboundError::Backend | OutboundError::Serialization | OutboundError::CasConflict => true,
         OutboundError::InvalidRequest { .. }
+        | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::AccessDenied
         | OutboundError::DeliveryNotFound => false,

@@ -10,6 +10,7 @@ mod file;
 mod glob_tool;
 mod grep_tool;
 mod inputs;
+mod patch;
 mod paths;
 mod state;
 mod text;
@@ -19,9 +20,15 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, MountView, ResourceScope, RuntimeDispatchErrorKind,
+    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceScope,
+    RuntimeDispatchErrorKind,
 };
 use serde_json::Value;
+
+use crate::latency::{
+    FirstPartyToolLatencyFields, FirstPartyToolLatencyMetrics, json_bytes, started_at,
+    trace_tool_error, trace_tool_ok,
+};
 
 use state::SharedCodingEditLocks;
 
@@ -35,8 +42,22 @@ pub enum CodingCapabilityKind {
     ApplyPatch,
 }
 
+impl CodingCapabilityKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadFile => "read_file",
+            Self::WriteFile => "write_file",
+            Self::ListDir => "list_dir",
+            Self::Glob => "glob",
+            Self::Grep => "grep",
+            Self::ApplyPatch => "apply_patch",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CodingCapabilityRequest<'a> {
+    pub(crate) capability_id: &'a CapabilityId,
     pub(crate) kind: CodingCapabilityKind,
     pub(crate) scope: &'a ResourceScope,
     pub(crate) mounts: Option<&'a MountView>,
@@ -71,6 +92,7 @@ impl CodingCapabilityOutput {
 
 impl<'a> CodingCapabilityRequest<'a> {
     pub fn new(
+        capability_id: &'a CapabilityId,
         kind: CodingCapabilityKind,
         scope: &'a ResourceScope,
         mounts: Option<&'a MountView>,
@@ -78,6 +100,7 @@ impl<'a> CodingCapabilityRequest<'a> {
         input: &'a Value,
     ) -> Self {
         Self {
+            capability_id,
             kind,
             scope,
             mounts,
@@ -139,7 +162,13 @@ async fn dispatch(
     request: &CodingCapabilityRequest<'_>,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
-    match request.kind {
+    let started_at = started_at();
+    let latency_fields = FirstPartyToolLatencyFields::from_input(
+        request.capability_id,
+        request.scope,
+        request.input,
+    );
+    let result = match request.kind {
         CodingCapabilityKind::ReadFile => file::read_file(request)
             .await
             .map(CodingCapabilityOutput::new),
@@ -154,6 +183,45 @@ async fn dispatch(
             .await
             .map(CodingCapabilityOutput::new),
         CodingCapabilityKind::ApplyPatch => file::apply_patch(request, edit_locks).await,
+    };
+    trace_coding_latency(request, latency_fields.as_ref(), started_at, &result);
+    result
+}
+
+fn trace_coding_latency(
+    request: &CodingCapabilityRequest<'_>,
+    fields: Option<&FirstPartyToolLatencyFields>,
+    started_at: Option<std::time::Instant>,
+    result: &Result<CodingCapabilityOutput, CodingCapabilityError>,
+) {
+    let output_bytes = result
+        .as_ref()
+        .ok()
+        .map(|output| json_bytes(&output.output))
+        .unwrap_or(0);
+
+    match result {
+        Ok(_) => trace_tool_ok(
+            "first_party_coding_tool",
+            request.kind.as_str(),
+            fields,
+            started_at,
+            FirstPartyToolLatencyMetrics {
+                output_bytes,
+                ..FirstPartyToolLatencyMetrics::default()
+            },
+        ),
+        Err(error) => trace_tool_error(
+            "first_party_coding_tool",
+            request.kind.as_str(),
+            fields,
+            started_at,
+            error.kind().as_str(),
+            FirstPartyToolLatencyMetrics {
+                output_bytes,
+                ..FirstPartyToolLatencyMetrics::default()
+            },
+        ),
     }
 }
 
@@ -186,6 +254,15 @@ fn bound_safe_summary(summary: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+    use ironclaw_host_api::{
+        CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        ResourceScope, RuntimeDispatchErrorKind, UserId, VirtualPath,
+    };
+    use serde_json::json;
+
     #[test]
     fn coding_tools_do_not_select_runtime_backends() {
         let sources = [
@@ -213,5 +290,155 @@ mod tests {
         let input = "x".repeat(512);
 
         assert_eq!(super::bound_safe_summary(input.clone()), input);
+    }
+
+    #[tokio::test]
+    async fn coding_file_tools_treat_bare_workspace_prefix_as_scoped_alias() {
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = workspace_mounts();
+        let scope = ResourceScope::local_default(
+            UserId::new("workspace-alias-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+        let write_capability_id = CapabilityId::new("builtin.write_file").expect("capability id");
+        let read_capability_id = CapabilityId::new("builtin.read_file").expect("capability id");
+
+        let write_input = json!({
+            "path": "workspace/demo/a.txt",
+            "content": "hello"
+        });
+        let write_request = super::CodingCapabilityRequest::new(
+            &write_capability_id,
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &write_input,
+        );
+        let write_output = state.dispatch(&write_request).await.expect("write file");
+
+        assert_eq!(
+            write_output.output["path"].as_str(),
+            Some("/workspace/demo/a.txt")
+        );
+        let write_preview = write_output
+            .display_preview
+            .as_ref()
+            .expect("write preview");
+        assert_eq!(
+            write_preview.subtitle.as_deref(),
+            Some("/workspace/demo/a.txt")
+        );
+        assert!(
+            write_preview
+                .output_preview
+                .contains("--- a/workspace/demo/a.txt\n+++ b/workspace/demo/a.txt"),
+            "preview should use normalized path, got: {}",
+            write_preview.output_preview
+        );
+        assert_eq!(
+            filesystem
+                .read_file(
+                    &VirtualPath::new("/projects/workspace/demo/a.txt").expect("virtual path")
+                )
+                .await
+                .expect("normalized write path exists"),
+            b"hello".to_vec()
+        );
+        assert!(temp_root.path().join("workspace/demo/a.txt").exists());
+        assert!(
+            !temp_root
+                .path()
+                .join("workspace/workspace/demo/a.txt")
+                .exists()
+        );
+
+        let read_input = json!({ "path": "workspace/demo/a.txt" });
+        let read_request = super::CodingCapabilityRequest::new(
+            &read_capability_id,
+            super::CodingCapabilityKind::ReadFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &read_input,
+        );
+        let read_output = state.dispatch(&read_request).await.expect("read file");
+
+        assert_eq!(
+            read_output.output["path"].as_str(),
+            Some("/workspace/demo/a.txt")
+        );
+        assert_eq!(
+            read_output.output["content"].as_str(),
+            Some("     1│ hello")
+        );
+
+        let url_like_input = json!({
+            "path": "workspace/http://example.com/a.txt",
+            "content": "blocked"
+        });
+        let url_like_request = super::CodingCapabilityRequest::new(
+            &write_capability_id,
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &url_like_input,
+        );
+        let err = state
+            .dispatch(&url_like_request)
+            .await
+            .expect_err("URL-like workspace alias path rejected");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(
+            !temp_root
+                .path()
+                .join("workspace/http:/example.com/a.txt")
+                .exists(),
+            "URL-like path must not be normalized into a writable scoped path"
+        );
+
+        let reserved_workspace_file_input = json!({
+            "path": "workspace//HEARTBEAT.md",
+            "content": "blocked"
+        });
+        let reserved_workspace_file_request = super::CodingCapabilityRequest::new(
+            &write_capability_id,
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &reserved_workspace_file_input,
+        );
+        let err = state
+            .dispatch(&reserved_workspace_file_request)
+            .await
+            .expect_err("empty alias segments preserve reserved workspace file guard");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(
+            !temp_root.path().join("workspace/HEARTBEAT.md").exists(),
+            "reserved workspace memory file must not be written through empty alias segments"
+        );
+    }
+
+    fn workspace_mounts() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("mount alias"),
+            VirtualPath::new("/projects/workspace").expect("virtual path"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view")
     }
 }

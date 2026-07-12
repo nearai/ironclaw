@@ -2,7 +2,8 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityDisplayOutputPreview;
 use ironclaw_product_adapters::{
-    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, ProductAdapterError, RedactedString,
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView, ProductAdapterError,
+    RedactedString,
 };
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
@@ -22,6 +23,47 @@ impl CapabilityDisplayPreviewSource for FailingPreviewSource {
             detail: RedactedString::new("preview encoder failed"),
         })
     }
+}
+
+async fn completed_preview_for_input(
+    tool_name: &str,
+    capability_id: &str,
+    arguments: serde_json::Value,
+) -> CapabilityDisplayPreviewView {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new(capability_id).unwrap();
+    let input_ref = preview_input_ref(&format!("preview-input-{tool_name}"));
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(&run_id.to_string(), &input_ref, tool_name, &arguments);
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:preview",
+        output: &serde_json::json!({"ok": true}),
+        output_bytes: 12,
+    });
+    store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(12),
+            error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -139,6 +181,8 @@ async fn capability_display_preview_error_does_not_drop_activity_payload() {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                error_detail: None,
+                first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
             }],
@@ -201,6 +245,8 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
             process_id: None,
             output_bytes: Some(42),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -215,6 +261,373 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     assert!(!rendered.contains("/etc/passwd"));
     assert!(!rendered.contains("\\\\host\\\\share"));
     assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_shell_command_safely() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.shell").unwrap();
+    let input_ref = preview_input_ref("shell-preview-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "builtin.shell",
+        &serde_json::json!({
+            "command": "pwd && curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret"
+        }),
+    );
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:shell-preview",
+        output: &serde_json::json!({"output": "ok"}),
+        output_bytes: 2,
+    });
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-shell-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(2),
+            error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("command: pwd && curl"));
+    assert!(input_summary.contains("-H 'Authorization: [redacted]'"));
+    assert!(input_summary.contains("https://example.test/path?..."));
+    assert!(!input_summary.contains("sk-secret"));
+    assert!(!input_summary.contains("token=secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_http_inputs_safely() {
+    let preview = completed_preview_for_input(
+        "builtin.http.save",
+        "builtin.http.save",
+        serde_json::json!({
+            "method": "post",
+            "url": "https://user:secret@example.test/reset/token/opaque-value?token=secret#frag",
+            "save_to": "/workspace/tmp/result.json",
+            "headers": {
+                "Authorization": "Bearer sk-secret"
+            },
+            "body": "secret request body",
+            "response_body_limit": 4096,
+            "timeout_ms": 5000
+        }),
+    )
+    .await;
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("method: POST"));
+    assert!(input_summary.contains("url: https://example.test/reset/[redacted]/[redacted]?..."));
+    assert!(input_summary.contains("save_to: tmp/result.json"));
+    assert!(input_summary.contains("response_body_limit: 4096"));
+    assert!(input_summary.contains("timeout_ms: 5000"));
+    assert!(!input_summary.contains("user:secret"));
+    assert!(!input_summary.contains("opaque-value"));
+    assert!(!input_summary.contains("sk-secret"));
+    assert!(!input_summary.contains("token=secret"));
+    assert!(!input_summary.contains("Authorization"));
+    assert!(!input_summary.contains("secret request body"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_redacts_file_url_inputs() {
+    let preview = completed_preview_for_input(
+        "builtin.http.save",
+        "builtin.http.save",
+        serde_json::json!({
+            "method": "get",
+            "url": "file:///Users/alice/.ssh/id_rsa",
+            "timeout_ms": 5000
+        }),
+    )
+    .await;
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("url: [redacted]"));
+    assert!(!input_summary.contains("file:///Users/alice"));
+    assert!(!input_summary.contains("id_rsa"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_file_inputs_without_contents() {
+    let write_preview = completed_preview_for_input(
+        "builtin.write_file",
+        "builtin.write_file",
+        serde_json::json!({
+            "path": "/workspace/src/main.rs",
+            "content": "fn main() {}"
+        }),
+    )
+    .await;
+    let write_summary = write_preview.input_summary.as_deref().unwrap();
+    assert!(write_summary.contains("path: src/main.rs"));
+    assert!(write_summary.contains("content_bytes: 12"));
+    assert!(!write_summary.contains("fn main"));
+
+    let patch_preview = completed_preview_for_input(
+        "builtin.apply_patch",
+        "builtin.apply_patch",
+        serde_json::json!({
+            "path": "src/lib.rs",
+            "old_string": "let token = \"sk-secret\";",
+            "new_string": "let token = load_token();",
+            "replace_all": true
+        }),
+    )
+    .await;
+    let patch_summary = patch_preview.input_summary.as_deref().unwrap();
+    assert!(patch_summary.contains("path: src/lib.rs"));
+    assert!(patch_summary.contains("old_bytes: 24"));
+    assert!(patch_summary.contains("new_bytes: 25"));
+    assert!(patch_summary.contains("replace_all: true"));
+    assert!(!patch_summary.contains("sk-secret"));
+    assert!(!patch_summary.contains("load_token"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_read_limits_and_memory_tree_root() {
+    let read_preview = completed_preview_for_input(
+        "builtin.read_file",
+        "builtin.read_file",
+        serde_json::json!({
+            "path": "/workspace/src/main.rs",
+            "offset": 128,
+            "max_bytes": 4096
+        }),
+    )
+    .await;
+    let read_summary = read_preview.input_summary.as_deref().unwrap();
+    assert!(read_summary.contains("path: src/main.rs"));
+    assert!(read_summary.contains("offset: 128"));
+    assert!(read_summary.contains("limit: 4096"));
+
+    let memory_tree_preview = completed_preview_for_input(
+        "builtin.memory_tree",
+        "builtin.memory_tree",
+        serde_json::json!({
+            "limit": 12
+        }),
+    )
+    .await;
+    let memory_tree_summary = memory_tree_preview.input_summary.as_deref().unwrap();
+    assert!(memory_tree_summary.contains("path: /"));
+    assert!(memory_tree_summary.contains("limit: 12"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_search_and_memory_inputs() {
+    let search_preview = completed_preview_for_input(
+        "nearai.web_search",
+        "nearai.web_search",
+        serde_json::json!({
+            "query": "deployment status token: sk-secret",
+            "limit": 5
+        }),
+    )
+    .await;
+    let search_summary = search_preview.input_summary.as_deref().unwrap();
+    assert!(search_summary.contains("query: deployment status token: [redacted]"));
+    assert!(search_summary.contains("limit: 5"));
+    assert!(!search_summary.contains("sk-secret"));
+    // The inline row subtitle is the primary argument (the query), redacted
+    // the same way the summary is — so the row reads `web_search   <query>`
+    // instead of a bare tool name.
+    let search_subtitle = search_preview.subtitle.as_deref().unwrap();
+    assert!(search_subtitle.contains("deployment status"));
+    assert!(!search_subtitle.contains("sk-secret"));
+
+    let memory_preview = completed_preview_for_input(
+        "builtin.memory_write",
+        "builtin.memory_write",
+        serde_json::json!({
+            "target": "/workspace/notes/deploy.md",
+            "content": "token: sk-secret",
+            "append": true
+        }),
+    )
+    .await;
+    let memory_summary = memory_preview.input_summary.as_deref().unwrap();
+    assert!(memory_summary.contains("target: notes/deploy.md"));
+    assert!(memory_summary.contains("append: true"));
+    assert!(memory_summary.contains("content_bytes: 16"));
+    assert!(!memory_summary.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn running_input_surfaces_staged_input_until_result_lands() {
+    let run_id = TurnRunId::new();
+    let input_ref = preview_input_ref("running-web-search");
+    let invocation_id = InvocationId::new();
+    let store = CapabilityDisplayPreviewStore::default();
+
+    // Nothing to show before the invocation is linked to its input.
+    assert!(store.running_input(invocation_id).is_none());
+
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "nearai.web_search",
+        &serde_json::json!({"query": "deploy status token: sk-secret", "limit": 5}),
+    );
+    store.record_running_invocation(invocation_id, &input_ref);
+
+    // While running, the inline subtitle and parameters are surfaced — and they
+    // carry the same projection-sanitized text the preview frame uses, so the
+    // secret never reaches the activity frame.
+    let running = store.running_input(invocation_id).expect("running input");
+    assert!(
+        running
+            .subtitle
+            .as_deref()
+            .is_some_and(|s| s.contains("deploy status")),
+        "subtitle should carry the query, got {:?}",
+        running.subtitle,
+    );
+    assert!(
+        running
+            .input_summary
+            .as_deref()
+            .is_some_and(|s| s.contains("query: deploy status")),
+    );
+    assert!(!running.subtitle.as_deref().unwrap().contains("sk-secret"));
+    assert!(
+        !running
+            .input_summary
+            .as_deref()
+            .unwrap()
+            .contains("sk-secret")
+    );
+
+    // Once the result lands, the pending input is consumed and no longer
+    // surfaced as in-flight (the completed preview takes over).
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &CapabilityId::new("nearai.web_search").unwrap(),
+        result_ref: "result:running",
+        output: &serde_json::json!({"results": []}),
+        output_bytes: 12,
+    });
+    assert!(store.running_input(invocation_id).is_none());
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_uses_primary_arg_subtitle_for_non_path_tools() {
+    // shell → the command (the inline row reads `shell   <command>`).
+    let shell = completed_preview_for_input(
+        "shell",
+        "builtin.shell",
+        serde_json::json!({"command": "cargo test -p ironclaw"}),
+    )
+    .await;
+    assert!(
+        shell
+            .subtitle
+            .as_deref()
+            .is_some_and(|s| s.contains("cargo test")),
+        "shell subtitle should carry the command, got {:?}",
+        shell.subtitle,
+    );
+
+    // http / web_fetch → the URL (sensitive parts stripped).
+    let http = completed_preview_for_input(
+        "web_fetch",
+        "builtin.web_fetch",
+        serde_json::json!({"url": "https://example.com/docs"}),
+    )
+    .await;
+    assert!(
+        http.subtitle
+            .as_deref()
+            .is_some_and(|s| s.contains("example.com")),
+        "web_fetch subtitle should carry the url, got {:?}",
+        http.subtitle,
+    );
+
+    // Path-based tools keep the workspace-relative path subtitle.
+    let read = completed_preview_for_input(
+        "read_file",
+        "builtin.read_file",
+        serde_json::json!({"path": "/workspace/src/main.rs"}),
+    )
+    .await;
+    assert_eq!(read.subtitle.as_deref(), Some("src/main.rs"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_list_dir_inputs() {
+    let preview = completed_preview_for_input(
+        "builtin.list_dir",
+        "builtin.list_dir",
+        serde_json::json!({
+            "path": "/workspace/src",
+            "recursive": true,
+            "max_depth": 3
+        }),
+    )
+    .await;
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("path: src"));
+    assert!(input_summary.contains("recursive: true"));
+    assert!(input_summary.contains("max_depth: 3"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_grep_and_glob_inputs() {
+    let grep_preview = completed_preview_for_input(
+        "builtin.grep",
+        "builtin.grep",
+        serde_json::json!({
+            "pattern": "Authorization: Bearer sk-secret",
+            "path": "/workspace/src",
+            "glob": "*.rs",
+            "output_mode": "content",
+            "head_limit": 20
+        }),
+    )
+    .await;
+    let grep_summary = grep_preview.input_summary.as_deref().unwrap();
+    assert!(grep_summary.contains("pattern: Authorization: [redacted]"));
+    assert!(grep_summary.contains("path: src"));
+    assert!(grep_summary.contains("glob: *.rs"));
+    assert!(grep_summary.contains("output_mode: content"));
+    assert!(grep_summary.contains("head_limit: 20"));
+    assert!(!grep_summary.contains("sk-secret"));
+
+    let glob_preview = completed_preview_for_input(
+        "builtin.glob",
+        "builtin.glob",
+        serde_json::json!({
+            "pattern": "**/*.rs",
+            "path": "/workspace/crates",
+            "max_results": 100
+        }),
+    )
+    .await;
+    let glob_summary = glob_preview.input_summary.as_deref().unwrap();
+    assert!(glob_summary.contains("pattern: **/*.rs"));
+    assert!(glob_summary.contains("path: crates"));
+    assert!(glob_summary.contains("max_results: 100"));
 }
 
 #[tokio::test]
@@ -258,6 +671,8 @@ async fn capability_display_preview_store_admits_workspace_and_project_scoped_pa
                 process_id: None,
                 output_bytes: Some(4),
                 error_kind: None,
+                error_detail: None,
+                first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
             })
@@ -286,7 +701,7 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
         capability_id: &capability,
         result_ref: "result:common-secret-text",
         output: &serde_json::Value::String(
-            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"
+            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature (https://example.test/reset/sk-secret) <https://example.test/reset/token/opaque-value> url=https://example.test/reset/token/query-value Authorization: Bearer header-value token =opaque-token password :opaque-password access_token: access-value refresh-token = refresh-value credential: credential-value"
                 .to_string(),
         ),
         output_bytes: 256,
@@ -304,6 +719,8 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -318,6 +735,15 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
     assert!(!rendered.contains("xoxb-1234567890"));
     assert!(!rendered.contains("AKIAIOSFODNN7EXAMPLE"));
     assert!(!rendered.contains("eyJhbGciOiJIUzI1NiJ9"));
+    assert!(!rendered.contains("sk-secret"));
+    assert!(!rendered.contains("opaque-value"));
+    assert!(!rendered.contains("query-value"));
+    assert!(!rendered.contains("header-value"));
+    assert!(!rendered.contains("opaque-token"));
+    assert!(!rendered.contains("opaque-password"));
+    assert!(!rendered.contains("access-value"));
+    assert!(!rendered.contains("refresh-value"));
+    assert!(!rendered.contains("credential-value"));
     assert!(rendered.contains("[redacted]"));
 }
 
@@ -355,6 +781,8 @@ async fn capability_display_preview_store_redacts_camel_case_api_key_json() {
             process_id: None,
             output_bytes: Some(128),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -421,6 +849,8 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -439,6 +869,8 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
         })
@@ -451,11 +883,13 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
         first_preview.output_preview.as_deref(),
         Some("first output")
     );
+    assert_eq!(first_preview.activity_order, Some(1));
     assert_eq!(second_preview.result_ref.as_deref(), Some("result:second"));
     assert_eq!(
         second_preview.output_preview.as_deref(),
         Some("second output")
     );
+    assert_eq!(second_preview.activity_order, Some(2));
 }
 
 #[tokio::test]
@@ -511,6 +945,8 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -529,6 +965,8 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
         })
@@ -543,6 +981,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
         first_preview.output_preview.as_deref(),
         Some("first output")
     );
+    assert_eq!(first_preview.activity_order, Some(1));
     assert_eq!(second_preview.title, "second");
     assert_eq!(second_preview.subtitle.as_deref(), Some("src/second.rs"));
     assert_eq!(second_preview.result_ref.as_deref(), Some("result:second"));
@@ -550,6 +989,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
         second_preview.output_preview.as_deref(),
         Some("second output")
     );
+    assert_eq!(second_preview.activity_order, Some(2));
 }
 
 #[test]
@@ -608,6 +1048,8 @@ async fn capability_display_preview_marks_json_depth_truncation() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -640,6 +1082,8 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
             process_id: None,
             output_bytes: None,
             error_kind: Some("operation_failed".to_string()),
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -648,6 +1092,7 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
         .unwrap();
 
     assert_eq!(preview.title, "fail");
+    assert_eq!(preview.error_kind.as_deref(), Some("operation_failed"));
     assert_eq!(preview.output_kind.as_deref(), Some("text"));
     assert_eq!(preview.result_ref, None);
     assert!(
@@ -656,6 +1101,71 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
             .as_deref()
             .is_some_and(|summary| summary.contains("operation_failed"))
     );
+}
+
+// Regression: when a failed capability stages a failure preview carrying the
+// rendered invalid-input detail, the projection surfaces that detail in
+// `output_summary` instead of degrading to the bare "tool failed: <kind>"
+// fallback. This is the chokepoint the per-tool UI Error tab reads.
+#[tokio::test]
+async fn capability_display_preview_uses_staged_failure_summary_over_bare_kind() {
+    let run_id = TurnRunId::new();
+    let invocation_id = InvocationId::from_uuid(run_id.as_uuid());
+    let capability = CapabilityId::new("builtin.json").unwrap();
+    let input_ref = preview_input_ref("failure-detail");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "json",
+        &serde_json::json!({ "value": "{" }),
+    );
+    store.record_running_invocation(invocation_id, &input_ref);
+
+    store.record_failure_preview(
+        &run_id.to_string(),
+        invocation_id,
+        &capability,
+        "Invalid input: value — missing required field (expected object)",
+    );
+
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(invocation_id),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Failed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some("invalid_input".to_string()),
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The bare kind is still on `error_kind`, but the human-facing summary now
+    // carries the actionable detail, not "tool failed: invalid_input".
+    assert_eq!(preview.error_kind.as_deref(), Some("invalid_input"));
+    assert_eq!(
+        preview.output_summary.as_deref(),
+        Some("Invalid input: value — missing required field (expected object)")
+    );
+    assert!(
+        !preview
+            .output_summary
+            .as_deref()
+            .unwrap()
+            .contains("tool failed")
+    );
+    // Title comes from the staged input, not just the capability id.
+    assert_eq!(preview.title, "json");
 }
 
 #[tokio::test]
@@ -690,6 +1200,8 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
             process_id: None,
             output_bytes: Some(2048),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -752,6 +1264,8 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
             process_id: None,
             output_bytes: Some(32),
             error_kind: None,
+            error_detail: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })

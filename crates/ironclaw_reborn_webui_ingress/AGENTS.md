@@ -15,7 +15,9 @@ the axum serve loop with the `Router` it gets handed.
   code, not product/API.
 - Provide concrete `WebuiAuthenticator` implementations the standalone
   `ironclaw-reborn` binary can wire (env-bearer first; DB / OIDC are
-  follow-ups). Token comparison must be constant-time (`subtle::ConstantTimeEq`).
+  follow-ups). Each accepted token must return both the `UserId` and
+  the request-scoped WebUI capabilities for that exact token. Token
+  comparison must be constant-time (`subtle::ConstantTimeEq`).
 - Do not touch `ProductAdapter`, `ExternalActorRef`, `ProtocolAuthEvidence`,
   or other external-protocol shims — WebUI is a Path A native host
   surface (see `docs/reborn/how-to-port-channel-to-reborn.md`).
@@ -42,7 +44,7 @@ update + explicit PR rationale.
 2. Implement `WebuiAuthenticator` from `ironclaw_reborn_composition`.
 3. Use constant-time comparison for any secret material.
 4. Add a unit test that exercises `authenticate` against a known
-   token + a wrong token.
+   token + a wrong token, including the returned capability shape.
 5. Add a caller-level test in `tests/` that spins up `serve_webui_v2`
    with the new authenticator on a random port and verifies bearer
    accept / reject through a real `reqwest::Client`.

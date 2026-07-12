@@ -4,15 +4,51 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
+mod auto_approve;
+mod capability_permission;
+mod cas_record;
+mod policy;
+
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
     Action, ApprovalDecisionKind, ApprovalRequestId, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, EffectKind, GrantConstraints, InvocationFingerprint, MountView, NetworkPolicy,
-    Principal, ResourceCeiling, ResourceScope, SecretHandle, Timestamp,
+    CapabilityId, GrantConstraints, InvocationFingerprint, Principal, ResourceScope,
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
+
+pub use auto_approve::{
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
+    AutoApproveSettingRecord, AutoApproveSettingStore, FilesystemAutoApproveSettingStore,
+    InMemoryAutoApproveSettingStore,
+};
+pub use capability_permission::{
+    CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
+    CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
+    CapabilityPermissionOverrideStore, CapabilityPermissionState, CapabilityPermissionStoreError,
+    FilesystemCapabilityPermissionOverrideStore, InMemoryCapabilityPermissionOverrideStore,
+};
+pub use policy::{
+    FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
+    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalScope, permission_mode_allows_persistent_approval,
+    persistent_approval_grant_issuer,
+};
+
+pub type ToolPermissionOverride = CapabilityPermissionOverride;
+pub type ToolPermissionOverrideInput = CapabilityPermissionOverrideInput;
+pub type ToolPermissionOverrideKey = CapabilityPermissionOverrideKey;
+pub type ToolPermissionOverrideRecord = CapabilityPermissionOverrideRecord;
+pub type ToolPermissionState = CapabilityPermissionState;
+pub type ToolPermissionStoreError = CapabilityPermissionStoreError;
+pub type FilesystemToolPermissionOverrideStore<F> = FilesystemCapabilityPermissionOverrideStore<F>;
+pub type InMemoryToolPermissionOverrideStore = InMemoryCapabilityPermissionOverrideStore;
+
+pub trait ToolPermissionOverrideStore: CapabilityPermissionOverrideStore {}
+
+impl<T> ToolPermissionOverrideStore for T where T: CapabilityPermissionOverrideStore + ?Sized {}
 
 pub struct ApprovalResolver<'a, A, L>
 where
@@ -216,15 +252,7 @@ where
             capability,
             grantee: approved_record.request.requested_by.clone(),
             issued_by: approval.issued_by,
-            constraints: GrantConstraints {
-                allowed_effects: approval.allowed_effects,
-                mounts: approval.mounts,
-                network: approval.network,
-                secrets: approval.secrets,
-                resource_ceiling: approval.resource_ceiling,
-                expires_at: approval.expires_at,
-                max_invocations: approval.max_invocations,
-            },
+            constraints: approval.constraints,
         };
         let mut lease = CapabilityLease::new(approved_record.scope.clone(), grant);
         lease.invocation_fingerprint = Some(invocation_fingerprint);
@@ -321,22 +349,17 @@ fn capability_for_action(
 
 /// Approval resolution input supplied by a trusted human/admin policy surface.
 ///
-/// `allowed_effects` and the constraint fields are the final attenuated grant
-/// shape that the resolver stamps onto the resume-only lease. The current
-/// [`ApprovalRequest`] shape does not carry the originating capability
-/// descriptor's full grant constraints, so callers must derive these values from
-/// the same reviewed descriptor/request they presented to the approver rather
-/// than widening them in the UI layer.
+/// `constraints` is the final attenuated grant shape that the resolver stamps
+/// onto the resume-only lease, embedded as the shared [`GrantConstraints`]
+/// rather than a field-by-field mirror. The current [`ApprovalRequest`] shape
+/// does not carry the originating capability descriptor's full grant
+/// constraints, so callers must derive these values from the same reviewed
+/// descriptor/request they presented to the approver rather than widening them
+/// in the UI layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseApproval {
     pub issued_by: Principal,
-    pub allowed_effects: Vec<EffectKind>,
-    pub mounts: MountView,
-    pub network: NetworkPolicy,
-    pub secrets: Vec<SecretHandle>,
-    pub resource_ceiling: Option<ResourceCeiling>,
-    pub expires_at: Option<Timestamp>,
-    pub max_invocations: Option<u64>,
+    pub constraints: GrantConstraints,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

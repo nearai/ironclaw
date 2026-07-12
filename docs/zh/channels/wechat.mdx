@@ -1,0 +1,144 @@
+---
+title: "微信"
+description: "通过微信与智能体交互"
+---
+
+通过微信 iLink 机器人账号将 IronClaw 接入微信。该频道使用二维码登录和长轮询，因此不需要公网 webhook URL 或隧道。
+
+<Note>
+如果您还没有设置智能体，请先查看我们的[快速开始指南](../quickstart)
+</Note>
+
+<Warning>
+微信频道支持单个已连接账号和私聊对话。群聊和多账号管理暂不支持。
+</Warning>
+
+---
+
+## 设置微信频道
+
+<Steps>
+
+<Step title="安装微信频道">
+
+微信以 WASM 频道形式分发。您可以在 Web Gateway 的 Extensions 页面安装，也可以在终端运行：
+
+```bash
+ironclaw registry install wechat
+```
+
+`ironclaw onboard --channels-only` 向导也可以安装该频道，但二维码登录流程更适合在 Web Gateway 中完成。
+
+</Step>
+
+<Step title="启动 IronClaw">
+
+如果智能体尚未运行，请先启动：
+
+```bash
+ironclaw
+```
+
+打开 Web Gateway，然后进入 **Settings** -> **Extensions**。
+
+</Step>
+
+<Step title="打开二维码登录流程">
+
+找到 **微信频道**，点击 **Configure**，再点击 **Open QR Page**。
+
+IronClaw 会在新的浏览器标签页打开微信二维码页面。使用微信扫码并在手机上确认登录。请保持网关页面打开，直到设置弹窗显示微信已连接。
+
+</Step>
+
+<Step title="发送测试消息">
+
+向已连接的微信 iLink 机器人账号发送私聊消息。IronClaw 会通过轮询接收消息，并在同一个私聊中回复。
+
+</Step>
+
+</Steps>
+
+---
+
+## 频道能力
+
+| 能力 | 状态 |
+|------|------|
+| 私聊文本对话 | 支持 |
+| 二维码登录 | 支持 |
+| 入站文本 | 支持 |
+| 入站图片 | 支持 |
+| 入站语音 | 支持 |
+| 入站视频 | 支持 |
+| 出站文本回复 | 支持 |
+| 出站图片 | 支持 |
+| 出站语音 | 暂不支持 |
+| 出站视频 | 暂不支持 |
+| 出站文件 | 暂不支持 |
+| 输入状态提示 | 支持 |
+| 群聊 | 暂不支持 |
+| 多个微信账号 | 暂不支持 |
+
+<Info>
+语音消息使用微信的 `audio/silk` 格式。IronClaw 可以接收原始附件；如需转写为 WAV，请构建并安装可选的 `ironclaw-silk-decoder` 辅助程序，或将 `IRONCLAW_SILK_DECODER` 指向该程序路径。
+</Info>
+
+<Note>
+出站媒体仅支持图片。语音、视频和文件发送暂不支持。
+</Note>
+
+---
+
+## 配置选项
+
+微信频道可通过 `~/.ironclaw/channels/wechat.capabilities.json` 配置，该文件会在频道安装后创建。
+
+<Accordion title="选项概览">
+
+| 选项 | 默认值 | 描述 |
+|------|--------|------|
+| `base_url` | `https://ilinkai.weixin.qq.com` | 微信 iLink API 基础 URL |
+| `cdn_base_url` | `https://novac2c.cdn.weixin.qq.com/c2c` | 媒体下载和上传使用的微信 CDN 基础 URL |
+| `bot_type` | `3` | 启动二维码登录时使用的微信 iLink 机器人类型 |
+| `poll_interval_ms` | `30000` | 轮询间隔，单位毫秒；最小值为 30,000ms |
+| `long_poll_timeout_ms` | `35000` | 单次微信长轮询请求的超时时间 |
+| `inbound_merge_window_ms` | `5000` | 将相邻入站消息片段合并为一个智能体回合的等待窗口 |
+
+</Accordion>
+
+<Note>
+修改频道配置文件后，请重启 IronClaw。
+</Note>
+
+### 认证
+
+二维码登录流程会为您保存 `wechat_bot_token` 密钥。您不需要手动复制或粘贴 token。
+
+如果登录过期，或微信报告 token 无效，请重新打开微信频道配置并再次完成二维码登录。
+
+---
+
+## 故障排除
+
+<AccordionGroup>
+  <Accordion title="没有看到微信频道">
+    运行 `ironclaw registry install wechat` 安装频道，然后重启 IronClaw 并刷新 Web Gateway。
+  </Accordion>
+
+  <Accordion title="二维码页面没有打开">
+    浏览器弹窗拦截可能会阻止二维码页面自动打开。请在设置弹窗中点击 **Open QR Page**。
+  </Accordion>
+
+  <Accordion title="二维码过期">
+    设置流程会自动刷新过期二维码。如果弹窗提示二维码多次过期，请关闭弹窗并重新开始微信配置。
+  </Accordion>
+
+  <Accordion title="消息没有到达">
+    确认 IronClaw 正在运行、微信频道已连接，并等待至少一个轮询周期。如果日志提示微信 token 无效或过期，请重新连接频道。
+  </Accordion>
+
+  <Accordion title="语音消息没有转写">
+    使用 `./crates/ironclaw_silk_decoder/build.sh` 构建 `ironclaw-silk-decoder`，将二进制放到 `PATH` 中，或将 `IRONCLAW_SILK_DECODER` 指向它。没有该辅助程序时，语音仍会作为原始 `audio/silk` 附件传递。
+  </Accordion>
+</AccordionGroup>

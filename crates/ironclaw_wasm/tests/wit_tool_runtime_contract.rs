@@ -302,6 +302,39 @@ fn executes_wit_tool_with_fresh_component_instance_per_call() {
     assert!(second.error.is_none());
 }
 
+// Regression: the host runtime offloads `WitToolRuntime::execute` to the
+// blocking thread pool via `tokio::task::spawn_blocking` so a synchronous
+// wasmtime guest call never parks an async worker (the runtime wedge). That
+// requires a clone of the runtime to be `Send + 'static` and to execute
+// correctly off-thread. This test exercises exactly that contract: clone the
+// runtime, move the clone + prepared component into `spawn_blocking`, and run
+// several concurrently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cloned_runtime_executes_inside_spawn_blocking_concurrently() {
+    let runtime = Arc::new(WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap());
+    let prepared = Arc::new(
+        runtime
+            .prepare("counter", &tool_component(COUNTER_TOOL_WAT))
+            .unwrap(),
+    );
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let runtime = Arc::clone(&runtime);
+        let prepared = Arc::clone(&prepared);
+        handles.push(tokio::task::spawn_blocking(move || {
+            let host = WitToolHost::deny_all();
+            runtime.execute(&prepared, host, WitToolRequest::new(r#"{"q":1}"#))
+        }));
+    }
+
+    for handle in handles {
+        let execution = handle.await.expect("blocking task must not panic").unwrap();
+        assert_eq!(execution.output_json.as_deref(), Some("1"));
+        assert!(execution.error.is_none());
+    }
+}
+
 #[test]
 fn http_import_delegates_to_recording_host_and_counts_request_body_only() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
@@ -408,7 +441,7 @@ fn execution_error_preserves_usage_when_guest_traps_after_host_egress() {
 #[test]
 fn allows_multiple_linear_memories_within_aggregate_memory_budget() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm::wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(128 * 1024)
             .with_fuel(100_000)
             .with_timeout(std::time::Duration::from_secs(5)),
@@ -429,7 +462,7 @@ fn allows_multiple_linear_memories_within_aggregate_memory_budget() {
 #[test]
 fn rejects_multiple_linear_memories_that_exceed_aggregate_memory_budget() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm::wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(64 * 1024)
             .with_fuel(100_000)
             .with_timeout(std::time::Duration::from_secs(5)),
@@ -510,7 +543,7 @@ fn guest_trap_after_overdue_host_import_reports_deadline_and_preserves_usage() {
     }
 
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm::wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(1024 * 1024)
             .with_fuel(100_000)
             .with_timeout(Duration::from_millis(20)),
@@ -595,7 +628,7 @@ fn execution_fails_when_host_import_returns_after_deadline() {
     }
 
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm::wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(1024 * 1024)
             .with_fuel(100_000)
             .with_timeout(Duration::from_millis(20)),

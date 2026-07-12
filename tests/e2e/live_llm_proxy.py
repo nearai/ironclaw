@@ -91,6 +91,11 @@ _UUID_RE = re.compile(
 _TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
 )
+_REPLAY_HASH_IGNORED_TOOLS = {
+    # Installer availability has changed across recordings, but these
+    # mission prompts explicitly forbid calling setup tools first.
+    "tool_install",
+}
 
 
 def _strip_dynamic(text: str) -> str:
@@ -252,15 +257,53 @@ def _canonicalize_request(body: dict[str, Any]) -> dict[str, Any]:
         canon["tools"] = sorted(
             (tool.get("function", {}) or {}).get("name") or ""
             for tool in body["tools"]
+            if ((tool.get("function", {}) or {}).get("name") or "")
+            not in _REPLAY_HASH_IGNORED_TOOLS
         )
 
     return canon
 
 
-def _hash_request(body: dict[str, Any]) -> str:
-    canon = _canonicalize_request(body)
+def _normalize_recorded_canonical(canon: dict[str, Any]) -> dict[str, Any]:
+    """Normalize older fixture canonical blobs to the current hash shape."""
+    normalized = json.loads(json.dumps(canon))
+    if normalized.get("tools"):
+        normalized["tools"] = sorted(
+            name
+            for name in normalized["tools"]
+            if name not in _REPLAY_HASH_IGNORED_TOOLS
+        )
+    for msg in normalized.get("tail", []) or []:
+        content = msg.get("content")
+        if (
+            isinstance(content, list)
+            and len(content) == 1
+            and isinstance(content[0], dict)
+            and content[0].get("type") == "text"
+        ):
+            msg["content"] = content[0].get("text", "")
+    return normalized
+
+
+def _hash_canonical(canon: dict[str, Any]) -> str:
     blob = json.dumps(canon, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _hash_request(body: dict[str, Any]) -> str:
+    canon = _normalize_recorded_canonical(_canonicalize_request(body))
+    return _hash_canonical(canon)
+
+
+def _fixture_entry_hashes(entry: dict[str, Any]) -> set[str]:
+    hashes = {entry["request_hash"]}
+    if entry.get("request_canonical"):
+        hashes.add(
+            _hash_canonical(
+                _normalize_recorded_canonical(entry["request_canonical"])
+            )
+        )
+    return hashes
 
 
 def _summarize_request(body: dict[str, Any]) -> dict[str, Any]:
@@ -358,7 +401,7 @@ async def _replay(
     state: dict[str, Any], body: dict[str, Any], request_hash: str
 ) -> web.Response:
     entries = state["fixture"].get("entries", []) or []
-    matching = [e for e in entries if e["request_hash"] == request_hash]
+    matching = [e for e in entries if request_hash in _fixture_entry_hashes(e)]
     cursor = state["cursors"].setdefault(request_hash, 0)
     if cursor >= len(matching):
         state["miss_count"] += 1

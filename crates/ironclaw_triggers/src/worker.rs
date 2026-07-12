@@ -13,7 +13,8 @@ mod report;
 
 pub use config::{TriggerPollerWorkerConfig, TriggerPollerWorkerDeps};
 pub use ports::{
-    TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
+    NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
+    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
     TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
 };
 pub use report::{

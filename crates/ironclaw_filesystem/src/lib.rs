@@ -16,6 +16,7 @@
 #![warn(unreachable_pub)]
 
 mod backend;
+mod cas;
 mod catalog;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 mod db;
@@ -24,6 +25,8 @@ mod in_memory;
 mod index;
 #[cfg(feature = "libsql")]
 mod libsql;
+#[cfg(feature = "libsql")]
+mod libsql_pool;
 mod local;
 #[cfg(feature = "postgres")]
 mod postgres;
@@ -34,7 +37,11 @@ mod types;
 mod vector;
 
 pub use backend::{EventRecord, StorageTxn};
-pub use catalog::{CompositeRootFilesystem, FilesystemCatalog, MountDescriptor, PathPlacement};
+pub use cas::{
+    CasApply, CasUpdateError, FILESYSTEM_APPLY_TIMEOUT, FILESYSTEM_CAS_BACKOFF_BASE,
+    FILESYSTEM_CAS_BACKOFF_MAX, FILESYSTEM_CAS_RETRIES, cas_update,
+};
+pub use catalog::{CompositeRootFilesystem, MountDescriptor, PathPlacement};
 pub use hsm::HsmBackend;
 pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};

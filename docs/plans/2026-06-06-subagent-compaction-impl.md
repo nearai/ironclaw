@@ -23,7 +23,7 @@ But the doc has eight concrete gaps that block implementation as written. Most a
 | `skip_model_this_iteration` | **WRONG MECHANISM.** PromptStage already returns to `canonical.rs` before ModelStage runs; PromptStage cannot short-circuit ModelStage via a state flag. Flag must land on `PromptStep::Prepared` output (or new variant), AND `canonical.rs` must read it between the match arm and `.stop.observe()`. Doc skipped this. |
 | Background re-enable single gate | Sound. One rejection site in `TryFrom`, confirmed. But `SpawnSubagentArgs` drops `mode` after decode AND the tool JSON schema does not advertise `mode` — both must be patched or model never requests background. |
 | Depth/concurrency policy | **Doc factually wrong.** `SubagentSpawnLimits.max_depth` already exists, defaults to 1. No `max_concurrent_background_children` — that gap is real. |
-| Durable stores list | Incomplete + wrong path. `gate_resolution.rs` lives in `ironclaw_reborn/subagent/`, not `ironclaw_loop_support/`. Gate store has 3 denormalized maps under one mutex (atomic migration). A 4th in-memory store (`BoundedSubagentResultTombstoneStore`) is entirely missing from the doc. |
+| Durable stores list | Incomplete + wrong path. `gate_resolution.rs` lives in `ironclaw_runner/subagent/`, not `ironclaw_loop_support/`. Gate store has 3 denormalized maps under one mutex (atomic migration). A 4th in-memory store (`BoundedSubagentResultTombstoneStore`) is entirely missing from the doc. |
 | `CapabilityResultStore` trait | Does not exist. Doc treats the durable swap as drop-in; reality requires introducing the trait first. `SubagentRestartReconciler` is a stub enum member only — no interface, no boot-replay prior art anywhere in the codebase. |
 | Event projection chain | Mostly correct, scope overstated AND understated. Constructor blast radius = 1 struct (`RuntimeEventPayload`) via post-construction assignment — doc implies 17 sites. But a second emission site (`live_progress.rs:147 product_items_for_live_update`) was missed. JOIN alternative is cheaper than doc implies — `ironclaw_event_projections` already depends on `ironclaw_turns`. |
 
@@ -36,7 +36,7 @@ But the doc has eight concrete gaps that block implementation as written. Most a
 
 ### Blocking gaps for Steps 2–5
 
-5. **Path correction:** `BoundedSubagentGateResolutionStore` is in `crates/ironclaw_reborn/src/subagent/gate_resolution.rs`, not `ironclaw_loop_support/`.
+5. **Path correction:** `BoundedSubagentGateResolutionStore` is in `crates/ironclaw_runner/src/subagent/gate_resolution.rs`, not `ironclaw_loop_support/`.
 6. **Add tombstone store** (`BoundedSubagentResultTombstoneStore`) to the durability list. Its production-readiness check already blocks production.
 7. **`CapabilityResultStore` trait must be introduced** before any durable backend can drop in. Cannot ship as direct backend swap.
 8. **Spawn schema + args field.** `SpawnSubagentArgs` needs `mode: SpawnSubagentMode` and `spawn_subagent_parameters_schema()` needs a `mode: enum[blocking, background]` property.
@@ -172,18 +172,11 @@ Goal/tombstone/idempotency-ledger likely fit (a) (file-shaped or key-value). Gat
 **Files modified (regardless of choice):**
 
 - `crates/ironclaw_loop_support/src/capability_port.rs` — **do NOT introduce `CapabilityResultStore` trait here** (Reviewer 1 R2: loop_support is adapter glue, not persistence). Introduce in `ironclaw_reborn_event_store` (or its own `ironclaw_loop_capability_store` if needs to be reusable above adapter layer).
-- `crates/ironclaw_reborn_composition/src/product_live_adapters.rs` — switch backend choice via config; keep in-memory as `local_dev` fallback only.
+- `crates/ironclaw_reborn_composition/src/root/product_live_adapters.rs` — switch backend choice via config; keep in-memory as `local_dev` fallback only.
 - `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs` — keep in-memory for dev; wire production-readiness check to require non-in-memory in prod.
-- `crates/ironclaw_reborn/src/composition/production_readiness.rs` — flip `SubagentRestartReconciler` from stub to required impl present.
+- `crates/ironclaw_runner/src/composition/production_readiness.rs` — flip `SubagentRestartReconciler` from stub to required impl present.
 
 **Schema requirement (Reviewer 4 B2):** every durable table/file gets explicit `agent_id` column/field (nullable for non-agent runs) per `_contract-freeze-index.md` §2 + §8. Index on `(tenant_id, user_id, agent_id, ...)` for scoped queries.
-
-**Files modified:**
-
-- `crates/ironclaw_loop_support/src/capability_port.rs` — introduce `CapabilityResultStore` trait. Refactor `LoopCapabilityResultWriter` to call through it.
-- `crates/ironclaw_reborn_composition/src/product_live_adapters.rs` — wire libsql/postgres backend choice via config; keep in-memory as `local_dev` fallback only.
-- `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs` — keep in-memory for dev; wire production-readiness check to require non-in-memory in prod.
-- `crates/ironclaw_reborn/src/composition/production_readiness.rs` — flip `SubagentRestartReconciler` from stub to required impl present.
 
 **Tests:** per-store CRUD + idempotency tests, dual-backend parity test, reconciler replay test (write settlement, drop in-memory state, boot, observe replay).
 
@@ -203,8 +196,8 @@ Goal: model can request background subagents; spawn port accepts them.
 | `crates/ironclaw_host_runtime/src/first_party_tools/spawn_subagent.rs` (`spawn_subagent_parameters_schema()` around line 48) | Add `mode: { type: "string", enum: ["blocking", "background"], default: "blocking" }` property. |
 | `crates/ironclaw_loop_support/src/subagent_spawn_port.rs` (spawn body, around line 590 depth check) | Add concurrent-background-children counter check against `BackgroundPolicy::Allowed.max_concurrent`. Counter lives on a new per-parent state slot (or computed from goal store on demand). Mailbox admission cap: refuse new background spawns when pending mailbox is full. |
 | `crates/ironclaw_loop_support/src/subagent_spawn_port.rs` (`finish_spawn` ~line 863) | For background mode, return `CapabilityOutcome::SpawnedChildRun { child_run_id, result_ref, safe_summary }` (existing variant, not `Completed`) instead of `AwaitDependentRun`. `AwaitDependentRunGateStage` is bypassed automatically. |
-| `crates/ironclaw_reborn/src/subagent/completion_observer.rs` | Existing Background branch (line 180-183) is already wired through `mark_child_deliveries`. Confirm it still works with durable result store; add idempotency-ledger write. |
-| New config knob | `ironclaw_reborn` config: `subagent.background_enabled: bool` (default false). Gate the wire-args acceptance. |
+| `crates/ironclaw_runner/src/subagent/completion_observer.rs` | Existing Background branch (line 180-183) is already wired through `mark_child_deliveries`. Confirm it still works with durable result store; add idempotency-ledger write. |
+| New config knob | `ironclaw_runner` config: `subagent.background_enabled: bool` (default false). Gate the wire-args acceptance. |
 
 **Tests:** background spawn happy path; background spawn denied when policy = `Denied`; depth cap honored; concurrent cap honored; mailbox admission cap honored; restart between spawn and settlement → reconciler delivers result.
 
@@ -323,7 +316,7 @@ Verified against `docs/reborn/contracts/_contract-freeze-index.md`, `events.md`,
 
 ### Cross-cutting boundary compliance
 
-- **`ironclaw_agent_loop` deps unchanged.** No imports from `ironclaw_reborn`, host_runtime, dispatcher, network, secrets, DB backends. `CompactionForceStrategy` trait + `ByteCapStrategy` impl stay crate-private. New file `executor/post_capability.rs` follows "one decision axis per file" rule.
+- **`ironclaw_agent_loop` deps unchanged.** No imports from `ironclaw_runner`, host_runtime, dispatcher, network, secrets, DB backends. `CompactionForceStrategy` trait + `ByteCapStrategy` impl stay crate-private. New file `executor/post_capability.rs` follows "one decision axis per file" rule.
 - **`ironclaw_turns` gains `CompactionInitiator::CapabilityResultOverflow` variant only.** No new ports. Stays neutral host/runner protocol per turns CLAUDE.md.
 - **`ironclaw_loop_support` writer return widened to surface existing `byte_len`.** Adapter glue per crate CLAUDE.md; no new ports, no dispatcher bypass.
 - **`ironclaw_events`, `ironclaw_event_projections`, `ironclaw_product_adapters`:** zero schema changes from WU-A. WU-F adds 3 optional fields to `RunStatusProjection` + `ProductProjectionItem::RunStatus`, all `#[serde(skip_serializing_if = "Option::is_none")]`. JOIN lookup via `TurnSpawnTreeStateStore::get_run_record(&scope, run_id)` per `events-projections.md` §5 (reducer rules: deterministic, side-effect free, rebuildable).
@@ -413,4 +406,3 @@ Before WU-A opens its PR:
 6. Caller-level tests pass `cargo test -p ironclaw_agent_loop`; boundary test passes `cargo test -p ironclaw_architecture`.
 
 WU-F merge gate: snapshot-path only this round; live-update path follow-up. `TurnSpawnTreeStateStore` injected at composition, not projections crate.
-

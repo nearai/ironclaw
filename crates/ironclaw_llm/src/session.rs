@@ -117,10 +117,20 @@ impl SessionManager {
     fn empty(config: SessionConfig) -> Self {
         Self {
             config,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: match crate::config::hardened_client_builder(
+                crate::config::AUXILIARY_REQUEST_TIMEOUT_SECS,
+            )
+            .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to build hardened HTTP client for SessionManager \
+                         (connect timeout / keepalive / pool-idle hygiene will be absent): {e}"
+                    );
+                    Client::new()
+                }
+            },
             token: RwLock::new(None),
             renewal_lock: Mutex::new(()),
             store: RwLock::new(None),

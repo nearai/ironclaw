@@ -1,6 +1,6 @@
+use ironclaw_host_api::DispatchInputIssueCode;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
-    CapabilityInputIssueCode,
 };
 
 pub(super) const MAX_PROVIDER_NORMALIZATION_DEPTH: usize = 32;
@@ -11,7 +11,7 @@ pub(super) fn prepare_provider_arguments(
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
-    prepare_provider_arguments_with_detail(arguments, schema, label).map_err(|error| error.error)
+    prepare_provider_arguments_with_detail(arguments, schema, label).map_err(|error| *error.error)
 }
 
 pub(super) fn prepare_provider_arguments_with_detail(
@@ -25,14 +25,18 @@ pub(super) fn prepare_provider_arguments_with_detail(
 }
 
 pub(super) struct ProviderArgumentError {
-    pub(super) error: AgentLoopHostError,
+    // Boxed to keep the `Result<_, ProviderArgumentError>` Err-variant small:
+    // `AgentLoopHostError` carries a safe_summary plus several optional refs
+    // and a model-visible detail string, and embedding it inline tripped
+    // clippy's `result_large_err`.
+    pub(super) error: Box<AgentLoopHostError>,
     pub(super) detail: Option<CapabilityFailureDetail>,
 }
 
 impl From<AgentLoopHostError> for ProviderArgumentError {
     fn from(error: AgentLoopHostError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             detail: None,
         }
     }
@@ -161,12 +165,12 @@ fn validate_provider_arguments_schema(
             }
         }
         return Err(ProviderArgumentError {
-            error: AgentLoopHostError::new(
+            error: Box::new(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 format!(
                     "{label} failed schema validation at instance path {instance_path} against schema path {schema_path}"
                 ),
-            ),
+            )),
             detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
         });
     }
@@ -184,13 +188,13 @@ fn validation_error_input_issues(
         "additionalProperties" => return unexpected_field_issues(arguments, schema, error),
         "type" => (
             safe_schema_path_summary(error.instance_path().as_str()),
-            CapabilityInputIssueCode::TypeMismatch,
+            DispatchInputIssueCode::TypeMismatch,
             expected_type_at_schema_path(schema, error.schema_path().as_str()),
             Some(json_value_kind(error.instance()).to_string()),
         ),
         _ => (
             safe_schema_path_summary(error.instance_path().as_str()),
-            CapabilityInputIssueCode::InvalidValue,
+            DispatchInputIssueCode::InvalidValue,
             None,
             None,
         ),
@@ -226,7 +230,7 @@ fn missing_required_issues(
 fn missing_required_issue(path: String) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path,
-        code: CapabilityInputIssueCode::MissingRequired,
+        code: DispatchInputIssueCode::MissingRequired,
         expected: Some("required field".to_string()),
         received: None,
         schema_path: Some("required".to_string()),
@@ -273,7 +277,7 @@ fn unexpected_field_issues(
 fn unexpected_field_issue(path: String, schema_path: String) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path,
-        code: CapabilityInputIssueCode::UnexpectedField,
+        code: DispatchInputIssueCode::UnexpectedField,
         expected: Some("declared field".to_string()),
         received: Some("unexpected field".to_string()),
         schema_path: Some(schema_path),
@@ -283,7 +287,7 @@ fn unexpected_field_issue(path: String, schema_path: String) -> CapabilityInputI
 fn invalid_value_issue(path: String, schema_path: String) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path,
-        code: CapabilityInputIssueCode::InvalidValue,
+        code: DispatchInputIssueCode::InvalidValue,
         expected: None,
         received: None,
         schema_path: Some(schema_path),

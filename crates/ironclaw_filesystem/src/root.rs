@@ -163,6 +163,38 @@ pub trait RootFilesystem: Send + Sync {
         })
     }
 
+    /// Deletes the single entry at `path` only when its current version
+    /// equals `expected_version` — the CAS counterpart of
+    /// [`delete`](Self::delete), never sweeping a subtree, event logs, or
+    /// sequence counters. An absent row surfaces [`FilesystemError::NotFound`]
+    /// (already gone, benign); a row at another version surfaces
+    /// [`FilesystemError::VersionMismatch`]. Default impl is `Unsupported`,
+    /// same as [`put`](Self::put): backends opt in natively.
+    ///
+    /// Version tokens are not generation-stable: a path's version restarts at
+    /// 1 on a fresh put after a prior delete. An `expected_version` captured
+    /// before a delete+recreate cycle can match a different incarnation of
+    /// the same path (ABA). This method is a sound standalone precondition
+    /// only for paths that are never recreated; callers that do recreate
+    /// paths must pair every successful delete with an unconditional
+    /// postcondition recheck.
+    ///
+    /// Takes a bare [`RecordVersion`] rather than [`put`](Self::put)'s
+    /// [`CasExpectation`]: `Absent`/`Any` are meaningless preconditions for a
+    /// delete (there is nothing to delete if the path is already absent, and
+    /// an unconditional delete is just [`delete`](Self::delete)), so the only
+    /// expressible precondition here is "at this version" — narrowing the
+    /// parameter type to `RecordVersion` makes that the only option, rather
+    /// than leaving two variants callers could pass but that would be
+    /// meaningless.
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        _expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        unsupported(path, FilesystemOperation::Delete)
+    }
+
     // ─── Atomicity ────────────────────────────────────────────────────────
 
     /// Begin a multi-key transaction scoped to `prefix`. Backends with only
@@ -185,6 +217,34 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Append)
     }
 
+    /// Append multiple `payloads` to the event log at `path` in one backend
+    /// round-trip, returning the assigned monotonic [`SeqNo`]s in payload
+    /// order. All payloads target the **same** `path`.
+    ///
+    /// The return type promises atomic all-or-nothing semantics: on success all
+    /// seqs are assigned; on error none are. A per-item loop cannot honor this
+    /// contract — if the loop commits some payloads and then fails, earlier
+    /// writes are already durable but the caller only sees an `Err` with no
+    /// record of which seqs committed. Retrying the whole batch then duplicates
+    /// the committed prefix, a silent correctness bug.
+    ///
+    /// Therefore the default is [`Unsupported`](FilesystemError::Unsupported).
+    /// Backends that can write a batch atomically (Postgres/libSQL multi-row
+    /// INSERT, in-memory) **must** override this method. Ordering is preserved:
+    /// the assigned seqs must be monotonic in payload order.
+    ///
+    /// [`CompositeRootFilesystem`](crate::CompositeRootFilesystem) overrides
+    /// this to forward to the resolved mount's `append_batch`, so callers
+    /// going through the composite dispatcher will reach the backend override.
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let _ = payloads;
+        unsupported(path, FilesystemOperation::Append)
+    }
+
     /// Read events at `path` starting at `from` (exclusive). Returns at most
     /// one page of records; consumers loop with the latest seq to drain the
     /// log. Streaming support will replace this Vec return shape in a later
@@ -195,6 +255,22 @@ pub trait RootFilesystem: Send + Sync {
         _from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
         unsupported(path, FilesystemOperation::Tail)
+    }
+
+    /// Read at most `max_records` events at `path` starting at `from`
+    /// (exclusive).
+    ///
+    /// Backends with native paging should override this so consumers do not
+    /// materialize the full tail before applying their replay limit.
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let mut records = self.tail(path, from).await?;
+        records.truncate(max_records);
+        Ok(records)
     }
 
     /// Return the highest seq present at `path` with `seq > from`, or `None`
@@ -214,6 +290,17 @@ pub trait RootFilesystem: Send + Sync {
     ) -> Result<Option<SeqNo>, FilesystemError> {
         let records = self.tail(path, from).await?;
         Ok(records.into_iter().map(|record| record.seq).max())
+    }
+
+    /// Reserve and return the next monotonic sequence number for `path`.
+    ///
+    /// Unlike [`append`](Self::append), this sequence is scoped to `path`
+    /// rather than the backend's global event table. Consumers use it to
+    /// assign row-native ordering keys without rewriting a shared metadata
+    /// record under CAS. A failed follow-up write may leave a gap; callers must
+    /// rely on monotonicity, not contiguity.
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        unsupported(path, FilesystemOperation::ReserveSeq)
     }
 
     // ─── Legacy bytes plane (DEPRECATED — removed after consumer migration) ─
@@ -326,6 +413,19 @@ mod tests {
                 operation: FilesystemOperation::Stat,
             })
         }
+
+        async fn tail(
+            &self,
+            _path: &VirtualPath,
+            _from: SeqNo,
+        ) -> Result<Vec<EventRecord>, FilesystemError> {
+            Ok((1..=3)
+                .map(|seq| EventRecord {
+                    seq: SeqNo::from_backend(seq),
+                    payload: vec![seq as u8],
+                })
+                .collect())
+        }
     }
 
     #[tokio::test]
@@ -339,5 +439,44 @@ mod tests {
         assert!(none.is_empty());
         assert_eq!(all.len(), 3);
         assert_eq!(all[2].name, "c");
+    }
+
+    #[tokio::test]
+    async fn tail_bounded_default_truncates_materialized_records() {
+        let backend = DefaultBoundedBackend;
+        let path = VirtualPath::new("/events").unwrap();
+
+        let none = backend.tail_bounded(&path, SeqNo::ZERO, 0).await.unwrap();
+        let first_two = backend.tail_bounded(&path, SeqNo::ZERO, 2).await.unwrap();
+
+        assert!(none.is_empty());
+        assert_eq!(first_two.len(), 2);
+        assert_eq!(first_two[1].seq, SeqNo::from_backend(2));
+    }
+
+    /// `DefaultBoundedBackend` does not override `delete_if_version`, so
+    /// calling it must reach the trait's default body and fail closed with
+    /// `Unsupported` rather than panicking, silently no-op'ing, or falling
+    /// through to some other operation's error variant. Pins the
+    /// currently-untested default arm (round-5 review finding, PR #5749).
+    #[tokio::test]
+    async fn delete_if_version_default_returns_unsupported() {
+        let backend = DefaultBoundedBackend;
+        let path = VirtualPath::new("/projects/leaf").unwrap();
+
+        let result = backend
+            .delete_if_version(&path, RecordVersion::from_backend(1))
+            .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(FilesystemError::Unsupported {
+                    path: err_path,
+                    operation: FilesystemOperation::Delete,
+                }) if err_path == &path
+            ),
+            "default delete_if_version must fail closed with Unsupported{{Delete}}, got: {result:?}"
+        );
     }
 }

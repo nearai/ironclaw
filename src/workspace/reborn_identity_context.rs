@@ -19,6 +19,8 @@ use crate::{error::WorkspaceError, workspace::paths};
 
 use super::Workspace;
 
+// context/profile.json is rendered via LoopRuntimeContext (typed), not prose-injected — see profile design §4a.
+// It is intentionally absent here; it remains in DEFAULT_PROMPT_PROTECTED_PATHS for write-protection only.
 const STABLE_IDENTITY_PATHS: &[&str] = &[
     paths::SOUL,
     paths::AGENTS,
@@ -214,6 +216,25 @@ mod tests {
         assert!(!stable.contains(&paths::HEARTBEAT));
         assert!(!stable.contains(&paths::MEMORY));
         assert!(!stable.contains(&paths::PROFILE));
+    }
+
+    #[test]
+    fn profile_json_is_not_prose_injected() {
+        // context/profile.json must be consumed by the typed LoopRuntimeContext producer,
+        // not prose-injected as a raw-JSON identity message. Prose injection would cause
+        // double-injection (raw JSON blob + the rendered "User profile:" line) with two
+        // sources that can disagree. The path stays in DEFAULT_PROMPT_PROTECTED_PATHS for
+        // write-protection only. See profile design §4a.
+        let stable = WorkspaceIdentityContextSource::stable_identity_paths();
+        assert!(
+            !stable.contains(&paths::PROFILE),
+            "context/profile.json must be consumed by the typed producer, not prose-injected; found: {stable:?}"
+        );
+        let personal = WorkspaceIdentityContextSource::personal_identity_paths();
+        assert!(
+            !personal.contains(&paths::PROFILE),
+            "context/profile.json must not be in personal identity paths either; found: {personal:?}"
+        );
     }
 
     #[test]

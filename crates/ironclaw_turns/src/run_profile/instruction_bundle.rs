@@ -17,8 +17,12 @@ use super::{
     LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, SkillTrustLevel,
     VisibleCapabilitySurface,
     prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
+    runtime_context::LoopRuntimeContext,
     skill_snippet_model_message_ref,
 };
+
+const CAPABILITY_SURFACE_USAGE_POLICY: &str =
+    include_str!("../../prompts/capability_surface_usage_policy.md");
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionBundleFingerprint(String);
@@ -103,6 +107,7 @@ pub struct InstructionBundleRequest {
     pub visible_surface: Option<VisibleCapabilitySurface>,
     pub safety_context: Option<InstructionSafetyContext>,
     pub inline_messages: Vec<LoopInlineMessage>,
+    pub runtime_context: Option<LoopRuntimeContext>,
 }
 
 /// Host-built instruction bundle materialized in memory for model-port resolution.
@@ -259,6 +264,17 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
+            )?;
+        }
+
+        if let Some(runtime_context) = request.runtime_context {
+            requires_materialization_store = true;
+            push_runtime_context(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                runtime_context,
+                &mut synthetic_refs,
             )?;
         }
 
@@ -538,6 +554,37 @@ fn push_safety_context(
     Ok(())
 }
 
+fn push_runtime_context(
+    messages: &mut Vec<LoopModelMessage>,
+    materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
+    fingerprint: &mut Sha256,
+    runtime_context: LoopRuntimeContext,
+    synthetic_refs: &mut SyntheticMessageRefRegistry,
+) -> Result<(), AgentLoopHostError> {
+    let model_content =
+        validate_model_safe_text(runtime_context.render_model_content(), "runtime context")?;
+    let content_ref =
+        synthetic_message_ref("runtime", "loop-start", &model_content, 0, synthetic_refs)?;
+    // Fingerprint commits the model-visible rendering only, matching the
+    // sibling sections: bundles whose rendered prompt is byte-identical must
+    // hash identically, so sub-minute timestamp differences (truncated away
+    // by render_model_content) and invalid timezones (not rendered) do not
+    // produce distinct fingerprints.
+    feed_field(fingerprint, b"section", b"runtime");
+    feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
+    feed_field(fingerprint, b"content", model_content.as_bytes());
+    materialized_messages.push(InstructionBundleMaterializedMessage {
+        role: "system".to_string(),
+        content_ref: content_ref.clone(),
+        model_content,
+    });
+    messages.push(LoopModelMessage {
+        role: "system".to_string(),
+        content_ref,
+    });
+    Ok(())
+}
+
 fn push_inline_message(
     messages: &mut Vec<LoopModelMessage>,
     materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
@@ -547,8 +594,11 @@ fn push_inline_message(
     synthetic_refs: &mut SyntheticMessageRefRegistry,
 ) -> Result<(), AgentLoopHostError> {
     let role = inline_role(message.role).to_string();
-    let safe_body =
-        validate_model_safe_text(message.safe_body.as_str().to_string(), "inline prompt body")?;
+    let safe_body = validate_prompt_text(
+        message.safe_body.as_str().to_string(),
+        "inline prompt body",
+        PromptTextSurface::GenericModelContent,
+    )?;
     let content_ref = synthetic_message_ref("inline", &role, &safe_body, ordinal, synthetic_refs)?;
     feed_field(fingerprint, b"section", b"inline");
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
@@ -581,14 +631,21 @@ fn push_visible_surface(
     surface
         .descriptors
         .sort_by(|a, b| a.capability_id.cmp(&b.capability_id));
+    let capability_policy = capability_surface_usage_policy()?;
     let mut summary = format!("surface {}", surface.version.as_str());
+    summary.push_str("\nPolicy:\n");
+    summary.push_str(capability_policy);
+    summary.push_str("\nCapabilities:");
+    if surface.descriptors.is_empty() {
+        summary.push_str("\n(none)");
+    }
     for descriptor in &surface.descriptors {
         validate_surface_descriptor(descriptor)?;
-        summary.push('|');
+        summary.push_str("\n- id: ");
         summary.push_str(descriptor.capability_id.as_str());
-        summary.push('|');
+        summary.push_str("\n  name: ");
         summary.push_str(&descriptor.safe_name);
-        summary.push('|');
+        summary.push_str("\n  description: ");
         summary.push_str(&descriptor.safe_description);
     }
     let content_ref = synthetic_message_ref(
@@ -601,6 +658,11 @@ fn push_visible_surface(
     feed_field(fingerprint, b"section", b"surface");
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
     feed_field(fingerprint, b"version", surface.version.as_str().as_bytes());
+    feed_field(
+        fingerprint,
+        b"capability_policy",
+        capability_policy.as_bytes(),
+    );
     for descriptor in &surface.descriptors {
         feed_field(
             fingerprint,
@@ -624,6 +686,23 @@ fn push_visible_surface(
         content_ref,
     });
     Ok(())
+}
+
+fn capability_surface_usage_policy() -> Result<&'static str, AgentLoopHostError> {
+    normalized_capability_surface_usage_policy(CAPABILITY_SURFACE_USAGE_POLICY)
+}
+
+fn normalized_capability_surface_usage_policy(
+    raw_policy: &'static str,
+) -> Result<&'static str, AgentLoopHostError> {
+    let policy = raw_policy.trim();
+    if policy.is_empty() {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability surface usage policy is empty",
+        ));
+    }
+    Ok(policy)
 }
 
 fn validate_surface_descriptor(
@@ -850,7 +929,13 @@ fn feed_field(digest: &mut Sha256, label: &[u8], value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+
     use super::*;
+    use crate::{
+        RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        run_profile::{LoopInlineMessageBody, ResolvedRunProfile},
+    };
 
     #[test]
     fn synthetic_ref_registry_rejects_mismatched_duplicate_refs() {
@@ -871,5 +956,64 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    }
+
+    #[test]
+    fn capability_surface_usage_policy_rejects_blank_text() {
+        let error = normalized_capability_surface_usage_policy(" \n\t ")
+            .expect_err("blank policy text should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface usage policy is empty"
+        );
+    }
+
+    #[test]
+    fn instruction_bundle_accepts_inline_message_body_over_legacy_threshold() {
+        let inline_body = format!(
+            "{}\n\nkeep markdown structure",
+            "review instruction ".repeat(32)
+        );
+        assert!(
+            inline_body.len() > 512,
+            "fixture must exceed the legacy 512-byte inline-message regression threshold"
+        );
+
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle::default(),
+                visible_surface: None,
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: vec![LoopInlineMessage {
+                    role: LoopInlineMessageRole::User,
+                    safe_body: LoopInlineMessageBody::new(inline_body.clone())
+                        .expect("inline message body should accept generic model-content budget"),
+                }],
+            })
+            .expect("instruction bundle should accept large inline-message bodies");
+
+        assert!(bundle.requires_materialization_store);
+        assert_eq!(bundle.messages.len(), 1);
+        assert_eq!(bundle.materialized_messages.len(), 1);
+        assert_eq!(bundle.materialized_messages[0].role, "user");
+        assert_eq!(bundle.materialized_messages[0].model_content, inline_body);
+    }
+
+    fn test_context() -> LoopRunContext {
+        let scope = TurnScope::new(
+            TenantId::new("tenant-instruction-bundle").unwrap(),
+            Some(AgentId::new("agent-instruction-bundle").unwrap()),
+            Some(ProjectId::new("project-instruction-bundle").unwrap()),
+            ThreadId::new("thread-instruction-bundle").unwrap(),
+        );
+        let resolved_run_profile = ResolvedRunProfile::legacy_compatibility(
+            RunProfileId::interactive_default(),
+            RunProfileVersion::new(1),
+            true,
+        );
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
     }
 }

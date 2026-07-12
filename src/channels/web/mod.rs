@@ -21,7 +21,6 @@ pub mod oauth;
 pub(crate) mod onboarding;
 pub mod openai_compat;
 pub mod platform;
-pub mod responses_api;
 pub mod types;
 pub(crate) mod util;
 
@@ -114,10 +113,9 @@ impl GatewayChannel {
     /// Builds a single-user `MultiAuthState` from the config.
     pub fn new(config: GatewayConfig, owner_id: String) -> Self {
         let auth_token = config.auth_token.clone().unwrap_or_else(|| {
-            use rand::RngCore;
-            use rand::rngs::OsRng;
+            use rand::RngExt as _;
             let mut bytes = [0u8; 32];
-            OsRng.fill_bytes(&mut bytes);
+            rand::rng().fill(&mut bytes);
             bytes.iter().map(|b| format!("{b:02x}")).collect()
         });
 

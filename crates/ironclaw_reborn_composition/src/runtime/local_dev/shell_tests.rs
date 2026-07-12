@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+};
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -41,7 +43,7 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn-1".to_string()),
         id: "call-1".to_string(),
-        name: "builtin_shell".to_string(),
+        name: ProviderToolName::new("builtin_shell").expect("provider tool name"), // safety: test-only provider-safe literal.
         arguments,
         response_reasoning: None,
         reasoning: None,
@@ -74,18 +76,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     .await
     .expect("local-dev services build");
     let runtime = services.host_runtime.clone().expect("host runtime");
-    let workspace_mounts = services
+    let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local runtime substrate")
-        .workspace_mounts
-        .clone();
-    let memory_mounts = services
-        .local_runtime
-        .as_ref()
-        .expect("local runtime substrate")
-        .memory_mounts
-        .clone();
+        .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+    let workspace_mounts = local_runtime.workspace_mounts.clone();
+    let memory_mounts = local_runtime.memory_mounts.clone();
     let policy = Arc::new(
         crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
     );
@@ -98,13 +94,46 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         policy,
         workspace_mounts,
         memory_mounts,
+        system_extensions_lifecycle_mounts: local_runtime
+            .system_extensions_lifecycle_mounts
+            .clone(),
         extension_surface_source: LocalDevExtensionSurfaceSource::default(),
         input_resolver,
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
+        project_service: Arc::clone(&local_runtime.project_service),
+        trajectory_observer: None,
+        outbound_preferences_facade: None,
+        outbound_delivery_target_set_requires_approval: false,
+        approval_settings: Arc::new(
+            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+        ),
+        approval_requests: local_runtime.approval_requests.clone(),
+        capability_leases: local_runtime.capability_leases.clone(),
+        external_tool_catalog: std::sync::Arc::new(
+            ironclaw_turns::InMemoryExternalToolCatalog::new(),
+        ),
     };
     let run_context = run_context("shell-workdir").await;
+    // Turn on the global auto-approve switch for this run's actor scope so the
+    // scripted shell call exercises the dispatch path instead of stopping at the
+    // per-tool approval gate (the Tools-settings switch is authoritative for
+    // first-party tool dispatch).
+    {
+        let mut scope = run_context.scope.to_resource_scope();
+        scope.user_id = UserId::new("local-dev-shell-user").expect("user id");
+        ironclaw_approvals::AutoApproveSettingStore::set(
+            local_runtime.auto_approve_settings.as_ref(),
+            ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("enabling global auto-approve should succeed");
+    }
     let port = factory
         .create_capability_port(&run_context)
         .await
@@ -126,9 +155,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
 
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("shell invocation");
@@ -142,14 +174,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .expect("result output");
     assert_eq!(output["exit_code"], serde_json::json!(0));
     assert_eq!(output["success"], serde_json::json!(true));
+    // `$PWD` is the real host workspace path at exec time, but the host-runtime
+    // reverse output rewrite virtualizes it back to the `/workspace` alias before
+    // the result reaches the model — so the caller only ever sees the alias path,
+    // never the host layout.
     assert_eq!(
         output["output"],
-        serde_json::json!(format!(
-            "local-dev-shell-ok:{}",
-            shell_workdir
-                .canonicalize()
-                .expect("canonical shell workdir")
-                .display()
-        ))
+        serde_json::json!("local-dev-shell-ok:/workspace/qa-coding-smoke")
     );
 }

@@ -7,6 +7,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use futures_util::FutureExt as _;
 use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountService, CredentialRecoveryKind,
@@ -29,6 +33,12 @@ use crate::gsuite::{
     },
     network::google_api_network_policy,
 };
+use crate::latency::{
+    FirstPartyToolLatencyFields, FirstPartyToolLatencyMetrics, json_bytes, started_at,
+    trace_tool_error, trace_tool_ok,
+};
+
+mod calendar_list_events;
 
 pub const CALENDAR_LIST_CALENDARS_CAPABILITY_ID: &str = "google-calendar.list_calendars";
 pub const CALENDAR_LIST_EVENTS_CAPABILITY_ID: &str = "google-calendar.list_events";
@@ -56,6 +66,52 @@ pub struct GsuiteExecutor {
     credential_stager: Arc<dyn GsuiteCredentialStager>,
 }
 
+fn gsuite_latency_started_at() -> Option<std::time::Instant> {
+    started_at()
+}
+
+fn trace_gsuite_latency_ok(
+    operation: &'static str,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
+    started_at: Option<std::time::Instant>,
+    network_egress_bytes: u64,
+    output_bytes: u64,
+) {
+    trace_tool_ok(
+        "gsuite_first_party_tool",
+        operation,
+        fields,
+        started_at,
+        FirstPartyToolLatencyMetrics {
+            network_egress_bytes,
+            output_bytes,
+            ..FirstPartyToolLatencyMetrics::default()
+        },
+    );
+}
+
+fn trace_gsuite_latency_error(
+    operation: &'static str,
+    fields: Option<&FirstPartyToolLatencyFields<'_>>,
+    started_at: Option<std::time::Instant>,
+    error_kind: &str,
+    network_egress_bytes: u64,
+    output_bytes: u64,
+) {
+    trace_tool_error(
+        "gsuite_first_party_tool",
+        operation,
+        fields,
+        started_at,
+        error_kind,
+        FirstPartyToolLatencyMetrics {
+            network_egress_bytes,
+            output_bytes,
+            ..FirstPartyToolLatencyMetrics::default()
+        },
+    );
+}
+
 impl GsuiteExecutor {
     pub fn new(
         accounts: Arc<dyn CredentialAccountService>,
@@ -72,35 +128,164 @@ impl GsuiteExecutor {
         &self,
         request: GsuiteDispatchRequest<'_>,
     ) -> Result<GsuiteDispatchResult, GsuiteDispatchError> {
+        let latency_fields = FirstPartyToolLatencyFields::from_input(
+            request.capability_id,
+            request.scope,
+            request.input,
+        );
         let started = Instant::now();
-        let (package, capability) = find_gsuite_capability(request.capability_id.as_str())
-            .ok_or_else(|| {
-                GsuiteDispatchError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
-            })?;
-        let extension = ExtensionId::new(package.extension_id)
-            .map_err(|_| GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend))?;
-        let scopes = required_provider_scopes(capability)?;
-        let credential = self
+        let prepare_started_at = gsuite_latency_started_at();
+        let (capability, extension, scopes) = match (|| {
+            let (package, capability) = find_gsuite_capability(request.capability_id.as_str())
+                .ok_or_else(|| {
+                    GsuiteDispatchError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
+                })?;
+            let extension = ExtensionId::new(package.extension_id)
+                .map_err(|_| GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend))?;
+            let scopes = required_provider_scopes(capability)?;
+            Ok::<_, GsuiteDispatchError>((capability, extension, scopes))
+        })() {
+            Ok(prepared) => {
+                trace_gsuite_latency_ok(
+                    "prepare_capability",
+                    latency_fields.as_ref(),
+                    prepare_started_at,
+                    0,
+                    0,
+                );
+                prepared
+            }
+            Err(error) => {
+                trace_gsuite_latency_error(
+                    "prepare_capability",
+                    latency_fields.as_ref(),
+                    prepare_started_at,
+                    error.kind().as_str(),
+                    error
+                        .usage()
+                        .map(|usage| usage.network_egress_bytes)
+                        .unwrap_or(0),
+                    0,
+                );
+                return Err(error);
+            }
+        };
+        let resolve_credential_started_at = gsuite_latency_started_at();
+        let credential = match self
             .resolver
             .resolve(request.scope, &extension, &scopes)
             .await
-            .map_err(map_credential_error)?;
+        {
+            Ok(credential) => {
+                trace_gsuite_latency_ok(
+                    "resolve_credential",
+                    latency_fields.as_ref(),
+                    resolve_credential_started_at,
+                    0,
+                    0,
+                );
+                credential
+            }
+            Err(error) => {
+                let error = map_credential_error(error);
+                trace_gsuite_latency_error(
+                    "resolve_credential",
+                    latency_fields.as_ref(),
+                    resolve_credential_started_at,
+                    error.kind().as_str(),
+                    error
+                        .usage()
+                        .map(|usage| usage.network_egress_bytes)
+                        .unwrap_or(0),
+                    0,
+                );
+                return Err(error);
+            }
+        };
         // Stage after parsing so a parse failure doesn't leave a staged credential
         // behind in the injection store.
-        let execution = capability_execution(capability, request.input)?;
-        self.stage_credential(&request, &credential).await?;
+        let parse_execution_started_at = gsuite_latency_started_at();
+        let execution = match capability_execution(capability, request.input) {
+            Ok(execution) => {
+                trace_gsuite_latency_ok(
+                    "parse_execution",
+                    latency_fields.as_ref(),
+                    parse_execution_started_at,
+                    0,
+                    0,
+                );
+                execution
+            }
+            Err(error) => {
+                trace_gsuite_latency_error(
+                    "parse_execution",
+                    latency_fields.as_ref(),
+                    parse_execution_started_at,
+                    error.kind().as_str(),
+                    error
+                        .usage()
+                        .map(|usage| usage.network_egress_bytes)
+                        .unwrap_or(0),
+                    0,
+                );
+                return Err(error);
+            }
+        };
+        let stage_credential_started_at = gsuite_latency_started_at();
+        if let Err(error) = self.stage_credential(&request, &credential).await {
+            trace_gsuite_latency_error(
+                "stage_credential",
+                latency_fields.as_ref(),
+                stage_credential_started_at,
+                error.kind().as_str(),
+                error
+                    .usage()
+                    .map(|usage| usage.network_egress_bytes)
+                    .unwrap_or(0),
+                0,
+            );
+            return Err(error);
+        }
+        trace_gsuite_latency_ok(
+            "stage_credential",
+            latency_fields.as_ref(),
+            stage_credential_started_at,
+            0,
+            0,
+        );
+
+        let execute_primary_started_at = gsuite_latency_started_at();
         let (response, network_egress_bytes) = match execution
             .execute(&request, &credential, self.credential_stager.as_ref())
-            .await?
+            .await
         {
-            CapabilityExecutionOutcome::Response {
+            Ok(CapabilityExecutionOutcome::Response {
                 response,
                 network_egress_bytes,
-            } => (response, network_egress_bytes),
-            CapabilityExecutionOutcome::AuthExpired {
+            }) => {
+                trace_gsuite_latency_ok(
+                    "execute_primary",
+                    latency_fields.as_ref(),
+                    execute_primary_started_at,
+                    network_egress_bytes,
+                    response.response_bytes,
+                );
+                (response, network_egress_bytes)
+            }
+            Ok(CapabilityExecutionOutcome::AuthExpired {
                 network_egress_bytes,
-            } => {
-                self.resolver
+            }) => {
+                trace_gsuite_latency_error(
+                    "execute_primary",
+                    latency_fields.as_ref(),
+                    execute_primary_started_at,
+                    RuntimeDispatchErrorKind::Client.as_str(),
+                    network_egress_bytes,
+                    0,
+                );
+                let refresh_started_at = gsuite_latency_started_at();
+                if let Err(error) = self
+                    .resolver
                     .refresh(
                         request.scope,
                         &credential.account_scope,
@@ -108,10 +293,32 @@ impl GsuiteExecutor {
                         credential.account_id,
                     )
                     .await
-                    .map_err(|error| {
-                        add_network_usage(map_credential_error(error), network_egress_bytes)
-                    })?;
-                let refreshed = self
+                {
+                    let error =
+                        add_network_usage(map_credential_error(error), network_egress_bytes);
+                    trace_gsuite_latency_error(
+                        "refresh_credential",
+                        latency_fields.as_ref(),
+                        refresh_started_at,
+                        error.kind().as_str(),
+                        error
+                            .usage()
+                            .map(|usage| usage.network_egress_bytes)
+                            .unwrap_or(0),
+                        0,
+                    );
+                    return Err(error);
+                }
+                trace_gsuite_latency_ok(
+                    "refresh_credential",
+                    latency_fields.as_ref(),
+                    refresh_started_at,
+                    network_egress_bytes,
+                    0,
+                );
+
+                let resolve_refreshed_started_at = gsuite_latency_started_at();
+                let refreshed = match self
                     .resolver
                     .resolve_account(
                         request.scope,
@@ -121,54 +328,192 @@ impl GsuiteExecutor {
                         &scopes,
                     )
                     .await
-                    .map_err(|error| {
-                        add_network_usage(map_credential_error(error), network_egress_bytes)
-                    })?;
+                {
+                    Ok(refreshed) => {
+                        trace_gsuite_latency_ok(
+                            "resolve_refreshed_credential",
+                            latency_fields.as_ref(),
+                            resolve_refreshed_started_at,
+                            network_egress_bytes,
+                            0,
+                        );
+                        refreshed
+                    }
+                    Err(error) => {
+                        let error =
+                            add_network_usage(map_credential_error(error), network_egress_bytes);
+                        trace_gsuite_latency_error(
+                            "resolve_refreshed_credential",
+                            latency_fields.as_ref(),
+                            resolve_refreshed_started_at,
+                            error.kind().as_str(),
+                            error
+                                .usage()
+                                .map(|usage| usage.network_egress_bytes)
+                                .unwrap_or(0),
+                            0,
+                        );
+                        return Err(error);
+                    }
+                };
                 // Parse before staging for the same reason as the primary path:
                 // a parse failure should not leave a credential staged.
-                let retry_execution = capability_execution(capability, request.input)?;
-                self.stage_credential(&request, &refreshed)
-                    .await
-                    .map_err(|error| add_network_usage(error, network_egress_bytes))?;
+                let retry_parse_started_at = gsuite_latency_started_at();
+                let retry_execution = match capability_execution(capability, request.input) {
+                    Ok(retry_execution) => {
+                        trace_gsuite_latency_ok(
+                            "parse_retry_execution",
+                            latency_fields.as_ref(),
+                            retry_parse_started_at,
+                            network_egress_bytes,
+                            0,
+                        );
+                        retry_execution
+                    }
+                    Err(error) => {
+                        trace_gsuite_latency_error(
+                            "parse_retry_execution",
+                            latency_fields.as_ref(),
+                            retry_parse_started_at,
+                            error.kind().as_str(),
+                            error
+                                .usage()
+                                .map(|usage| usage.network_egress_bytes)
+                                .unwrap_or(0),
+                            0,
+                        );
+                        return Err(error);
+                    }
+                };
+                let retry_stage_started_at = gsuite_latency_started_at();
+                if let Err(error) = self.stage_credential(&request, &refreshed).await {
+                    let error = add_network_usage(error, network_egress_bytes);
+                    trace_gsuite_latency_error(
+                        "stage_retry_credential",
+                        latency_fields.as_ref(),
+                        retry_stage_started_at,
+                        error.kind().as_str(),
+                        error
+                            .usage()
+                            .map(|usage| usage.network_egress_bytes)
+                            .unwrap_or(0),
+                        0,
+                    );
+                    return Err(error);
+                }
+                trace_gsuite_latency_ok(
+                    "stage_retry_credential",
+                    latency_fields.as_ref(),
+                    retry_stage_started_at,
+                    network_egress_bytes,
+                    0,
+                );
+
+                let execute_retry_started_at = gsuite_latency_started_at();
                 match retry_execution
                     .execute(&request, &refreshed, self.credential_stager.as_ref())
                     .await
-                    .map_err(|error| add_network_usage(error, network_egress_bytes))?
                 {
-                    CapabilityExecutionOutcome::Response {
+                    Ok(CapabilityExecutionOutcome::Response {
                         response,
                         network_egress_bytes: retry_network_egress_bytes,
-                    } => (
-                        response,
-                        network_egress_bytes.saturating_add(retry_network_egress_bytes),
-                    ),
-                    CapabilityExecutionOutcome::AuthExpired {
+                    }) => {
+                        let total_network_egress_bytes =
+                            network_egress_bytes.saturating_add(retry_network_egress_bytes);
+                        trace_gsuite_latency_ok(
+                            "execute_retry",
+                            latency_fields.as_ref(),
+                            execute_retry_started_at,
+                            total_network_egress_bytes,
+                            response.response_bytes,
+                        );
+                        (response, total_network_egress_bytes)
+                    }
+                    Ok(CapabilityExecutionOutcome::AuthExpired {
                         network_egress_bytes: retry_network_egress_bytes,
-                    } => {
-                        return Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
-                            .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
-                            .with_usage(ResourceUsage {
-                                network_egress_bytes: network_egress_bytes
-                                    .saturating_add(retry_network_egress_bytes),
-                                ..ResourceUsage::default()
-                            }));
+                    }) => {
+                        let error = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                            .with_reason(GsuiteCredentialDispatchReason::AuthRequired {
+                                required_secrets: vec![refreshed.access_secret.clone()],
+                            })
+                            .with_usage(ResourceUsage::default().set_network_egress_bytes(
+                                network_egress_bytes.saturating_add(retry_network_egress_bytes),
+                            ));
+                        trace_gsuite_latency_error(
+                            "execute_retry",
+                            latency_fields.as_ref(),
+                            execute_retry_started_at,
+                            error.kind().as_str(),
+                            error
+                                .usage()
+                                .map(|usage| usage.network_egress_bytes)
+                                .unwrap_or(0),
+                            0,
+                        );
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        let error = add_network_usage(error, network_egress_bytes);
+                        trace_gsuite_latency_error(
+                            "execute_retry",
+                            latency_fields.as_ref(),
+                            execute_retry_started_at,
+                            error.kind().as_str(),
+                            error
+                                .usage()
+                                .map(|usage| usage.network_egress_bytes)
+                                .unwrap_or(0),
+                            0,
+                        );
+                        return Err(error);
                     }
                 }
             }
+            Err(error) => {
+                trace_gsuite_latency_error(
+                    "execute_primary",
+                    latency_fields.as_ref(),
+                    execute_primary_started_at,
+                    error.kind().as_str(),
+                    error
+                        .usage()
+                        .map(|usage| usage.network_egress_bytes)
+                        .unwrap_or(0),
+                    0,
+                );
+                return Err(error);
+            }
         };
-        let output = response_output(&response)?;
+        let shape_output_started_at = gsuite_latency_started_at();
+        let output = match response_output(&response) {
+            Ok(output) => output,
+            Err(error) => {
+                trace_gsuite_latency_error(
+                    "shape_output",
+                    latency_fields.as_ref(),
+                    shape_output_started_at,
+                    error.kind().as_str(),
+                    network_egress_bytes,
+                    0,
+                );
+                return Err(error);
+            }
+        };
+        let output_bytes = json_bytes(&output);
+        trace_gsuite_latency_ok(
+            "shape_output",
+            latency_fields.as_ref(),
+            shape_output_started_at,
+            network_egress_bytes,
+            output_bytes,
+        );
         let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-        let output_bytes = serde_json::to_vec(&output)
-            .map(|body| body.len() as u64)
-            .unwrap_or(0);
         Ok(GsuiteDispatchResult {
             output,
-            usage: ResourceUsage {
-                wall_clock_ms,
-                output_bytes,
-                network_egress_bytes,
-                ..ResourceUsage::default()
-            },
+            usage: ResourceUsage::default()
+                .set_wall_clock_ms(wall_clock_ms)
+                .set_output_bytes(output_bytes)
+                .set_network_egress_bytes(network_egress_bytes),
         })
     }
 
@@ -320,6 +665,7 @@ enum CapabilityExecution {
         url: String,
         body: Vec<u8>,
     },
+    CalendarListEvents(calendar_list_events::CalendarEventsQuery),
     AddAttendees(CalendarAddAttendeesInput),
 }
 
@@ -349,6 +695,9 @@ impl CapabilityExecution {
                 .await?;
                 let network_egress_bytes = response.request_bytes;
                 Ok(response_outcome(response, network_egress_bytes))
+            }
+            Self::CalendarListEvents(input) => {
+                calendar_list_events::execute(request, credential, stager, input).await
             }
             Self::AddAttendees(input) => {
                 execute_add_attendees(request, credential, stager, input).await
@@ -506,7 +855,9 @@ fn capability_execution(
     let single = |(method, url, body)| CapabilityExecution::Single { method, url, body };
     Ok(match capability.operation {
         Operation::CalendarListCalendars => single(calendar_list_calendars_request()),
-        Operation::CalendarListEvents => single(calendar_list_events_request(input)?),
+        Operation::CalendarListEvents => CapabilityExecution::CalendarListEvents(
+            calendar_list_events::CalendarEventsQuery::parse(input)?,
+        ),
         Operation::CalendarGetEvent => single(calendar_get_event_request(input)?),
         Operation::CalendarFindFreeSlots => single(calendar_find_free_slots_request(input)?),
         Operation::CalendarCreateEvent => single(calendar_create_event_request(input)?),
@@ -528,31 +879,9 @@ fn capability_execution(
 fn calendar_list_calendars_request() -> (NetworkMethod, String, Vec<u8>) {
     (
         NetworkMethod::Get,
-        format!("{CALENDAR_API_BASE}/users/me/calendarList"),
+        calendar_list_calendars_url(),
         Vec::new(),
     )
-}
-
-struct CalendarEventsQuery {
-    calendar_id: String,
-    time_min: Option<String>,
-    time_max: Option<String>,
-    page_token: Option<String>,
-    max_results: Option<String>,
-}
-
-impl CalendarEventsQuery {
-    fn parse(input: &Value) -> Result<Self, GsuiteDispatchError> {
-        Ok(Self {
-            calendar_id: optional_str(input, "calendar_id")?
-                .unwrap_or("primary")
-                .to_string(),
-            time_min: optional_query_value(input, "time_min")?,
-            time_max: optional_query_value(input, "time_max")?,
-            page_token: optional_query_value(input, "page_token")?,
-            max_results: optional_query_value(input, "max_results")?,
-        })
-    }
 }
 
 struct CalendarEventPath {
@@ -626,17 +955,6 @@ impl GmailMessagePath {
     }
 }
 
-fn calendar_list_events_request(
-    input: &Value,
-) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let input = CalendarEventsQuery::parse(input)?;
-    Ok((
-        NetworkMethod::Get,
-        calendar_events_url(&input, None),
-        Vec::new(),
-    ))
-}
-
 fn calendar_get_event_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
@@ -660,18 +978,10 @@ fn calendar_find_free_slots_request(
 fn calendar_create_event_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let query = CalendarEventsQuery {
-        calendar_id: optional_str(input, "calendar_id")?
-            .unwrap_or("primary")
-            .to_string(),
-        time_min: None,
-        time_max: None,
-        page_token: None,
-        max_results: None,
-    };
+    let calendar_id = optional_str(input, "calendar_id")?.unwrap_or("primary");
     Ok((
         NetworkMethod::Post,
-        calendar_events_url(&query, None),
+        calendar_events_collection_url(calendar_id, &[]),
         json_body(required_object(input, "event")?)?,
     ))
 }
@@ -732,11 +1042,119 @@ fn gmail_get_message_request(
 fn gmail_send_message_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    let message = gmail_outgoing_message_body(required_object(input, "message")?)?;
     Ok((
         NetworkMethod::Post,
         format!("{GMAIL_API_BASE}/users/me/messages/send"),
-        json_body(required_object(input, "message")?)?,
+        json_body(&message)?,
     ))
+}
+
+fn gmail_outgoing_message_body(message: &Value) -> Result<Value, GsuiteDispatchError> {
+    if let Some(raw) = optional_str(message, "raw")? {
+        let mut body = json!({ "raw": raw });
+        if let Some(thread_id) = optional_str(message, "threadId")? {
+            body["threadId"] = json!(thread_id);
+        }
+        return Ok(body);
+    }
+
+    let mut body = json!({
+        "raw": encode_plain_text_gmail_message(message)?,
+    });
+    if let Some(thread_id) = optional_str(message, "threadId")? {
+        body["threadId"] = json!(thread_id);
+    }
+    Ok(body)
+}
+
+fn encode_plain_text_gmail_message(message: &Value) -> Result<String, GsuiteDispatchError> {
+    let to = required_recipient_header(message, "to")?;
+    let cc = optional_recipient_header(message, "cc")?;
+    let bcc = optional_recipient_header(message, "bcc")?;
+    let from = optional_header_value(message, "from")?;
+    let body = required_str(message, "body")?;
+    if body.is_empty() {
+        return Err(input_error());
+    }
+    let subject = optional_header_value(message, "subject")?
+        .map(ToString::to_string)
+        .map(Ok)
+        .unwrap_or_else(|| inferred_subject_from_body(body))?;
+
+    let mut rfc822 = String::new();
+    if let Some(from) = from {
+        push_mail_header(&mut rfc822, "From", from);
+    }
+    push_mail_header(&mut rfc822, "To", &to);
+    if let Some(cc) = cc {
+        push_mail_header(&mut rfc822, "Cc", &cc);
+    }
+    if let Some(bcc) = bcc {
+        push_mail_header(&mut rfc822, "Bcc", &bcc);
+    }
+    push_mail_header(&mut rfc822, "Subject", &subject);
+    rfc822.push_str("MIME-Version: 1.0\r\n");
+    rfc822.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
+    rfc822.push_str("Content-Transfer-Encoding: 8bit\r\n");
+    rfc822.push_str("\r\n");
+    rfc822.push_str(body);
+
+    Ok(URL_SAFE_NO_PAD.encode(rfc822.as_bytes()))
+}
+
+fn inferred_subject_from_body(body: &str) -> Result<String, GsuiteDispatchError> {
+    let mut subject = body
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| "No subject".to_string());
+    if subject.chars().count() > 120 {
+        subject = subject.chars().take(117).collect::<String>();
+        subject.push_str("...");
+    }
+    validate_header_value(&subject)?;
+    Ok(subject)
+}
+
+fn push_mail_header(message: &mut String, name: &str, value: &str) {
+    message.push_str(name);
+    message.push_str(": ");
+    if name.eq_ignore_ascii_case("subject") {
+        message.push_str(&encode_rfc2047_phrase(value));
+    } else {
+        message.push_str(&encode_address_header_value(value));
+    }
+    message.push_str("\r\n");
+}
+
+fn encode_address_header_value(value: &str) -> String {
+    value
+        .split(',')
+        .map(|part| {
+            let trimmed = part.trim();
+            if let Some(address_start) = trimmed.find('<') {
+                let (display, address) = trimmed.split_at(address_start);
+                let display = display.trim().trim_matches('"');
+                if display.is_empty() {
+                    trimmed.to_string()
+                } else {
+                    format!("{} {}", encode_rfc2047_phrase(display), address.trim())
+                }
+            } else {
+                encode_rfc2047_phrase(trimmed)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn encode_rfc2047_phrase(value: &str) -> String {
+    if value.is_ascii() {
+        value.to_string()
+    } else {
+        format!("=?UTF-8?B?{}?=", STANDARD.encode(value.as_bytes()))
+    }
 }
 
 fn gmail_create_draft_request(
@@ -859,10 +1277,8 @@ fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
             RuntimeDispatchErrorKind::OutputTooLarge
         }
     };
-    GsuiteDispatchError::new(kind).with_usage(ResourceUsage {
-        network_egress_bytes: error.request_bytes(),
-        ..ResourceUsage::default()
-    })
+    GsuiteDispatchError::new(kind)
+        .with_usage(ResourceUsage::default().set_network_egress_bytes(error.request_bytes()))
 }
 
 fn map_recovery_kind(recovery: &CredentialRecoveryProjection) -> RuntimeDispatchErrorKind {
@@ -882,22 +1298,18 @@ fn add_network_usage(error: GsuiteDispatchError, network_egress_bytes: u64) -> G
     error.with_usage(usage)
 }
 
-fn calendar_events_url(input: &CalendarEventsQuery, extra_query: Option<&str>) -> String {
-    let calendar_id = encode_segment(&input.calendar_id);
+fn calendar_events_collection_url(calendar_id: &str, query: &[String]) -> String {
+    let calendar_id = encode_segment(calendar_id);
     let mut url = format!("{CALENDAR_API_BASE}/calendars/{calendar_id}/events");
-    let mut query = Vec::new();
-    push_optional_query(&mut query, "timeMin", input.time_min.as_deref());
-    push_optional_query(&mut query, "timeMax", input.time_max.as_deref());
-    push_optional_query(&mut query, "pageToken", input.page_token.as_deref());
-    push_optional_query(&mut query, "maxResults", input.max_results.as_deref());
-    if let Some(extra) = extra_query {
-        query.push(extra.to_string());
-    }
     if !query.is_empty() {
         url.push('?');
         url.push_str(&query.join("&"));
     }
     url
+}
+
+fn calendar_list_calendars_url() -> String {
+    format!("{CALENDAR_API_BASE}/users/me/calendarList")
 }
 
 fn gmail_messages_url(input: &GmailMessagesQuery) -> String {
@@ -931,6 +1343,13 @@ fn optional_query_value(input: &Value, key: &str) -> Result<Option<String>, Gsui
     })
 }
 
+fn optional_bool(input: &Value, key: &str) -> Result<Option<bool>, GsuiteDispatchError> {
+    input
+        .get(key)
+        .map(|value| value.as_bool().ok_or_else(input_error))
+        .transpose()
+}
+
 fn optional_string_array(
     input: &Value,
     input_key: &str,
@@ -961,6 +1380,56 @@ fn optional_str<'a>(input: &'a Value, key: &str) -> Result<Option<&'a str>, Gsui
         .get(key)
         .map(|value| value.as_str().ok_or_else(input_error))
         .transpose()
+}
+
+fn optional_header_value<'a>(
+    input: &'a Value,
+    key: &str,
+) -> Result<Option<&'a str>, GsuiteDispatchError> {
+    optional_str(input, key)?
+        .map(validate_header_value)
+        .transpose()
+}
+
+fn required_recipient_header(input: &Value, key: &str) -> Result<String, GsuiteDispatchError> {
+    recipient_header(input.get(key).ok_or_else(input_error)?)
+}
+
+fn optional_recipient_header(
+    input: &Value,
+    key: &str,
+) -> Result<Option<String>, GsuiteDispatchError> {
+    input.get(key).map(recipient_header).transpose()
+}
+
+fn recipient_header(value: &Value) -> Result<String, GsuiteDispatchError> {
+    match value {
+        Value::String(value) => Ok(validate_header_value(value)?.to_string()),
+        Value::Array(values) => {
+            if values.is_empty() {
+                return Err(input_error());
+            }
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(input_error)
+                        .and_then(validate_header_value)
+                        .map(ToString::to_string)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|values| values.join(", "))
+        }
+        _ => Err(input_error()),
+    }
+}
+
+fn validate_header_value(value: &str) -> Result<&str, GsuiteDispatchError> {
+    if value.trim().is_empty() || value.contains('\r') || value.contains('\n') {
+        return Err(input_error());
+    }
+    Ok(value)
 }
 
 fn required_object<'a>(input: &'a Value, key: &str) -> Result<&'a Value, GsuiteDispatchError> {
@@ -1387,15 +1856,10 @@ mod tests {
     fn url_building_tests() {
         assert_eq!(encode_percent("a b/c?d=e&f"), "a%20b%2Fc%3Fd%3De%26f");
 
-        let calendar_events = calendar_events_url(
-            &CalendarEventsQuery::parse(&json!({
-                "calendar_id": "team calendar",
-                "time_min": "2026-05-21T00:00:00Z",
-                "max_results": 10,
-            }))
-            .unwrap(),
-            None,
-        );
+        let mut calendar_query = Vec::new();
+        push_optional_query(&mut calendar_query, "timeMin", Some("2026-05-21T00:00:00Z"));
+        push_optional_query(&mut calendar_query, "maxResults", Some("10"));
+        let calendar_events = calendar_events_collection_url("team calendar", &calendar_query);
         assert!(calendar_events.contains("/calendars/team%20calendar/events"));
         assert!(calendar_events.contains("timeMin=2026-05-21T00%3A00%3A00Z"));
         assert!(calendar_events.contains("maxResults=10"));

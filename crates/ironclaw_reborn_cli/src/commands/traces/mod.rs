@@ -19,11 +19,12 @@ use ironclaw_reborn_traces::contribution::{
     TraceCreditEventKind, TraceSubmissionReceipt, TraceSubmissionStatusUpdate,
     acknowledge_trace_credit_notice_for_scope, estimate_initial_credit,
     fetch_trace_submission_statuses_with_policy, mark_trace_credit_notice_due_for_scope,
-    normalize_trace_selected_tools, preflight_trace_contribution_policy,
-    read_trace_policy_for_scope, revoke_trace_submission_at_endpoint_with_policy,
+    mint_profile_attribution_token_for_scope, normalize_trace_selected_tools,
+    preflight_trace_contribution_policy, read_trace_policy_for_scope,
+    revoke_trace_submission_at_endpoint_with_policy, set_community_profile_for_scope,
     snooze_trace_credit_notice_for_scope, submit_trace_envelope_to_endpoint_with_policy,
     trace_credit_summary, trace_queue_diagnostics_for_scope, trace_submission_status_endpoint,
-    write_trace_policy_for_scope,
+    withdraw_community_profile_for_scope, write_trace_policy_for_scope,
 };
 
 mod contributor;
@@ -121,11 +122,40 @@ enum TracesSubcommand {
         min_submission_score: f32,
     },
 
-    /// Disable autonomous trace contribution
+    /// Disable autonomous trace contribution. With --user-scope: opt out ONLY
+    /// that user (instance-level enrollment untouched). Without: disable the
+    /// global/instance policy AND the owner scope (full off switch).
     OptOut {
-        /// Runtime/web user scope to disable; defaults to this instance's owner_id
+        /// Runtime/web user scope to disable (scoped-only opt-out); defaults
+        /// to this instance's owner_id AND disables the global policy
         #[arg(long)]
         user_scope: Option<String>,
+    },
+
+    /// Enroll this ENTIRE INSTANCE in Trace Commons with an operator invite
+    /// link (admin operation — requires shell access to the instance host).
+    /// Every user without a personal enrollment inherits it, attributed via a
+    /// salted per-user pseudonym. Exclude a single user with
+    /// `traces opt-out --user-scope <tenant-id>/<user-id>` (bare
+    /// `traces opt-out` disables the entire instance enrollment).
+    EnrollInstance {
+        /// Operator invite link (`https://<host>#<code>`, or `<code>@<host>`)
+        #[arg(long)]
+        invite: String,
+
+        /// Include locally redacted user/assistant message text in envelopes
+        /// (applies instance-wide to every inheriting user)
+        #[arg(long)]
+        include_message_text: bool,
+
+        /// Include locally redacted tool arguments, tool results, and HTTP
+        /// bodies in envelopes (applies instance-wide)
+        #[arg(long)]
+        include_tool_payloads: bool,
+
+        /// Output the enrollment outcome as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show local standing trace contribution policy
@@ -280,6 +310,51 @@ enum TracesSubcommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Manage the optional public community profile (second opt-in)
+    Profile {
+        #[command(subcommand)]
+        command: TracesProfileSubcommand,
+    },
+}
+
+/// Sub-subcommands for `traces profile`. The community profile is a second,
+/// separate opt-in: a profile token carries only the `public_attribution`
+/// consent scope with no allowed uses, so it cannot submit traces.
+#[derive(Subcommand, Debug, Clone)]
+enum TracesProfileSubcommand {
+    /// Mint a short-lived profile token for the Trace Commons web profile page
+    Token {
+        /// Runtime/web user scope; defaults to this instance's owner_id
+        #[arg(long)]
+        user_scope: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Create or update the public community profile
+    Set {
+        /// Pseudonymous display handle (3-32 chars: ASCII letters, digits, '-', '_')
+        #[arg(long)]
+        handle: String,
+
+        /// Optional short bio (max 280 bytes)
+        #[arg(long)]
+        bio: Option<String>,
+
+        /// Runtime/web user scope; defaults to this instance's owner_id
+        #[arg(long)]
+        user_scope: Option<String>,
+    },
+
+    /// Withdraw the public community profile
+    Withdraw {
+        /// Runtime/web user scope; defaults to this instance's owner_id
+        #[arg(long)]
+        user_scope: Option<String>,
+    },
 }
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceScopeArg {
@@ -353,6 +428,7 @@ async fn run_traces(cmd: TracesSubcommand) -> anyhow::Result<()> {
     match cmd {
         v @ TracesSubcommand::OptIn { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::OptOut { .. } => contributor::dispatch(v).await,
+        v @ TracesSubcommand::EnrollInstance { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::Status { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::Preview { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::Enqueue { .. } => contributor::dispatch(v).await,
@@ -363,6 +439,7 @@ async fn run_traces(cmd: TracesSubcommand) -> anyhow::Result<()> {
         v @ TracesSubcommand::ListSubmissions { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::Revoke { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::IngestHealth { .. } => contributor::dispatch(v).await,
+        v @ TracesSubcommand::Profile { .. } => contributor::dispatch(v).await,
     }
 }
 
@@ -475,15 +552,94 @@ fn opt_in(options: OptInOptions) -> anyhow::Result<()> {
 }
 
 fn opt_out(user_scope: Option<&str>) -> anyhow::Result<()> {
+    let explicit_scope = user_scope.is_some();
     let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    if explicit_scope {
+        // Per-user opt-out: write ONLY the scoped policy. The root policy is
+        // the instance-wide enrollment (inherited by every user without a
+        // personal enrollment); flipping it here would disenroll the entire
+        // instance to opt out one user.
+        ironclaw_reborn_traces::contribution::opt_out_user_scope(&runtime_scope)?;
+        println!("Trace contribution disabled for user scope: {runtime_scope}");
+        println!(
+            "The instance-level enrollment (if any) is unchanged; other users keep contributing."
+        );
+        return Ok(());
+    }
+    // No explicit scope: legacy full disable — the global/instance policy AND
+    // the owner's scope. This is the admin-facing "turn it all off" path.
     let mut policy = read_policy()?;
     policy.enabled = false;
     write_policy(&policy)?;
-    let mut scoped_policy = read_trace_policy_for_scope(Some(&runtime_scope))?;
-    scoped_policy.enabled = false;
-    write_trace_policy_for_scope(Some(&runtime_scope), &scoped_policy)?;
+    ironclaw_reborn_traces::contribution::opt_out_user_scope(&runtime_scope)?;
     println!("Trace contribution opt-in disabled. Queued envelopes remain local.");
     println!("Runtime/web trace scope disabled: {runtime_scope}");
+    println!(
+        "NOTE: this also disabled the global/instance-level policy. To opt out a single \
+         user instead, pass --user-scope <tenant-id>/<user-id>."
+    );
+    Ok(())
+}
+
+/// Instance-wide Trace Commons enrollment via an operator invite link.
+/// Host-shell possession is the admin gate (same trust boundary as `opt-in`
+/// writing the global policy). Writes the DeviceKey policy + device keypair
+/// at the instance (scope-`None`) location, which every user without a
+/// personal enrollment inherits with a salted per-user pseudonymous subject.
+async fn enroll_instance(
+    invite: &str,
+    include_message_text: bool,
+    include_tool_payloads: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let consents = ironclaw_reborn_traces::onboarding::OnboardConsents {
+        include_message_text,
+        include_tool_payloads,
+    };
+    let outcome = ironclaw_reborn_traces::onboarding::onboard_instance_at_base(
+        &ironclaw_reborn_traces::paths::ironclaw_base_dir(),
+        invite,
+        consents,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("instance enrollment failed: {e}"))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "enrolled": true,
+                "tenant_id": outcome.tenant_id,
+                "ingest_url": outcome.ingest_url,
+                "issuer_url": outcome.issuer_url,
+                "device_key_id": outcome.device_key_id,
+                "include_message_text": include_message_text,
+                "include_tool_payloads": include_tool_payloads,
+            }))
+            .map_err(|e| anyhow::anyhow!("failed to serialize enrollment outcome: {e}"))?
+        );
+        return Ok(());
+    }
+
+    println!("Instance enrolled in Trace Commons.");
+    println!("  tenant: {}", outcome.tenant_id);
+    println!("  ingest: {}", outcome.ingest_url);
+    println!("  issuer: {}", outcome.issuer_url);
+    println!("  device key: {}", outcome.device_key_id);
+    println!(
+        "  consents: message_text={include_message_text} tool_payloads={include_tool_payloads}"
+    );
+    println!();
+    println!(
+        "All users without a personal enrollment now contribute under this instance \
+         enrollment, attributed via salted per-user pseudonyms."
+    );
+    println!(
+        "Opt a single user out with `ironclaw-reborn traces opt-out --user-scope \
+         <tenant-id>/<user-id>`; an explicit opt-out always wins over instance enrollment \
+         (bare `traces opt-out` disables the whole instance enrollment)."
+    );
+    println!("Verify with `ironclaw-reborn traces status --json` and `traces ingest-health`.");
     Ok(())
 }
 
@@ -578,6 +734,56 @@ fn show_policy_status(json: bool, user_scope: Option<&str>) -> anyhow::Result<()
         None => queued_envelope_paths()?.len(),
     };
     println!("  queued envelopes: {queued_count}");
+    Ok(())
+}
+
+async fn profile_token(user_scope: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    let token = mint_profile_attribution_token_for_scope(Some(&runtime_scope)).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "access_token": token.access_token,
+                "expires_at": token.expires_at,
+                "expires_in": token.expires_in,
+            }))
+            .map_err(|e| anyhow::anyhow!("failed to serialize profile token: {}", e))?
+        );
+        return Ok(());
+    }
+    println!("{}", token.access_token);
+    if let Some(expires_at) = token.expires_at {
+        println!("Expires at: {expires_at}");
+    } else if let Some(expires_in) = token.expires_in {
+        println!("Expires in: {expires_in} second(s)");
+    }
+    println!();
+    println!(
+        "Paste this token (without any 'Bearer ' prefix) into the Trace Commons profile page."
+    );
+    println!("It only authorizes community-profile management and cannot submit traces.");
+    Ok(())
+}
+
+async fn profile_set(
+    user_scope: Option<&str>,
+    handle: &str,
+    bio: Option<&str>,
+) -> anyhow::Result<()> {
+    let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    set_community_profile_for_scope(Some(&runtime_scope), handle, bio).await?;
+    println!("Community profile set: display handle '{}'.", handle.trim());
+    println!("Withdraw anytime with 'ironclaw-reborn traces profile withdraw'.");
+    Ok(())
+}
+
+async fn profile_withdraw(user_scope: Option<&str>) -> anyhow::Result<()> {
+    let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    withdraw_community_profile_for_scope(Some(&runtime_scope)).await?;
+    println!(
+        "Community profile withdrawn. Your handle no longer appears on the public community surface."
+    );
     Ok(())
 }
 

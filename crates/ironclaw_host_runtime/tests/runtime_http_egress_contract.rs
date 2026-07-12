@@ -4,13 +4,14 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, CredentialStageError, ExecutionContext, ExtensionId,
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, ProjectId, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
-    ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+    AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
+    ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
+    MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
+    ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeHttpSaveTarget, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_host_runtime::{
     BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -18,17 +19,20 @@ use ironclaw_host_runtime::{
     ToolCallHttpEgress,
 };
 use ironclaw_mcp::{
-    McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
-    McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
+    McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpRuntimeHttpAdapter,
+    StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
+use ironclaw_scripts::ScriptRuntimeHttpAdapter;
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
-use ironclaw_wasm::{WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter};
+use ironclaw_wasm::{
+    WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
+    WasmStagedRuntimeCredentials,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -363,6 +367,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
             context.resource_scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-staged-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -1921,6 +1926,7 @@ async fn production_host_http_egress_rejects_direct_secret_store_lease_before_tr
         scope.clone(),
         handle.clone(),
         SecretMaterial::from("sk-direct-lease"),
+        None,
     ))
     .unwrap();
     let service = services.host_http_egress(network);
@@ -2169,7 +2175,7 @@ async fn script_http_adapter_borrows_real_host_staged_network_policy() {
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(service));
 
     let response = adapter
-        .request(ScriptHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: scope.clone(),
             capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
@@ -2216,7 +2222,7 @@ async fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(service));
 
     let response = adapter
-        .request(McpHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: scope.clone(),
             capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
@@ -2295,7 +2301,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
 }
 
 #[tokio::test]
-async fn mcp_http_client_consumes_staged_credential_on_first_session_request() {
+async fn mcp_http_client_reuses_staged_credential_for_json_rpc_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let services = test_obligation_services();
@@ -2332,7 +2338,7 @@ async fn mcp_http_client_consumes_staged_credential_on_first_session_request() {
         }),
     );
 
-    let error = client
+    let output = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
             capability_id: capability_id.clone(),
@@ -2345,30 +2351,107 @@ async fn mcp_http_client_consumes_staged_credential_on_first_session_request() {
             max_output_bytes: 4096,
         })
         .await
-        .expect_err("one-shot staged credential must not cover the whole MCP session");
-    assert_eq!(error.stable_reason(), "credential_unavailable");
+        .expect("staged MCP credential should cover the whole JSON-RPC session");
+
+    assert_eq!(
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
-        1,
-        "initialize should consume the staged credential before initialized/tools-call retry"
+        3,
+        "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-staged-mcp-secret".to_string(),
-        )),
-        "initialize must receive the staged MCP credential"
+    assert!(
+        requests.iter().all(|request| {
+            request.headers.iter().any(|(name, value)| {
+                name == "authorization" && value == "Bearer sk-staged-mcp-secret"
+            })
+        }),
+        "every MCP session request must receive the staged credential"
     );
     drop(requests);
 }
 
 #[tokio::test]
-async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_session_request() {
+async fn wasm_http_adapter_reuses_staged_credential_for_multiple_requests_in_one_invocation() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let services = test_obligation_services();
+    let scope = sample_scope();
+    let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
+    let handle = SecretHandle::new("google_runtime_token").unwrap();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-wasm-secret",
+    );
+    let service: Arc<dyn RuntimeHttpEgress> = Arc::new(services.host_http_egress(network));
+    let adapter = WasmRuntimeHttpAdapter::new(
+        service,
+        scope,
+        capability_id.clone(),
+        caller_supplied_policy(),
+    )
+    .with_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+        WasmStagedRuntimeCredential::for_any_request(
+            handle,
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            true,
+        ),
+    ])));
+
+    for url in [
+        "https://api.example.test/drive/v3/files/doc-id?fields=id,name,mimeType",
+        "https://api.example.test/drive/v3/files/doc-id/export?mimeType=text%2Fplain",
+    ] {
+        adapter
+            .request(WasmHttpRequest {
+                method: "GET".to_string(),
+                url: url.to_string(),
+                headers_json: "{}".to_string(),
+                body: None,
+                timeout_ms: None,
+            })
+            .expect("each Drive request should receive the staged WASM credential");
+    }
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "Drive download_file should make metadata and export requests"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "authorization"
+                    && value == "Bearer sk-staged-wasm-secret")),
+        "each WASM HTTP request in the same invocation must receive the staged credential"
+    );
+}
+
+#[tokio::test]
+async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let source_scope = sample_scope();
@@ -2390,6 +2473,7 @@ async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_sessio
             source_scope,
             account_access_handle,
             SecretMaterial::from("sk-account-scope-mcp-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -2408,6 +2492,7 @@ async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_sessio
                 Obligation::InjectCredentialAccountOnce {
                     handle: runtime_slot_handle.clone(),
                     provider: RuntimeCredentialAccountProviderId::new("mcp").unwrap(),
+                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("mcp").unwrap(),
                 },
@@ -2436,7 +2521,7 @@ async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_sessio
         }),
     );
 
-    let error = client
+    let output = client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("mcp").unwrap(),
             capability_id: capability_id.clone(),
@@ -2449,24 +2534,25 @@ async fn mcp_http_client_consumes_product_auth_staged_credential_on_first_sessio
             max_output_bytes: 4096,
         })
         .await
-        .expect_err("one-shot product-auth credential must not cover the whole MCP session");
-    assert_eq!(error.stable_reason(), "credential_unavailable");
+        .expect("product-auth staged credential should cover the whole MCP JSON-RPC session");
+
+    assert_eq!(
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
-        1,
-        "initialize should consume the staged product-auth credential before initialized/tools-call retry"
+        3,
+        "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert_eq!(
-        requests[0]
+    assert!(
+        requests.iter().all(|request| request
             .headers
             .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-account-scope-mcp-secret".to_string(),
-        )),
-        "initialize must receive the staged product-auth credential"
+            .any(|(name, value)| name == "authorization"
+                && value == "Bearer sk-account-scope-mcp-secret")),
+        "every MCP session request must receive the staged product-auth credential"
     );
     drop(requests);
 }
@@ -2486,6 +2572,7 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-direct-lease"),
+            None,
         )
         .await
         .unwrap();
@@ -2523,7 +2610,11 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
         .await
         .expect_err("production MCP egress must require staged credentials");
 
-    assert_eq!(error.stable_reason(), "request_denied");
+    // Per-cause MCP denial tokens: the SecretStoreLease guard now names its
+    // cause instead of the flat "request_denied" (see
+    // `McpRequestDeniedCause::DeniedCredentialSource`). The boundary is
+    // unchanged — denied before any transport, asserted below.
+    assert_eq!(error.stable_reason(), "mcp_denied_credential_source");
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
@@ -3762,6 +3853,171 @@ async fn host_http_egress_blocks_credential_shaped_response_body() {
     assert_eq!(error.response_bytes(), 43);
 }
 
+/// Caller-level regression for the credential-exchange egress path (audit MJ5).
+///
+/// `execute_credential_exchange` is the only unsanitized response path, used
+/// solely by the host OAuth provider client: a Slack `oauth.v2.access` response
+/// legitimately carries an `xoxp-` user token that the host auth system stores
+/// as a secret handle. Nearly every egress fake inherits the trait's default
+/// forward to `execute`, so before this test the skip-sanitization branch was
+/// exercised by no caller-level test. This drives the real host pipeline and
+/// pins both halves of the contract with an identical token-shaped body:
+/// `execute_credential_exchange` passes it through un-sanitized (token
+/// preserved, no redaction), while the default `execute` blocks it as a leak.
+#[tokio::test]
+async fn credential_exchange_passes_token_body_that_default_execute_blocks() {
+    const SLACK_USER_TOKEN: &str = "xoxp-1234567890-9876543210-abcdefghijklmnopqrstuvwxyz";
+    let token_body = format!(
+        r#"{{"ok":true,"app_id":"A0123456789","authed_user":{{"id":"U0123456789","access_token":"{SLACK_USER_TOKEN}","scope":"chat:write","token_type":"user"}},"team":{{"id":"T0123456789"}}}}"#
+    )
+    .into_bytes();
+
+    // The OAuth provider client POSTs a benign form body; the credential lives
+    // in the *response*. The same request shape drives both egress entry points.
+    let oauth_token_request =
+        |scope: ResourceScope, capability_id: CapabilityId| RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::System,
+            scope,
+            capability_id,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/api/oauth.v2.access".to_string(),
+            headers: vec![],
+            body: b"grant_type=authorization_code&code=stub-auth-code".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        };
+    let token_response = |body: Vec<u8>| NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: body.len() as u64,
+            resolved_ip: None,
+        },
+        body,
+    };
+
+    // Credential-exchange path: the token must reach the host auth caller intact.
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service =
+        services.host_http_egress(RecordingNetwork::ok(token_response(token_body.clone())));
+
+    let response = service
+        .execute_credential_exchange(oauth_token_request(scope, capability_id))
+        .await
+        .expect("credential exchange must deliver the token body to the host auth system");
+
+    assert_eq!(response.status, 200);
+    assert!(
+        !response.redaction_applied,
+        "credential-exchange responses must not be sanitized/redacted"
+    );
+    assert_eq!(
+        response.body, token_body,
+        "the token body must be delivered byte-for-byte"
+    );
+    assert!(
+        String::from_utf8_lossy(&response.body).contains(SLACK_USER_TOKEN),
+        "the xoxp- user token must survive the credential-exchange path"
+    );
+
+    // Default (sanitized) path: the identical token body is blocked as a leak.
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service =
+        services.host_http_egress(RecordingNetwork::ok(token_response(token_body.clone())));
+
+    let error = service
+        .execute(oauth_token_request(scope, capability_id))
+        .await
+        .expect_err("default execute must block a credential-shaped response body");
+
+    assert!(
+        matches!(
+            error,
+            RuntimeHttpEgressError::Response { ref reason, .. } if reason == "response_leak_blocked"
+        ),
+        "expected response_leak_blocked, got {error:?}"
+    );
+    assert!(
+        !error.to_string().contains(SLACK_USER_TOKEN),
+        "the blocked-leak error must not echo the token"
+    );
+}
+
+/// The skip-sanitization contract of `execute_credential_exchange` is only safe
+/// because token-exchange requests carry no injected credentials to redact (the
+/// response sanitizer is the layer that would scrub them from the body). A
+/// request that *does* carry injections on this path is a contract violation by
+/// the caller, so the pipeline fails closed before any credential staging or
+/// network dispatch instead of trusting the doc comment.
+#[tokio::test]
+async fn credential_exchange_rejects_requests_carrying_credential_injections() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let requests = Arc::clone(&network.requests);
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute_credential_exchange(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::System,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/api/oauth.v2.access".to_string(),
+            headers: vec![],
+            body: b"grant_type=authorization_code&code=stub-auth-code".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("stub-cred").expect("secret handle"),
+                source: RuntimeCredentialSource::StagedObligation { capability_id },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("credential exchange must reject requests carrying credential injections");
+
+    assert!(
+        matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "credential_exchange_injections_unsupported"
+        ),
+        "expected credential_exchange_injections_unsupported, got {error:?}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "the rejected exchange must never reach the network transport"
+    );
+}
+
 #[tokio::test]
 async fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
@@ -4429,6 +4685,22 @@ impl RuntimeHttpEgress for RequestPolicyStagingEgress {
         );
         self.inner.execute(request).await
     }
+
+    // Forward the exchange entry point too: without this, an exchange routed
+    // through the staging helper would silently take the trait default (the
+    // SANITIZING path) and green-light against the wrong pipeline.
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        stage_policy_sync(
+            &self.services,
+            &request.scope,
+            &request.capability_id,
+            request.network_policy.clone(),
+        );
+        self.inner.execute_credential_exchange(request).await
+    }
 }
 
 fn request_policy_staging_egress<N>(network: N) -> Arc<dyn RuntimeHttpEgress>
@@ -4517,6 +4789,7 @@ async fn stage_secret(
             scope.clone(),
             handle.clone(),
             SecretMaterial::from(material),
+            None,
         )
         .await
         .unwrap();

@@ -1,0 +1,23 @@
+[sqlfluff]
+dialect = postgres
+templater = raw
+# Keep CodeRabbit's SQLFluff pass focused on correctness/ambiguity checks; the
+# repo does not use SQLFluff for migration formatting or capitalization style.
+rules =
+    AL04,
+    AL08,
+    AL09,
+    AL10,
+    AM01,
+    AM02,
+    AM06,
+    AM07,
+    AM08,
+    AM09,
+    CV05,
+    CV06,
+    ST03,
+    ST08,
+    ST10,
+    ST11,
+    ST12

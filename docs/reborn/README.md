@@ -6,12 +6,14 @@ This page is intentionally short. Use it for progressive disclosure: start here,
 
 ## Current Reborn sources in this branch
 
-The `reborn-integration` branch currently exposes Reborn structure primarily through implementation crates, crate-local agent docs, tests, and CI guardrails.
+This repo exposes Reborn structure primarily through implementation crates, crate-local agent docs, tests, and CI guardrails.
 
 | Need | Start with |
 | --- | --- |
 | Standalone Reborn binary | `docs/reborn-binary.md` |
 | Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
+| Production cutover readiness closeout | `docs/reborn/production-cutover-readiness-closeout.md` |
+| Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |
 | Porting v1 channels to Reborn surfaces/ProductAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
 | Proposed subagent spawn design | `docs/reborn/subagent-spawn/README.md` |
 | Host API vocabulary | `crates/ironclaw_host_api/` |
@@ -37,9 +39,10 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 | E2E test harness | `tests/e2e/README.md` |
 | Live/replay testing guide | `tests/support/LIVE_TESTING.md` |
 
-## Future Reborn contract docs
+## Reborn contract docs
 
-When the Reborn contract-doc packet is present in this branch, agents should prefer these docs as the source of truth:
+Start with these common Reborn contract docs and prefer the full in-tree
+`docs/reborn/contracts/` set over older design notes:
 
 ```text
 docs/reborn/contracts/_contract-freeze-index.md
@@ -55,7 +58,7 @@ docs/reborn/contracts/skills-extension.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
-Until then, use the crate-local `CLAUDE.md` files, public crate APIs, and architecture tests as the branch-local source of truth.
+If a topic is not covered there yet, use the crate-local `CLAUDE.md` files, public crate APIs, and architecture tests as the branch-local source of truth.
 
 ## Harness docs
 
@@ -64,13 +67,13 @@ Until then, use the crate-local `CLAUDE.md` files, public crate APIs, and archit
 | Local per-worktree environment | `docs/reborn/harness/local-dev.md` |
 | Replay and compatibility fixtures | `docs/reborn/harness/replay.md` |
 | Logs, events, traces, debug bundles | `docs/reborn/harness/observability.md` |
+| Change-category landing policy for review | `docs/reborn/harness/landing-policy.md` |
 
 ## Existing harness assets
 
 Reborn should reuse the existing IronClaw harness where possible:
 
 - `scripts/replay-snap.sh`
-- `scripts/trace-coverage.sh`
 - `tests/fixtures/llm_traces/README.md`
 - `tests/support/LIVE_TESTING.md`
 - `.github/workflows/replay-gate.yml`

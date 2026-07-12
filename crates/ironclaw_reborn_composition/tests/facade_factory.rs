@@ -1,62 +1,85 @@
-#[cfg(feature = "libsql")]
-use std::collections::BTreeMap;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use std::sync::Arc;
+#[cfg(feature = "postgres")]
+#[path = "support/postgres.rs"]
+mod postgres_support;
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use std::{collections::BTreeMap, sync::Arc};
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use chrono::Utc;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::tokio_postgres;
 #[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
     ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
     GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, TrustClass, UserId,
 };
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, SurfaceKind,
+    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+use ironclaw_reborn_composition::{
+    LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
+use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornReadinessState, build_reborn_services,
+    RebornReadinessDiagnostic, RebornReadinessState, build_reborn_services,
+};
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::{
+    RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
+    RebornReadinessDiagnosticStatus,
+};
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_runner::turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::{
     InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
+#[cfg(feature = "postgres")]
+use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 #[cfg(feature = "libsql")]
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use serde_json::json;
 #[cfg(feature = "libsql")]
 use tokio::sync::Mutex;
 
 #[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+static HOSTED_TRIGGER_ACCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "libsql")]
 struct EnvVarGuard {
@@ -91,8 +114,48 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[path = "facade_factory/sandbox_process_ports.rs"]
-mod sandbox_process_ports;
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+struct PostgresEnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+impl PostgresEnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests serialize process-env mutation with
+        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn clear(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests serialize process-env mutation with
+        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
+}
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+impl Drop for PostgresEnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: PostgresEnvVarGuard is only constructed while
+        // HOSTED_TRIGGER_ACCESS_ENV_LOCK is held by this test module.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_master_key() -> SecretMaterial {
@@ -144,6 +207,21 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn hosted_secure_default_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Brokered,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
 #[cfg(feature = "libsql")]
 fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
@@ -157,6 +235,15 @@ fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
     }
+}
+
+#[cfg(feature = "libsql")]
+fn local_only_minimal_approval_policy() -> EffectiveRuntimePolicy {
+    let mut policy = local_only_runtime_policy();
+    policy.requested_profile = RuntimeProfile::LocalYolo;
+    policy.resolved_profile = RuntimeProfile::LocalYolo;
+    policy.approval_policy = ApprovalPolicy::Minimal;
+    policy
 }
 
 #[cfg(feature = "libsql")]
@@ -226,7 +313,163 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
         .with_provider_trust(provider_trust)
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_visible_request() -> VisibleCapabilityRequest {
+    let context = production_process_capability_execution_context();
+
+    VisibleCapabilityRequest::new(context, SurfaceKind::new("agent_loop").unwrap())
+        .with_policy(CapabilitySurfacePolicy::allow_all())
+        .with_provider_trust(production_builtin_provider_trust())
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_process_capability_execution_context() -> ExecutionContext {
+    let grants = CapabilitySet {
+        grants: vec![
+            local_dev_grant(
+                SHELL_CAPABILITY_ID,
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::Network,
+                ],
+            ),
+            local_dev_grant(
+                SPAWN_SUBAGENT_CAPABILITY_ID,
+                vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+            ),
+        ],
+    };
+    ExecutionContext::local_default(
+        UserId::new("production-user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::FirstParty,
+        TrustClass::UserTrusted,
+        grants,
+        MountView::default(),
+    )
+    .unwrap()
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
+    let mut provider_trust = BTreeMap::new();
+    provider_trust.insert(
+        ExtensionId::new("builtin").unwrap(),
+        production_builtin_trust_decision(),
+    );
+    provider_trust
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::AdminConfig,
+        evaluated_at: Utc::now(),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn assert_failed_capability(
+    outcome: RuntimeCapabilityOutcome,
+    capability_id: &str,
+    expected_kind: RuntimeFailureKind,
+    expected_message: &str,
+) {
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected failed {capability_id} invocation, got {outcome:?}");
+    };
+    assert_eq!(failure.capability_id.as_str(), capability_id);
+    assert_eq!(failure.kind, expected_kind);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(expected_message)),
+        "expected {capability_id} failure message to contain {expected_message:?}, got {:?}",
+        failure.message
+    );
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn assert_process_capabilities_unavailable_for_processless_runtime(
+    services: &RebornServices,
+    expected_shell_failure_kind: RuntimeFailureKind,
+    expected_shell_failure_message: &str,
+) {
+    let runtime = services
+        .host_runtime
+        .as_deref()
+        .expect("production services expose host runtime");
+    let surface = runtime
+        .visible_capabilities(production_builtin_visible_request())
+        .await
+        .expect("visible capabilities resolve");
+    let ids = surface
+        .capabilities
+        .iter()
+        .map(|capability| capability.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.contains(&SHELL_CAPABILITY_ID),
+        "builtin.shell must not be visible when process_backend == None: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID),
+        "process-effect builtin.spawn_subagent must not be visible when process_backend == None: {ids:?}"
+    );
+
+    let shell_outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            production_process_capability_execution_context(),
+            CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+            ResourceEstimate::default(),
+            json!({"command": "echo should-not-run"}),
+            production_builtin_trust_decision(),
+        ))
+        .await
+        .expect("shell invocation returns an outcome");
+    assert_failed_capability(
+        shell_outcome,
+        SHELL_CAPABILITY_ID,
+        expected_shell_failure_kind,
+        expected_shell_failure_message,
+    );
+
+    let spawn_outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            production_process_capability_execution_context(),
+            CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            ResourceEstimate::default(),
+            json!({}),
+            production_builtin_trust_decision(),
+        ))
+        .await
+        .expect("spawn_subagent invocation returns an outcome");
+    assert_failed_capability(
+        spawn_outcome,
+        SPAWN_SUBAGENT_CAPABILITY_ID,
+        RuntimeFailureKind::Authorization,
+        "ProcessBackendKind::None",
+    );
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
@@ -323,6 +566,30 @@ fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerH
     (handle.wake_notifier(), handle)
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn assert_production_services_ready_with_first_party_runtime(services: &RebornServices) {
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::ProductionValidated
+    );
+    assert!(services.turn_coordinator.is_some());
+    assert!(services.product_auth.is_some());
+
+    let runtime = services
+        .host_runtime
+        .as_deref()
+        .expect("production services expose host runtime");
+    let health = runtime
+        .health()
+        .await
+        .expect("production host runtime health should resolve");
+    assert!(
+        health.ready,
+        "production host runtime should report first-party backend ready"
+    );
+    assert!(health.missing_runtime_backends.is_empty());
+}
+
 #[cfg(feature = "libsql")]
 async fn libsql_db_at(path: impl AsRef<std::path::Path>) -> Arc<libsql::Database> {
     Arc::new(
@@ -357,6 +624,7 @@ async fn postgres_pool_or_skip() -> Option<(
     String,
 )> {
     let (container, database_url) = start_postgres_container().await?;
+    assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
         .expect("testcontainer database URL must parse");
@@ -365,10 +633,6 @@ async fn postgres_pool_or_skip() -> Option<(
         .max_size(4)
         .build()
         .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
-        .await
-        .expect("Postgres testcontainer must accept connections");
     Some((container, pool, database_url))
 }
 
@@ -429,6 +693,10 @@ async fn disabled_returns_empty_services() {
     assert!(services.host_runtime.is_none());
     assert!(services.turn_coordinator.is_none());
     assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
+    assert_eq!(
+        services.readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::disabled()]
+    );
 }
 
 #[tokio::test]
@@ -448,6 +716,35 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.readiness.facades.turn_coordinator);
     assert!(services.readiness.facades.product_auth);
     assert!(services.product_auth.is_some());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn hosted_single_tenant_volume_hides_process_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = ironclaw_reborn_composition::local_runtime_build_input_with_options(
+        RebornCompositionProfile::HostedSingleTenantVolume,
+        "hosted-volume-owner",
+        dir.path().to_path_buf(),
+        Default::default(),
+    )
+    .unwrap();
+    let services = build_reborn_services(input).await.unwrap();
+
+    assert_eq!(
+        services.readiness.profile,
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::HostedSingleTenantVolumePreviewValidated
+    );
+    assert_process_capabilities_unavailable_for_processless_runtime(
+        &services,
+        RuntimeFailureKind::Authorization,
+        "ProcessBackendKind::None",
+    )
+    .await;
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -779,7 +1076,11 @@ async fn production_rejects_empty_trust_policy() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn production_requires_live_turn_wake_notifier() {
+async fn production_self_mints_turn_wake_wiring() {
+    // Production no longer requires an externally-supplied turn-run wake notifier:
+    // `build_production_shaped` mints its own `SchedulerWakeWiring` so the
+    // coordinator and scheduler always share one channel. A build with every other
+    // required input present (and NO `.with_turn_run_wake_notifier`) must succeed.
     let dir = tempfile::tempdir().unwrap();
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
 
@@ -798,10 +1099,11 @@ async fn production_requires_live_turn_wake_notifier() {
     )
     .await;
 
-    assert!(matches!(
-        result,
-        Err(RebornBuildError::MissingTurnRunWakeNotifier)
-    ));
+    assert!(
+        result.is_ok(),
+        "production build must succeed with a self-minted wake wiring; got: {:?}",
+        result.err()
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -869,6 +1171,51 @@ async fn production_rejects_local_only_runtime_policy() {
         ),
         "local-only runtime policy should fail production wiring: {report:?}"
     );
+    let diagnostics = RebornReadinessDiagnostic::from_production_wiring_report(
+        RebornCompositionProfile::Production,
+        &report,
+    );
+    assert!(
+        RebornReadinessDiagnostic::from_production_wiring_report(
+            RebornCompositionProfile::LocalDev,
+            &report,
+        )
+        .is_empty(),
+        "production wiring reports should not produce production diagnostics for local-dev profiles"
+    );
+    assert!(
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimePolicy,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
+        "runtime policy local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.contains(
+            &RebornReadinessDiagnostic::production_blocker(
+                RebornCompositionProfile::Production,
+                RebornReadinessDiagnosticComponent::RuntimeProcessPort,
+                RebornReadinessDiagnosticReason::LocalOnly,
+            )
+            .expect("production profile should create a blocker")
+        ),
+        "runtime process port local-only issue should map to readiness diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.status == RebornReadinessDiagnosticStatus::Blocking)
+    );
+    let serialized = serde_json::to_string(&diagnostics).unwrap();
+    assert!(!serialized.contains("LocalOnlyImplementation"));
+    assert!(!serialized.contains("EffectiveRuntimePolicy"));
+    assert!(!serialized.contains("ironclaw_"));
+    assert!(!serialized.contains("/root/"));
+    assert!(!serialized.contains("postgres://"));
 }
 
 #[cfg(feature = "libsql")]
@@ -961,7 +1308,9 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
-        .with_runtime_process_binding(test_sandbox_process_binding()),
+        .with_runtime_process_binding(test_sandbox_process_binding())
+        .with_required_runtime_backends([RuntimeKind::FirstParty])
+        .require_runtime_http_egress(),
     )
     .await;
 
@@ -969,13 +1318,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
 
     let services =
         result.expect("production libsql services should build with a sandbox process binding");
-    assert_eq!(
-        services.readiness.state,
-        RebornReadinessState::ProductionValidated
-    );
-    assert!(services.host_runtime.is_some());
-    assert!(services.turn_coordinator.is_some());
-    assert!(services.product_auth.is_some());
+    assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1026,10 +1369,27 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
     let dir = tempfile::tempdir().unwrap();
     let services = build_reborn_services(
         RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(local_only_runtime_policy()),
+            .with_runtime_policy(local_only_minimal_approval_policy()),
     )
     .await
     .expect("local-dev services should build with trigger management runtime");
+
+    // The Tools-settings global auto-approve switch is authoritative for
+    // first-party tool dispatch; turn it on for the dispatch scope so
+    // these trigger management calls exercise the dispatch path instead of
+    // stopping at the per-tool approval gate.
+    let auto_approve = services
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test");
+    let auto_approve_scope = trigger_management_execution_context().resource_scope;
+    auto_approve
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: Principal::User(auto_approve_scope.user_id.clone()),
+            scope: auto_approve_scope,
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for trigger management dispatch");
 
     let runtime = services
         .host_runtime
@@ -1041,7 +1401,7 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         json!({
             "name": "Daily production summary",
             "prompt": "Summarize production state",
-            "cron": "0 8 * * *"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
     )
     .await;
@@ -1124,12 +1484,183 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
     assert_eq!(count, 0);
 }
 
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[tokio::test]
+async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
+    let Some((_container, _pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let _env_lock = HOSTED_TRIGGER_ACCESS_ENV_LOCK.lock().await;
+    let _database_url = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_URL", &database_url);
+    let _secret_master_key = PostgresEnvVarGuard::set(
+        "IRONCLAW_REBORN_SECRET_MASTER_KEY",
+        "01234567890123456789012345678901",
+    );
+    let _pool_max_size = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+    let _resource_governor_singleton = PostgresEnvVarGuard::set(
+        "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
+        "true",
+    );
+    let _allow_cleartext =
+        PostgresEnvVarGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "true");
+    let _ssl_mode = PostgresEnvVarGuard::clear("DATABASE_SSLMODE");
+    let root = tempfile::tempdir().expect("runtime root");
+    let config = RebornConfigFile {
+        storage: Some(StorageSection {
+            backend: Some(StorageBackend::Postgres),
+            pool_max_size: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let tenant_id = TenantId::new("hosted-trigger-tenant").expect("tenant id");
+    let user_id = UserId::new("hosted-trigger-user").expect("user id");
+    let agent_id = AgentId::new("hosted-trigger-agent").expect("agent id");
+    let project_id = ProjectId::new("hosted-trigger-project").expect("project id");
+
+    let input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
+        RebornCompositionProfile::HostedSingleTenant,
+        "hosted-trigger-owner",
+        root.path().to_path_buf(),
+        Some(&config),
+    )
+    .expect("hosted postgres build input resolves from env");
+    let store = input
+        .open_hosted_single_tenant_trigger_access_store()
+        .await
+        .expect("open hosted trigger access store");
+    store
+        .seed_local_access(LocalTriggerAccessSeed {
+            tenant_id: &tenant_id,
+            user_id: &user_id,
+            agent_id: Some(&agent_id),
+            project_id: Some(&project_id),
+            role: LocalTriggerAccessRole::Owner,
+            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
+        })
+        .await
+        .expect("seed hosted trigger access");
+    drop(store);
+
+    let reopened_input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
+        RebornCompositionProfile::HostedSingleTenant,
+        "hosted-trigger-owner",
+        root.path().to_path_buf(),
+        Some(&config),
+    )
+    .expect("reopened hosted postgres build input resolves from env");
+    let reopened_store = reopened_input
+        .open_hosted_single_tenant_trigger_access_store()
+        .await
+        .expect("reopen hosted trigger access store");
+
+    assert!(
+        reopened_store
+            .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
+            .await
+            .expect("check reopened hosted trigger access"),
+        "hosted-single-tenant trigger access must persist through the filesystem-backed Postgres store"
+    );
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
-#[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]
 async fn production_postgres_services_wire_first_party_runtime_http_egress() {
-    // Restore the ProductionValidated readiness and host_runtime.health()
-    // happy-path assertions that are temporarily fail-closed below.
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool,
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding())
+        .with_required_runtime_backends([RuntimeKind::FirstParty])
+        .require_runtime_http_egress(),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    let services =
+        result.expect("production postgres services should build with a sandbox process binding");
+    assert_production_services_ready_with_first_party_runtime(&services).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn production_postgres_secure_default_builds_without_process_port() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool,
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(hosted_secure_default_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .expect("postgres secure_default production should not require a process port");
+
+    handle.shutdown().await;
+
+    assert_production_services_ready_with_first_party_runtime(&services).await;
+    assert_process_capabilities_unavailable_for_processless_runtime(
+        &services,
+        RuntimeFailureKind::MissingRuntime,
+        "unknown capability",
+    )
+    .await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_libsql_secure_default_builds_without_process_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(hosted_secure_default_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .expect("secure_default production should not require a process port");
+
+    handle.shutdown().await;
+
+    assert_production_services_ready_with_first_party_runtime(&services).await;
+    assert_process_capabilities_unavailable_for_processless_runtime(
+        &services,
+        RuntimeFailureKind::MissingRuntime,
+        "unknown capability",
+    )
+    .await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1236,6 +1767,7 @@ async fn migration_dry_run_validates_libsql_shape() {
         services.readiness.state,
         RebornReadinessState::MigrationDryRunValidated
     );
+    assert!(services.readiness.diagnostics.is_empty());
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
 }

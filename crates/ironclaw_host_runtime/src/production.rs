@@ -13,22 +13,29 @@
 //! claims. The default fail-closed policy denies authority until composition
 //! supplies a concrete host policy.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use futures_util::future::join_all;
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalScope, permission_mode_allows_persistent_approval,
+};
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
-    CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
-    CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityAuthResumeRequest, CapabilityHost, CapabilityInvocationError,
+    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
+    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
-    RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DenyReason,
+    DispatchFailureKind, InvocationId, PackageSource, Principal, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
@@ -39,18 +46,66 @@ use ironclaw_processes::{
 use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
+use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 use ironclaw_turns::run_profile::LoopSafeSummary;
+
+fn trace_capability_latency_ok(
+    operation: &'static str,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    started_at: Option<Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "host_runtime",
+        operation,
+        started_at,
+        capability_id = %capability_id,
+        tenant_id = %scope.tenant_id,
+        user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %scope.invocation_id,
+        "host runtime capability operation completed",
+    );
+}
+
+fn trace_capability_latency_error<E: ?Sized>(
+    operation: &'static str,
+    capability_id: &CapabilityId,
+    scope: &ResourceScope,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "host_runtime",
+        operation,
+        started_at,
+        "error",
+        capability_id = %capability_id,
+        tenant_id = %scope.tenant_id,
+        user_id = %scope.user_id,
+        agent_id = scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        mission_id = scope.mission_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = scope.thread_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        invocation_id = %scope.invocation_id,
+        "host runtime capability operation failed",
+    );
+}
 
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId, RuntimeStatusRequest,
-    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    plan_capability, surface::CapabilityCatalog,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
+    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, obligations::secret_owner_scope, plan_capability,
+    surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -63,6 +118,10 @@ pub struct DefaultHostRuntime {
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     run_state_approval_store: Option<Arc<dyn RunStateApprovalStore>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
+    // arch-exempt: optional_arc, minimal/test compositions intentionally disable
+    // persistent approval replay until the product revoke control plane is split out,
+    // plan #4539
+    persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_store: Option<Arc<dyn ProcessStore>>,
     process_result_store: Option<Arc<dyn ProcessResultStore>>,
@@ -70,6 +129,19 @@ pub struct DefaultHostRuntime {
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
+    /// Optional secret store used for pre-flight credential presence checks.
+    ///
+    /// When present, capability dispatch (both `invoke_capability` and
+    /// `spawn_capability`) checks whether all required credentials declared in the
+    /// capability manifest are present before the authorization step. This surfaces
+    /// `AuthRequired` ahead of the approval gate so users are never asked to
+    /// approve an action that cannot yet execute.
+    ///
+    /// When absent the pre-flight is skipped; the dispatch-time obligation check
+    /// remains the enforcement backstop regardless.
+    // arch-exempt: optional_arc, credential pre-flight is disabled in minimal/test
+    // host-runtime graphs that do not wire a secret store, plan #4539 (Fix B)
+    credential_preflight_store: Option<Arc<dyn SecretStore>>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -127,6 +199,7 @@ impl DefaultHostRuntime {
             approval_requests: None,
             run_state_approval_store: None,
             capability_leases: None,
+            persistent_approval_policies: None,
             process_manager: None,
             process_store: None,
             process_result_store: None,
@@ -134,6 +207,7 @@ impl DefaultHostRuntime {
             surface_filesystem: None,
             runtime_health: None,
             obligation_handler: None,
+            credential_preflight_store: None,
             surface_version,
             runtime_policy,
         }
@@ -199,6 +273,16 @@ impl DefaultHostRuntime {
         capability_leases: Arc<dyn CapabilityLeaseStore>,
     ) -> Self {
         self.capability_leases = Some(capability_leases);
+        self
+    }
+
+    /// Attaches reusable approval policy overrides used to inject scoped,
+    /// manifest-bounded grants before ordinary authorization.
+    pub fn with_persistent_approval_policies(
+        mut self,
+        policies: Arc<dyn PersistentApprovalPolicyStore>,
+    ) -> Self {
+        self.persistent_approval_policies = Some(policies);
         self
     }
 
@@ -277,6 +361,30 @@ impl DefaultHostRuntime {
         self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
     }
 
+    /// Attaches the secret store used for credential pre-flight checks.
+    ///
+    /// When set, `invoke_capability` and `spawn_capability` query secret presence
+    /// for all required credentials declared in the capability manifest *before*
+    /// the approval gate fires. This prevents burning a human approval on an
+    /// invocation that cannot yet succeed because a credential is missing.
+    ///
+    /// The dispatch-time obligation check remains the enforcement backstop
+    /// regardless of whether this store is set.
+    ///
+    /// Production code must use `HostRuntimeServices::build_host_runtime()` which
+    /// wires the secret store automatically. This setter is `pub(crate)` to prevent
+    /// a second public seam for secret-store configuration on the production facade.
+    // arch-exempt: optional_arc, genuinely optional — minimal/test graphs that
+    // never need pre-flight skip this; production wires it from HostRuntimeServices,
+    // plan #4539 (Fix B)
+    pub(crate) fn with_credential_preflight_store(
+        mut self,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
+        self.credential_preflight_store = Some(secret_store);
+        self
+    }
+
     /// Spawns an already-authorized process request through the configured
     /// process manager.
     pub async fn spawn_process(
@@ -316,6 +424,7 @@ impl HostRuntime for DefaultHostRuntime {
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
+        let total_started_at = live_latency_started_at();
         // Forward the (currently advisory) idempotency key into spans for
         // audit/tracing only — dedupe enforcement is not yet implemented at
         // this layer (see `RuntimeCapabilityRequest::idempotency_key`).
@@ -334,6 +443,12 @@ impl HostRuntime for DefaultHostRuntime {
                 runtime_policy_error_kind = error.kind(),
                 "capability runtime policy rejected invocation before dispatch"
             );
+            trace_capability_latency_ok(
+                "invoke_capability_policy_rejected",
+                &capability_id,
+                &scope,
+                total_started_at,
+            );
             return Ok(runtime_policy_failure(capability_id, error));
         }
 
@@ -345,12 +460,77 @@ impl HostRuntime for DefaultHostRuntime {
                     trust_error_kind = error.kind(),
                     "capability trust evaluation failed before dispatch"
                 );
+                trace_capability_latency_ok(
+                    "invoke_capability_trust_rejected",
+                    &capability_id,
+                    &scope,
+                    total_started_at,
+                );
                 return Ok(trust_evaluation_failure(capability_id, error));
             }
         };
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+
+        // Validate the execution context before the credential pre-flight queries
+        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
+        // could probe secret-store presence under a forged resource_scope that does
+        // not match the top-level tenant/user/agent/project fields.
+        if let Err(error) = context.validate() {
+            return Err(HostRuntimeError::invalid_request(error.to_string()));
+        }
+
+        // Pre-flight credential check: surface AuthRequired BEFORE the approval
+        // gate fires. This prevents a human approval being consumed for an action
+        // that cannot yet succeed because a required credential is missing.
+        //
+        // Design note: the pre-flight is trust-class-agnostic by design — it runs
+        // before the authorizer and trust/authorization checks. The dispatch-time
+        // obligation check (which runs after those checks) is the enforcing layer.
+        // The pre-flight provides ordering only (credentials before approval gate).
+        let credential_preflight_started_at = live_latency_started_at();
+        if let Some(auth_required) = self
+            .credential_preflight_check(&capability_id, &scope, &registry)
+            .await
+        {
+            trace_capability_latency_ok(
+                "credential_preflight_check",
+                &capability_id,
+                &scope,
+                credential_preflight_started_at,
+            );
+            trace_capability_latency_ok(
+                "invoke_capability_auth_required",
+                &capability_id,
+                &scope,
+                total_started_at,
+            );
+            return Ok(auth_required);
+        }
+        trace_capability_latency_ok(
+            "credential_preflight_check",
+            &capability_id,
+            &scope,
+            credential_preflight_started_at,
+        );
+
+        let approval_started_at = live_latency_started_at();
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::Dispatch,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
+        trace_capability_latency_ok(
+            "persistent_approval_policy",
+            &capability_id,
+            &scope,
+            approval_started_at,
+        );
         let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
@@ -361,19 +541,63 @@ impl HostRuntime for DefaultHostRuntime {
             trust_decision,
         };
 
+        let dispatch_started_at = live_latency_started_at();
         match host.invoke_json(invocation).await {
-            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                completed_outcome_from(result, capability_id),
-            ))),
+            Ok(result) => {
+                trace_capability_latency_ok(
+                    "capability_host_invoke_json",
+                    &capability_id,
+                    &scope,
+                    dispatch_started_at,
+                );
+                trace_capability_latency_ok(
+                    "invoke_capability",
+                    &capability_id,
+                    &scope,
+                    total_started_at,
+                );
+                Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                    completed_outcome_from(result, capability_id),
+                )))
+            }
             Err(error) => {
+                trace_capability_latency_error(
+                    "capability_host_invoke_json",
+                    &capability_id,
+                    &scope,
+                    dispatch_started_at,
+                    &error,
+                );
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability invocation failed"
                 );
-                self.translate_invocation_error(error, capability_id, scope, invocation_id)
-                    .await
+                let translated = self
+                    .translate_invocation_error(
+                        error,
+                        capability_id.clone(),
+                        scope.clone(),
+                        invocation_id,
+                    )
+                    .await;
+                match &translated {
+                    Ok(_) => trace_capability_latency_ok(
+                        "invoke_capability",
+                        &capability_id,
+                        &scope,
+                        total_started_at,
+                    ),
+                    Err(error) => trace_capability_latency_error(
+                        "invoke_capability",
+                        &capability_id,
+                        &scope,
+                        total_started_at,
+                        error,
+                    ),
+                }
+                translated
             }
         }
     }
@@ -390,7 +614,16 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
-        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
+            SpawnInputPreparation::Ready(input) => input,
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    "process sandbox spawn rejected malformed model plan as recoverable tool error"
+                );
+                return Ok(RuntimeCapabilityOutcome::Failed(failure));
+            }
+        };
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
@@ -425,6 +658,35 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+
+        // Validate the execution context before the credential pre-flight queries
+        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
+        // could probe secret-store presence under a forged resource_scope that does
+        // not match the top-level tenant/user/agent/project fields.
+        if let Err(error) = context.validate() {
+            return Err(HostRuntimeError::invalid_request(error.to_string()));
+        }
+
+        // Pre-flight credential check: surface AuthRequired BEFORE the approval
+        // gate fires. The pre-flight is trust-class-agnostic by design — the
+        // dispatch-time obligation check (which runs after trust/authorization)
+        // is the enforcing layer.
+        if let Some(auth_required) = self
+            .credential_preflight_check(&capability_id, &scope, &registry)
+            .await
+        {
+            return Ok(auth_required);
+        }
+
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::SpawnCapability,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
         let host = self.capability_host(&registry);
         let spawn = CapabilitySpawnRequest {
             context,
@@ -464,6 +726,12 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
+        if let Some(outcome) = self
+            .resume_actor_preflight_guard(&context, &capability_id)
+            .await?
+        {
+            return Ok(outcome);
+        }
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
@@ -554,6 +822,130 @@ impl HostRuntime for DefaultHostRuntime {
         }
     }
 
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityAuthResumeRequest {
+            mut context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+            approval_request_id,
+        } = request;
+        if let Some(outcome) = self
+            .resume_actor_preflight_guard(&context, &capability_id)
+            .await?
+        {
+            return Ok(outcome);
+        }
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                approval_request_id = approval_request_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
+                idempotency_key = %key,
+                "capability auth-resume accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected auth-resume before dispatch"
+            );
+            self.fail_matching_blocked_auth_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                error.kind(),
+            )
+            .await;
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before auth-resume"
+                );
+                self.fail_matching_blocked_auth_resume_on_preflight_error(
+                    &context,
+                    &capability_id,
+                    error.kind(),
+                )
+                .await;
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let registry = self.registry.snapshot();
+        // Re-apply the persistent-approval grant on the auth-resume preflight,
+        // mirroring `dispatch_capability`. The original dispatch injected this
+        // grant so the authorizer returned `Allow`; the loop re-dispatches the
+        // resume with a freshly built context that does not carry it. Without
+        // this, a capability authorized only by a persistent-approval grant
+        // (e.g. `extension_activate` under admin-config FirstParty trust) is
+        // re-authorized grant-less after the user supplies the missing
+        // credential and is denied — so the credential gate resumes only to
+        // fail authorization, even though a subsequent fresh dispatch succeeds.
+        // The helper is a no-op when no matching policy/grant exists, so
+        // capabilities that genuinely require fresh approval are unaffected.
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::Dispatch,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
+        let host = self.capability_host(&registry);
+        let auth_resume = CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+            approval_request_id,
+        };
+
+        match host.auth_resume_json(auth_resume).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                completed_outcome_from(result, capability_id),
+            ))),
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability auth-resume failed"
+                );
+                match error {
+                    CapabilityInvocationError::AuthorizationRequiresAuth {
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    } => Ok(auth_required_outcome(
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    )),
+                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                        other,
+                        capability_id,
+                    ))),
+                }
+            }
+        }
+    }
+
     async fn resume_spawn_capability(
         &self,
         request: RuntimeCapabilityResumeRequest,
@@ -567,7 +959,22 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
-        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        if let Some(outcome) = self
+            .resume_actor_preflight_guard(&context, &capability_id)
+            .await?
+        {
+            return Ok(outcome);
+        }
+        let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
+            SpawnInputPreparation::Ready(input) => input,
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    "process sandbox spawn resume rejected malformed model plan as recoverable tool error"
+                );
+                return Ok(RuntimeCapabilityOutcome::Failed(failure));
+            }
+        };
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
@@ -924,6 +1331,158 @@ impl DefaultHostRuntime {
         Ok(())
     }
 
+    async fn apply_persistent_approval_policy(
+        &self,
+        context: &mut ironclaw_host_api::ExecutionContext,
+        registry: &ExtensionRegistry,
+        action: PersistentApprovalAction,
+        capability_id: &CapabilityId,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) {
+        let Some(policies) = self.persistent_approval_policies.as_ref() else {
+            return;
+        };
+        let Some(descriptor) = registry.get_capability(capability_id) else {
+            return;
+        };
+        if !permission_mode_allows_persistent_approval(descriptor.default_permission) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                permission = ?descriptor.default_permission,
+                "persistent approval skipped for manifest policy"
+            );
+            return;
+        }
+        let scopes = persistent_approval_lookup_scopes(&context.resource_scope);
+        let grantees = persistent_approval_grantees(context);
+        let lookup_results = join_all(
+            scopes
+                .into_iter()
+                .flat_map(|scope| {
+                    grantees
+                        .iter()
+                        .cloned()
+                        .map(move |grantee| (scope.clone(), grantee))
+                })
+                .map(|(scope, grantee)| {
+                    let policies = Arc::clone(policies);
+                    let key = PersistentApprovalPolicyKey {
+                        scope,
+                        action,
+                        capability_id: capability_id.clone(),
+                        grantee,
+                    };
+                    async move { policies.lookup(&key).await }
+                }),
+        )
+        .await;
+        for policy in lookup_results {
+            let policy = match policy {
+                Ok(policy) => policy,
+                Err(error) => {
+                    tracing::warn!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "persistent approval policy lookup failed; falling back to normal authorization"
+                    );
+                    continue;
+                }
+            };
+            let Some(policy) = policy else {
+                continue;
+            };
+            let Some(grant) = policy.active_grant() else {
+                continue;
+            };
+            let mut candidate_context = context.clone();
+            candidate_context.grants.grants.clear();
+            candidate_context.grants.grants.push(grant.clone());
+            let decision = match action {
+                PersistentApprovalAction::Dispatch => {
+                    self.authorizer
+                        .authorize_dispatch_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+                PersistentApprovalAction::SpawnCapability => {
+                    self.authorizer
+                        .authorize_spawn_with_trust(
+                            &candidate_context,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+            };
+            match decision {
+                Decision::Allow { .. } => {}
+                Decision::Deny { reason } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        deny_reason = ?reason,
+                        "persistent approval policy matched but cannot authorize invocation"
+                    );
+                    continue;
+                }
+                Decision::RequireApproval { .. } => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        "persistent approval policy matched but still requires approval"
+                    );
+                    continue;
+                }
+            }
+            tracing::debug!(
+                capability_id = %capability_id,
+                "persistent approval policy matched; injecting scoped grant"
+            );
+            context.grants.grants.push(grant);
+            break;
+        }
+    }
+
+    /// Rejects a resume whose sealed ingress actor differs from the actor that
+    /// started the run. Callers invoke this before any preflight that can fail
+    /// or mutate the blocked run; `CapabilityHost` repeats the check before
+    /// claiming leases or dispatching.
+    async fn resume_actor_preflight_guard(
+        &self,
+        context: &ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+    ) -> Result<Option<RuntimeCapabilityOutcome>, HostRuntimeError> {
+        context
+            .validate()
+            .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))?;
+        let Some(run_state) = self.run_state.as_ref() else {
+            return Ok(None);
+        };
+        let Some(record) = run_state
+            .get(&context.resource_scope, context.invocation_id)
+            .await
+            .map_err(unavailable_from_run_state)?
+        else {
+            return Ok(None);
+        };
+        if record.authenticated_actor_user_id == context.authenticated_actor_user_id {
+            return Ok(None);
+        }
+
+        let error = CapabilityInvocationError::AuthorizationDenied {
+            capability: capability_id.clone(),
+            reason: DenyReason::PolicyDenied,
+        };
+        Ok(Some(RuntimeCapabilityOutcome::Failed(failure_from(
+            error,
+            capability_id.clone(),
+        ))))
+    }
+
     async fn fail_matching_blocked_resume_on_preflight_error(
         &self,
         context: &ironclaw_host_api::ExecutionContext,
@@ -956,6 +1515,7 @@ impl DefaultHostRuntime {
         if record.status != RunStatus::BlockedApproval
             || &record.capability_id != capability_id
             || record.approval_request_id != Some(approval_request_id)
+            || record.authenticated_actor_user_id != context.authenticated_actor_user_id
         {
             return;
         }
@@ -970,6 +1530,66 @@ impl DefaultHostRuntime {
                 preflight_error_kind = error_kind,
                 transition_error = %unavailable_from_run_state(error),
                 "blocked resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
+            );
+        }
+    }
+
+    /// Mirrors `fail_matching_blocked_resume_on_preflight_error` for
+    /// `auth_resume_capability` preflight rejections.  Checks for a
+    /// `BlockedAuth` run record matching the capability; if found,
+    /// transitions it to `Failed` so it is not left as a stale resumable
+    /// gate after the caller has returned a terminal failure outcome.
+    ///
+    /// The `approval_request_id` carried by the auth-resume request is
+    /// intentionally NOT compared here: the `BlockedAuth` transition always
+    /// clears `approval_request_id` to `None` on the persisted record, so
+    /// any equality check against `Some(id)` would always fail and silently
+    /// skip the fail-transition.  `invocation_id` (embedded in `context`)
+    /// already uniquely identifies the run.
+    async fn fail_matching_blocked_auth_resume_on_preflight_error(
+        &self,
+        context: &ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+        error_kind: &'static str,
+    ) {
+        if context.validate().is_err() {
+            return;
+        }
+        let Some(run_state) = self.run_state.as_ref() else {
+            return;
+        };
+        let scope = &context.resource_scope;
+        let invocation_id = context.invocation_id;
+        let record = match run_state.get(scope, invocation_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    invocation_id = %invocation_id,
+                    capability_id = %capability_id,
+                    preflight_error_kind = error_kind,
+                    transition_error = %unavailable_from_run_state(error),
+                    "blocked auth-resume preflight failed, but run-state lookup failed; leaving run state unchanged",
+                );
+                return;
+            }
+        };
+        if record.status != RunStatus::BlockedAuth
+            || &record.capability_id != capability_id
+            || record.authenticated_actor_user_id != context.authenticated_actor_user_id
+        {
+            return;
+        }
+        if let Err(error) = run_state
+            .fail(scope, invocation_id, error_kind.to_string())
+            .await
+        {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                capability_id = %capability_id,
+                preflight_error_kind = error_kind,
+                transition_error = %unavailable_from_run_state(error),
+                "blocked auth-resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
             );
         }
     }
@@ -1073,6 +1693,92 @@ impl DefaultHostRuntime {
             .await
             .map_err(unavailable_from_run_state)?;
         Ok(record.and_then(|record| record.approval_request_id))
+    }
+
+    /// Checks whether all required credentials declared in the capability
+    /// manifest are present in the secret store.
+    ///
+    /// `registry` is the already-snapshotted registry from the caller; the
+    /// caller is responsible for taking a single snapshot and passing it here
+    /// to avoid a redundant `registry.snapshot()` inside this method.
+    ///
+    /// Returns `Some(RuntimeCapabilityOutcome::AuthRequired)` if any required
+    /// secret is absent, or `None` when all secrets are present (or when no
+    /// secret store is wired, i.e. pre-flight is disabled).
+    ///
+    /// The dispatch-time obligation check remains the enforcement backstop —
+    /// this method provides ordering only (credentials before approval gate).
+    ///
+    /// ## Failure handling
+    ///
+    /// On a transient secret-store `Err`, the pre-flight is skipped entirely
+    /// (returns `None`) rather than treating the error as "credential absent"
+    /// and firing `AuthRequired`. A backend failure must not burn a user auth
+    /// interaction — the dispatch-time obligation check enforces the credential
+    /// requirement and will catch genuine absences at execution time.
+    async fn credential_preflight_check(
+        &self,
+        capability_id: &CapabilityId,
+        scope: &ResourceScope,
+        registry: &ExtensionRegistry,
+    ) -> Option<RuntimeCapabilityOutcome> {
+        let secret_store = self.credential_preflight_store.as_ref()?;
+
+        let descriptor = registry.get_capability(capability_id)?;
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(descriptor);
+
+        if required_secrets.is_empty() {
+            return None;
+        }
+
+        for handle in &required_secrets {
+            // `secret_owner_scope` is the single owner of the presence+ownership rule,
+            // shared with the dispatch-time obligation backstop
+            // (obligations::preflight_secret_injection / inject_secrets) so the paths
+            // cannot drift on "what counts as a present credential" or "which scope owns
+            // it". Here we only need presence (Some vs None) for gate ordering; the happy
+            // path intentionally re-checks at dispatch time, where the backstop is the
+            // authority. (Accepted double-read.)
+            match secret_owner_scope(secret_store.as_ref(), scope, handle)
+                .await
+                .map(|owner| owner.is_some())
+            {
+                Ok(true) => {
+                    // Secret present — continue checking.
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        secret_handle = handle.as_str(),
+                        "credential pre-flight: required secret absent; surfacing AuthRequired before approval gate"
+                    );
+                    return Some(auth_required_outcome(
+                        capability_id.clone(),
+                        required_secrets,
+                        credential_requirements,
+                    ));
+                }
+                Err(error) => {
+                    // Fail-open: a transient store error must not masquerade as a
+                    // missing credential and burn a user auth interaction. Skip the
+                    // pre-flight entirely — the dispatch-time obligation check is the
+                    // enforcement backstop and will catch genuine absences at execution
+                    // time. The cause is logged (sanitized; SecretStoreError carries no
+                    // raw secret material) so a backend outage still leaves a trail.
+                    tracing::debug!(
+                        capability_id = %capability_id,
+                        secret_handle = handle.as_str(),
+                        error = %error,
+                        "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
+                    );
+                    return None; // silent-ok: transient store error must not burn a user auth interaction; dispatch-time obligation check is the backstop
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -1324,6 +2030,64 @@ fn completed_outcome_from(
     }
 }
 
+/// Returns the required secrets and OAuth credential requirements declared in
+/// the capability descriptor.
+///
+/// This is the canonical extraction used by the **pre-flight credential
+/// presence check** (before the approval gate). The dispatch-time obligation
+/// check remains the enforcement backstop; it derives the same handles through
+/// the obligation-handler iteration over `descriptor.runtime_credentials`
+/// (same source, different code path — both iterate `required == true` entries).
+/// The two paths agree on which handles are required; the pre-flight additionally
+/// computes `credential_requirements` for the auth-gate payload.
+///
+/// Callers outside the pre-flight check must not recompute the requirement set
+/// independently — call this function instead.
+///
+/// Only entries with `required == true` **and** `source == SecretHandle` are
+/// included in `required_secrets`. `ProductAuthAccount`-source credentials are
+/// staged by the credential-account resolver at dispatch time (not via
+/// `secret_store.metadata`), so including their slot handle here would produce
+/// a false-positive `AuthRequired` for capabilities whose product-auth account
+/// is already connected.
+pub(crate) fn capability_credential_requirements(
+    descriptor: &ironclaw_host_api::CapabilityDescriptor,
+) -> (
+    Vec<SecretHandle>,
+    Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+) {
+    let provider = descriptor.provider.clone();
+    let mut required_secrets = Vec::new();
+    let mut credential_requirements = Vec::new();
+
+    // Double-read accepted: the dispatch-time obligation path (in
+    // ironclaw_host_runtime::obligations) will re-check each handle's presence via
+    // the same secret_store when the capability executes. Threading the pre-flight
+    // result into the obligation path would cross crate-boundary constraints (per
+    // CLAUDE.md) without meaningful gain; the ordering guarantee (auth before
+    // approval gate) is the pre-flight's sole purpose.
+    for cred in &descriptor.runtime_credentials {
+        if !cred.required {
+            continue;
+        }
+        // Only SecretHandle-source credentials are presence-checkable in the
+        // secret store. ProductAuthAccount credentials are staged by the
+        // credential-account resolver at dispatch time (not via secret_store.metadata),
+        // so including their slot handle here would produce a false-positive AuthRequired
+        // for capabilities whose product-auth account is already connected.
+        if matches!(
+            cred.source,
+            ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle
+        ) {
+            required_secrets.push(cred.handle.clone());
+        }
+        if let Some(auth_req) = cred.product_auth_requirement_for(provider.clone()) {
+            credential_requirements.push(auth_req);
+        }
+    }
+    (required_secrets, credential_requirements)
+}
+
 fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
@@ -1387,26 +2151,103 @@ fn spawned_process_outcome_from(
     }
 }
 
+fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -> Vec<Principal> {
+    let mut grantees = vec![
+        Principal::Extension(context.extension_id.clone()),
+        Principal::User(context.user_id.clone()),
+    ];
+    if let Some(agent_id) = &context.agent_id {
+        grantees.push(Principal::Agent(agent_id.clone()));
+    }
+    if let Some(project_id) = &context.project_id {
+        grantees.push(Principal::Project(project_id.clone()));
+    }
+    if let Some(mission_id) = &context.mission_id {
+        grantees.push(Principal::Mission(mission_id.clone()));
+    }
+    // No `Principal::Thread` grantee: persistent approval policies are never
+    // written under a thread grantee (the grantee always comes from
+    // `ApprovalRequest.requested_by`, which is `Principal::User` or
+    // `Principal::Extension`), so looking one up could never match. Persistent
+    // approvals are deliberately thread-agnostic (see #4825).
+    grantees
+}
+
+fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApprovalScope> {
+    let user_scope = PersistentApprovalScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+    };
+    let legacy_scope = PersistentApprovalScope::from_resource_scope(scope);
+    if legacy_scope == user_scope {
+        vec![user_scope]
+    } else {
+        // User-scope settings-page policies intentionally win lookup order over
+        // legacy agent/project-scoped prompt policies.
+        vec![user_scope, legacy_scope]
+    }
+}
+
+/// Outcome of preparing model-supplied spawn input for a capability.
+///
+/// A malformed or invalid process-sandbox plan is a *model-fixable* condition:
+/// the model chose bad arguments and can correct them on a retry. It must
+/// surface as a recoverable, model-visible tool error
+/// ([`RuntimeFailureKind::InvalidInput`] → `ModelVisibleToolError`), never as a
+/// terminal [`HostRuntimeError`] that ends the whole run. Genuine host-side
+/// faults (serializing the validated host struct back to JSON) remain errors.
+enum SpawnInputPreparation {
+    /// Input is ready to dispatch to the capability host.
+    Ready(serde_json::Value),
+    /// Model supplied an unparseable/invalid plan — recoverable, model-visible.
+    ModelInputRejected(RuntimeCapabilityFailure),
+}
+
 fn host_runtime_spawn_input_for_capability(
     capability_id: &CapabilityId,
     input: serde_json::Value,
-) -> Result<serde_json::Value, HostRuntimeError> {
+) -> Result<SpawnInputPreparation, HostRuntimeError> {
     if capability_id.as_str() != PROCESS_SANDBOX_CAPABILITY_ID {
-        return Ok(input);
+        return Ok(SpawnInputPreparation::Ready(input));
     }
-    let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|_| {
-        HostRuntimeError::invalid_request(
-            "process sandbox capability input must be a SandboxProcessPlan",
-        )
-    })?;
-    let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|_| {
-        HostRuntimeError::invalid_request(
-            "process sandbox capability input failed SandboxProcessPlan validation",
-        )
-    })?;
-    serde_json::to_value(plan.into_plan()).map_err(|_| {
+    let plan = match serde_json::from_value::<SandboxProcessPlan>(input) {
+        Ok(plan) => plan,
+        Err(_) => {
+            return Ok(SpawnInputPreparation::ModelInputRejected(
+                RuntimeCapabilityFailure::new(
+                    capability_id.clone(),
+                    RuntimeFailureKind::InvalidInput,
+                    Some(
+                        "process sandbox capability input must be a SandboxProcessPlan".to_string(),
+                    ),
+                ),
+            ));
+        }
+    };
+    let plan = match ValidatedSandboxProcessPlan::new(plan) {
+        Ok(plan) => plan,
+        Err(_) => {
+            return Ok(SpawnInputPreparation::ModelInputRejected(
+                RuntimeCapabilityFailure::new(
+                    capability_id.clone(),
+                    RuntimeFailureKind::InvalidInput,
+                    Some(
+                        "process sandbox capability input failed SandboxProcessPlan validation"
+                            .to_string(),
+                    ),
+                ),
+            ));
+        }
+    };
+    // Serializing the *validated host struct* back to JSON is a host-side
+    // operation, not model input. A failure here is a genuine internal fault,
+    // so it stays a terminal error rather than a model-visible tool error.
+    let value = serde_json::to_value(plan.into_plan()).map_err(|_| {
         HostRuntimeError::invalid_request("validated process sandbox plan could not be serialized")
-    })
+    })?;
+    Ok(SpawnInputPreparation::Ready(value))
 }
 
 fn failure_from(
@@ -1415,7 +2256,15 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let message = sanitized_failure_message(&error);
-    RuntimeCapabilityFailure::new(capability_id, kind, message)
+    let detail = match error {
+        CapabilityInvocationError::Dispatch { detail, .. } => detail,
+        _ => None,
+    };
+    let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
+    if let Some(detail) = detail {
+        failure = failure.with_detail(detail);
+    }
+    failure
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1444,9 +2293,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
         | ResumeContextMismatch { .. } => Some(error.to_string()),
-        Dispatch { safe_summary, .. } => {
-            Some(dispatch_failure_message(safe_summary.as_deref(), error))
-        }
+        Dispatch {
+            safe_summary, kind, ..
+        } => Some(dispatch_failure_message(safe_summary.as_deref(), *kind)),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
         RunState(_) => Some("run-state store unavailable".to_string()),
@@ -1456,12 +2305,16 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 
 fn dispatch_failure_message(
     safe_summary: Option<&str>,
-    error: &CapabilityInvocationError,
+    kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
+    // Prefer a host-authored safe summary; otherwise fall back to a plain
+    // human sentence for the failure category rather than the stable category
+    // token (e.g. "the tool input could not be encoded" instead of
+    // "dispatch failed: InputEncode").
     safe_summary
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
-        .unwrap_or_else(|| error.to_string())
+        .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
@@ -1557,17 +2410,30 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
                 RuntimeFailureKind::OperationFailed
             }
+            // A method or capability the model named that does not exist is a
+            // model-fixable request error, not an infra fault: classify it as
+            // InvalidInput so it surfaces as an immediate model-visible tool
+            // error instead of burning the retry budget on a call that can
+            // never resolve by retrying.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
+                RuntimeFailureKind::InvalidInput
+            }
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
             }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Unknown,
+            // The fail-safe "uncategorized" redaction bucket collapses to a
+            // concrete internal failure rather than propagating a dedicated
+            // `Unknown` category downstream. `Internal` is retryable and
+            // surfaces to the model/user, so an unclassified dispatch error is
+            // no longer an opaque run-ending dead-end. See
+            // `docs/plans/2026-06-28-reborn-error-recoverability-audit.md`.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Internal,
         }
     }
 }
@@ -1584,7 +2450,9 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
-    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
         CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog, PackageSource,
@@ -1600,12 +2468,16 @@ mod tests {
         CapabilityInvocationError::Dispatch {
             kind,
             safe_summary: None,
+            detail: None,
         }
     }
 
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            },
             requester_extension: ExtensionId::new("notion").unwrap(),
             provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
         }
@@ -1749,7 +2621,7 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::MethodMissing,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::NetworkDenied,
@@ -1781,15 +2653,18 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::UndeclaredCapability,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::UnsupportedRunner,
                 RuntimeFailureKind::Backend,
             ),
+            // The fail-safe "uncategorized" redaction bucket collapses to a
+            // concrete, surfacing `Internal` rather than a dedicated `Unknown`
+            // category (which no longer exists on `RuntimeFailureKind`).
             (
                 RuntimeDispatchErrorKind::Unknown,
-                RuntimeFailureKind::Unknown,
+                RuntimeFailureKind::Internal,
             ),
         ];
         for (variant, expected) in cases {
@@ -1862,7 +2737,81 @@ output_schema_ref = "schemas/test.output.json"
         let output = host_runtime_spawn_input_for_capability(&cap(), input.clone())
             .expect("non-sandbox capability input should pass through");
 
-        assert_eq!(output, input);
+        match output {
+            SpawnInputPreparation::Ready(value) => assert_eq!(value, input),
+            SpawnInputPreparation::ModelInputRejected(_) => {
+                panic!("non-sandbox input must pass through unchanged")
+            }
+        }
+    }
+
+    fn process_sandbox_cap() -> CapabilityId {
+        CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID).expect("valid process sandbox capability")
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_rejects_malformed_plan_as_recoverable_invalid_input() {
+        // The model supplied JSON that is not a `SandboxProcessPlan` at all.
+        // This is model-fixable: it must surface as a recoverable, model-visible
+        // tool error (`InvalidInput`), never a terminal `HostRuntimeError`.
+        let input = serde_json::json!({ "not_run": true });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("malformed model plan must not be a terminal host error");
+
+        match output {
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.disposition(),
+                    crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+            }
+            SpawnInputPreparation::Ready(_) => {
+                panic!("malformed plan must be rejected as model-visible InvalidInput")
+            }
+        }
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_rejects_invalid_plan_as_recoverable_invalid_input() {
+        // The model supplied a structurally-parseable plan that fails
+        // `ValidatedSandboxProcessPlan` validation (empty command). Still
+        // model-fixable → recoverable `InvalidInput`, not terminal.
+        let input = serde_json::json!({ "run": { "command": "" } });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("invalid model plan must not be a terminal host error");
+
+        match output {
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.disposition(),
+                    crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+            }
+            SpawnInputPreparation::Ready(_) => {
+                panic!("invalid plan must be rejected as model-visible InvalidInput")
+            }
+        }
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_accepts_valid_plan() {
+        let input = serde_json::json!({ "run": { "command": "echo", "args": ["ok"] } });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("valid plan preparation must not error");
+
+        match output {
+            SpawnInputPreparation::Ready(value) => {
+                assert!(value.is_object(), "validated plan serializes to an object");
+            }
+            SpawnInputPreparation::ModelInputRejected(_) => {
+                panic!("valid plan must be accepted")
+            }
+        }
     }
 
     #[test]
@@ -1871,12 +2820,10 @@ output_schema_ref = "schemas/test.output.json"
             RuntimeDispatchErrorKind::NetworkDenied,
         ));
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        // Stable form: relies only on the redacted kind token, never on raw
-        // backend strings.
-        assert!(
-            message.contains("NetworkDenied"),
-            "sanitized dispatch message should expose the redacted kind, got {message:?}"
-        );
+        // With no host-authored safe_summary, the message is the fixed
+        // human-readable summary for the redacted kind — derived only from the
+        // category, never from raw backend strings.
+        assert_eq!(message, "the tool was denied network access");
     }
 
     #[test]
@@ -1887,6 +2834,7 @@ output_schema_ref = "schemas/test.output.json"
                 "apply_patch failed for path workspace main.rs: old_string matched 0 times"
                     .to_string(),
             ),
+            detail: None,
         };
 
         assert_eq!(
@@ -1900,11 +2848,43 @@ output_schema_ref = "schemas/test.output.json"
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some("read_file failed for path workspace api_key.txt".to_string()),
+            detail: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        assert_eq!(message, "dispatch failed: OperationFailed");
+        // The unsafe safe_summary is rejected, so the message falls back to the
+        // host-authored human summary for the kind (not the raw category token).
+        assert_eq!(message, "the tool operation failed");
         assert!(!message.contains("api_key"));
+    }
+
+    #[test]
+    fn failure_from_preserves_dispatch_detail() {
+        let issue = ironclaw_host_api::DispatchInputIssue::new(
+            "schedule.kind",
+            ironclaw_host_api::DispatchInputIssueCode::MissingRequired,
+        )
+        .expected("cron or once");
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            safe_summary: Some("trigger_create input failed validation".to_string()),
+            detail: Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
+                issues: vec![issue.clone()],
+            }),
+        };
+
+        let failure = failure_from(
+            error,
+            CapabilityId::new("builtin.trigger_create").expect("valid capability id"),
+        );
+
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(
+            failure.detail,
+            Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
+                issues: vec![issue]
+            })
+        );
     }
 
     #[test]
@@ -1936,7 +2916,6 @@ output_schema_ref = "schemas/test.output.json"
         assert_eq!(RuntimeFailureKind::Resource.as_str(), "resource");
         assert_eq!(RuntimeFailureKind::Transient.as_str(), "transient");
         assert_eq!(RuntimeFailureKind::Unavailable.as_str(), "unavailable");
-        assert_eq!(RuntimeFailureKind::Unknown.as_str(), "unknown");
     }
 
     #[test]
@@ -1960,7 +2939,6 @@ output_schema_ref = "schemas/test.output.json"
             (RuntimeFailureKind::Resource, ModelVisibleToolError),
             (RuntimeFailureKind::Transient, RetrySameCall),
             (RuntimeFailureKind::Unavailable, RetrySameCall),
-            (RuntimeFailureKind::Unknown, ModelVisibleToolError),
         ];
 
         for (kind, expected) in cases {
@@ -1988,6 +2966,211 @@ output_schema_ref = "schemas/test.output.json"
                 "{kind:?}"
             );
         }
+    }
+
+    // ─── capability_credential_requirements unit tests ──────────────────────────
+    //
+    // These were previously integration tests in host_runtime_services_contract.rs
+    // that called the function via `ironclaw_host_runtime::capability_credential_requirements`.
+    // They are kept here as unit tests because the function is now `pub(crate)`,
+    // making it invisible to external test binaries. Coverage is equivalent.
+
+    fn build_descriptor_for_manifest(
+        manifest_toml: &str,
+    ) -> ironclaw_host_api::CapabilityDescriptor {
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest must parse");
+        let cap_id = manifest.capabilities[0].id.clone();
+        let root =
+            VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+        let package = ExtensionPackage::from_manifest(manifest, root).expect("package must build");
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(package).unwrap();
+        registry.get_capability(&cap_id).unwrap().clone()
+    }
+
+    /// `capability_credential_requirements` must return exactly the required
+    /// `SecretHandle`-source handles declared in the descriptor, filtered to
+    /// `required == true`, and must not include `ProductAuthAccount`-source handles.
+    ///
+    /// Previously `credential_requirements_extraction_matches_descriptor_required_credentials`
+    /// in host_runtime_services_contract.rs (moved here because the function is
+    /// now `pub(crate)`; coverage is identical).
+    #[test]
+    fn credential_requirements_extraction_matches_descriptor_required_credentials() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Credential"
+version = "0.1.0"
+description = "Script extension that requires a runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "script_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = true
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (preflight_handles, preflight_reqs) = capability_credential_requirements(&descriptor);
+
+        // The obligation handler iterates `descriptor.runtime_credentials` filtered
+        // to `required == true` — verify `capability_credential_requirements` produces
+        // the same handles from the same source.
+        let expected_handles: Vec<SecretHandle> = descriptor
+            .runtime_credentials
+            .iter()
+            .filter(|cred| cred.required)
+            .map(|cred| cred.handle.clone())
+            .collect();
+
+        assert_eq!(
+            preflight_handles, expected_handles,
+            "capability_credential_requirements must return exactly the required handles from the descriptor"
+        );
+        assert_eq!(preflight_handles.len(), 1, "expected one required handle");
+        assert_eq!(
+            preflight_handles[0].as_str(),
+            "script_api_token",
+            "required handle must be script_api_token"
+        );
+        // The manifest source is `secret_handle` (not `product_auth_account`), so
+        // `product_auth_requirement_for` returns None — credential_requirements is empty.
+        assert!(
+            preflight_reqs.is_empty(),
+            "credential_requirements must be empty for secret_handle source (no product_auth_account)"
+        );
+    }
+
+    /// A capability descriptor with only `required = false` credentials must
+    /// produce empty `required_secrets` and `credential_requirements`.
+    ///
+    /// Previously `credential_requirements_extraction_returns_empty_for_all_optional_credentials`
+    /// in host_runtime_services_contract.rs (moved here because the function is now
+    /// `pub(crate)`; coverage is identical).
+    #[test]
+    fn credential_requirements_extraction_returns_empty_for_all_optional_credentials() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Optional Credential"
+version = "0.1.0"
+description = "Script extension with an optional runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "optional_api_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "x-api-key" }
+required = false
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(&descriptor);
+
+        assert!(
+            required_secrets.is_empty(),
+            "capability with only optional credentials must produce empty required_secrets; got {required_secrets:?}"
+        );
+        assert!(
+            credential_requirements.is_empty(),
+            "capability with only optional credentials must produce empty credential_requirements; got {credential_requirements:?}"
+        );
+    }
+
+    /// A REQUIRED `product_auth_account`-source credential must NOT be pushed into
+    /// `required_secrets` (its handle is only an injection slot that the account
+    /// resolver stages later, so a pre-flight `metadata()` probe would false-positive
+    /// `AuthRequired` for an already-connected account). It MUST still surface in
+    /// `credential_requirements` so the auth payload can describe the product-auth need.
+    #[test]
+    fn credential_requirements_extraction_excludes_required_product_auth_account() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script With Product-Auth Credential"
+version = "0.1.0"
+description = "Script extension that requires a product-auth account credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capabilities.runtime_credentials]]
+handle = "github_runtime_token"
+source = { type = "product_auth_account", provider = "github" }
+audience = { scheme = "https", host_pattern = "api.github.com" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+required = true
+"#;
+        let descriptor = build_descriptor_for_manifest(MANIFEST);
+
+        let (required_secrets, credential_requirements) =
+            capability_credential_requirements(&descriptor);
+
+        assert!(
+            required_secrets.is_empty(),
+            "a required product_auth_account credential must be excluded from required_secrets \
+             (the slot handle is not a presence-checkable secret); got {required_secrets:?}"
+        );
+        assert!(
+            !credential_requirements.is_empty(),
+            "a required product_auth_account credential must still surface in credential_requirements"
+        );
     }
 
     #[test]

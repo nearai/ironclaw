@@ -9,13 +9,13 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import time
 
 import httpx
 import pytest
 
-from helpers import api_post, auth_headers
+from emulate_provider import slack_post
+from helpers import EMULATE_SLACK_BEARER, api_post, auth_headers
 
 # Bot token used throughout these tests.
 BOT_TOKEN = "xoxb-FAKE-SLACK-BOT-TOKEN"
@@ -25,7 +25,6 @@ SIGNING_SECRET = "e2e-test-slack-signing-secret"
 OWNER_USER_ID = "U42OWNER"
 # Bot user ID (used to detect self-messages and strip mentions).
 BOT_USER_ID = "UBOTUSER"
-PAIRING_CODE_RE = re.compile(r"approve slack ([A-Z0-9]+)|`([A-Z0-9]+)`")
 
 
 # -- helpers ---------------------------------------------------------------
@@ -68,7 +67,7 @@ def _patch_slack_capabilities_for_testing(channels_dir: str):
 
     1. Add files.slack.com to HTTP allowlist for file download tests.
     2. Add files.slack.com to credential host_patterns.
-    3. Bind the test Slack owner so DM tests do not depend on pairing state.
+    3. Bind the test Slack owner so DM tests exercise the chat path.
     """
     cap_path = os.path.join(channels_dir, "slack.capabilities.json")
     assert os.path.exists(cap_path), (
@@ -101,9 +100,7 @@ def _patch_slack_capabilities_for_testing(channels_dir: str):
         json.dump(caps, f, indent=2)
 
 
-async def activate_slack(
-    base_url: str, http_url: str, fake_slack_url: str, channels_dir: str
-) -> None:
+async def activate_slack(base_url: str, fake_slack_url: str, channels_dir: str) -> None:
     """Install (if needed) and set up the Slack channel.
 
     Slack setup is single-step (no verification flow like Telegram).
@@ -134,54 +131,55 @@ async def activate_slack(
         f"Slack setup failed: {body}"
     )
 
-    # Complete DM pairing so subsequent Slack webhook tests exercise the real
-    # chat path instead of the pairing prompt path.
-    await reset_fake_slack(fake_slack_url)
-    pairing_resp = await post_slack_webhook(
-        http_url,
-        build_slack_dm_event(OWNER_USER_ID, "hello"),
-    )
-    assert pairing_resp.status_code == 200
-    messages = await wait_for_sent_messages(fake_slack_url, min_count=1, timeout=30)
-    code = extract_pairing_code(messages)
-    if code:
-        await approve_slack_pairing(base_url, code)
     await reset_fake_slack(fake_slack_url)
 
 
-def extract_pairing_code(messages: list[dict]) -> str | None:
-    """Extract a pairing code from Slack reply text."""
-    for message in reversed(messages):
-        text = message.get("text", "")
-        match = PAIRING_CODE_RE.search(text)
-        if match:
-            return match.group(1) or match.group(2)
-    return None
+async def activate_slack_with_token(
+    base_url: str,
+    *,
+    token: str,
+    owner_id: str,
+    channels_dir: str,
+) -> None:
+    """Install and configure Slack with a supplied owner binding."""
+    await install_slack(base_url)
+    _patch_slack_capabilities_for_testing(channels_dir)
 
+    cap_path = os.path.join(channels_dir, "slack.capabilities.json")
+    with open(cap_path, "r") as f:
+        caps = json.load(f)
+    caps.setdefault("config", {})["owner_id"] = owner_id
+    with open(cap_path, "w") as f:
+        json.dump(caps, f, indent=2)
 
-async def approve_slack_pairing(base_url: str, code: str) -> None:
-    """Approve a Slack pairing code through the web API."""
     async with httpx.AsyncClient() as c:
-        response = await c.post(
-            f"{base_url}/api/pairing/slack/approve",
+        r = await c.post(
+            f"{base_url}/api/extensions/slack/setup",
             headers=auth_headers(),
-            json={"code": code},
-            timeout=10,
+            json={
+                "secrets": {
+                    "slack_bot_token": token,
+                    "slack_signing_secret": SIGNING_SECRET,
+                },
+                "fields": {},
+            },
+            timeout=30,
         )
-    response.raise_for_status()
-    body = response.json()
-    assert body.get("success"), f"Slack pairing approval failed: {body}"
+    r.raise_for_status()
+    body = r.json()
+    assert body.get("activated") or body.get("success"), (
+        f"Slack setup failed: {body}"
+    )
 
 
 @pytest.fixture
 async def active_slack(slack_e2e_server):
     """Ensure Slack is installed, configured, and clean for each test."""
     base_url = slack_e2e_server["base_url"]
-    http_url = slack_e2e_server["http_url"]
     fake_slack_url = slack_e2e_server["fake_slack_url"]
     channels_dir = slack_e2e_server["channels_dir"]
 
-    await activate_slack(base_url, http_url, fake_slack_url, channels_dir)
+    await activate_slack(base_url, fake_slack_url, channels_dir)
     await reset_fake_slack(fake_slack_url)
     return slack_e2e_server
 
@@ -328,6 +326,61 @@ async def test_slack_setup_and_dm_roundtrip(active_slack):
     assert reply_text, f"Empty reply text. All sent messages: {messages}"
     assert "Hello! How can I help you today?" in reply_text
     assert messages[-1]["channel"] == f"D{OWNER_USER_ID}"
+
+
+async def test_slack_emulate_app_mention_roundtrip(slack_emulate_e2e_server):
+    """Emulate Slack app_mention -> IronClaw -> chat.postMessage readback."""
+    base_url = slack_emulate_e2e_server["base_url"]
+    http_url = slack_emulate_e2e_server["http_url"]
+    channels_dir = slack_emulate_e2e_server["channels_dir"]
+    emulate_slack_url = slack_emulate_e2e_server["emulate_slack_url"]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        auth = await slack_post(client, emulate_slack_url, "auth.test")
+        owner_id = auth["user"]
+        channels = await slack_post(
+            client,
+            emulate_slack_url,
+            "conversations.list",
+            {"types": "public_channel", "exclude_archived": True},
+        )
+    channel = next(
+        item for item in channels["channels"] if item["name"] == "reborn-alerts"
+    )
+
+    await activate_slack_with_token(
+        base_url,
+        token=EMULATE_SLACK_BEARER,
+        owner_id=owner_id,
+        channels_dir=channels_dir,
+    )
+
+    ts = f"{time.time():.6f}"
+    payload = build_slack_mention_event(
+        owner_id,
+        "hello from Emulate Slack",
+        channel=channel["id"],
+        ts=ts,
+    )
+    resp = await post_slack_webhook(http_url, payload)
+    assert resp.status_code == 200, f"Webhook returned {resp.status_code}: {resp.text}"
+
+    deadline = time.monotonic() + 30
+    async with httpx.AsyncClient(timeout=10) as client:
+        while time.monotonic() < deadline:
+            replies = await slack_post(
+                client,
+                emulate_slack_url,
+                "conversations.replies",
+                {"channel": channel["id"], "ts": ts},
+            )
+            if any(
+                "Hello! How can I help you today?" in message.get("text", "")
+                for message in replies["messages"]
+            ):
+                return
+            await asyncio.sleep(0.5)
+    raise TimeoutError("Expected Emulate Slack thread reply from IronClaw")
 
 
 async def test_slack_app_mention_roundtrip(active_slack):

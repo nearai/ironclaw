@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_host_api::ResourceScope;
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError};
 use ironclaw_turns::{GateRef, TurnRunId};
 
@@ -152,15 +152,7 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
 }
 
 fn resource_scope_for_interaction(scope: &ApprovalInteractionScope) -> ResourceScope {
-    ResourceScope {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: scope.user_id.clone(),
-        agent_id: scope.agent_id.clone(),
-        project_id: scope.project_id.clone(),
-        mission_id: None,
-        thread_id: Some(scope.thread_id.clone()),
-        invocation_id: InvocationId::new(),
-    }
+    scope.to_resource_scope()
 }
 
 fn same_interaction_owner(left: &ResourceScope, right: &ResourceScope) -> bool {

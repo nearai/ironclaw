@@ -1,5 +1,6 @@
 use ironclaw_safety::{
-    ProviderValidationError, validate_optional_provider_metadata_text,
+    PROVIDER_METADATA_TEXT_MAX_BYTES, ProviderValidationError,
+    validate_optional_provider_metadata_text,
     validate_provider_arguments as validate_safety_provider_arguments, validate_provider_identity,
     validate_provider_token, validate_provider_tool_name as validate_safety_provider_tool_name,
 };
@@ -22,24 +23,24 @@ pub(super) fn validate_provider_tool_call(
     })?;
     validate_provider_token(turn_id, "provider turn id", 512).map_err(invalid_invocation)?;
     validate_provider_token(&tool_call.id, "provider call id", 512).map_err(invalid_invocation)?;
-    validate_provider_tool_name(&tool_call.name)?;
+    validate_provider_tool_name(tool_call.name.as_str())?;
     validate_provider_arguments(&tool_call.arguments)?;
     validate_optional_provider_metadata_text(
         tool_call.response_reasoning.as_deref(),
         "provider response reasoning",
-        4096,
+        PROVIDER_METADATA_TEXT_MAX_BYTES,
     )
     .map_err(invalid_invocation)?;
     validate_optional_provider_metadata_text(
         tool_call.reasoning.as_deref(),
         "provider reasoning",
-        4096,
+        PROVIDER_METADATA_TEXT_MAX_BYTES,
     )
     .map_err(invalid_invocation)?;
     validate_optional_provider_metadata_text(
         tool_call.signature.as_deref(),
         "provider signature",
-        4096,
+        PROVIDER_METADATA_TEXT_MAX_BYTES,
     )
     .map_err(invalid_invocation)?;
     Ok(())
@@ -69,13 +70,15 @@ fn invalid_invocation(error: ProviderValidationError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ProviderToolName;
+
+    fn provider_name(value: &str) -> ProviderToolName {
+        ProviderToolName::new(value).expect("provider tool name")
+    }
 
     #[test]
     fn provider_tool_call_validation_rejects_provider_unsafe_tool_name() {
-        let mut call = provider_tool_call();
-        call.name = "demo.echo".to_string();
-
-        let error = validate_provider_tool_call(&call).expect_err("unsafe name rejected");
+        let error = validate_provider_tool_name("demo.echo").expect_err("unsafe name rejected");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
@@ -90,13 +93,19 @@ mod tests {
 
     #[test]
     fn provider_tool_call_validation_rejects_sensitive_metadata() {
+        // Arguments carrying a real secret-like token are rejected by the
+        // entropy-based leak scan, which is the canonical guard after #5001
+        // dropped the crude bare-word substring markers.
         let mut call = provider_tool_call();
         let api_key = format!("sk-proj-{}", "a".repeat(24));
         call.arguments = serde_json::json!({"password": api_key});
         assert!(validate_provider_tool_call(&call).is_err());
 
+        // The same leak scan runs over model-emitted reasoning, so a leaked
+        // secret-like token there is rejected even though bare words like
+        // "traceback" are now intentionally allowed (#5001, PinchBench bucket D).
         let mut call = provider_tool_call();
-        call.reasoning = Some("provider error included traceback".to_string());
+        call.reasoning = Some(format!("provider error leaked sk-proj-{}", "b".repeat(24)));
         assert!(validate_provider_tool_call(&call).is_err());
     }
 
@@ -148,7 +157,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
+            name: provider_name("demo__echo"),
             arguments: serde_json::json!({"message":"hello"}),
             response_reasoning: None,
             reasoning: None,

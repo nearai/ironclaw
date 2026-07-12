@@ -1,5 +1,8 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -19,8 +22,9 @@ use ironclaw_turns::{
     LoopMessageRef, TurnStatus,
     run_profile::{LoopRunContext, PromptMode},
 };
-use reborn_support::harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort};
-use reborn_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::RecordingTestCapabilityPort;
 
 const ALICE_IDENTITY: &str = "Alice is a software engineer who lives in Seattle.";
 const BOB_IDENTITY: &str = "Bob is a marine biologist who lives in Miami.";
@@ -34,15 +38,14 @@ async fn reborn_identity_prompt_scope_isolation_parity() {
         HostManagedModelResponse::assistant_reply("alice scoped reply"),
         HostManagedModelResponse::assistant_reply("bob scoped reply"),
     ]);
-    let mut harness =
-        RebornBinaryE2EHarness::with_model_gateway_identity_source_unscoped_shared_worker(
-            SHARED_ROOM,
-            model_gateway,
-            RecordingTestCapabilityPort::echo(),
-            identity_source.clone(),
-        )
-        .await
-        .expect("harness");
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway_identity_source_shared(
+        SHARED_ROOM,
+        model_gateway,
+        RecordingTestCapabilityPort::echo(),
+        identity_source.clone(),
+    )
+    .await
+    .expect("harness");
 
     let alice = harness
         .submit_text_for_with_trigger(

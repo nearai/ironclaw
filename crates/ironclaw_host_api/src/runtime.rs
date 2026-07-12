@@ -30,6 +30,24 @@ pub enum RuntimeKind {
     System,
 }
 
+impl RuntimeKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wasm => "wasm",
+            Self::Mcp => "mcp",
+            Self::Script => "script",
+            Self::FirstParty => "first_party",
+            Self::System => "system",
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Effective trust ceiling for an invocation, produced by the host trust
 /// policy engine.
 ///

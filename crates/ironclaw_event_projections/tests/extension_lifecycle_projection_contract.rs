@@ -3,8 +3,7 @@ use std::{fs, path::Path, sync::Arc};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    AuditProjectionRequest, AuditProjectionService, AuditProjectionStage, ProjectionScope,
-    ReplayAuditProjectionService,
+    AuditProjectionRequest, AuditProjectionService, ProjectionScope, ReplayAuditProjectionService,
 };
 use ironclaw_events::{AuditSink, DurableAuditSink, EventError};
 use ironclaw_extensions::{
@@ -98,7 +97,7 @@ async fn extension_lifecycle_projects_metadata_only_from_durable_audit_log() {
         ]
     );
     assert!(snapshot.entries.iter().all(|entry| {
-        entry.stage == AuditProjectionStage::After
+        entry.stage == AuditStage::After
             && entry.action_kind == "extension_lifecycle"
             && entry.action_target.is_none()
             && entry.extension_id.as_ref().unwrap().as_str() == "echo"

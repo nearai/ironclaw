@@ -13,7 +13,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, UserId};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -71,7 +71,14 @@ async fn local_dev_runtime_auth_interactions_use_flow_record_source() {
     );
     let actor = TurnActor::new(runtime.actor_user_id.clone());
     let gate_ref = GateRef::new("gate:runtime-auth-read-model").expect("gate");
-    let run_id = submit_and_block_auth_run(&runtime, scope.clone(), actor.clone(), &gate_ref).await;
+    let run_id = submit_and_block_auth_run(
+        &runtime,
+        scope.clone(),
+        actor.clone(),
+        &gate_ref,
+        Vec::new(),
+    )
+    .await;
     create_auth_flow(&runtime, &scope, &actor, run_id, &gate_ref).await;
 
     let pending = runtime
@@ -154,7 +161,7 @@ async fn build_runtime(
     if let Some(ports) = product_auth_ports {
         services = services.with_product_auth_ports(ports);
     }
-    build_reborn_runtime(
+    let runtime = build_reborn_runtime(
         RebornRuntimeInput::from_services(services)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: format!("{owner}-tenant"),
@@ -162,13 +169,16 @@ async fn build_runtime(
                 source_binding_id: format!("{owner}-source"),
                 reply_target_binding_id: format!("{owner}-reply"),
             })
-            .with_runner_settings(TurnRunnerSettings {
-                heartbeat_interval: Duration::from_secs(60),
-                poll_interval: Duration::from_secs(60),
-            })
+            .with_runner_settings(
+                TurnRunnerSettings::default()
+                    .set_heartbeat_interval(Duration::from_secs(60))
+                    .set_poll_interval(Duration::from_secs(60)),
+            )
             .with_model_gateway_override(Arc::new(UnusedModelGateway)),
     )
-    .await
+    .await?;
+    runtime.turn_scheduler.stop_for_test().await;
+    Ok(runtime)
 }
 
 async fn submit_and_block_auth_run(
@@ -176,6 +186,7 @@ async fn submit_and_block_auth_run(
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &GateRef,
+    credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 ) -> TurnRunId {
     let local_runtime = runtime
         .services
@@ -206,6 +217,7 @@ async fn submit_and_block_auth_run(
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             },
             &admission,
             &profiles,
@@ -236,7 +248,7 @@ async fn submit_and_block_auth_run(
                 .expect("checkpoint ref"),
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref.clone(),
-                credential_requirements: Vec::new(),
+                credential_requirements,
             },
         })
         .await

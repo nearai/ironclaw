@@ -73,18 +73,13 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
         &snapshot.planned_default_profile,
     ));
 
-    let pass = checks
+    let (pass, fail, skip) = checks
         .iter()
-        .filter(|c| c.outcome == CheckOutcome::Pass)
-        .count();
-    let fail = checks
-        .iter()
-        .filter(|c| c.outcome == CheckOutcome::Fail)
-        .count();
-    let skip = checks
-        .iter()
-        .filter(|c| c.outcome == CheckOutcome::Skip)
-        .count();
+        .fold((0, 0, 0), |counts, check| match check.outcome {
+            CheckOutcome::Pass => (counts.0 + 1, counts.1, counts.2),
+            CheckOutcome::Fail => (counts.0, counts.1 + 1, counts.2),
+            CheckOutcome::Skip => (counts.0, counts.1, counts.2 + 1),
+        });
 
     DoctorDto {
         checks,

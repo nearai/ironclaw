@@ -1,16 +1,17 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
 use ironclaw_loop_support::HostManagedModelResponse;
 use ironclaw_threads::{MessageKind, MessageStatus, ThreadMessageRecord};
 use ironclaw_turns::TurnStatus;
-use reborn_support::harness::{
-    RebornBinaryE2EHarness, RebornHarnessSharedStorage, RecordingTestCapabilityPort,
-    test_product_scope,
-};
-use reborn_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 
 #[tokio::test]
 async fn reborn_tenant_binding_scope_isolation_parity() {
@@ -28,30 +29,28 @@ async fn reborn_tenant_binding_scope_isolation_parity() {
         Some("project-e2e"),
     );
 
-    let mut tenant_a =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
-            "room-shared-tenant",
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("tenant alpha isolated reply"),
-            ]),
-            RecordingTestCapabilityPort::echo(),
-            tenant_a_scope,
-            shared_storage.clone(),
-        )
-        .await
-        .expect("tenant A harness");
-    let mut tenant_b =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
-            "room-shared-tenant",
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("tenant beta isolated reply"),
-            ]),
-            RecordingTestCapabilityPort::echo(),
-            tenant_b_scope,
-            shared_storage,
-        )
-        .await
-        .expect("tenant B harness");
+    let mut tenant_a = RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
+        "room-shared-tenant",
+        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
+            "tenant alpha isolated reply",
+        )]),
+        RecordingTestCapabilityPort::echo(),
+        tenant_a_scope,
+        shared_storage.clone(),
+    )
+    .await
+    .expect("tenant A harness");
+    let mut tenant_b = RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
+        "room-shared-tenant",
+        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
+            "tenant beta isolated reply",
+        )]),
+        RecordingTestCapabilityPort::echo(),
+        tenant_b_scope,
+        shared_storage,
+    )
+    .await
+    .expect("tenant B harness");
 
     tenant_a.start();
     tenant_b.start();

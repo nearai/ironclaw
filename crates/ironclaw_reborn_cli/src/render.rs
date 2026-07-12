@@ -354,6 +354,7 @@ mod tests {
         assert_eq!(ConfigValue::Bool(true).to_string(), "true");
         assert_eq!(ConfigValue::Integer(42).to_string(), "42");
         assert_eq!(ConfigValue::Float(1.5).to_string(), "1.5");
+        assert_eq!(ConfigValue::Float(5.0).to_string(), "5.0");
         assert_eq!(
             ConfigValue::List(vec!["a".to_string(), "b".to_string()]).to_string(),
             "[a, b]"
