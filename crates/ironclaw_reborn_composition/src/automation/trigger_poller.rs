@@ -37,6 +37,8 @@ pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs
 pub(crate) struct TriggerPollerRuntimeHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_worker: Option<Arc<TriggerPollerWorker>>,
 }
 
 impl TriggerPollerRuntimeHandle {
@@ -65,6 +67,16 @@ impl TriggerPollerRuntimeHandle {
                 }
             }
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn tick_once_for_test(
+        &self,
+    ) -> Option<Result<ironclaw_triggers::TriggerPollerTickReport, ironclaw_triggers::TriggerError>> {
+        let Some(worker) = &self.test_worker else {
+            return None;
+        };
+        Some(worker.tick_once(Utc::now()).await)
     }
 }
 
@@ -110,11 +122,18 @@ pub(crate) fn spawn_trigger_poller(
             fire_settlement_observer,
         },
     )?;
+    let worker = Arc::new(worker);
     let task_cancel = cancel.clone();
+    let task_worker = Arc::clone(&worker);
     let handle = tokio::spawn(async move {
-        run_trigger_poller(worker, settings, task_cancel).await;
+        run_trigger_poller(task_worker, settings, task_cancel).await;
     });
-    Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
+    Ok(Some(TriggerPollerRuntimeHandle {
+        cancel,
+        handle,
+        #[cfg(any(test, feature = "test-support"))]
+        test_worker: Some(worker),
+    }))
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -232,7 +251,7 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
 }
 
 async fn run_trigger_poller(
-    worker: TriggerPollerWorker,
+    worker: Arc<TriggerPollerWorker>,
     settings: TriggerPollerSettings,
     cancel: CancellationToken,
 ) {
@@ -326,7 +345,12 @@ mod tests {
             task_cancel.cancelled().await;
             std::future::pending::<()>().await;
         });
-        let runtime_handle = TriggerPollerRuntimeHandle { cancel, handle };
+        let runtime_handle = TriggerPollerRuntimeHandle {
+            cancel,
+            handle,
+            #[cfg(any(test, feature = "test-support"))]
+            test_worker: None,
+        };
 
         runtime_handle.shutdown(Duration::from_millis(1)).await;
     }
