@@ -4884,26 +4884,32 @@ mod tests {
         .await
         .expect("upsert trigger record");
 
-        // Wait for the poller to fire the trigger.  `mark_fire_accepted` sets
-        // both `last_fired_slot` and `active_run_ref` atomically, so if we see
-        // `last_fired_slot` we can also safely read the run_id.
+        // Wait for the poller to persist an accepted run. `active_run_ref` is
+        // cleared when a fast run completes, so read the durable run-history
+        // row instead of racing that transient field.
         // Keep this budget generous: under `cargo llvm-cov --all-targets`, this
         // E2E runs alongside many instrumented async tests, so the background
         // trigger poller can be scheduled much later than in a focused test.
         let deadline = Instant::now() + TRIGGER_HOOK_E2E_FIRE_TIMEOUT;
         let mut fired_run_id = None;
         let mut last_trigger_state = None;
+        let mut last_run_history = None;
         while Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let run_history = repo
+                .list_trigger_run_history(tenant_id.clone(), trigger_id, 1)
+                .await
+                .expect("list trigger run history");
+            if let Some(run_id) = run_history.first().and_then(|run| run.run_id) {
+                fired_run_id = Some(run_id);
+                break;
+            }
+            last_run_history = Some(run_history);
             let current = repo
                 .get_trigger(tenant_id.clone(), trigger_id)
                 .await
                 .expect("get_trigger")
                 .expect("record present");
-            if current.last_fired_slot.is_some() {
-                fired_run_id = current.active_run_ref;
-                break;
-            }
             last_trigger_state = Some((
                 current.next_run_at,
                 current.last_run_at,
@@ -4941,7 +4947,7 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within {:?} — hook wiring e2e stalled; last_trigger_state={last_trigger_state:?}",
+            "trigger did not fire within {:?} — hook wiring e2e stalled; last_trigger_state={last_trigger_state:?}; last_run_history={last_run_history:?}",
             TRIGGER_HOOK_E2E_FIRE_TIMEOUT
         );
         assert!(
