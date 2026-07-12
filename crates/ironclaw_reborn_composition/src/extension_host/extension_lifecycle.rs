@@ -487,6 +487,7 @@ impl RebornLocalExtensionManagementPort {
     /// install→activate capability handshake through the model. For tests
     /// only — zero bytes shipped in production builds.
     #[cfg(feature = "test-support")]
+    #[cfg(test)]
     pub(crate) fn active_extensions_for_test(&self) -> &ActiveExtensionPublisher {
         &self.active_extensions
     }
