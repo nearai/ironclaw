@@ -52,6 +52,7 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
+mod run_delivery;
 mod webui_inbound;
 mod workflow;
 
@@ -145,9 +146,17 @@ pub use outbound_delivery::{
     ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
     VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
 };
+// The generic run-delivery components (§5.4): channel hosts wire these over
+// the coordinator; vendor residue enters only through the ports.
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
+};
+pub use run_delivery::{
+    ApprovalPromptContextSource, BlockedAuthFlowCancel, BlockedAuthPromptRequest,
+    BlockedAuthPromptSource, DeliveredChannelMessage, PreferenceTargetCodec, RunDeliveryError,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
 };
 // Projection/event types that route handlers need to thread through SSE
 // (parse the resume cursor, render browser-safe event payloads). Re-exported
