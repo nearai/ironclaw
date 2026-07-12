@@ -136,20 +136,20 @@ fn sanitize_response(
     if !slack_context {
         return response;
     }
-    response.safe_text_deltas = response
-        .safe_text_deltas
-        .into_iter()
-        .map(|delta| redact_slack_identifiers(&delta))
-        .collect();
-    response.safe_reasoning_deltas = response
-        .safe_reasoning_deltas
-        .into_iter()
-        .map(|delta| redact_slack_identifiers(&delta))
-        .collect();
+    response.safe_text_deltas = redact_slack_identifier_sequence(response.safe_text_deltas);
+    response.safe_reasoning_deltas =
+        redact_slack_identifier_sequence(response.safe_reasoning_deltas);
     if let ParentLoopOutput::AssistantReply(reply) = &mut response.output {
         reply.content = redact_slack_identifiers(&reply.content);
     }
     response
+}
+
+fn redact_slack_identifier_sequence(deltas: Vec<String>) -> Vec<String> {
+    if deltas.is_empty() {
+        return deltas;
+    }
+    vec![redact_slack_identifiers(&deltas.concat())]
 }
 
 fn redact_slack_identifiers(text: &str) -> String {
@@ -234,7 +234,7 @@ mod tests {
     };
     use ironclaw_turns::{LoopMessageRef, TurnId, TurnRunId, TurnScope};
 
-    use super::{SlackOutputHygieneGateway, redact_slack_identifiers};
+    use super::{SLACK_IDENTIFIER_REDACTION, SlackOutputHygieneGateway, redact_slack_identifiers};
 
     #[test]
     fn slack_output_hygiene_redacts_bounded_user_identifiers_and_mentions() {
@@ -569,6 +569,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_output_hygiene_gateway_redacts_slack_mentions_split_across_text_deltas() {
+        let mut raw_response = HostManagedModelResponse::assistant_reply("complete");
+        raw_response.safe_text_deltas = vec!["mention <@U0123".to_string(), "ABCDE>".to_string()];
+        let gateway = SlackOutputHygieneGateway::new(Arc::new(RecordingGateway::new(raw_response)));
+
+        let response = gateway
+            .stream_model(model_request(Some("slack.search_messages")))
+            .await
+            .expect("decorated split text response");
+        let public_text = response.safe_text_deltas.concat();
+
+        assert_eq!(public_text, format!("mention {SLACK_IDENTIFIER_REDACTION}"));
+        assert!(!public_text.contains("U0123ABCDE"));
+        assert!(response.safe_reasoning_deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slack_output_hygiene_gateway_redacts_identifiers_split_across_reasoning_deltas() {
+        let mut raw_response = HostManagedModelResponse::assistant_reply("complete");
+        raw_response.safe_text_deltas.clear();
+        raw_response.safe_reasoning_deltas = vec!["reason U0123".to_string(), "ABCDE".to_string()];
+        let gateway = SlackOutputHygieneGateway::new(Arc::new(RecordingGateway::new(raw_response)));
+
+        let response = gateway
+            .stream_model(model_request(Some("slack.search_messages")))
+            .await
+            .expect("decorated split reasoning response");
+        let public_reasoning = response.safe_reasoning_deltas.concat();
+
+        assert_eq!(
+            public_reasoning,
+            format!("reason {SLACK_IDENTIFIER_REDACTION}")
+        );
+        assert!(!public_reasoning.contains("U0123ABCDE"));
+        assert!(response.safe_text_deltas.is_empty());
+    }
+
+    #[tokio::test]
     async fn slack_output_hygiene_gateway_detects_visible_slack_tools_without_mutating_capability_calls()
      {
         let arguments = serde_json::json!({
@@ -626,6 +664,10 @@ mod tests {
             "user U0123ABCDE",
             Some("mention <@U0123ABCDE>".to_string()),
         );
+        let mut raw_response = raw_response;
+        raw_response.safe_text_deltas = vec!["user U0123".to_string(), "ABCDE".to_string()];
+        raw_response.safe_reasoning_deltas =
+            vec!["mention <@U0123".to_string(), "ABCDE>".to_string()];
         let inner = Arc::new(
             RecordingGateway::new(raw_response.clone()).with_progress(vec!["checking U0123ABCDE"]),
         );
