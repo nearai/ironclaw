@@ -40,6 +40,12 @@ pub use credential::{
     binding_scope_owns_account,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
+pub use engine::keepalive;
+pub use engine::keepalive::{
+    AlwaysLeaderKeepaliveLock, KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT, KeepaliveCandidateSource,
+    KeepaliveLeaderLock, KeepaliveRefreshPort, KeepaliveSweepDeps, KeepaliveSweepFuture,
+    KeepaliveSweepHandle, KeepaliveSweepSettings, LeaderOutcome, spawn_keepalive_sweep,
+};
 pub use engine::{
     ApiKeyFieldValue, ApiKeySubmission, ApiKeySubmitRequest, AuthEngine, AuthEngineDeps,
     AuthRecipeResolver, DCR_CLIENT_HANDLE_PREFIX, EngineCallbackBase,

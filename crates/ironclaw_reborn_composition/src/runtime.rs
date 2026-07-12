@@ -660,8 +660,7 @@ pub struct RebornRuntime {
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    credential_refresh_worker_handle:
-        Option<crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
+    credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
@@ -670,8 +669,9 @@ pub struct RebornRuntime {
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
     #[cfg(feature = "slack-v2-host-beta")]
-    post_submit_hook_slot:
-        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>>,
+    post_submit_hook_slot: Option<
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>,
+    >,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -2454,9 +2454,7 @@ impl RebornRuntime {
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
-                .shutdown(
-                    crate::product_auth::credentials::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
-                )
+                .shutdown(ironclaw_auth::KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT)
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
@@ -3901,12 +3899,13 @@ pub async fn build_reborn_runtime(
     }
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
-    // Spawn the background Google OAuth credential keepalive worker (B4).
-    // Gated on the db features: the worker deps (candidate source + leader lock
-    // + refresh port) are only produced together on production paths (libsql /
-    // postgres), bundled into `CredentialRefreshWorkerReady::Ready`. Local-dev /
-    // override paths are `Absent` and the worker is skipped. The `enabled` policy
-    // flag still gates the actual spawn inside `spawn_credential_refresh_worker`.
+    // Spawn the engine-owned credential keepalive sweep (B4;
+    // `ironclaw_auth::keepalive`). Gated on the db features: the sweep deps
+    // (candidate source + recipes + leader lock + refresh port) are only
+    // produced together on production paths (libsql / postgres), bundled into
+    // `CredentialRefreshWorkerReady::Ready`. Local-dev / override paths are
+    // `Absent` and the sweep is skipped. The `enabled` policy flag still gates
+    // the actual spawn inside `spawn_keepalive_sweep`.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let credential_refresh_worker_handle = match std::mem::replace(
         &mut services.credential_refresh_worker,
@@ -3914,13 +3913,15 @@ pub async fn build_reborn_runtime(
     ) {
         crate::factory::CredentialRefreshWorkerReady::Ready {
             candidate_source,
+            recipes,
             leader_lock,
             refresh_port,
-        } => crate::product_auth::credentials::credential_refresh_worker::spawn_credential_refresh_worker(
+        } => ironclaw_auth::spawn_keepalive_sweep(
             credential_refresh,
-            crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerDeps {
-                candidate_source,
-                refresh_port,
+            ironclaw_auth::KeepaliveSweepDeps {
+                candidates: candidate_source,
+                recipes,
+                refresh: refresh_port as std::sync::Arc<dyn ironclaw_auth::KeepaliveRefreshPort>,
                 leader_lock: std::sync::Arc::new(leader_lock),
             },
         ),

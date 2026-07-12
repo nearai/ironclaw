@@ -221,6 +221,19 @@ impl VendorAuthRecipe {
         }
     }
 
+    /// The declared idle-keepalive threshold, if any (`oauth2_code` only —
+    /// `api_key` credentials have no refresh token to keep alive).
+    pub fn keepalive_idle_threshold(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Oauth2Code(recipe) => recipe
+                .refresh
+                .as_ref()
+                .and_then(|refresh| refresh.keepalive_idle_seconds)
+                .map(|seconds| std::time::Duration::from_secs(u64::from(seconds))),
+            Self::ApiKey(_) => None,
+        }
+    }
+
     /// Whether two recipes for a shared vendor are compatible: identical
     /// except `scopes` and `display_name`
     /// (`docs/reborn/extension-runtime/overview.md` §3.2).
@@ -314,6 +327,11 @@ impl OAuth2CodeRecipe {
             if RESERVED_AUTHORIZE_PARAMS.contains(&key.as_str()) || *key == scope_param {
                 return Err(RecipeValidationError::ReservedAuthorizeParam { param: key.clone() });
             }
+        }
+        if let Some(seconds) = self.refresh.as_ref().and_then(|r| r.keepalive_idle_seconds)
+            && !(MIN_KEEPALIVE_IDLE_SECONDS..=MAX_KEEPALIVE_IDLE_SECONDS).contains(&seconds)
+        {
+            return Err(RecipeValidationError::KeepaliveIdleOutOfRange { seconds });
         }
         Ok(())
     }
@@ -423,6 +441,11 @@ pub struct IdentityEndpoint {
     pub url: HttpsEndpoint,
 }
 
+/// Lower bound for [`RefreshRecipe::keepalive_idle_seconds`] (one hour).
+pub const MIN_KEEPALIVE_IDLE_SECONDS: u32 = 3_600;
+/// Upper bound for [`RefreshRecipe::keepalive_idle_seconds`] (365 days).
+pub const MAX_KEEPALIVE_IDLE_SECONDS: u32 = 31_536_000;
+
 /// Refresh-token semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -430,6 +453,15 @@ pub struct RefreshRecipe {
     /// Whether the vendor rotates the refresh token on every refresh.
     #[serde(default)]
     pub rotates_refresh_token: bool,
+    /// Vendor lifetime constraint: refresh tokens die after this many seconds
+    /// of inactivity (some vendors expire idle refresh tokens — e.g. for apps
+    /// in a "testing" publishing status — after a fixed window). Declaring it
+    /// opts the vendor's accounts into the host auth engine's proactive
+    /// keepalive sweep; absent means the vendor's tokens do not idle-expire
+    /// and are never swept.
+    /// Bounded to [`MIN_KEEPALIVE_IDLE_SECONDS`, `MAX_KEEPALIVE_IDLE_SECONDS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_idle_seconds: Option<u32>,
 }
 
 /// Best-effort remote revocation.
@@ -542,6 +574,11 @@ pub enum RecipeValidationError {
     ProbeWithoutSuccessStatus,
     #[error("validation probe injects `{handle}`, which is not one of the recipe's fields")]
     ProbeInjectsUndeclaredHandle { handle: String },
+    #[error(
+        "refresh.keepalive_idle_seconds must be between {MIN_KEEPALIVE_IDLE_SECONDS} and \
+         {MAX_KEEPALIVE_IDLE_SECONDS} seconds (got {seconds})"
+    )]
+    KeepaliveIdleOutOfRange { seconds: u32 },
     #[error("signed_payload must not be empty")]
     EmptySignedPayload,
     #[error("signed_payload `body` segments must be `body = true`")]
@@ -831,6 +868,61 @@ signed_payload = [ { body = true } ]
                 HttpsEndpoint::new("https://vendor.example/other/token").unwrap();
         }
         assert!(!base.compatible_for_shared_vendor(&conflicting));
+
+        let mut keepalive_conflicting = base.clone();
+        if let VendorAuthRecipe::Oauth2Code(inner) = &mut keepalive_conflicting {
+            inner.refresh = Some(RefreshRecipe {
+                rotates_refresh_token: false,
+                keepalive_idle_seconds: Some(604_800),
+            });
+        }
+        assert!(
+            !base.compatible_for_shared_vendor(&keepalive_conflicting),
+            "a keepalive-threshold difference is a shared-vendor conflict"
+        );
+    }
+
+    #[test]
+    fn refresh_keepalive_idle_threshold_parses_validates_and_projects() {
+        let toml = format!(
+            "{}\n[refresh]\nkeepalive_idle_seconds = 604800\n",
+            slack_shaped_recipe_toml()
+        );
+        let recipe: VendorAuthRecipe = toml::from_str(&toml).unwrap();
+        recipe.validate().unwrap();
+        assert_eq!(
+            recipe.keepalive_idle_threshold(),
+            Some(std::time::Duration::from_secs(604_800)),
+            "a declared keepalive threshold projects as a duration"
+        );
+
+        let bare: VendorAuthRecipe = toml::from_str(slack_shaped_recipe_toml()).unwrap();
+        assert_eq!(
+            bare.keepalive_idle_threshold(),
+            None,
+            "vendors that do not declare the threshold are never swept"
+        );
+    }
+
+    #[test]
+    fn refresh_keepalive_idle_seconds_out_of_range_fails_closed() {
+        for out_of_range in [
+            MIN_KEEPALIVE_IDLE_SECONDS - 1,
+            MAX_KEEPALIVE_IDLE_SECONDS + 1,
+        ] {
+            let toml = format!(
+                "{}\n[refresh]\nkeepalive_idle_seconds = {out_of_range}\n",
+                slack_shaped_recipe_toml()
+            );
+            let recipe: VendorAuthRecipe = toml::from_str(&toml).unwrap();
+            assert!(
+                matches!(
+                    recipe.validate().unwrap_err(),
+                    RecipeValidationError::KeepaliveIdleOutOfRange { .. }
+                ),
+                "keepalive_idle_seconds = {out_of_range} must fail closed"
+            );
+        }
     }
 
     #[test]

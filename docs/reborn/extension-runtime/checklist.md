@@ -283,8 +283,21 @@ Rules — kept short on purpose:
   (`auth_engine_contract.rs`); on-demand-at-injection single-flight is the
   per-account refresh lock in `ProviderBackedCredentialAccountService`
   (`crates/ironclaw_auth/src/credential.rs`) driven by the inline
-  injection-time refresh in `runtime_credentials.rs` — no background
-  refresher was added.
+  injection-time refresh in `runtime_credentials.rs`. KEEPALIVE LEG (owner
+  call, resolves the #6008 owner note): a recipe may declare an idle
+  keepalive threshold (`refresh.keepalive_idle_seconds`, a vendor lifetime
+  constraint — implementation §7); the engine executes one generic
+  vendor-blind background sweep (leader-locked, due at half the declared
+  lifetime, soonest-death-first under the per-tick cap), replacing the
+  composition-owned Google-specific worker. —
+  `keepalive_sweep_refreshes_due_accounts_of_declaring_vendors_only`,
+  `keepalive_sweep_skips_the_tick_when_not_leader`,
+  `keepalive_refresh_failure_follows_engine_account_state_rules`,
+  `google_manifests_declare_the_keepalive_idle_lifetime_identically`
+  (`auth_engine_contract.rs`); vendor-blind candidate enumeration on both
+  DB-gated builds (`list_refresh_candidates_covers_agent_and_project_scopes`,
+  composition `product_auth/durable/tests.rs`); recipe-field validation +
+  shared-vendor conflict coverage in `ironclaw_host_api` `recipe.rs` tests.
 - [x] AUTH-7 Identity extracts from the token response or the declared
   identity endpoint and is validated against the flow before storage. —
   `pointer_extraction_reads_nested_fields_and_scope_fallback` (token response),

@@ -1062,16 +1062,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/product_auth/credentials/credential_refresh_worker.rs",
-        "google",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs",
         "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_refresh_lock.rs",
-        "google",
     ),
     (
         "crates/ironclaw_reborn_composition/src/product_auth/credentials/runtime_credentials.rs",
@@ -1113,10 +1105,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
         "web_access",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/runtime_input.rs",
-        "google",
     ),
     (
         "crates/ironclaw_reborn_composition/src/slack/mod.rs",

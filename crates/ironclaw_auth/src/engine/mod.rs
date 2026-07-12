@@ -24,6 +24,7 @@
 mod dcr;
 mod exchange;
 mod http;
+pub mod keepalive;
 
 use std::collections::BTreeMap;
 use std::fmt;

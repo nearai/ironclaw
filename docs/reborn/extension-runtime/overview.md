@@ -465,12 +465,17 @@ There is deliberately **no auth trait in the extension ABI.** The host's
   validation, scope intersection against the recipe ceiling, token exchange
   HTTP, secret encryption and storage, identity claim extraction via the
   recipe's JSON-pointer map, grant/account records, the blocked-tool auth gate
-  and resume, revocation and grant cleanup on extension removal.
+  and resume, revocation and grant cleanup on extension removal. Refresh is
+  on-demand at injection; additionally, a recipe may declare an idle keepalive
+  threshold (a vendor lifetime constraint — some vendors expire refresh tokens
+  after a fixed idle window), executed once by the engine as a generic,
+  vendor-blind background sweep.
 - **Recipe declares (per vendor, data only):** endpoints, scope parameter
   name, extra authorize params, token-exchange auth style, token-response and
   identity field paths (RFC 6901 JSON pointers, closed vocabulary), refresh
-  rotation flags, revoke endpoint, client-credential handles — or, for
-  `api_key`: form fields and an optional validation probe:
+  rotation flags and optional idle-keepalive threshold
+  (`refresh.keepalive_idle_seconds`), revoke endpoint, client-credential
+  handles — or, for `api_key`: form fields and an optional validation probe:
 
   ```toml
   [auth.github]

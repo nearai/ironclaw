@@ -267,6 +267,9 @@ fn engine_provider_client_for_test(
             "expires_in": "/expires_in",
             "scope": { "path": "/scope", "missing": "fallback_to_requested" }
         },
+        // Test vendors declare a 7-day idle lifetime so sweep tests exercise
+        // the engine keepalive path (accounts become due at half-life).
+        "refresh": { "keepalive_idle_seconds": 604_800 },
     }))
     .expect("test vendor recipe parses");
     Arc::new(ironclaw_auth::AuthEngine::new(
@@ -334,6 +337,10 @@ pub struct OAuthProductAuthTestBundle {
     /// Scripted egress — inspect after `handle_oauth_callback` to verify
     /// the token-exchange HTTP call happened.
     pub egress: Arc<ScriptedOAuthTokenEgress>,
+    /// The engine's recipe data (synthetic test vendors declare a 7-day
+    /// keepalive lifetime); `sweep_for_refresh` resolves idle thresholds
+    /// through this, exactly like the production sweep.
+    pub keepalive_recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
 }
 
 /// Shared infrastructure preamble for OAuth product-auth test bundles.
@@ -434,7 +441,12 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         Arc::new(TestNoopContinuationDispatcher),
     ));
 
-    OAuthProductAuthTestBundle { services, egress }
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
 }
 
 /// Construct the same engine-backed bundle as [`build_oauth_product_auth_for_test`]
@@ -493,13 +505,18 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
         durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
         Arc::new(TestNoopContinuationDispatcher),
     ));
-    OAuthProductAuthTestBundle { services, egress }
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
 }
 
 // ─── Slice 8: OAuth credential-refresh sweep test support ────────────────────
 //
 // `FixedCandidateSource` and `OAuthProductAuthTestBundle::sweep_for_refresh`
-// together let a test drive `credential_refresh_worker::sweep_once` with:
+// together let a test drive the engine-owned `keepalive::sweep_once` with:
 //   • a pre-seeded list of accounts (bypasses the filesystem walk)
 //   • a frozen `now` instant (controls the idle-cutoff comparison)
 //   • the real `ProviderBackedCredentialAccountService` refresh path
@@ -512,20 +529,21 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
 // through `ProviderBackedCredentialAccountService` instead of returning
 // `BackendUnavailable`.
 
-/// Fixed candidate source for credential-refresh sweep tests (slice 8).
+/// Fixed candidate source for credential-keepalive sweep tests (slice 8).
 ///
-/// Returns a caller-supplied list of accounts from `list_refresh_candidates`,
-/// bypassing the `FilesystemAuthProductServices` filesystem walk. This lets a
-/// test inject a real `CredentialAccount` (read back after an OAuth connect
-/// flow) directly into `sweep_once` without needing the full tenant-path
-/// enumeration to work in an in-memory backend.
+/// Returns a caller-supplied list of accounts from
+/// `list_keepalive_candidates`, bypassing the `FilesystemAuthProductServices`
+/// filesystem walk. This lets a test inject a real `CredentialAccount` (read
+/// back after an OAuth connect flow) directly into the engine's `sweep_once`
+/// without needing the full tenant-path enumeration to work in an in-memory
+/// backend.
 ///
-/// Gated on `any(feature = "libsql", feature = "postgres")` because
-/// `credential_refresh_worker` is only compiled under those features.
+/// Gated on `any(feature = "libsql", feature = "postgres")` to match the
+/// production spawn wiring (`CredentialRefreshWorkerReady`).
 // TODO(follow-up): add a LibSql-backed sweep test that drives the real
-// `FilesystemCredentialRefreshCandidateSource` enumeration. `FixedCandidateSource`
-// bypasses the tenant-path filesystem walk because this bundle's fixed view
-// mounts only `/secrets` (no tenant tree to enumerate). The refresh path itself
+// durable candidate enumeration. `FixedCandidateSource` bypasses the
+// tenant-path filesystem walk because this bundle's fixed view mounts only
+// `/secrets` (no tenant tree to enumerate). The refresh path itself
 // (`sweep_once` -> `refresh_account` -> provider client -> egress -> status
 // write-back) is already covered here at full fidelity; only candidate
 // enumeration is stubbed.
@@ -536,63 +554,50 @@ struct FixedCandidateSource {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait]
-impl crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource
-    for FixedCandidateSource
-{
-    async fn list_refresh_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
+impl ironclaw_auth::KeepaliveCandidateSource for FixedCandidateSource {
+    async fn list_keepalive_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
         self.candidates.clone()
     }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 impl OAuthProductAuthTestBundle {
-    /// Run one credential-refresh sweep tick with a fixed account list and a
-    /// frozen clock.
+    /// Run one credential-keepalive sweep tick with a fixed account list and
+    /// a frozen clock.
     ///
-    /// This exercises the production `sweep_once` path — `select_idle_candidates`
-    /// (idle-threshold + cap), `CredentialRefreshRequest` construction,
+    /// This exercises the engine-owned `sweep_once` path — recipe-threshold
+    /// gating (the test vendor declares a 7-day keepalive lifetime; accounts
+    /// become due at half-life), due selection + cap,
+    /// `CredentialRefreshRequest` construction,
     /// `RebornProductAuthServices::refresh_credential_account` →
-    /// `ProviderBackedCredentialAccountService::refresh_account` →
-    /// `HostOAuthProviderClient::refresh_token` → scripted HTTP egress — without
-    /// needing a real filesystem walk or a Postgres leader lock.
+    /// `ProviderBackedCredentialAccountService::refresh_account` → engine
+    /// `refresh_token` → scripted HTTP egress — without needing a real
+    /// filesystem walk or a Postgres leader lock.
     ///
     /// # Arguments
     ///
     /// * `candidates` — `CredentialAccount` records to feed into the sweep.
     ///   Obtain these by calling `services.credential_account_service().get_account()`
     ///   after a successful OAuth connect flow so the handles are real.
-    /// * `settings` — pass `CredentialRefreshSettings::enabled()` to enable the
-    ///   sweep with the default 2-day idle threshold and cap of 5.
-    /// * `now` — frozen instant. Pass `Utc::now() + Duration::days(3)` to make a
-    ///   just-created account appear idle; pass `Utc::now()` (or any time within
-    ///   the threshold) to verify no refresh is triggered.
+    /// * `settings` — pass `KeepaliveSweepSettings::enabled()` (cap of 5).
+    /// * `now` — frozen instant. Pass `Utc::now() + Duration::days(4)` to put
+    ///   a just-created account past the test vendor's 3.5-day half-life;
+    ///   pass `Utc::now()` (or anything under the half-life) to verify no
+    ///   refresh is triggered.
     pub async fn sweep_for_refresh(
         &self,
         candidates: Vec<ironclaw_auth::CredentialAccount>,
-        settings: crate::runtime_input::CredentialRefreshSettings,
+        settings: ironclaw_auth::KeepaliveSweepSettings,
         now: chrono::DateTime<chrono::Utc>,
     ) {
-        use crate::product_auth::credentials::credential_refresh_worker::{
-            CredentialRefreshWorkerDeps, sweep_once,
-        };
+        use ironclaw_auth::keepalive::sweep_once;
         use tokio_util::sync::CancellationToken;
 
-        let candidate_source = std::sync::Arc::new(FixedCandidateSource { candidates });
-
-        // Build an always-leader lock: no Postgres pool needed for tests.
-        #[cfg(not(feature = "postgres"))]
-        let leader_lock = std::sync::Arc::new(
-            crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader(),
-        );
-        #[cfg(feature = "postgres")]
-        let leader_lock = std::sync::Arc::new(
-            crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
-        );
-
-        let deps = CredentialRefreshWorkerDeps {
-            candidate_source,
-            refresh_port: std::sync::Arc::clone(&self.services),
-            leader_lock,
+        let deps = ironclaw_auth::KeepaliveSweepDeps {
+            candidates: std::sync::Arc::new(FixedCandidateSource { candidates }),
+            recipes: std::sync::Arc::clone(&self.keepalive_recipes),
+            refresh: std::sync::Arc::clone(&self.services) as _,
+            leader_lock: std::sync::Arc::new(ironclaw_auth::AlwaysLeaderKeepaliveLock),
         };
         let cancel = CancellationToken::new();
         sweep_once(&deps, &settings, &cancel, now).await;
@@ -613,8 +618,9 @@ impl OAuthProductAuthTestBundle {
 ///   `BackendUnavailable`.
 ///
 /// Gated on `any(feature = "libsql", feature = "postgres")` because
-/// `sweep_for_refresh` (the primary consumer) requires `credential_refresh_worker`,
-/// which is compiled only under those features.
+/// `sweep_for_refresh` (the primary consumer) mirrors the production spawn
+/// wiring (`CredentialRefreshWorkerReady`), which is compiled only under
+/// those features.
 ///
 /// Calling this multiple times produces independent, isolated bundles.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -634,14 +640,15 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
 
     // The vendor id must be "google" so the engine resolves the same recipe
     // the refresh path requests; the recipe is synthetic test data.
-    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> =
-        engine_provider_client_for_test(
-            "google",
-            &["email"],
-            "https://oauth2.googleapis.com/token",
-            Arc::clone(&egress),
-            Arc::clone(&secret_store),
-        );
+    let engine = engine_provider_client_for_test(
+        "google",
+        &["email"],
+        "https://oauth2.googleapis.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = engine;
 
     // Build services then wrap credential_account_service with
     // ProviderBackedCredentialAccountService via with_provider_client() so
@@ -660,5 +667,9 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
         .with_provider_client(provider_client),
     );
 
-    OAuthProductAuthTestBundle { services, egress }
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
 }

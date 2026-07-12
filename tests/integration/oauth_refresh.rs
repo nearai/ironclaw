@@ -22,7 +22,7 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{AuthProductScope, AuthSurface, CredentialAccountLookupRequest};
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, test_support::build_google_oauth_product_auth_for_test,
+    KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
 };
 use reborn_support::oauth_flow::connect_google_account;
 
@@ -62,14 +62,10 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
     // Freeze the clock 3 days ahead: the account was just created (updated_at
     // ≈ Utc::now()), so idle_cutoff = frozen_now − 2 days is still 1 day ahead
     // of creation, making the account idle.
-    let frozen_now = Utc::now() + Duration::days(3);
+    let frozen_now = Utc::now() + Duration::days(4);
 
     bundle
-        .sweep_for_refresh(
-            vec![account],
-            CredentialRefreshSettings::enabled(),
-            frozen_now,
-        )
+        .sweep_for_refresh(vec![account], KeepaliveSweepSettings::enabled(), frozen_now)
         .await;
 
     assert_eq!(
@@ -137,11 +133,7 @@ async fn credential_refresh_sweep_skips_fresh_google_account() {
     // updated_at is effectively Utc::now(); idle_cutoff = now − 2 days is
     // 2 days ago, which is BEFORE updated_at → account is NOT idle.
     bundle
-        .sweep_for_refresh(
-            vec![account],
-            CredentialRefreshSettings::enabled(),
-            Utc::now(),
-        )
+        .sweep_for_refresh(vec![account], KeepaliveSweepSettings::enabled(), Utc::now())
         .await;
 
     assert_eq!(

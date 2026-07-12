@@ -1449,3 +1449,400 @@ async fn cross_flow_callbacks_are_rejected() {
         ironclaw_auth::AuthErrorCode::BackendUnavailable
     );
 }
+
+// ---------------------------------------------------------------------------
+// Engine-owned keepalive sweep: recipes declare idle lifetimes, the engine
+// sweeps once for every declaring vendor (AUTH-6 keepalive leg)
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use ironclaw_auth::keepalive::{sweep_once, tick_once};
+use ironclaw_auth::{
+    AlwaysLeaderKeepaliveLock, CredentialAccount, CredentialAccountLookupRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    KeepaliveCandidateSource, KeepaliveLeaderLock, KeepaliveSweepDeps, KeepaliveSweepFuture,
+    KeepaliveSweepSettings, LeaderOutcome, NewCredentialAccount,
+    ProviderBackedCredentialAccountService,
+};
+use tokio_util::sync::CancellationToken;
+
+fn keepalive_recipe_toml(vendor: &str, keepalive_idle_seconds: Option<u32>) -> String {
+    let refresh = match keepalive_idle_seconds {
+        Some(seconds) => format!("[refresh]\nkeepalive_idle_seconds = {seconds}\n"),
+        None => String::new(),
+    };
+    format!(
+        r#"
+method = "oauth2_code"
+display_name = "{vendor} account"
+authorization_endpoint = "https://auth.{vendor}.example/authorize"
+token_endpoint = "https://auth.{vendor}.example/token"
+scopes = ["msg:read"]
+client_credentials = {{ client_id_handle = "{vendor}_client_id", client_secret_handle = "{vendor}_client_secret" }}
+
+{refresh}
+[token_response]
+access_token = "/access_token"
+refresh_token = "/refresh_token"
+expires_in = "/expires_in"
+"#
+    )
+}
+
+/// Candidate source the tests control explicitly. The sweep's recipe gating
+/// and defensive `Configured`-only filter are the behavior under test; the
+/// production source contract (Configured + refresh handle, all vendors) is
+/// pinned at the composition tier.
+#[derive(Default)]
+struct ScriptedCandidateSource {
+    accounts: Mutex<Vec<CredentialAccount>>,
+    calls: AtomicUsize,
+}
+
+impl ScriptedCandidateSource {
+    fn set(&self, accounts: Vec<CredentialAccount>) {
+        *self.accounts.lock().unwrap() = accounts;
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl KeepaliveCandidateSource for ScriptedCandidateSource {
+    async fn list_keepalive_candidates(&self) -> Vec<CredentialAccount> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.accounts.lock().unwrap().clone()
+    }
+}
+
+/// A lock that never grants leadership; the sweep future must be dropped
+/// untouched.
+struct NeverLeaderLock;
+
+#[async_trait]
+impl KeepaliveLeaderLock for NeverLeaderLock {
+    async fn run_as_leader(&self, _sweep: KeepaliveSweepFuture) -> LeaderOutcome<()> {
+        LeaderOutcome::NotLeader
+    }
+}
+
+/// Engine + scripted vendor server + in-memory stores wired into sweep deps,
+/// with the refresh port going through the REAL engine-owned refresh path
+/// (`ProviderBackedCredentialAccountService` over `AuthEngine`).
+struct SweepFixture {
+    server: Arc<ScriptedVendorServer>,
+    secrets: Arc<InMemorySecretStore>,
+    services: Arc<InMemoryAuthProductServices>,
+    source: Arc<ScriptedCandidateSource>,
+    deps: KeepaliveSweepDeps,
+    scope: AuthProductScope,
+}
+
+impl SweepFixture {
+    fn new(recipes: Vec<ResolvedVendorAuthRecipe>) -> Self {
+        let mut by_vendor = HashMap::new();
+        for recipe in &recipes {
+            by_vendor.insert(
+                recipe.vendor.clone(),
+                (
+                    format!("{}-client-id", recipe.vendor),
+                    Some(format!("{}-client-secret", recipe.vendor)),
+                ),
+            );
+        }
+        let server = Arc::new(ScriptedVendorServer::default());
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let engine = Arc::new(AuthEngine::new(AuthEngineDeps {
+            recipes: Arc::new(StaticAuthRecipeResolver::new(recipes.clone())),
+            client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
+            egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
+            secret_store: Arc::clone(&secrets) as Arc<dyn SecretStore>,
+            callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),
+            dcr_client_name: "IronClaw test".to_string(),
+        }));
+        let services = Arc::new(InMemoryAuthProductServices::new());
+        let refresh = Arc::new(ProviderBackedCredentialAccountService::new(
+            services.clone(),
+            services.clone(),
+            engine as Arc<dyn AuthProviderClient>,
+        ));
+        let source = Arc::new(ScriptedCandidateSource::default());
+        let deps = KeepaliveSweepDeps {
+            candidates: source.clone(),
+            recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
+            refresh,
+            leader_lock: Arc::new(AlwaysLeaderKeepaliveLock),
+        };
+        Self {
+            server,
+            secrets,
+            services,
+            source,
+            deps,
+            scope: test_scope(),
+        }
+    }
+
+    async fn seed_account(&self, vendor: &str) -> CredentialAccount {
+        let refresh_handle = SecretHandle::new(format!("{vendor}-seeded-refresh")).unwrap();
+        self.secrets
+            .put(
+                self.scope.resource.clone(),
+                refresh_handle.clone(),
+                SecretString::from(format!("{vendor}-seeded-refresh-token")),
+                None,
+            )
+            .await
+            .unwrap();
+        let account = self
+            .services
+            .create_account(NewCredentialAccount {
+                scope: self.scope.clone(),
+                provider: AuthProviderId::new(vendor).unwrap(),
+                label: CredentialAccountLabel::new(vendor).unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: None,
+                refresh_secret: Some(refresh_handle),
+                scopes: vec![ProviderScope::new("msg:read").unwrap()],
+            })
+            .await
+            .expect("seed account");
+        let mut accounts = self.source.accounts.lock().unwrap().clone();
+        accounts.push(account.clone());
+        self.source.set(accounts);
+        account
+    }
+
+    async fn stored_account(&self, account: &CredentialAccount) -> CredentialAccount {
+        self.services
+            .get_account(CredentialAccountLookupRequest::new(
+                self.scope.clone(),
+                account.id,
+            ))
+            .await
+            .expect("lookup")
+            .expect("account exists")
+    }
+
+    fn token_url(vendor: &str) -> String {
+        format!("https://auth.{vendor}.example/token")
+    }
+}
+
+const WEEK_SECONDS: u32 = 604_800;
+const MONTH_SECONDS: u32 = 2_592_000;
+
+#[tokio::test]
+async fn keepalive_sweep_refreshes_due_accounts_of_declaring_vendors_only() {
+    let fixture = SweepFixture::new(vec![
+        synthetic_recipe("alpha", &keepalive_recipe_toml("alpha", Some(WEEK_SECONDS))),
+        synthetic_recipe("beta", &keepalive_recipe_toml("beta", Some(MONTH_SECONDS))),
+        synthetic_recipe("gamma", &keepalive_recipe_toml("gamma", None)),
+    ]);
+    let alpha = fixture.seed_account("alpha").await;
+    let beta = fixture.seed_account("beta").await;
+    let gamma = fixture.seed_account("gamma").await;
+
+    fixture.server.script(
+        &SweepFixture::token_url("alpha"),
+        200,
+        serde_json::json!({
+            "access_token": "kept-alive-access",
+            "expires_in": 3600
+        }),
+    );
+
+    // Frozen clock 4 days ahead: alpha (7d lifetime) is past its half-life,
+    // beta (30d lifetime) is fresh, gamma declares no lifetime at all.
+    let now = Utc::now() + Duration::days(4);
+    sweep_once(
+        &fixture.deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        now,
+    )
+    .await;
+
+    let alpha_requests = fixture
+        .server
+        .requests_for(&SweepFixture::token_url("alpha"));
+    assert_eq!(alpha_requests.len(), 1, "alpha is refreshed exactly once");
+    let form = alpha_requests[0].form();
+    assert_eq!(
+        form.get("grant_type").map(String::as_str),
+        Some("refresh_token")
+    );
+    assert_eq!(
+        form.get("refresh_token").map(String::as_str),
+        Some("alpha-seeded-refresh-token")
+    );
+    assert_eq!(
+        fixture.server.request_count(),
+        1,
+        "fresh and non-declaring vendors see no vendor traffic"
+    );
+
+    let refreshed = fixture.stored_account(&alpha).await;
+    assert!(
+        refreshed.updated_at > alpha.updated_at,
+        "a keepalive refresh resets the idle clock"
+    );
+    assert_eq!(refreshed.status, CredentialAccountStatus::Configured);
+    assert_eq!(
+        fixture.stored_account(&beta).await.updated_at,
+        beta.updated_at,
+        "fresh accounts are untouched"
+    );
+    assert_eq!(
+        fixture.stored_account(&gamma).await.updated_at,
+        gamma.updated_at,
+        "non-declaring vendors are never swept"
+    );
+}
+
+#[tokio::test]
+async fn keepalive_sweep_skips_the_tick_when_not_leader() {
+    let fixture = SweepFixture::new(vec![synthetic_recipe(
+        "alpha",
+        &keepalive_recipe_toml("alpha", Some(WEEK_SECONDS)),
+    )]);
+    fixture.seed_account("alpha").await;
+
+    let mut deps = fixture.deps.clone();
+    deps.leader_lock = Arc::new(NeverLeaderLock);
+    tick_once(
+        &deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        Utc::now() + Duration::days(4),
+    )
+    .await;
+
+    assert_eq!(
+        fixture.source.call_count(),
+        0,
+        "non-leaders never enumerate candidates"
+    );
+    assert_eq!(
+        fixture.server.request_count(),
+        0,
+        "non-leaders never touch a token endpoint"
+    );
+}
+
+#[tokio::test]
+async fn keepalive_refresh_failure_follows_engine_account_state_rules() {
+    let fixture = SweepFixture::new(vec![
+        synthetic_recipe("alpha", &keepalive_recipe_toml("alpha", Some(WEEK_SECONDS))),
+        synthetic_recipe("beta", &keepalive_recipe_toml("beta", Some(MONTH_SECONDS))),
+    ]);
+    let alpha = fixture.seed_account("alpha").await;
+    let beta = fixture.seed_account("beta").await;
+
+    // alpha's vendor revoked the refresh token; beta refreshes fine.
+    fixture.server.script(
+        &SweepFixture::token_url("alpha"),
+        400,
+        serde_json::json!({ "error": "invalid_grant" }),
+    );
+    fixture.server.script(
+        &SweepFixture::token_url("beta"),
+        200,
+        serde_json::json!({ "access_token": "beta-access", "expires_in": 3600 }),
+    );
+
+    // 16 days ahead both accounts are past their half-lives.
+    let now = Utc::now() + Duration::days(16);
+    sweep_once(
+        &fixture.deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        now,
+    )
+    .await;
+
+    assert_eq!(
+        fixture
+            .server
+            .requests_for(&SweepFixture::token_url("alpha"))
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .server
+            .requests_for(&SweepFixture::token_url("beta"))
+            .len(),
+        1,
+        "one account's permanent failure does not abort the sweep"
+    );
+    let revoked = fixture.stored_account(&alpha).await;
+    assert_eq!(
+        revoked.status,
+        CredentialAccountStatus::Revoked,
+        "invalid_grant follows the engine's account-state rules"
+    );
+    assert!(
+        fixture.stored_account(&beta).await.updated_at > beta.updated_at,
+        "the healthy account still refreshed"
+    );
+
+    // Next tick: the revoked account is no longer refreshable and must be
+    // excluded even if a loose candidate source still lists it.
+    let refreshed_beta = fixture.stored_account(&beta).await;
+    fixture.source.set(vec![revoked, refreshed_beta]);
+    fixture.server.script(
+        &SweepFixture::token_url("beta"),
+        200,
+        serde_json::json!({ "access_token": "beta-access-2", "expires_in": 3600 }),
+    );
+    sweep_once(
+        &fixture.deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        now,
+    )
+    .await;
+    assert_eq!(
+        fixture
+            .server
+            .requests_for(&SweepFixture::token_url("alpha"))
+            .len(),
+        1,
+        "a revoked account is never re-swept"
+    );
+}
+
+#[test]
+fn google_manifests_declare_the_keepalive_idle_lifetime_identically() {
+    let gmail = manifest_recipe("gmail", "google");
+    assert_eq!(
+        gmail.recipe.keepalive_idle_threshold(),
+        Some(std::time::Duration::from_secs(u64::from(WEEK_SECONDS))),
+        "google refresh tokens idle-die after 7 days (testing publishing status)"
+    );
+    for package in [
+        "google-calendar",
+        "google-docs",
+        "google-drive",
+        "google-sheets",
+        "google-slides",
+    ] {
+        let sibling = manifest_recipe(package, "google");
+        assert_eq!(
+            sibling.recipe.keepalive_idle_threshold(),
+            gmail.recipe.keepalive_idle_threshold(),
+            "{package} must declare the same keepalive lifetime as gmail"
+        );
+        assert!(
+            gmail.recipe.compatible_for_shared_vendor(&sibling.recipe),
+            "{package} must stay shared-vendor compatible with gmail"
+        );
+    }
+}

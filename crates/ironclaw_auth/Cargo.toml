@@ -26,7 +26,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync"] }
+rand = "0.10"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = "0.7"
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }

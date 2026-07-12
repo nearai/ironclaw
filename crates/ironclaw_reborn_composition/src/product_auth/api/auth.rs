@@ -1473,6 +1473,21 @@ impl RuntimeCredentialAccountRefreshPort for RebornProductAuthServices {
     }
 }
 
+// The engine keepalive sweep refreshes through the same composed path as the
+// inline injection-time refresh: the per-account single-flight lock lives in
+// `ProviderBackedCredentialAccountService` below this facade.
+#[async_trait]
+impl ironclaw_auth::KeepaliveRefreshPort for RebornProductAuthServices {
+    async fn refresh_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        RebornProductAuthServices::refresh_credential_account(self, request)
+            .await
+            .map_err(auth_product_error_from_reborn_error)
+    }
+}
+
 fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthProductError {
     match error.code {
         AuthErrorCode::UnknownOrExpiredFlow => AuthProductError::UnknownOrExpiredFlow,
