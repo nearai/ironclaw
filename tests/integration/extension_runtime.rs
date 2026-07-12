@@ -27,6 +27,64 @@ use reborn_support::reply::RebornScriptedReply;
 use rstest::rstest;
 use serde_json::json;
 
+/// TEST-1: the invented-vendor fixture adapter runs the SAME exported
+/// channel-adapter conformance suite the concrete crates run — proof that
+/// no generic delivery path needs a real product.
+#[tokio::test]
+async fn acme_channel_adapter_satisfies_the_conformance_contract() {
+    use std::sync::Arc;
+
+    use ironclaw_product_adapters::conformance::{
+        ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
+    };
+    use ironclaw_product_adapters::{
+        ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
+    };
+
+    run_channel_adapter_conformance(ChannelAdapterConformance {
+        adapter: Arc::new(reborn_support::harness::profiles::extension::AcmeFixtureChannelAdapter),
+        extension_id: "acme-messenger".to_string(),
+        installation_id: "acme-install-1".to_string(),
+        message_inbound: ConformanceInbound {
+            body: json!({
+                "type": "message",
+                "event_id": "Ev-acme-conformance",
+                "conversation": "C-ACME-CONF",
+                "user": "U-ACME-1",
+                "text": "conformance hello",
+            })
+            .to_string()
+            .into_bytes(),
+            headers: Vec::new(),
+        },
+        challenge_inbound: Some(ConformanceInbound {
+            body: json!({"type": "challenge", "challenge": "acme-conformance-token"})
+                .to_string()
+                .into_bytes(),
+            headers: Vec::new(),
+        }),
+        outbound_envelope: OutboundEnvelope {
+            extension_id: "acme-messenger".to_string(),
+            installation_id: "acme-install-1".to_string(),
+            delivery_attempt_id: "attempt-acme-conformance".to_string(),
+            target: OutboundTarget {
+                conversation: ExternalConversationRef::new(None, "C-ACME-CONF", None, None)
+                    .expect("conversation"),
+                thread_anchor: None,
+            },
+            parts: vec![OutboundPart::Text("conformance reply".to_string())],
+            reply_context: None,
+        },
+        vendor_responses: Arc::new(|_request| ironclaw_host_api::RestrictedEgressResponse {
+            status: 200,
+            body: br#"{"ok":true}"#.to_vec(),
+        }),
+        config: Vec::new(),
+        expects_unsupported_free_target_listing: true,
+    })
+    .await;
+}
+
 /// Install → activate → dispatch-from-snapshot → remove, all through model
 /// tool calls against the real dispatcher (TEST-4; LIFE-17's harness leg).
 #[tokio::test]

@@ -6,6 +6,8 @@ mod adapter;
 pub mod auth;
 pub mod capabilities;
 mod channel_adapter;
+#[cfg(any(test, feature = "test-support"))]
+pub mod conformance;
 mod egress;
 mod error;
 pub mod external;

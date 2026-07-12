@@ -389,13 +389,67 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
         }
     }
 
+    /// Minimal real outbound: one vendor POST per text part. Proves the
+    /// generic delivery path (coordinator → adapter → restricted egress)
+    /// needs no real product, and gives the conformance suite a deliverable
+    /// fixture.
     async fn deliver(
         &self,
-        _envelope: ironclaw_product_adapters::OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        envelope: ironclaw_product_adapters::OutboundEnvelope,
+        egress: &dyn ironclaw_host_api::RestrictedEgress,
     ) -> Result<ironclaw_product_adapters::DeliveryReport, ironclaw_product_adapters::ChannelError>
     {
-        Err(ironclaw_product_adapters::ChannelError::Unsupported)
+        use ironclaw_product_adapters::{ChannelError, OutboundPart, PartDeliveryOutcome};
+        if envelope.parts.is_empty() {
+            return Err(ChannelError::Render {
+                reason: "outbound envelope carries no parts".to_string(),
+            });
+        }
+        let mut parts = Vec::new();
+        for part in &envelope.parts {
+            let outcome = match part {
+                OutboundPart::Text(text) => {
+                    let body = serde_json::json!({
+                        "conversation": envelope.target.conversation.conversation_id(),
+                        "text": text,
+                    });
+                    let response = egress
+                        .send(ironclaw_host_api::RestrictedEgressRequest {
+                            method: ironclaw_host_api::NetworkMethod::Post,
+                            url: "https://api.acme.example/messages".to_string(),
+                            headers: vec![(
+                                "content-type".to_string(),
+                                "application/json".to_string(),
+                            )],
+                            body: serde_json::to_vec(&body).ok(),
+                            credential: None,
+                        })
+                        .await;
+                    match response {
+                        Ok(response) if (200..300).contains(&response.status) => {
+                            PartDeliveryOutcome::Sent {
+                                vendor_message_ref: None,
+                            }
+                        }
+                        Ok(response) => PartDeliveryOutcome::Permanent {
+                            reason: format!("acme vendor returned status {}", response.status),
+                        },
+                        Err(error) => PartDeliveryOutcome::Retryable {
+                            reason: error.to_string(),
+                        },
+                    }
+                }
+                _ => PartDeliveryOutcome::Permanent {
+                    reason: "the acme fixture delivers text parts only".to_string(),
+                },
+            };
+            let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+            parts.push(outcome);
+            if !sent {
+                break;
+            }
+        }
+        Ok(ironclaw_product_adapters::DeliveryReport { parts })
     }
 }
 
