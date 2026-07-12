@@ -61,6 +61,163 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env={},
         )
 
+    def _drive_submission_capture_state(
+        self,
+        *,
+        response_payloads: list[dict[str, object] | None],
+        user_bubble_failures: int = 0,
+        terminal_failure: run_live_qa.TerminalRunFailureObservation | None = None,
+    ) -> tuple[run_live_qa.ProbeResult, dict[str, int]]:
+        state = {
+            "presses": 0,
+            "dismissals": 0,
+            "user_bubble_assertions": 0,
+            "response_waiters": 0,
+        }
+
+        class FakeLocator:
+            def __init__(self, selector):
+                self.selector = selector
+
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return 0
+
+        class FakeComposer(FakeLocator):
+            async def fill(self, _text):
+                return None
+
+            async def press(self, _key):
+                state["presses"] += 1
+
+        class FakeDismiss(FakeLocator):
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return int(state["presses"] > 0 and state["dismissals"] == 0)
+
+            async def is_visible(self):
+                return True
+
+            async def click(self):
+                state["dismissals"] += 1
+
+        class FakeRequest:
+            method = "POST"
+            post_data_json = {"content": "Read Slack."}
+
+        class FakeResponse:
+            url = (
+                "http://127.0.0.1:9/api/webchat/v2/threads/"
+                "thread-current/messages"
+            )
+            request = FakeRequest()
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+        class FakeResponseInfo:
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            @property
+            def value(self):
+                async def get_response():
+                    if self.payload is None:
+                        raise TimeoutError("no matching submission response")
+                    return FakeResponse(self.payload)
+
+                return get_response()
+
+        class FakePage:
+            async def goto(self, _url, **_kwargs):
+                return None
+
+            def expect_response(self, predicate, **_kwargs):
+                index = state["response_waiters"]
+                state["response_waiters"] += 1
+                payload = response_payloads[index]
+                if payload is not None:
+                    self_outer.assertTrue(predicate(FakeResponse(payload)))
+                return FakeResponseInfo(payload)
+
+            def locator(self, selector):
+                if selector == "[aria-label='Dismiss connect action']":
+                    return FakeDismiss(selector)
+                if selector == "[data-testid='chat-composer']":
+                    return FakeComposer(selector)
+                return FakeLocator(selector)
+
+        class FakeExpectation:
+            def __init__(self, locator):
+                self.locator = locator
+
+            async def to_be_visible(self, **_kwargs):
+                return None
+
+            async def to_contain_text(self, _text, **_kwargs):
+                if self.locator.selector == "[data-testid='msg-user']":
+                    state["user_bubble_assertions"] += 1
+                    if state["user_bubble_assertions"] <= user_bubble_failures:
+                        raise AssertionError("user bubble not visible")
+
+        async def fake_with_page(_output_dir, _case_name, action):
+            await action(FakePage())
+
+        async def fake_wait(_page, **_kwargs):
+            if terminal_failure is not None:
+                raise run_live_qa.TerminalRunFailure(terminal_failure)
+            return run_live_qa.AssistantReplyWaitResult(
+                text_excerpt="Slack answer.",
+                full_text="Slack answer.",
+                semantic_judge_used=False,
+                semantic_judge_reason="literal_required_text_matched",
+                final_reply_wait_ms=0,
+                final_reply_reason="final_reply_observed",
+            )
+
+        playwright_module = types.ModuleType("playwright")
+        playwright_async_api = types.ModuleType("playwright.async_api")
+        playwright_async_api.expect = lambda locator: FakeExpectation(locator)
+        self_outer = self
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "playwright": playwright_module,
+                    "playwright.async_api": playwright_async_api,
+                },
+            ),
+            patch.object(run_live_qa, "_with_page", new=fake_with_page),
+            patch.object(run_live_qa, "_wait_for_assistant_reply", new=fake_wait),
+        ):
+            result = asyncio.run(
+                run_live_qa._live_chat_case(
+                    self._dummy_ctx(),
+                    case_name="qa_submission_capture_state",
+                    prompt="Read Slack.",
+                    marker=None,
+                    required_text=[],
+                    capture_submission_identity=True,
+                    enforce_marker=False,
+                )
+            )
+        return result, state
+
     def test_case_spec_accepts_only_explicit_contract_or_behavioral_tiers(self):
         async def fake_case(_ctx):
             return None
@@ -2052,6 +2209,95 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertLess(registry_index, auth_index)
         self.assertLess(auth_index, chat_index)
         self.assertLess(chat_index, submit_index)
+
+    def test_submission_capture_retries_once_after_no_post_and_connect_dismissal(self):
+        submitted = {
+            "outcome": "submitted",
+            "thread_id": "thread-current",
+            "accepted_message_ref": "msg:message-current",
+            "turn_id": "turn-current",
+            "run_id": "run-current",
+        }
+        result, state = self._drive_submission_capture_state(
+            response_payloads=[None, submitted]
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(state["presses"], 2)
+        self.assertEqual(state["dismissals"], 1)
+        self.assertEqual(result.details["submission_identity"]["run_id"], "run-current")
+
+    def test_submitted_ack_survives_missing_user_bubble_without_second_enter(self):
+        submitted = {
+            "outcome": "submitted",
+            "thread_id": "thread-first",
+            "accepted_message_ref": "msg:message-first",
+            "turn_id": "turn-first",
+            "run_id": "run-first",
+        }
+        result, state = self._drive_submission_capture_state(
+            response_payloads=[submitted, submitted],
+            user_bubble_failures=1,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(state["presses"], 1)
+        self.assertEqual(state["dismissals"], 0)
+        self.assertEqual(result.details["submission_identity"]["run_id"], "run-first")
+
+    def test_submitted_run_terminal_provider_error_wins_without_retry(self):
+        submitted = {
+            "outcome": "submitted",
+            "thread_id": "thread-first",
+            "accepted_message_ref": "msg:message-first",
+            "turn_id": "turn-first",
+            "run_id": "run-first",
+        }
+        terminal = run_live_qa.TerminalRunFailureObservation(
+            summary="The model provider is transiently unavailable.",
+            failure_category="model_transient",
+            failure_status="failed",
+        )
+        result, state = self._drive_submission_capture_state(
+            response_payloads=[submitted, submitted],
+            user_bubble_failures=1,
+            terminal_failure=terminal,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(state["presses"], 1)
+        self.assertEqual(result.details["failure_category"], "model_transient")
+        self.assertEqual(result.details["failure_status"], "failed")
+        self.assertEqual(result.details["submission_identity"]["run_id"], "run-first")
+
+    def test_submission_identity_rejects_distinct_submitted_acknowledgements(self):
+        record_identity = getattr(run_live_qa, "_record_submitted_identity", None)
+        self.assertIsNotNone(
+            record_identity,
+            "submission capture must expose one immutable identity transition",
+        )
+        if record_identity is None:
+            return
+        observed: dict[str, object] = {}
+        first = {
+            "outcome": "submitted",
+            "thread_id": "thread-first",
+            "accepted_message_ref": "msg:message-first",
+            "turn_id": "turn-first",
+            "run_id": "run-first",
+        }
+        second = {
+            "outcome": "submitted",
+            "thread_id": "thread-second",
+            "accepted_message_ref": "msg:message-second",
+            "turn_id": "turn-second",
+            "run_id": "run-second",
+        }
+
+        record_identity(observed, first)
+        with self.assertRaisesRegex(AssertionError, "ambiguous submission identity"):
+            record_identity(observed, second)
+        self.assertEqual(observed["submission_identity"]["run_id"], "run-first")
 
     def test_live_chat_with_extensions_delegates_to_shared_live_chat_case(self):
         captured: dict[str, object] = {}

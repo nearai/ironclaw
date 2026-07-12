@@ -1243,6 +1243,32 @@ def _record_assistant_reply_wait_result(
         observed["semantic_judge"] = reply.semantic_judge
 
 
+_SUBMISSION_IDENTITY_FIELDS = (
+    "accepted_message_ref",
+    "thread_id",
+    "turn_id",
+    "run_id",
+)
+
+
+def _record_submitted_identity(
+    observed: dict[str, Any],
+    payload: dict[str, object],
+) -> None:
+    if any(not payload.get(field) for field in _SUBMISSION_IDENTITY_FIELDS):
+        raise AssertionError("submitted response omitted turn identity fields")
+    identity = {
+        field: str(payload[field]) for field in _SUBMISSION_IDENTITY_FIELDS
+    }
+    existing = observed.get("submission_identity")
+    if existing is not None and existing != identity:
+        raise AssertionError(
+            "ambiguous submission identity: distinct submitted "
+            "acknowledgements matched one prompt"
+        )
+    observed["submission_identity"] = identity
+
+
 def _routine_confirmation_follow_up_for_text(
     text: str,
     *,
@@ -1318,38 +1344,65 @@ async def _live_chat_case(
         except Exception:
             return False
 
-    async def submit_prompt(page: object, composer: object) -> None:
+    async def submit_prompt(page: object, composer: object) -> bool:
         if not capture_submission_identity:
             await composer.fill(prompt)  # type: ignore[attr-defined]
             await composer.press("Enter")  # type: ignore[attr-defined]
-            return
-        async with page.expect_response(  # type: ignore[attr-defined]
-            is_matching_submission_response,
-            timeout=15000,
-        ) as response_info:
-            await composer.fill(prompt)  # type: ignore[attr-defined]
-            await composer.press("Enter")  # type: ignore[attr-defined]
-        response = await response_info.value
+            return True
+        try:
+            async with page.expect_response(  # type: ignore[attr-defined]
+                is_matching_submission_response,
+                timeout=15000,
+            ) as response_info:
+                await composer.fill(prompt)  # type: ignore[attr-defined]
+                await composer.press("Enter")  # type: ignore[attr-defined]
+            response = await response_info.value
+        except Exception as exc:
+            if "submission_identity" in observed:
+                raise
+            observed["submission_response_wait_error"] = _exc_text(exc)
+            return False
         payload = await response.json()
         if not isinstance(payload, dict):
             raise AssertionError("chat submission response was not a JSON object")
         outcome = str(payload.get("outcome") or "")
-        if outcome == "rejected_busy" and "submission_identity" in observed:
-            return
-        required_fields = (
-            "accepted_message_ref",
-            "thread_id",
-            "turn_id",
-            "run_id",
-        )
-        if outcome != "submitted" or any(not payload.get(field) for field in required_fields):
+        existing = observed.get("submission_identity")
+        if outcome == "submitted":
+            _record_submitted_identity(observed, payload)
+            return True
+        if outcome == "already_submitted" and isinstance(existing, dict):
+            same_thread = str(payload.get("thread_id") or "") == existing.get(
+                "thread_id"
+            )
+            same_run = str(payload.get("run_id") or "") == existing.get("run_id")
+            same_message = str(payload.get("accepted_message_ref") or "") == existing.get(
+                "accepted_message_ref"
+            )
+            if same_thread and same_run and same_message:
+                return True
+            raise AssertionError(
+                "ambiguous submission identity: idempotent response referenced "
+                "a different thread or run"
+            )
+        if outcome == "rejected_busy" and isinstance(existing, dict):
+            same_thread = str(payload.get("thread_id") or "") == existing.get(
+                "thread_id"
+            )
+            same_run = str(payload.get("active_run_id") or "") == existing.get(
+                "run_id"
+            )
+            if same_thread and same_run:
+                return True
+            raise AssertionError(
+                "ambiguous submission identity: busy response referenced a "
+                "different active run"
+            )
+        if outcome != "submitted":
             raise AssertionError(
                 "chat submission did not return a fresh submitted turn identity: "
                 f"outcome={outcome!r}"
             )
-        observed["submission_identity"] = {
-            field: str(payload[field]) for field in required_fields
-        }
+        return True
 
     async def action(page: object) -> None:
         if extensions:
@@ -1387,21 +1440,38 @@ async def _live_chat_case(
         error_count_before = await page.locator(  # type: ignore[attr-defined]
             "[data-testid='msg-error']"
         ).count()
-        await submit_prompt(page, composer)
+        response_captured = await submit_prompt(page, composer)
+        if not response_captured:
+            if not await _dismiss_visible_connect_action(page):
+                raise AssertionError(
+                    "chat submission produced no matching response and no "
+                    "connect action was available for recovery"
+                )
+            observed["connect_action_dismissed_after_submit"] = True
+            if not await submit_prompt(page, composer):
+                raise AssertionError(
+                    "chat submission retry produced no matching response"
+                )
         try:
             await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
                 prompt[:80],
                 timeout=15000,
             )
         except Exception:
-            if not await _dismiss_visible_connect_action(page):
+            if capture_submission_identity and "submission_identity" in observed:
+                observed["submitted_user_bubble_not_observed"] = True
+            elif not await _dismiss_visible_connect_action(page):
                 raise
-            observed["connect_action_dismissed_after_submit"] = True
-            await submit_prompt(page, composer)
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
+            else:
+                observed["connect_action_dismissed_after_submit"] = True
+                if not await submit_prompt(page, composer):
+                    raise AssertionError(
+                        "chat submission retry produced no matching response"
+                    )
+                await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                    prompt[:80],
+                    timeout=15000,
+                )
         reply = await _wait_for_assistant_reply(
             page,
             marker=marker,
