@@ -3624,6 +3624,24 @@ async fn builtin_time_accepts_unix_seconds_millis_and_slack_fractional_timestamp
     .unwrap();
     assert_eq!(parsed_millis["unix_millis"], json!(1778590800123_i64));
 
+    let parsed_float_millis = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": 1778590800123.0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_float_millis["unix_millis"], json!(1778590800123_i64));
+
+    let exponent_millis_input =
+        serde_json::from_str(r#"{"operation":"parse","input":1.778590800123e12}"#).unwrap();
+    let parsed_exponent_millis = invoke(TIME_CAPABILITY_ID, exponent_millis_input)
+        .await
+        .unwrap();
+    assert_eq!(
+        parsed_exponent_millis["unix_millis"],
+        json!(1778590800123_i64)
+    );
+
     let parsed_slack_timestamp = invoke(
         TIME_CAPABILITY_ID,
         json!({"operation": "parse", "input": "1783634967.123456"}),

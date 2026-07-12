@@ -2,7 +2,7 @@ use chrono::{DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offse
 use chrono_tz::Tz;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{EffectKind, PermissionMode};
-use serde_json::{Value, json};
+use serde_json::{Number, Value, json};
 
 use crate::FirstPartyCapabilityError;
 
@@ -187,13 +187,23 @@ fn parse_timestamp(
             };
             return local_to_utc(naive, *timezone);
         }
-    } else if let Some(number) = input.as_number() {
-        let number = number.to_string();
-        if let Some(dt) = parse_unix_timestamp(&number) {
-            return Ok(dt);
-        }
+    } else if let Some(number) = input.as_number()
+        && let Some(dt) = parse_unix_number(number)
+    {
+        return Ok(dt);
     }
     Err(input_error())
+}
+
+fn parse_unix_number(number: &Number) -> Option<DateTime<Utc>> {
+    if number.as_i64().is_some() || number.as_u64().is_some() {
+        return parse_unix_timestamp(&number.to_string());
+    }
+    let value = number.as_f64()?;
+    if value.is_finite() && value.fract() == 0.0 {
+        return parse_unix_timestamp(&format!("{value:.0}"));
+    }
+    parse_unix_timestamp(&number.to_string())
 }
 
 fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
