@@ -1545,6 +1545,16 @@ impl RebornRuntime {
             .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn trigger_poller_tick_once_for_test(
+        &self,
+    ) -> Option<Result<ironclaw_triggers::TriggerPollerTickReport, ironclaw_triggers::TriggerError>> {
+        let Some(handle) = &self.trigger_poller_handle else {
+            return None;
+        };
+        handle.tick_once_for_test().await
+    }
+
     /// Test-only accessor for the SAME `ConversationActorPairingService`
     /// instance the spawned trigger poller's
     /// [`ConversationContentRefMaterializer`] consults. Integration tests

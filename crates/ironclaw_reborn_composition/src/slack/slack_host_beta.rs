@@ -4894,6 +4894,12 @@ mod tests {
         let mut fired_run_id = None;
         let mut last_trigger_state = None;
         while Instant::now() < deadline {
+            if let Some(result) = runtime
+                .trigger_poller_tick_once_for_test()
+                .await
+            {
+                result.expect("manual trigger poller tick should succeed in test");
+            }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let current = repo
                 .get_trigger(tenant_id.clone(), trigger_id)
@@ -4910,6 +4916,7 @@ mod tests {
                 current.last_status,
                 current.active_fire_slot,
                 current.active_run_ref,
+                current.last_fired_slot,
             ));
         }
 
@@ -4941,8 +4948,10 @@ mod tests {
 
         assert!(
             fired_run_id.is_some(),
-            "trigger did not fire within {:?} — hook wiring e2e stalled; last_trigger_state={last_trigger_state:?}",
+            "trigger did not fire within {:?} — hook wiring e2e stalled; last_trigger_state={:?}",
             TRIGGER_HOOK_E2E_FIRE_TIMEOUT
+            ,
+            last_trigger_state
         );
         assert!(
             delivery_record.is_some(),
