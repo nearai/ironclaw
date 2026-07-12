@@ -5,7 +5,8 @@ use ironclaw_reborn_composition::{
 
 use crate::context::RebornCliContext;
 use crate::dto::{ComponentStatus, DriversSnapshot, FilePresence, StatusDto};
-use crate::render::{self, OutputMode};
+use crate::render::{self, OutputMode, Renderable, terminal_safe_text};
+use std::io::Write;
 
 #[derive(Debug, Args)]
 pub(crate) struct StatusCommand {
@@ -70,37 +71,6 @@ pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) ->
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context::RebornCliContext;
-    use ironclaw_reborn_composition::RebornRuntimeComponentStatus;
-
-    #[test]
-    fn status_dto_builds_without_config_file() {
-        let (_tmp, context) = RebornCliContext::test_context();
-        let dto = build_status_dto(&context).expect("must build");
-        assert_eq!(dto.version, env!("CARGO_PKG_VERSION"));
-        assert!(!dto.model_slots.is_empty());
-    }
-
-    #[test]
-    fn convert_component_status_failed_maps_correctly() {
-        let status = RebornRuntimeComponentStatus::Failed("db connection refused".to_string());
-        let result = convert_component_status(&status);
-        match result {
-            ComponentStatus::Failed { reason } => {
-                assert_eq!(reason, "db connection refused");
-            }
-            ComponentStatus::Initialized => panic!("expected Failed variant"),
-        }
-    }
-}
-
-use crate::render::{Renderable, terminal_safe_text};
-use std::io::Write;
-// ─── Status ────────────────────────────────────────────────────────────────
-
 impl Renderable for StatusDto {
     fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
         writeln!(w, "IronClaw Reborn status")?;
@@ -159,8 +129,33 @@ fn driver_line(w: &mut impl Write, label: &str, status: &ComponentStatus) -> std
     }
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
 fn kv(w: &mut impl Write, key: &str, value: &str) -> std::io::Result<()> {
     writeln!(w, "{:<20} {value}", format!("{key}:"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::RebornCliContext;
+    use ironclaw_reborn_composition::RebornRuntimeComponentStatus;
+
+    #[test]
+    fn status_dto_builds_without_config_file() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let dto = build_status_dto(&context).expect("must build");
+        assert_eq!(dto.version, env!("CARGO_PKG_VERSION"));
+        assert!(!dto.model_slots.is_empty());
+    }
+
+    #[test]
+    fn convert_component_status_failed_maps_correctly() {
+        let status = RebornRuntimeComponentStatus::Failed("db connection refused".to_string());
+        let result = convert_component_status(&status);
+        match result {
+            ComponentStatus::Failed { reason } => {
+                assert_eq!(reason, "db connection refused");
+            }
+            ComponentStatus::Initialized => panic!("expected Failed variant"),
+        }
+    }
 }

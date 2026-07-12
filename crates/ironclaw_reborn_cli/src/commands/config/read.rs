@@ -1,5 +1,7 @@
 use crate::context::RebornCliContext;
 use crate::dto::{ConfigEntry, ConfigGetDto, ConfigListDto, ConfigValue};
+use crate::render::{Renderable, terminal_safe_text};
+use std::io::Write;
 
 pub(super) fn build_config_list_dto(context: &RebornCliContext) -> anyhow::Result<ConfigListDto> {
     let config_path = context.boot_config().home().config_file_path();
@@ -125,6 +127,34 @@ fn json_to_config_value(value: &serde_json::Value) -> ConfigValue {
                 .collect(),
         ),
         other => ConfigValue::String(other.to_string()),
+    }
+}
+
+impl Renderable for ConfigListDto {
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        writeln!(w, "IronClaw Reborn config ({})", self.config_file.display())?;
+        writeln!(w)?;
+        for entry in &self.entries {
+            match &entry.value {
+                Some(value) => writeln!(
+                    w,
+                    "{:<44} {}",
+                    terminal_safe_text(&entry.key),
+                    terminal_safe_text(&value.to_string())
+                )?,
+                None => writeln!(w, "{:<44} (not set)", terminal_safe_text(&entry.key))?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Renderable for ConfigGetDto {
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        match &self.value {
+            Some(value) => writeln!(w, "{}", terminal_safe_text(&value.to_string())),
+            None => writeln!(w, "(not set)"),
+        }
     }
 }
 
@@ -372,37 +402,5 @@ model = "claude-3-5-sonnet-latest"
             err_msg.contains("unknown config key"),
             "error should mention unknown key: {err_msg}"
         );
-    }
-}
-
-use crate::render::{Renderable, terminal_safe_text};
-use std::io::Write;
-// ─── Config ────────────────────────────────────────────────────────────────
-
-impl Renderable for ConfigListDto {
-    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "IronClaw Reborn config ({})", self.config_file.display())?;
-        writeln!(w)?;
-        for entry in &self.entries {
-            match &entry.value {
-                Some(value) => writeln!(
-                    w,
-                    "{:<44} {}",
-                    terminal_safe_text(&entry.key),
-                    terminal_safe_text(&value.to_string())
-                )?,
-                None => writeln!(w, "{:<44} (not set)", terminal_safe_text(&entry.key))?,
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Renderable for ConfigGetDto {
-    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        match &self.value {
-            Some(value) => writeln!(w, "{}", terminal_safe_text(&value.to_string())),
-            None => writeln!(w, "(not set)"),
-        }
     }
 }

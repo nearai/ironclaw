@@ -6,7 +6,8 @@ use ironclaw_reborn_config::{RebornConfigFile, RebornDoctorReport};
 
 use crate::context::RebornCliContext;
 use crate::dto::{CheckCategory, CheckOutcome, DoctorCheck, DoctorDto, DoctorSummary};
-use crate::render::{self, OutputMode};
+use crate::render::{self, OutputMode, Renderable, terminal_safe_text};
+use std::io::Write;
 
 #[derive(Debug, Args)]
 pub(crate) struct DoctorCommand {
@@ -172,6 +173,42 @@ fn driver_check(name: &str, status: &RebornRuntimeComponentStatus) -> DoctorChec
     }
 }
 
+impl Renderable for DoctorDto {
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        writeln!(w, "IronClaw Reborn doctor")?;
+        writeln!(w)?;
+        let mut current_category: Option<CheckCategory> = None;
+        for check in &self.checks {
+            if current_category != Some(check.category) {
+                current_category = Some(check.category);
+                let label = match check.category {
+                    CheckCategory::Core => "Core",
+                    CheckCategory::Drivers => "Drivers",
+                };
+                writeln!(w, "  {label}")?;
+            }
+            let icon = match check.outcome {
+                CheckOutcome::Pass => "\u{2714}",
+                CheckOutcome::Fail => "\u{2718}",
+                CheckOutcome::Skip => "-",
+            };
+            writeln!(
+                w,
+                "  {icon} {:<28} {}",
+                terminal_safe_text(&check.name),
+                terminal_safe_text(&check.detail)
+            )?;
+        }
+        writeln!(w)?;
+        writeln!(
+            w,
+            "{} passed, {} failed, {} skipped",
+            self.summary.pass, self.summary.fail, self.summary.skip,
+        )?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,47 +321,5 @@ mod tests {
             "detail should contain reason: {}",
             check.detail
         );
-    }
-}
-
-use crate::render::{Renderable, terminal_safe_text};
-use std::io::Write;
-// ─── Doctor ────────────────────────────────────────────────────────────────
-
-impl Renderable for DoctorDto {
-    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "IronClaw Reborn doctor")?;
-        writeln!(w)?;
-
-        let mut current_category: Option<CheckCategory> = None;
-        for check in &self.checks {
-            if current_category != Some(check.category) {
-                current_category = Some(check.category);
-                let label = match check.category {
-                    CheckCategory::Core => "Core",
-                    CheckCategory::Drivers => "Drivers",
-                };
-                writeln!(w, "  {label}")?;
-            }
-            let icon = match check.outcome {
-                CheckOutcome::Pass => "\u{2714}",
-                CheckOutcome::Fail => "\u{2718}",
-                CheckOutcome::Skip => "-",
-            };
-            writeln!(
-                w,
-                "  {icon} {:<28} {}",
-                terminal_safe_text(&check.name),
-                terminal_safe_text(&check.detail)
-            )?;
-        }
-
-        writeln!(w)?;
-        writeln!(
-            w,
-            "{} passed, {} failed, {} skipped",
-            self.summary.pass, self.summary.fail, self.summary.skip,
-        )?;
-        Ok(())
     }
 }
