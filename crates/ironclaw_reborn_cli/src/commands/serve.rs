@@ -574,6 +574,16 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
+            // Generic extension channel ingress (extension-runtime P4): one
+            // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
+            // for every active extension; the route table follows the active
+            // snapshot.
+            if let Some(ingress_parts) = runtime.services().extension_ingress_parts() {
+                let ingress_mount =
+                    ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
+                        .context("failed to compose the extension ingress route mount")?;
+                serve_config = serve_config.with_public_route_mount(ingress_mount);
+            }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
                 let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();

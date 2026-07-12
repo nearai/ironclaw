@@ -126,6 +126,24 @@ impl ActiveSnapshot {
         self.extensions.get(owner).cloned()
     }
 
+    /// Resolve the active extension serving
+    /// `/webhooks/extensions/{extension_id}/{route_suffix}` — the extension
+    /// must be active, declare an inbound channel, and declare exactly this
+    /// ingress suffix.
+    pub fn resolve_channel_ingress(
+        &self,
+        extension_id: &str,
+        route_suffix: &str,
+    ) -> Option<Arc<ActiveExtension>> {
+        let extension = self.extensions.get(extension_id)?;
+        let channel = extension.resolved.channel.as_ref()?;
+        let ingress = channel.ingress.as_ref()?;
+        if !channel.inbound || ingress.route_suffix.as_str() != route_suffix {
+            return None;
+        }
+        Some(Arc::clone(extension))
+    }
+
     /// Resolve an active extension by id.
     pub fn extension(&self, extension_id: &str) -> Option<Arc<ActiveExtension>> {
         self.extensions.get(extension_id).cloned()
@@ -190,4 +208,8 @@ pub enum SnapshotConflict {
         capability_id: String,
         extension_id: String,
     },
+    #[error(
+        "ingress route `{route}` declared by `{extension_id}` collides with a fixed host route"
+    )]
+    ReservedRoute { route: String, extension_id: String },
 }

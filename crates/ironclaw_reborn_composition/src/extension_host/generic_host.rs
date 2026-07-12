@@ -66,6 +66,7 @@ pub(crate) async fn build_generic_extension_host(
     installation_store: Arc<dyn ExtensionInstallationStore>,
     governor: Arc<dyn ResourceGovernor>,
     reserved_capability_ids: BTreeSet<CapabilityId>,
+    reserved_ingress_routes: BTreeSet<String>,
 ) -> Result<GenericExtensionHost, crate::RebornBuildError> {
     let factories: HashMap<String, Arc<dyn NativeExtensionFactory>> = native_factories
         .into_iter()
@@ -88,6 +89,7 @@ pub(crate) async fn build_generic_extension_host(
             drain: Arc::new(GenerationDrain),
             egress: Arc::new(DenyAllEgressFactory),
             reserved_capability_ids,
+            reserved_ingress_routes,
             hook_deadline: Duration::from_secs(30),
         })
         .await,

@@ -15,6 +15,7 @@ pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
 pub(crate) mod extension_activation_credentials;
 pub(crate) mod extension_credential_requirements;
+pub(crate) mod extension_ingress;
 pub(crate) mod extension_installation_store;
 pub(crate) mod extension_lifecycle;
 pub(crate) mod extension_lifecycle_capabilities;

@@ -14,6 +14,7 @@
 
 pub mod active;
 pub mod entrypoint;
+pub mod ingress;
 pub mod lifecycle;
 pub mod loaders;
 pub mod resolver;

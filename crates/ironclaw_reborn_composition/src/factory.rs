@@ -467,6 +467,12 @@ pub struct RebornServices {
     /// the only consumer; this field must never leak through any public facade.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) credential_refresh_worker: CredentialRefreshWorkerReady,
+    /// The composed generic channel ingress (extension-runtime P4): the
+    /// router over the active snapshot plus the per-extension registration
+    /// surface. `None` on composition paths that do not build the generic
+    /// extension host.
+    pub(crate) extension_ingress:
+        Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
 }
 
 /// Whether the background credential keepalive worker can be started, with its
@@ -502,6 +508,15 @@ impl RebornServices {
     )]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
+    }
+
+    /// The composed generic channel ingress (router + per-extension
+    /// registration surface), when this composition path built the generic
+    /// extension host (extension-runtime P4).
+    pub fn extension_ingress_parts(
+        &self,
+    ) -> Option<crate::extension_host::extension_ingress::ExtensionIngressParts> {
+        self.extension_ingress.clone()
     }
 
     /// Test-support access to the shared scoped secret store backing the
@@ -1028,6 +1043,7 @@ impl RebornServices {
             local_dev_wasm_runtime_credential_provider_captured: false,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
+            extension_ingress: None,
         }
     }
 }
@@ -1721,7 +1737,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // configured runtime lanes, hydrated from the facade's durable state.
     // From here extension dispatch resolves from the host's active snapshot;
     // the registry lane serves built-ins only.
-    {
+    let extension_ingress = {
         let reserved_capability_ids: std::collections::BTreeSet<_> = services
             .shared_extension_registry()
             .snapshot()
@@ -1745,6 +1761,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             Arc::clone(&store_graph.resource_governor)
                 as Arc<dyn ironclaw_resources::ResourceGovernor>,
             reserved_capability_ids,
+            crate::extension_host::extension_ingress::reserved_fixed_ingress_routes(),
         )
         .await?;
         if let Some(management) = store_graph.local_runtime.extension_management.as_ref() {
@@ -1757,7 +1774,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
         }
         services.set_extension_tool_resolver(generic.resolver);
-    }
+        // Generic channel ingress (extension-runtime P4): one router over
+        // the host's snapshot watch; the serve layer mounts it once.
+        Some(
+            crate::extension_host::extension_ingress::build_extension_ingress(
+                generic.host.snapshot_watch(),
+            ),
+        )
+    };
 
     #[cfg(any(test, feature = "test-support"))]
     let local_dev_wasm_runtime_credential_provider_captured =
@@ -1784,6 +1808,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
+        extension_ingress,
     })
 }
 
@@ -4739,6 +4764,9 @@ where
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.
         credential_refresh_worker,
+        // The production composition path does not build the generic
+        // extension host yet; the generic ingress mounts with it.
+        extension_ingress: None,
     })
 }
 

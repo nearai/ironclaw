@@ -57,6 +57,7 @@ async fn harness_full(
         drain: Arc::clone(&drain) as Arc<_>,
         egress: Arc::new(FakeEgressFactory),
         reserved_capability_ids: Default::default(),
+        reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
@@ -352,6 +353,7 @@ async fn restore_resumes_active_and_skips_invalid() {
         drain: Arc::new(RecordingDrain::default()),
         egress: Arc::new(FakeEgressFactory),
         reserved_capability_ids: Default::default(),
+        reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
@@ -391,6 +393,7 @@ async fn restore_skips_a_load_failure_without_blocking_the_rest() {
         drain: Arc::new(RecordingDrain::default()),
         egress: Arc::new(FakeEgressFactory),
         reserved_capability_ids: Default::default(),
+        reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
@@ -583,6 +586,7 @@ async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
         reserved_capability_ids: [CapabilityId::new("acme.ping").unwrap()]
             .into_iter()
             .collect(),
+        reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;

@@ -78,6 +78,10 @@ pub struct ExtensionHostDeps {
     /// Host-owned capability ids (the built-in registry). An extension
     /// declaring any of these fails activation with a conflict (TOOL-10).
     pub reserved_capability_ids: BTreeSet<CapabilityId>,
+    /// Fixed host route paths (full canonical paths). An extension whose
+    /// canonical ingress path (`/webhooks/extensions/{id}/{suffix}`)
+    /// collides with one fails activation with a conflict (ING-1).
+    pub reserved_ingress_routes: BTreeSet<String>,
     /// Bounded deadline for adapter hooks and drains.
     pub hook_deadline: Duration,
 }
@@ -460,6 +464,20 @@ impl ExtensionHost {
                         extension_id: record.extension_id.clone(),
                     },
                 ));
+            }
+        }
+        if let Some(channel) = &resolved.channel
+            && let Some(ingress) = &channel.ingress
+        {
+            let route = crate::ingress::canonical_ingress_path(
+                &record.extension_id,
+                ingress.route_suffix.as_str(),
+            );
+            if self.deps.reserved_ingress_routes.contains(&route) {
+                return Err(LifecycleError::Conflict(SnapshotConflict::ReservedRoute {
+                    route,
+                    extension_id: record.extension_id.clone(),
+                }));
             }
         }
         Ok(ActiveExtension {

@@ -169,6 +169,12 @@ fn catalog() -> HostPortCatalog {
     .unwrap()
 }
 
+/// Resolve an arbitrary v2/v3 manifest through the production parser (test
+/// fixtures that need a shape the canned manifests below don't cover).
+pub fn resolve_manifest_toml(toml: &str) -> ResolvedExtensionManifest {
+    resolve(toml)
+}
+
 fn resolve(toml: &str) -> ResolvedExtensionManifest {
     let contracts = {
         let mut registry = ironclaw_extensions::HostApiContractRegistry::new();

@@ -21,6 +21,7 @@ use crate::error::ProductAdapterError;
 use crate::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
 };
+use crate::inbound::ProductTriggerReason;
 
 /// A channel adapter: protocol behavior for one extension's channel surface.
 #[async_trait]
@@ -109,6 +110,10 @@ pub struct NormalizedInboundMessage {
     pub conversation: ExternalConversationRef,
     pub event_id: ExternalEventId,
     pub text: String,
+    /// Why the protocol forwarded this message (direct chat, bot mention,
+    /// thread reply, …). The workflow's user-message payload requires it, so
+    /// any host sink mapping normalized messages into the workflow needs it.
+    pub trigger: ProductTriggerReason,
     pub attachments: Vec<AttachmentRef>,
     /// Opaque per-message context (≤ 4 KiB) the host stores server-side and
     /// hands back at delivery time (reply routing). Never interpreted by the
@@ -254,6 +259,7 @@ mod tests {
             conversation: ExternalConversationRef::new(None, "c-1", None, None).expect("conv"),
             event_id: ExternalEventId::new("e-1").expect("event"),
             text: "hi".to_string(),
+            trigger: ProductTriggerReason::DirectChat,
             attachments: Vec::new(),
             reply_context: Some(vec![0u8; MAX_REPLY_CONTEXT_BYTES + 1]),
         };
