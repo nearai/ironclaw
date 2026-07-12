@@ -107,8 +107,10 @@ pub(crate) enum StorageReopen {
     },
     Postgres {
         database_url: String,
-        _container: testcontainers_modules::testcontainers::ContainerAsync<
-            testcontainers_modules::postgres::Postgres,
+        _container: Box<
+            testcontainers_modules::testcontainers::ContainerAsync<
+                testcontainers_modules::postgres::Postgres,
+            >,
         >,
     },
 }
@@ -1770,7 +1772,7 @@ pub(crate) async fn build_storage_composite(
             )?;
             StorageReopen::Postgres {
                 database_url,
-                _container: container,
+                _container: Box::new(container),
             }
         }
     };
