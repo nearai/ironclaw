@@ -18,9 +18,9 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "enum": ["now", "parse", "convert", "format", "diff"],
                     "description": "Time operation to perform. Defaults to now."
                 },
-                "input": { "type": "string", "description": "Timestamp input for parse, convert, format, or diff" },
-                "timestamp": { "type": "string", "description": "Alias for input" },
-                "timestamp2": { "type": "string", "description": "Second timestamp for diff" },
+                "input": timestamp_input_schema("Timestamp input for parse, convert, format, or diff"),
+                "timestamp": timestamp_input_schema("Alias for input"),
+                "timestamp2": timestamp_input_schema("Second timestamp for diff"),
                 "timezone": { "type": "string", "description": "IANA timezone name" },
                 "utc_offset": { "type": "string", "description": "UTC offset for now output, e.g. +03:00 or -07:00" },
                 "from_timezone": { "type": "string", "description": "IANA timezone for interpreting the input" },
@@ -564,6 +564,18 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         _ => return None,
+    })
+}
+
+fn timestamp_input_schema(description: &str) -> Value {
+    json!({
+        "description": format!(
+            "{description}. Accepts an ISO 8601 string, Unix seconds (including fractional Slack timestamps), or Unix milliseconds. Integer values with absolute magnitude at least 100000000000 are interpreted as milliseconds."
+        ),
+        "oneOf": [
+            { "type": "string" },
+            { "type": "number" }
+        ]
     })
 }
 

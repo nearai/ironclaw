@@ -3607,6 +3607,74 @@ async fn builtin_time_parse_convert_and_diff_are_deterministic() {
 }
 
 #[tokio::test]
+async fn builtin_time_accepts_unix_seconds_millis_and_slack_fractional_timestamps() {
+    let parsed_seconds = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": 1778590800}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_seconds["iso"], json!("2026-05-12T13:00:00+00:00"));
+
+    let parsed_millis = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "timestamp": 1778590800123_i64}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_millis["unix_millis"], json!(1778590800123_i64));
+
+    let parsed_slack_timestamp = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": "1783634967.123456"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parsed_slack_timestamp["unix"], json!(1783634967));
+    assert_eq!(
+        parsed_slack_timestamp["iso"],
+        json!("2026-07-09T22:09:27.123456+00:00")
+    );
+
+    let converted = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "convert",
+            "input": 1778590800,
+            "to_timezone": "America/New_York"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(converted["output"], json!("2026-05-12T09:00:00-04:00"));
+
+    let formatted = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "format",
+            "input": 1778590800,
+            "timezone": "America/New_York",
+            "format": "%Y-%m-%d %H:%M:%S %Z"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(formatted["formatted"], json!("2026-05-12 09:00:00 EDT"));
+
+    let diff = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "diff",
+            "input": 1778590800,
+            "timestamp2": 1778599800
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(diff["minutes"], json!(150));
+}
+
+#[tokio::test]
 async fn builtin_time_rejects_naive_without_timezone_and_ambiguous_local_time() {
     let missing_timezone = invoke(
         TIME_CAPABILITY_ID,

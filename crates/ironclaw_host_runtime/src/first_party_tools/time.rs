@@ -107,10 +107,7 @@ fn time_format(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
 
 fn time_diff(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
     let first = required_input(input)?;
-    let second = input
-        .get("timestamp2")
-        .and_then(Value::as_str)
-        .ok_or_else(input_error)?;
+    let second = input.get("timestamp2").ok_or_else(input_error)?;
     let tz = optional_timezone(input, &["from_timezone", "timezone"])?.map(|(tz, _)| tz);
     let dt1 = parse_timestamp(first, tz.as_ref())?;
     let dt2 = parse_timestamp(second, tz.as_ref())?;
@@ -123,11 +120,10 @@ fn time_diff(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
     }))
 }
 
-fn required_input(input: &Value) -> Result<&str, FirstPartyCapabilityError> {
+fn required_input(input: &Value) -> Result<&Value, FirstPartyCapabilityError> {
     input
         .get("input")
         .or_else(|| input.get("timestamp"))
-        .and_then(Value::as_str)
         .ok_or_else(input_error)
 }
 
@@ -175,19 +171,85 @@ fn parse_utc_offset(value: &str) -> Result<(FixedOffset, String), FirstPartyCapa
 }
 
 fn parse_timestamp(
-    input: &str,
+    input: &Value,
     timezone: Option<&Tz>,
 ) -> Result<DateTime<Utc>, FirstPartyCapabilityError> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
-        return Ok(dt.with_timezone(&Utc));
-    }
-    if let Some(naive) = parse_naive_datetime(input) {
-        let Some(timezone) = timezone else {
-            return Err(input_error());
-        };
-        return local_to_utc(naive, *timezone);
+    if let Some(input) = input.as_str() {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
+            return Ok(dt.with_timezone(&Utc));
+        }
+        if let Some(dt) = parse_unix_timestamp(input) {
+            return Ok(dt);
+        }
+        if let Some(naive) = parse_naive_datetime(input) {
+            let Some(timezone) = timezone else {
+                return Err(input_error());
+            };
+            return local_to_utc(naive, *timezone);
+        }
+    } else if let Some(number) = input.as_number() {
+        let number = number.to_string();
+        if let Some(dt) = parse_unix_timestamp(&number) {
+            return Ok(dt);
+        }
     }
     Err(input_error())
+}
+
+fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    const UNIX_MILLIS_THRESHOLD: i128 = 100_000_000_000;
+
+    let input = input.trim();
+    let (negative, unsigned) = match input.as_bytes().first() {
+        Some(b'-') => (true, &input[1..]),
+        Some(b'+') => (false, &input[1..]),
+        Some(_) => (false, input),
+        None => return None,
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (unsigned, None),
+    };
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|fraction| {
+            fraction.is_empty()
+                || fraction.len() > 9
+                || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+
+    let whole = whole.parse::<i128>().ok()?;
+    let signed_whole = if negative {
+        whole.checked_neg()?
+    } else {
+        whole
+    };
+    let Some(fraction) = fraction else {
+        let timestamp = i64::try_from(signed_whole).ok()?;
+        return if signed_whole.abs() >= UNIX_MILLIS_THRESHOLD {
+            DateTime::from_timestamp_millis(timestamp)
+        } else {
+            DateTime::from_timestamp(timestamp, 0)
+        };
+    };
+
+    let fractional_nanos = fraction.parse::<i128>().ok()?
+        * 10_i128.pow(u32::try_from(9_usize.checked_sub(fraction.len())?).ok()?);
+    let total_nanos = whole
+        .checked_mul(NANOS_PER_SECOND)?
+        .checked_add(fractional_nanos)?;
+    let total_nanos = if negative {
+        total_nanos.checked_neg()?
+    } else {
+        total_nanos
+    };
+    let seconds = i64::try_from(total_nanos.div_euclid(NANOS_PER_SECOND)).ok()?;
+    let nanos = u32::try_from(total_nanos.rem_euclid(NANOS_PER_SECOND)).ok()?;
+    DateTime::from_timestamp(seconds, nanos)
 }
 
 fn parse_naive_datetime(input: &str) -> Option<NaiveDateTime> {
