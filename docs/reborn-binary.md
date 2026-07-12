@@ -607,6 +607,8 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >/tmp/ironclaw-reborn.zsh
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
   cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
+IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
+  cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- doctor
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
