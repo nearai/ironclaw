@@ -4484,6 +4484,40 @@ fn ensure_postgres_event_store_config(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_with_error<F, E, J>(
+    resource_governor: FilesystemResourceGovernor<F>,
+    map_join_error: J,
+) -> Result<FilesystemResourceGovernor<F>, E>
+where
+    F: RootFilesystem + 'static,
+    E: From<ironclaw_resources::ResourceError>,
+    J: FnOnce(tokio::task::JoinError) -> E,
+{
+    let resource_governor = tokio::task::spawn_blocking(move || {
+        resource_governor.warm_authority()?;
+        Ok::<_, ironclaw_resources::ResourceError>(resource_governor)
+    })
+    .await
+    .map_err(map_join_error)??;
+    Ok(resource_governor)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_for_composition<F>(
+    resource_governor: FilesystemResourceGovernor<F>,
+) -> Result<FilesystemResourceGovernor<F>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
+    warm_resource_governor_with_error(resource_governor, |error| {
+        crate::RebornCompositionError::InvalidConfig {
+            reason: format!("resource governor warm-up task failed: {error}"),
+        }
+    })
+    .await
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
     input: FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake>,
 ) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
@@ -4518,7 +4552,7 @@ where
         secret_master_key,
     )
     .await?;
-    resource_governor.warm_authority()?;
+    let resource_governor = warm_resource_governor_for_composition(resource_governor).await?;
     let governor = Arc::new(resource_governor);
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
@@ -4672,7 +4706,7 @@ impl<F> ProductionStoreBundle<F>
 where
     F: RootFilesystem + 'static,
 {
-    fn new(
+    async fn new(
         filesystem: Arc<F>,
         resource_governor: FilesystemResourceGovernor<F>,
         secret_master_key: ironclaw_secrets::SecretMaterial,
@@ -4689,7 +4723,7 @@ where
             Arc::clone(&scoped_filesystem),
             secret_master_key,
         )?;
-        resource_governor.warm_authority()?;
+        let resource_governor = warm_resource_governor_for_build(resource_governor).await?;
 
         Ok(Self {
             filesystem,
@@ -4701,6 +4735,19 @@ where
             event_store,
         })
     }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn warm_resource_governor_for_build<F>(
+    resource_governor: FilesystemResourceGovernor<F>,
+) -> Result<FilesystemResourceGovernor<F>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    warm_resource_governor_with_error(resource_governor, |error| RebornBuildError::InvalidConfig {
+        reason: format!("resource governor warm-up task failed: {error}"),
+    })
+    .await
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -5019,7 +5066,8 @@ async fn build_libsql_production(
             path_or_url,
             auth_token,
         },
-    )?;
+    )
+    .await?;
 
     build_backend_production(
         context,
@@ -5077,7 +5125,8 @@ async fn build_postgres_production(
         resource_governor,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
-    )?;
+    )
+    .await?;
 
     build_backend_production(
         context,
