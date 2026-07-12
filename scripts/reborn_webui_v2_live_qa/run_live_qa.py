@@ -1145,6 +1145,24 @@ class AssistantReplyWaitResult:
     full_text: str = ""''
 
 
+@dataclass(frozen=True)
+class TerminalRunFailureObservation:
+    summary: str
+    failure_category: str | None
+    failure_status: str | None
+
+
+class TerminalRunFailure(AssertionError):
+    def __init__(self, observation: TerminalRunFailureObservation) -> None:
+        self.observation = observation
+        summary = observation.summary or "The model run failed."
+        super().__init__(
+            f"terminal run failure: {summary} "
+            f"failure_category={observation.failure_category!r} "
+            f"failure_status={observation.failure_status!r}"
+        )
+
+
 ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS = 2.0
 ASSISTANT_REPLY_POLL_SECONDS = 0.5
 # Persisted diagnostic excerpt only — content checks read
@@ -1239,6 +1257,7 @@ async def _live_chat_case(
     routine_confirmation_follow_up: bool = False,
     routine_follow_up_timezone_instruction: str | None = None,
     expose_full_reply_text: bool = False,
+    enforce_marker: bool = True,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1254,6 +1273,9 @@ async def _live_chat_case(
             observed["connect_action_dismissed_before_submit"] = True
         composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
         await expect(composer).to_be_visible(timeout=15000)
+        error_count_before = await page.locator(  # type: ignore[attr-defined]
+            "[data-testid='msg-error']"
+        ).count()
         await composer.fill(prompt)
         await composer.press("Enter")
         try:
@@ -1277,6 +1299,8 @@ async def _live_chat_case(
             required_text=required_text,
             timeout=timeout,
             semantic_goal=prompt,
+            error_count_before=error_count_before,
+            enforce_marker=enforce_marker,
         )
         _record_assistant_reply_wait_result(observed, reply)
         if expose_full_reply_text:
@@ -1293,6 +1317,9 @@ async def _live_chat_case(
                 reply.text_excerpt, **follow_up_kwargs
             )
             if follow_up:
+                follow_up_error_count_before = await page.locator(  # type: ignore[attr-defined]
+                    "[data-testid='msg-error']"
+                ).count()
                 observed["routine_confirmation_follow_up_sent"] = follow_up
                 observed["routine_confirmation_initial_text_excerpt"] = (
                     reply.text_excerpt
@@ -1309,6 +1336,8 @@ async def _live_chat_case(
                     required_text=required_text,
                     timeout=timeout,
                     semantic_goal=f"{prompt}\n{follow_up}",
+                    error_count_before=follow_up_error_count_before,
+                    enforce_marker=enforce_marker,
                 )
                 _record_assistant_reply_wait_result(observed, follow_up_reply)
         if forbidden_text:
@@ -1336,6 +1365,22 @@ async def _live_chat_case(
                 "required_text": required_text,
                 **(extra_details or {}),
                 **observed,
+            },
+        )
+    except TerminalRunFailure as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {
+                "error": _exc_text(exc),
+                "prompt": prompt,
+                "marker": marker,
+                "required_text": required_text,
+                **(extra_details or {}),
+                **observed,
+                "failure_category": exc.observation.failure_category,
+                "failure_status": exc.observation.failure_status,
             },
         )
     except Exception as exc:
@@ -1467,6 +1512,52 @@ async def _dismiss_visible_connect_action(page: object) -> bool:
         return False
 
 
+async def _observe_terminal_run_failure(
+    page: object,
+    *,
+    baseline_count: int = 0,
+) -> TerminalRunFailureObservation | None:
+    try:
+        errors = page.locator("[data-testid='msg-error']")  # type: ignore[attr-defined]
+        error_count = await errors.count()
+    except Exception:
+        return None
+    if error_count <= max(0, baseline_count):
+        return None
+
+    latest_error = errors.last
+    try:
+        summary = (await latest_error.inner_text(timeout=1000)).strip()
+    except Exception:
+        summary = ""
+    try:
+        failure_category = await latest_error.get_attribute(
+            "data-failure-category",
+            timeout=1000,
+        )
+    except Exception:
+        failure_category = None
+    try:
+        failure_status = await latest_error.get_attribute(
+            "data-failure-status",
+            timeout=1000,
+        )
+    except Exception:
+        failure_status = None
+
+    return TerminalRunFailureObservation(
+        summary=summary,
+        failure_category=(
+            failure_category.strip() if isinstance(failure_category, str) else None
+        )
+        or None,
+        failure_status=(
+            failure_status.strip() if isinstance(failure_status, str) else None
+        )
+        or None,
+    )
+
+
 async def _wait_for_assistant_reply(
     page: object,
     *,
@@ -1474,22 +1565,41 @@ async def _wait_for_assistant_reply(
     required_text: list[str],
     timeout: float,
     semantic_goal: str | None = None,
+    error_count_before: int = 0,
+    enforce_marker: bool = True,
 ) -> AssistantReplyWaitResult:
     started = time.monotonic()
     deadline = time.monotonic() + timeout
     assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
+    last_final_assistant_text = ""
     last_observed_text = ""
     last_text_change_at = started
     last_final_reply_state: str | None = None
+
+    async def read_main_text() -> str:
+        try:
+            return await page.locator("main").inner_text(timeout=1000)  # type: ignore[attr-defined]
+        except Exception:
+            return ""
+
     while time.monotonic() < deadline:
         await _approve_visible_tool_gate(page)
+        terminal_failure = await _observe_terminal_run_failure(
+            page,
+            baseline_count=error_count_before,
+        )
+        if terminal_failure is not None:
+            raise TerminalRunFailure(terminal_failure)
         assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
         if await assistant_blocks.count() > 0:
             try:
-                text = await assistant.inner_text(timeout=1000)
+                final_assistant_text = await assistant.inner_text(timeout=1000)
             except Exception:
-                text = ""
+                final_assistant_text = ""
+            else:
+                last_final_assistant_text = final_assistant_text
+            text = final_assistant_text
             try:
                 observed_final_reply_state = await assistant.get_attribute(
                     "data-final-reply",
@@ -1516,13 +1626,23 @@ async def _wait_for_assistant_reply(
                     last_text_change_at = now
                 last_text = text
             normalized = text.lower()
-            marker_matches = not marker or marker in text
-            if marker_matches and required_text_matches(normalized, required_text):
-                final_reply_observed = last_final_reply_state in ("true", "false")
-                if final_reply_observed and last_final_reply_state != "true":
+            marker_matches = (
+                not enforce_marker
+                or not marker
+                or marker in last_final_assistant_text
+            )
+            required_text_matched = required_text_matches(normalized, required_text)
+            if last_final_reply_state == "true" and not marker_matches:
+                raise AssertionError(
+                    "finalized assistant reply did not contain required marker. "
+                    f"marker={marker!r} "
+                    f"last_assistant={last_final_assistant_text[-500:]!r}"
+                )
+            if marker_matches and required_text_matched:
+                if last_final_reply_state == "false":
                     await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
                     continue
-                if not final_reply_observed:
+                if last_final_reply_state != "true":
                     quiet_for = time.monotonic() - last_text_change_at
                     if quiet_for < ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS:
                         await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
@@ -1535,20 +1655,21 @@ async def _wait_for_assistant_reply(
                     final_reply_wait_ms=int((time.monotonic() - started) * 1000),
                     final_reply_reason=(
                         "final_reply_marker_matched"
-                        if final_reply_observed
+                        if last_final_reply_state == "true"
                         else "fallback_quiet_period_matched"
                     ),
                 )
+            if last_final_reply_state == "true":
+                break
         await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
-    main_text = ""
-    try:
-        main_text = await page.locator("main").inner_text(timeout=1000)  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    main_text = await read_main_text()
     semantic_judge: dict[str, object] | None = None
-    if last_text and (not marker or marker in last_text) and last_final_reply_state != "false":
+    marker_matches = (
+        not enforce_marker or not marker or marker in last_final_assistant_text
+    )
+    if last_text and marker_matches and last_final_reply_state != "false":
         semantic_judge = await _judge_assistant_reply_completion(
-            marker=marker,
+            marker=marker if enforce_marker else None,
             required_text=required_text,
             assistant_text=last_text,
             main_text=main_text,
@@ -1571,6 +1692,7 @@ async def _wait_for_assistant_reply(
     raise AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
+        f"enforce_marker={enforce_marker!r} "
         f"latest_final_reply_state={last_final_reply_state!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
@@ -5648,11 +5770,12 @@ async def _slack_correctness_chat_reply(
 ) -> tuple[ProbeResult, str]:
     """Chat arm shared by the QA-10 Slack tool-correctness probes.
 
-    Runs the WebUI chat turn, waits for the per-run answer marker, and hands
-    back the FULL in-memory reply text for content asserts (excerpt
-    truncation must never blind a marker/leak check). The full text is
-    stripped from persisted details on both paths; a failed chat result is
-    ready to return as-is with latency re-anchored to the case start.
+    Runs the WebUI chat turn, waits for its structural terminal state, and
+    hands back the FULL in-memory reply text for seeded content assertions
+    (excerpt truncation must never blind a marker/leak check). The synthetic
+    answer marker remains prompt context but is not a liveness condition. The
+    full text is stripped from persisted details on both paths; a failed chat
+    result is ready to return as-is with latency re-anchored to the case start.
     """
     chat = await _live_chat_case(
         ctx,
@@ -5663,6 +5786,7 @@ async def _slack_correctness_chat_reply(
         timeout=timeout,
         extra_details=extra_details,
         expose_full_reply_text=True,
+        enforce_marker=False,
     )
     reply_text = str(
         chat.details.pop("full_reply_text", None)

@@ -35,6 +35,23 @@ else:
     import text_match
 
 
+class _FakeEmptyErrorBlocks:
+    @property
+    def last(self):
+        return self
+
+    async def count(self):
+        return 0
+
+    async def inner_text(self, **_kwargs):
+        return ""
+
+    async def get_attribute(self, name, **_kwargs):
+        if name in ("data-failure-category", "data-failure-status"):
+            return None
+        raise AssertionError(f"unexpected error attribute: {name}")
+
+
 class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def _dummy_ctx(self) -> run_live_qa.LiveQaContext:
         return run_live_qa.LiveQaContext(
@@ -49,7 +66,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         response_text: str,
         *,
         final_reply_state: str | None = "true",
+        error_messages: list[dict[str, str | None]] | None = None,
+        assistant_block_texts: list[str] | None = None,
     ):
+        error_messages = error_messages or []
+        assistant_block_texts = assistant_block_texts or [response_text]
+
         class FakeApprove:
             @property
             def last(self):
@@ -64,7 +86,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 return self
 
             async def count(self):
-                return 1
+                return len(assistant_block_texts)
 
             async def inner_text(self, **_kwargs):
                 return response_text
@@ -75,7 +97,29 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 return None
 
             async def all_inner_texts(self):
-                return [response_text]
+                return assistant_block_texts
+
+        class FakeErrorBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return len(error_messages)
+
+            async def inner_text(self, **_kwargs):
+                if not error_messages:
+                    return ""
+                return str(error_messages[-1].get("summary") or "")
+
+            async def get_attribute(self, name, **_kwargs):
+                if not error_messages:
+                    return None
+                if name == "data-failure-category":
+                    return error_messages[-1].get("failure_category")
+                if name == "data-failure-status":
+                    return error_messages[-1].get("failure_status")
+                raise AssertionError(f"unexpected error attribute: {name}")
 
         class FakeMain:
             async def inner_text(self, **_kwargs):
@@ -85,6 +129,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             def locator(self, selector):
                 if selector == "[data-testid='msg-assistant']":
                     return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-error']":
+                    return FakeErrorBlocks()
                 if selector == "main":
                     return FakeMain()
                 raise AssertionError(f"unexpected selector: {selector}")
@@ -1032,9 +1078,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         class FakePage:
             def locator(self, selector):
-                if selector != "[data-testid='msg-assistant']":
-                    raise AssertionError(f"unexpected selector: {selector}")
-                return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-error']":
+                    return _FakeEmptyErrorBlocks()
+                raise AssertionError(f"unexpected selector: {selector}")
 
             def get_by_role(self, _role, **_kwargs):
                 return FakeApprove()
@@ -1091,9 +1139,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         class FakePage:
             def locator(self, selector):
-                if selector != "[data-testid='msg-assistant']":
-                    raise AssertionError(f"unexpected selector: {selector}")
-                return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-error']":
+                    return _FakeEmptyErrorBlocks()
+                raise AssertionError(f"unexpected selector: {selector}")
 
             def get_by_role(self, _role, **_kwargs):
                 return FakeApprove()
@@ -1156,9 +1206,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         class FakePage:
             def locator(self, selector):
-                if selector != "[data-testid='msg-assistant']":
-                    raise AssertionError(f"unexpected selector: {selector}")
-                return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-error']":
+                    return _FakeEmptyErrorBlocks()
+                raise AssertionError(f"unexpected selector: {selector}")
 
             def get_by_role(self, _role, **_kwargs):
                 return FakeApprove()
@@ -1180,6 +1232,289 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(state["sleep_calls"], 2)
         self.assertEqual(reply.text_excerpt, "Google Calendar connected.")
         self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+
+    def test_wait_for_assistant_reply_returns_final_reply_when_marker_is_not_enforced(
+        self,
+    ):
+        response_text = "Seeded fixture content. REBORN QA 10A marker reformatted."
+
+        async def fail_if_waits(_seconds):
+            raise AssertionError("finalized reply should return without waiting")
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fail_if_waits):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    self._fake_assistant_reply_page(response_text),
+                    marker="REBORN_QA_10A_EXACT",
+                    required_text=["seeded fixture"],
+                    timeout=30.0,
+                    enforce_marker=False,
+                )
+            )
+
+        self.assertEqual(reply.full_text, response_text)
+        self.assertFalse(reply.semantic_judge_used)
+        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+
+    def test_wait_for_assistant_reply_fails_immediately_when_marker_is_enforced(self):
+        async def fail_if_waits(_seconds):
+            raise AssertionError("finalized reply should not continue the wait loop")
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fail_if_waits):
+            with self.assertRaisesRegex(
+                AssertionError,
+                "finalized assistant reply.*required marker",
+            ):
+                asyncio.run(
+                    run_live_qa._wait_for_assistant_reply(
+                        self._fake_assistant_reply_page("Routine created."),
+                        marker="REBORN_QA_DONE",
+                        required_text=["routine"],
+                        timeout=30.0,
+                        enforce_marker=True,
+                    )
+                )
+
+    def test_wait_for_assistant_reply_enforces_marker_on_finalized_bubble_only(self):
+        with self.assertRaisesRegex(
+            AssertionError,
+            "finalized assistant reply.*required marker",
+        ):
+            asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    self._fake_assistant_reply_page(
+                        "Routine created without the marker.",
+                        assistant_block_texts=[
+                            "Earlier reply REBORN_QA_DONE",
+                            "Routine created without the marker.",
+                        ],
+                    ),
+                    marker="REBORN_QA_DONE",
+                    required_text=["routine"],
+                    timeout=30.0,
+                    enforce_marker=True,
+                )
+            )
+
+    def test_wait_for_assistant_reply_raises_terminal_model_failure_without_waiting(
+        self,
+    ):
+        errors = [
+            {
+                "summary": "Old request failed.",
+                "failure_category": "driver_invalid_request",
+                "failure_status": "failed",
+            },
+            {
+                "summary": "The configured model provider is unavailable.",
+                "failure_category": "model_unavailable",
+                "failure_status": "failed",
+            },
+        ]
+
+        async def fail_if_waits(_seconds):
+            raise AssertionError("terminal model failure should not wait")
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fail_if_waits):
+            with self.assertRaises(run_live_qa.TerminalRunFailure) as raised:
+                asyncio.run(
+                    run_live_qa._wait_for_assistant_reply(
+                        self._fake_assistant_reply_page(
+                            "",
+                            final_reply_state=None,
+                            error_messages=errors,
+                        ),
+                        marker="REBORN_QA_DONE",
+                        required_text=[],
+                        timeout=30.0,
+                        error_count_before=1,
+                    )
+                )
+
+        observation = raised.exception.observation
+        self.assertEqual(
+            observation.summary,
+            "The configured model provider is unavailable.",
+        )
+        self.assertEqual(observation.failure_category, "model_unavailable")
+        self.assertEqual(observation.failure_status, "failed")
+
+    def test_wait_for_assistant_reply_ignores_stale_terminal_failure(self):
+        stale_error = {
+            "summary": "A previous run failed.",
+            "failure_category": "model_unavailable",
+            "failure_status": "failed",
+        }
+        response_text = "Routine created. REBORN_QA_DONE"
+
+        async def fail_if_waits(_seconds):
+            raise AssertionError("finalized reply should return without waiting")
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fail_if_waits):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    self._fake_assistant_reply_page(
+                        response_text,
+                        error_messages=[stale_error],
+                    ),
+                    marker="REBORN_QA_DONE",
+                    required_text=["routine"],
+                    timeout=30.0,
+                    error_count_before=1,
+                )
+            )
+
+        self.assertEqual(reply.full_text, response_text)
+
+    def test_wait_for_assistant_reply_retains_quiet_fallback_without_final_metadata(
+        self,
+    ):
+        response_text = "Routine created. REBORN_QA_DONE"
+        with patch.object(
+            run_live_qa,
+            "ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS",
+            0.0,
+        ):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    self._fake_assistant_reply_page(
+                        response_text,
+                        final_reply_state=None,
+                    ),
+                    marker="REBORN_QA_DONE",
+                    required_text=["routine"],
+                    timeout=1.0,
+                )
+            )
+
+        self.assertEqual(reply.full_text, response_text)
+        self.assertEqual(reply.final_reply_reason, "fallback_quiet_period_matched")
+
+    def test_live_chat_case_persists_terminal_failure_metadata(self):
+        captured_wait: dict[str, object] = {}
+
+        class FakeComposer:
+            async def fill(self, _text):
+                return None
+
+            async def press(self, _key):
+                return None
+
+        class FakeUserMessages:
+            @property
+            def last(self):
+                return self
+
+        class FakeDismiss:
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return 0
+
+        class FakeErrors:
+            async def count(self):
+                return 2
+
+        class FakePage:
+            async def goto(self, _url, **_kwargs):
+                return None
+
+            def locator(self, selector):
+                if selector == "[aria-label='Dismiss connect action']":
+                    return FakeDismiss()
+                if selector == "[data-testid='chat-composer']":
+                    return FakeComposer()
+                if selector == "[data-testid='msg-user']":
+                    return FakeUserMessages()
+                if selector == "[data-testid='msg-error']":
+                    return FakeErrors()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        class FakeExpectation:
+            async def to_be_visible(self, **_kwargs):
+                return None
+
+            async def to_contain_text(self, _text, **_kwargs):
+                return None
+
+        def fake_expect(_locator):
+            return FakeExpectation()
+
+        async def fake_with_page(_output_dir, _case_name, action):
+            await action(FakePage())
+
+        async def fake_wait(_page, **kwargs):
+            captured_wait.update(kwargs)
+            observation = run_live_qa.TerminalRunFailureObservation(
+                summary="The configured model provider is unavailable.",
+                failure_category="model_unavailable",
+                failure_status="failed",
+            )
+            raise run_live_qa.TerminalRunFailure(observation)
+
+        playwright_module = types.ModuleType("playwright")
+        playwright_async_api = types.ModuleType("playwright.async_api")
+        playwright_async_api.expect = fake_expect
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "playwright": playwright_module,
+                    "playwright.async_api": playwright_async_api,
+                },
+            ),
+            patch.object(run_live_qa, "_with_page", new=fake_with_page),
+            patch.object(run_live_qa, "_wait_for_assistant_reply", new=fake_wait),
+        ):
+            result = asyncio.run(
+                run_live_qa._live_chat_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_terminal_failure",
+                    prompt="Run a live model turn.",
+                    marker="REBORN_QA_DONE",
+                    required_text=[],
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(captured_wait["error_count_before"], 2)
+        self.assertEqual(result.details["failure_category"], "model_unavailable")
+        self.assertEqual(result.details["failure_status"], "failed")
+
+    def test_slack_correctness_chat_reply_does_not_enforce_answer_marker(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_10_test",
+                success=True,
+                latency_ms=1,
+                details={"full_reply_text": "Seeded Slack fixture content."},
+            )
+
+        with patch.object(
+            run_live_qa,
+            "_live_chat_case",
+            side_effect=fake_live_chat_case,
+        ):
+            chat, reply_text = asyncio.run(
+                run_live_qa._slack_correctness_chat_reply(
+                    self._dummy_ctx(),
+                    case_name="qa_10_test",
+                    started=0.0,
+                    prompt="Read the seeded Slack fixture.",
+                    answer_marker="REBORN_QA_10_TEST_EXACT",
+                    extra_details={},
+                )
+            )
+
+        self.assertTrue(chat.success)
+        self.assertEqual(reply_text, "Seeded Slack fixture content.")
+        self.assertIs(captured["enforce_marker"], False)
 
     def test_wait_for_assistant_reply_uses_semantic_judge_for_text_mismatch(self):
         response_text = (

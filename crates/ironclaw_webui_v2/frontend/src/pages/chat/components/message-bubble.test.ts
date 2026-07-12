@@ -4,7 +4,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test, vi } from "vitest";
 
-import { CHAT_MESSAGE_ROLES } from "../lib/message-types";
+import {
+  CHAT_MESSAGE_ROLES,
+  type ErrorChatMessage,
+} from "../lib/message-types";
 
 vi.mock("./markdown-renderer", async () => {
   const { createElement } = await import("react");
@@ -207,6 +210,29 @@ test("error messages render as inline chat bubbles, not centered notices", async
     "error role must not regress to the old centered banner styling",
   );
   assert.match(html, /Provider unavailable/);
+});
+
+test("error bubbles expose structural provider failure metadata", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const message: ErrorChatMessage = {
+    id: "err-provider-unavailable",
+    role: CHAT_MESSAGE_ROLES.ERROR,
+    content: "Provider unavailable",
+    timestamp: "2026-07-12T00:00:00.000Z",
+    failureCategory: "model_unavailable",
+    failureStatus: "failed",
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message,
+      onRetry: () => {},
+      threadId: "thread-1",
+    }),
+  );
+
+  assert.match(html, /data-failure-category="model_unavailable"/);
+  assert.match(html, /data-failure-status="failed"/);
 });
 
 test("message timestamp and actions share a hover-only meta row", () => {
