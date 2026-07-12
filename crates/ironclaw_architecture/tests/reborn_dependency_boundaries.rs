@@ -2627,7 +2627,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // normalization/rendering over the ProductAdapter DTO surface.
             // Host auth verification, credential resolution, delivery fanout,
             // workflow admission, and runtime/network authority stay outside
-            // the adapter crate.
+            // the adapter crate. `ironclaw_host_api` is deliberately allowed:
+            // concrete extension crates depend on host_api /
+            // product_adapters CONTRACT types only (`RestrictedEgress`,
+            // `SecretHandle` — extension-runtime implementation.md §3), which
+            // the P4 `ChannelAdapter` signatures require.
             crate_name: "ironclaw_slack_v2_adapter",
             forbidden: vec![
                 "ironclaw",
@@ -2643,7 +2647,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_gateway",
-                "ironclaw_host_api",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
                 "ironclaw_loop_support",

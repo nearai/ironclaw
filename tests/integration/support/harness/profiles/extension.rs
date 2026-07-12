@@ -10,8 +10,6 @@ use ironclaw_host_api::{
 
 use std::sync::Arc;
 
-use ironclaw_network::NetworkHttpEgress;
-
 use super::super::super::extension_surface::{
     BUNDLED_EXTENSION_CAPABILITY_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
 };

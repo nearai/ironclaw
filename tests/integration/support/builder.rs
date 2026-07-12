@@ -107,8 +107,12 @@ pub(crate) enum StorageReopen {
     },
     Postgres {
         database_url: String,
-        _container: testcontainers_modules::testcontainers::ContainerAsync<
-            testcontainers_modules::postgres::Postgres,
+        // Boxed: the container handle dwarfs the other variants
+        // (clippy::large_enum_variant) and is only held for its Drop.
+        _container: Box<
+            testcontainers_modules::testcontainers::ContainerAsync<
+                testcontainers_modules::postgres::Postgres,
+            >,
         >,
     },
 }
@@ -1778,7 +1782,7 @@ pub(crate) async fn build_storage_composite(
             )?;
             StorageReopen::Postgres {
                 database_url,
-                _container: container,
+                _container: Box::new(container),
             }
         }
     };
