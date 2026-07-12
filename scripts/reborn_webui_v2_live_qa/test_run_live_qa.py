@@ -2227,6 +2227,48 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(state["dismissals"], 1)
         self.assertEqual(result.details["submission_identity"]["run_id"], "run-current")
 
+    def test_submission_capture_recovers_already_submitted_retry_identity(self):
+        replay = {
+            "outcome": "already_submitted",
+            "thread_id": "thread-current",
+            "accepted_message_ref": "msg:message-current",
+            "run_id": "run-current",
+            "status": "running",
+            "event_cursor": 42,
+        }
+        result, state = self._drive_submission_capture_state(
+            response_payloads=[None, replay]
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(state["presses"], 2)
+        self.assertEqual(state["dismissals"], 1)
+        self.assertEqual(
+            result.details["submission_identity"],
+            {
+                "accepted_message_ref": "msg:message-current",
+                "thread_id": "thread-current",
+                "run_id": "run-current",
+            },
+        )
+
+    def test_submission_capture_rejects_busy_retry_without_prior_identity(self):
+        rejected_busy = {
+            "outcome": "rejected_busy",
+            "thread_id": "thread-current",
+            "accepted_message_ref": "msg:message-rejected",
+            "active_run_id": "run-blocking",
+        }
+        result, state = self._drive_submission_capture_state(
+            response_payloads=[None, rejected_busy]
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(state["presses"], 2)
+        self.assertEqual(state["dismissals"], 1)
+        self.assertNotIn("submission_identity", result.details)
+        self.assertIn("rejected_busy", result.details["error"])
+
     def test_submitted_ack_survives_missing_user_bubble_without_second_enter(self):
         submitted = {
             "outcome": "submitted",
@@ -2501,6 +2543,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             *,
             before: dict[str, str] | None = None,
             during: dict[str, str] | None = None,
+            include_turn_id: bool = True,
         ) -> run_live_qa.ProbeResult:
             with tempfile.TemporaryDirectory() as tmpdir:
                 reborn_home = Path(tmpdir) / "reborn-home"
@@ -2511,6 +2554,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 async def fake_live_chat_case(_ctx, **_kwargs):
                     if during is not None:
                         write_capability_execution(db_path, **during)
+                    submission_identity = {
+                        "accepted_message_ref": "msg:message-current",
+                        "thread_id": "thread-current",
+                        "run_id": "run-current",
+                    }
+                    if include_turn_id:
+                        submission_identity["turn_id"] = "turn-current"
                     return run_live_qa.ProbeResult(
                         provider="test",
                         mode="live:qa_10_turn_binding",
@@ -2518,12 +2568,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         latency_ms=1,
                         details={
                             "full_reply_text": "CURRENT_TURN_123",
-                            "submission_identity": {
-                                "accepted_message_ref": "msg:message-current",
-                                "thread_id": "thread-current",
-                                "turn_id": "turn-current",
-                                "run_id": "run-current",
-                            },
+                            "submission_identity": submission_identity,
                         },
                     )
 
@@ -2568,6 +2613,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "invocation_id": "invocation-current",
             }
         )
+        replay_current = drive(
+            during={
+                "thread_id": "thread-current",
+                "run_id": "run-current",
+                "invocation_id": "invocation-current",
+            },
+            include_turn_id=False,
+        )
 
         self.assertFalse(stale.success)
         self.assertEqual(stale.details["failure_category"], "missing_expected_capability")
@@ -2587,6 +2640,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "invocation_ids": {capability_id: ["invocation-current"]},
                 "statuses": {capability_id: ["completed"]},
             },
+        )
+        self.assertTrue(replay_current.success)
+        self.assertEqual(
+            replay_current.details["capability_evidence"]["statuses"],
+            {capability_id: ["completed"]},
         )
 
     def test_qa_10e_prompt_echo_without_current_turn_history_call_fails(self):

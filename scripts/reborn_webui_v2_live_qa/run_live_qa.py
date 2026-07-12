@@ -1243,12 +1243,12 @@ def _record_assistant_reply_wait_result(
         observed["semantic_judge"] = reply.semantic_judge
 
 
-_SUBMISSION_IDENTITY_FIELDS = (
+_SUBMISSION_CORRELATION_FIELDS = (
     "accepted_message_ref",
     "thread_id",
-    "turn_id",
     "run_id",
 )
+_SUBMISSION_IDENTITY_FIELDS = (*_SUBMISSION_CORRELATION_FIELDS, "turn_id")
 
 
 def _record_submitted_identity(
@@ -1266,6 +1266,35 @@ def _record_submitted_identity(
             "ambiguous submission identity: distinct submitted "
             "acknowledgements matched one prompt"
         )
+    observed["submission_identity"] = identity
+
+
+def _record_replayed_submission_identity(
+    observed: dict[str, Any],
+    payload: dict[str, object],
+) -> None:
+    """Recover correlation identity from an authoritative replay response."""
+    if any(not payload.get(field) for field in _SUBMISSION_CORRELATION_FIELDS):
+        raise AssertionError(
+            "already_submitted response omitted correlation identity fields"
+        )
+    identity = {
+        field: str(payload[field]) for field in _SUBMISSION_CORRELATION_FIELDS
+    }
+    existing = observed.get("submission_identity")
+    if existing is not None:
+        if not isinstance(existing, dict):
+            raise AssertionError("submission identity had an invalid shape")
+        existing_correlation = {
+            field: str(existing.get(field) or "")
+            for field in _SUBMISSION_CORRELATION_FIELDS
+        }
+        if existing_correlation != identity:
+            raise AssertionError(
+                "ambiguous submission identity: replay response referenced "
+                "a different message or run"
+            )
+        return
     observed["submission_identity"] = identity
 
 
@@ -1370,21 +1399,19 @@ async def _live_chat_case(
         if outcome == "submitted":
             _record_submitted_identity(observed, payload)
             return True
-        if outcome == "already_submitted" and isinstance(existing, dict):
-            same_thread = str(payload.get("thread_id") or "") == existing.get(
-                "thread_id"
-            )
-            same_run = str(payload.get("run_id") or "") == existing.get("run_id")
-            same_message = str(payload.get("accepted_message_ref") or "") == existing.get(
-                "accepted_message_ref"
-            )
-            if same_thread and same_run and same_message:
-                return True
-            raise AssertionError(
-                "ambiguous submission identity: idempotent response referenced "
-                "a different thread or run"
-            )
-        if outcome == "rejected_busy" and isinstance(existing, dict):
+        if outcome == "already_submitted":
+            _record_replayed_submission_identity(observed, payload)
+            return True
+        if outcome == "rejected_busy":
+            # This response acknowledges a rejected message, not the run that
+            # should answer it. Its active_run_id may identify an unrelated
+            # blocker (or be absent on replay), so it cannot establish first-
+            # turn identity by itself.
+            if not isinstance(existing, dict):
+                raise AssertionError(
+                    "cannot recover submitted turn identity from rejected_busy "
+                    "without a prior submitted acknowledgement"
+                )
             same_thread = str(payload.get("thread_id") or "") == existing.get(
                 "thread_id"
             )
@@ -3198,7 +3225,7 @@ def _current_turn_capability_evidence(
         "invocation_ids": {capability_id: [] for capability_id in capability_ids},
         "statuses": {capability_id: [] for capability_id in capability_ids},
     }
-    if not all(identity.values()):
+    if not all(identity[field] for field in _SUBMISSION_CORRELATION_FIELDS):
         return evidence
 
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
