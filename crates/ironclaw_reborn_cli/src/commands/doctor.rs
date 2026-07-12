@@ -62,18 +62,7 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
         detail: report.v1_state().to_string(),
     });
 
-    checks.push(DoctorCheck {
-        name: "v1_migration_state".to_string(),
-        category: CheckCategory::Core,
-        outcome: CheckOutcome::Pass,
-        detail: migration_state(context).unwrap_or_else(|| {
-            if context.v1_migration_source_candidate().is_some() {
-                "available".to_string()
-            } else {
-                "not_detected".to_string()
-            }
-        }),
-    });
+    checks.push(migration_check(context));
 
     let config_path = context.boot_config().home().config_file_path();
     checks.push(check_config_file(&config_path));
@@ -212,12 +201,21 @@ impl Renderable for DoctorDto {
                 CheckOutcome::Fail => "\u{2718}",
                 CheckOutcome::Skip => "-",
             };
-            writeln!(
-                w,
-                "  {icon} {:<28} {}",
-                terminal_safe_text(&check.name),
-                terminal_safe_text(&check.detail)
-            )?;
+            if check.name == "v1_migration_state" {
+                writeln!(
+                    w,
+                    "  {icon} {}: {}",
+                    terminal_safe_text(&check.name),
+                    terminal_safe_text(&check.detail)
+                )?;
+            } else {
+                writeln!(
+                    w,
+                    "  {icon} {:<28} {}",
+                    terminal_safe_text(&check.name),
+                    terminal_safe_text(&check.detail)
+                )?;
+            }
         }
         writeln!(w)?;
         writeln!(
@@ -226,6 +224,27 @@ impl Renderable for DoctorDto {
             self.summary.pass, self.summary.fail, self.summary.skip,
         )?;
         Ok(())
+    }
+}
+
+fn migration_check(context: &RebornCliContext) -> DoctorCheck {
+    let detail = migration_state(context).unwrap_or_else(|| {
+        if context.v1_migration_source_candidate().is_some() {
+            "available".to_string()
+        } else {
+            "not_detected".to_string()
+        }
+    });
+    let outcome = match detail.as_str() {
+        "invalid" | "failed" => CheckOutcome::Fail,
+        "not_detected" | "available" | "planned" => CheckOutcome::Skip,
+        _ => CheckOutcome::Pass,
+    };
+    DoctorCheck {
+        name: "v1_migration_state".to_string(),
+        category: CheckCategory::Core,
+        outcome,
+        detail,
     }
 }
 
