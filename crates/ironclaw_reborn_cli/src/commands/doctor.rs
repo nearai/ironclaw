@@ -31,6 +31,7 @@ impl DoctorCommand {
         } else {
             dto.checks.extend(skipped_live_dependency_checks());
         }
+        dto.checks.extend(build_driver_checks());
         refresh_summary(&mut dto);
         let mode = if self.json {
             OutputMode::Json
@@ -74,30 +75,13 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
     let providers_path = context.boot_config().home().providers_file_path();
     checks.push(check_providers_file(&providers_path));
 
-    let snapshot = reborn_runtime_readiness_snapshot();
-
-    checks.push(driver_check("text_only_driver", &snapshot.text_only_driver));
-    checks.push(driver_check("planned_driver", &snapshot.planned_driver));
-    checks.push(driver_check(
-        "subagent_planned_driver",
-        &snapshot.subagent_planned_driver,
-    ));
-    checks.push(driver_check(
-        "planned_default_profile",
-        &snapshot.planned_default_profile,
-    ));
-
-    let (pass, fail, skip) = checks
-        .iter()
-        .fold((0, 0, 0), |counts, check| match check.outcome {
-            CheckOutcome::Pass => (counts.0 + 1, counts.1, counts.2),
-            CheckOutcome::Fail => (counts.0, counts.1 + 1, counts.2),
-            CheckOutcome::Skip => (counts.0, counts.1, counts.2 + 1),
-        });
-
     DoctorDto {
         checks,
-        summary: DoctorSummary { pass, fail, skip },
+        summary: DoctorSummary {
+            pass: 0,
+            fail: 0,
+            skip: 0,
+        },
     }
 }
 
@@ -111,6 +95,19 @@ fn refresh_summary(dto: &mut DoctorDto) {
                 CheckOutcome::Skip => (counts.0, counts.1, counts.2 + 1),
             });
     dto.summary = DoctorSummary { pass, fail, skip };
+}
+
+fn build_driver_checks() -> Vec<DoctorCheck> {
+    let snapshot = reborn_runtime_readiness_snapshot();
+    vec![
+        driver_check("text_only_driver", &snapshot.text_only_driver),
+        driver_check("planned_driver", &snapshot.planned_driver),
+        driver_check("subagent_planned_driver", &snapshot.subagent_planned_driver),
+        driver_check(
+            "planned_default_profile",
+            &snapshot.planned_default_profile,
+        ),
+    ]
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -163,7 +160,7 @@ fn check_llm_readiness(_context: &RebornCliContext) -> DoctorCheck {
 }
 
 fn skipped_live_dependency_checks() -> Vec<DoctorCheck> {
-    ["storage_backend", "secrets_store"]
+    ["storage_backend", "secrets_store", "runtime_wiring"]
         .into_iter()
         .map(|name| {
             dependency_check(
@@ -194,6 +191,11 @@ fn check_live_dependencies(context: &RebornCliContext) -> Vec<DoctorCheck> {
                     CheckOutcome::Skip,
                     "not probed because runtime storage configuration failed".to_string(),
                 ),
+                dependency_check(
+                    "runtime_wiring",
+                    CheckOutcome::Skip,
+                    "not probed because runtime storage configuration failed".to_string(),
+                ),
             ];
         }
     };
@@ -213,6 +215,11 @@ fn check_live_dependencies(context: &RebornCliContext) -> Vec<DoctorCheck> {
                 CheckOutcome::Pass,
                 "initialized through production composition".to_string(),
             ),
+            dependency_check(
+                "runtime_wiring",
+                CheckOutcome::Pass,
+                "production composition validated".to_string(),
+            ),
         ],
         Ok(Err(error)) => classify_live_build_error(error),
         Err(error) => vec![
@@ -226,44 +233,78 @@ fn check_live_dependencies(context: &RebornCliContext) -> Vec<DoctorCheck> {
                 CheckOutcome::Skip,
                 "not probed because the dependency probe could not run".to_string(),
             ),
+            dependency_check(
+                "runtime_wiring",
+                CheckOutcome::Skip,
+                "not probed because the dependency probe could not run".to_string(),
+            ),
         ],
     }
 }
 
 fn classify_live_build_error(error: RebornBuildError) -> Vec<DoctorCheck> {
     let detail = error.to_string();
-    let secret_failure = matches!(
-        error,
-        RebornBuildError::MissingSecretMasterKey | RebornBuildError::Secret(_)
-    );
-    vec![
-        dependency_check(
-            "storage_backend",
-            if secret_failure {
-                CheckOutcome::Skip
-            } else {
-                CheckOutcome::Fail
-            },
-            if secret_failure {
-                "storage opened far enough to reach secrets initialization".to_string()
-            } else {
-                detail.clone()
-            },
-        ),
-        dependency_check(
-            "secrets_store",
-            if secret_failure {
-                CheckOutcome::Fail
-            } else {
-                CheckOutcome::Skip
-            },
-            if secret_failure {
-                detail
-            } else {
-                "not probed because storage initialization failed".to_string()
-            },
-        ),
-    ]
+
+    enum FailureKind {
+        Secret,
+        Storage,
+        RuntimeWiring,
+    }
+
+    let kind = match &error {
+        RebornBuildError::MissingSecretMasterKey | RebornBuildError::Secret(_) => {
+            FailureKind::Secret
+        }
+        RebornBuildError::MissingProductionTrustPolicy
+        | RebornBuildError::MissingRuntimePolicy
+        | RebornBuildError::EmptyProductionTrustPolicy
+        | RebornBuildError::PlannedRunProfileResolver { .. }
+        | RebornBuildError::ProductionWiring { .. }
+        | RebornBuildError::InvalidConfig { .. } => FailureKind::RuntimeWiring,
+        _ => FailureKind::Storage,
+    };
+
+    match kind {
+        FailureKind::Secret => vec![
+            dependency_check(
+                "storage_backend",
+                CheckOutcome::Skip,
+                "storage opened far enough to reach secrets initialization".to_string(),
+            ),
+            dependency_check("secrets_store", CheckOutcome::Fail, detail),
+            dependency_check(
+                "runtime_wiring",
+                CheckOutcome::Skip,
+                "not probed because secrets initialization failed".to_string(),
+            ),
+        ],
+        FailureKind::Storage => vec![
+            dependency_check("storage_backend", CheckOutcome::Fail, detail),
+            dependency_check(
+                "secrets_store",
+                CheckOutcome::Skip,
+                "not probed because storage initialization failed".to_string(),
+            ),
+            dependency_check(
+                "runtime_wiring",
+                CheckOutcome::Skip,
+                "not probed because storage initialization failed".to_string(),
+            ),
+        ],
+        FailureKind::RuntimeWiring => vec![
+            dependency_check(
+                "storage_backend",
+                CheckOutcome::Skip,
+                "storage opened far enough to reach runtime wiring".to_string(),
+            ),
+            dependency_check(
+                "secrets_store",
+                CheckOutcome::Skip,
+                "secrets opened far enough to reach runtime wiring".to_string(),
+            ),
+            dependency_check("runtime_wiring", CheckOutcome::Fail, detail),
+        ],
+    }
 }
 
 fn dependency_check(name: &str, outcome: CheckOutcome, detail: String) -> DoctorCheck {
@@ -405,7 +446,11 @@ mod tests {
     #[test]
     fn doctor_dto_builds_with_defaults() {
         let (_tmp, context) = RebornCliContext::test_context();
-        let dto = build_doctor_dto(&context);
+        let mut dto = build_doctor_dto(&context);
+        dto.checks.push(check_llm_readiness(&context));
+        dto.checks.extend(skipped_live_dependency_checks());
+        dto.checks.extend(build_driver_checks());
+        refresh_summary(&mut dto);
         assert!(!dto.checks.is_empty());
         assert_eq!(
             dto.summary.pass + dto.summary.fail + dto.summary.skip,
@@ -414,10 +459,18 @@ mod tests {
     }
 
     #[test]
-    fn doctor_has_core_and_driver_checks() {
+    fn doctor_has_core_dependency_and_driver_checks() {
         let (_tmp, context) = RebornCliContext::test_context();
-        let dto = build_doctor_dto(&context);
+        let mut dto = build_doctor_dto(&context);
+        dto.checks.push(check_llm_readiness(&context));
+        dto.checks.extend(skipped_live_dependency_checks());
+        dto.checks.extend(build_driver_checks());
         assert!(dto.checks.iter().any(|c| c.category == CheckCategory::Core));
+        assert!(
+            dto.checks
+                .iter()
+                .any(|c| c.category == CheckCategory::Dependencies)
+        );
         assert!(
             dto.checks
                 .iter()
@@ -432,6 +485,8 @@ mod tests {
         assert_eq!(checks[0].outcome, CheckOutcome::Skip);
         assert_eq!(checks[1].name, "secrets_store");
         assert_eq!(checks[1].outcome, CheckOutcome::Fail);
+        assert_eq!(checks[2].name, "runtime_wiring");
+        assert_eq!(checks[2].outcome, CheckOutcome::Skip);
     }
 
     #[test]
@@ -443,6 +498,20 @@ mod tests {
         assert_eq!(checks[0].outcome, CheckOutcome::Fail);
         assert_eq!(checks[1].name, "secrets_store");
         assert_eq!(checks[1].outcome, CheckOutcome::Skip);
+        assert_eq!(checks[2].name, "runtime_wiring");
+        assert_eq!(checks[2].outcome, CheckOutcome::Skip);
+    }
+
+    #[test]
+    fn wiring_build_failure_is_attributed_to_runtime_wiring() {
+        let checks =
+            classify_live_build_error(RebornBuildError::MissingProductionTrustPolicy);
+        assert_eq!(checks[0].name, "storage_backend");
+        assert_eq!(checks[0].outcome, CheckOutcome::Skip);
+        assert_eq!(checks[1].name, "secrets_store");
+        assert_eq!(checks[1].outcome, CheckOutcome::Skip);
+        assert_eq!(checks[2].name, "runtime_wiring");
+        assert_eq!(checks[2].outcome, CheckOutcome::Fail);
     }
 
     #[test]

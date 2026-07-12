@@ -54,16 +54,16 @@ fn sample_doctor() -> DoctorDto {
                 detail: "missing".to_string(),
             },
             DoctorCheck {
-                name: "text_only_driver".to_string(),
-                category: CheckCategory::Drivers,
-                outcome: CheckOutcome::Pass,
-                detail: "initialized".to_string(),
-            },
-            DoctorCheck {
                 name: "llm_provider".to_string(),
                 category: CheckCategory::Dependencies,
                 outcome: CheckOutcome::Pass,
                 detail: "configured".to_string(),
+            },
+            DoctorCheck {
+                name: "text_only_driver".to_string(),
+                category: CheckCategory::Drivers,
+                outcome: CheckOutcome::Pass,
+                detail: "initialized".to_string(),
             },
             DoctorCheck {
                 name: "subagent_planned_driver".to_string(),
