@@ -156,6 +156,7 @@ jobs:
             local workflow="$1"
             local required="$2"
             local run_json status conclusion url
+            local api_error=false
 
             if ! run_json="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
@@ -168,11 +169,17 @@ jobs:
               --jq '.[0] // {}' \
               2>/dev/null)"; then
               echo "::warning::Failed to query workflow status for ${workflow}; treating as missing."
-              run_json='{}'
+              api_error=true
+              run_json='{"status":"pending","conclusion":"pending","url":""}'
             fi
             status="$(jq -r '.status // "missing"' <<<"$run_json")"
             conclusion="$(jq -r '.conclusion // "missing"' <<<"$run_json")"
             url="$(jq -r '.url // ""' <<<"$run_json")"
+
+            if [ "$api_error" = true ]; then
+              pending+=("${workflow} (query error)")
+              return
+            fi
 
             if [ "$status" = "missing" ]; then
               if [ "$required" = "required" ]; then
