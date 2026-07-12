@@ -116,13 +116,11 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-pub use llm_admin::llm_catalog::{
-    ProviderCatalogValidationError, validate_reborn_provider_catalog_contents,
-};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
-    RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
-    resolve_reborn_runtime_llm,
+    ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
+    resolve_llm_selection_against_catalog, resolve_reborn_runtime_llm,
+    validate_reborn_provider_catalog_contents,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
