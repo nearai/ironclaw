@@ -269,16 +269,16 @@ fn classify_live_build_error(error: RebornBuildError) -> Vec<DoctorCheck> {
         | RebornBuildError::EmptyProductionTrustPolicy
         | RebornBuildError::PlannedRunProfileResolver { .. }
         | RebornBuildError::ProductionWiring { .. }
-        | RebornBuildError::InvalidConfig { .. } => FailureKind::RuntimeWiring,
-        RebornBuildError::MissingDatabaseHandle { .. }
+        | RebornBuildError::InvalidConfig { .. }
         | RebornBuildError::HostRuntime(_)
-        | RebornBuildError::EventStore(_)
-        | RebornBuildError::Filesystem(_)
         | RebornBuildError::Resource(_)
         | RebornBuildError::RunState(_)
         | RebornBuildError::CapabilityLease(_)
         | RebornBuildError::Turn(_)
-        | RebornBuildError::Mount(_) => FailureKind::Storage,
+        | RebornBuildError::Mount(_) => FailureKind::RuntimeWiring,
+        RebornBuildError::MissingDatabaseHandle { .. }
+        | RebornBuildError::EventStore(_)
+        | RebornBuildError::Filesystem(_) => FailureKind::Storage,
     };
 
     match kind {
