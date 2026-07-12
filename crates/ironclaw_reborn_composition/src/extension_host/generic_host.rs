@@ -431,11 +431,18 @@ impl DrainController for GenerationDrain {
     }
 }
 
-/// Channel hooks have no production egress consumer until P4/P5; fail closed.
+/// Fail-closed factory for paths built without a channel egress transport
+/// (override/test compositions). Production serve paths wire the real
+/// `TransportBackedEgressFactory` over the host runtime egress.
 struct DenyAllEgressFactory;
 
 impl EgressFactory for DenyAllEgressFactory {
-    fn egress_for(&self, _extension_id: &str) -> Arc<dyn RestrictedEgress> {
+    fn egress_for_channel(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+        _declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+    ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllRestrictedEgress)
     }
 }

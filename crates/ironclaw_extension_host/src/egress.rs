@@ -19,7 +19,7 @@ use ironclaw_host_api::{
     RestrictedEgressResponse, RuntimeCredentialTarget, SecretHandle,
 };
 
-use crate::lifecycle::{EgressFactory, SnapshotWatch};
+use crate::lifecycle::EgressFactory;
 
 /// Default response-body cap for channel vendor calls.
 pub const CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 256 * 1024;
@@ -193,52 +193,47 @@ impl RestrictedEgress for PolicyEnforcedChannelEgress {
     }
 }
 
-/// Snapshot-backed [`EgressFactory`]: resolves the extension's declared
-/// `[[channel.egress]]` targets from the active generation. An extension with
-/// no channel (or no declared egress) gets a policy that rejects every host —
-/// fail-closed, never a panic.
-pub struct SnapshotChannelEgressFactory {
-    watch: SnapshotWatch,
-    transport: Arc<dyn ChannelEgressTransport>,
-}
-
-impl SnapshotChannelEgressFactory {
-    pub fn new(watch: SnapshotWatch, transport: Arc<dyn ChannelEgressTransport>) -> Self {
-        Self { watch, transport }
+impl DeclaredChannelEgress {
+    /// Lift one resolved `[[channel.egress]]` declaration into policy form.
+    pub fn from_descriptor(descriptor: &ironclaw_host_api::ChannelEgressDescriptor) -> Self {
+        Self {
+            scheme: descriptor.scheme,
+            host: descriptor.host.clone(),
+            methods: descriptor.methods.clone(),
+            credential_handle: descriptor.credential_handle.clone(),
+            injection: descriptor.injection.clone(),
+        }
     }
 }
 
-impl EgressFactory for SnapshotChannelEgressFactory {
-    fn egress_for(&self, extension_id: &str) -> Arc<dyn RestrictedEgress> {
-        let snapshot = self.watch.current();
-        let (installation_id, declared) = snapshot
-            .extension(extension_id)
-            .map(|extension| {
-                let declared = extension
-                    .resolved
-                    .channel
-                    .as_ref()
-                    .map(|channel| {
-                        channel
-                            .egress
-                            .iter()
-                            .map(|egress| DeclaredChannelEgress {
-                                scheme: egress.scheme,
-                                host: egress.host.clone(),
-                                methods: egress.methods.clone(),
-                                credential_handle: egress.credential_handle.clone(),
-                                injection: egress.injection.clone(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (extension.installation_id.clone(), declared)
-            })
-            .unwrap_or_else(|| (String::new(), Vec::new()));
+/// The production [`EgressFactory`]: builds a policy-enforced egress from the
+/// declaration the lifecycle passes (staged or active) over one injected
+/// transport. An extension with no declared egress gets a policy that rejects
+/// every host — fail-closed, never a panic.
+pub struct TransportBackedEgressFactory {
+    transport: Arc<dyn ChannelEgressTransport>,
+}
+
+impl TransportBackedEgressFactory {
+    pub fn new(transport: Arc<dyn ChannelEgressTransport>) -> Self {
+        Self { transport }
+    }
+}
+
+impl EgressFactory for TransportBackedEgressFactory {
+    fn egress_for_channel(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+        declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+    ) -> Arc<dyn RestrictedEgress> {
         Arc::new(PolicyEnforcedChannelEgress::new(
             extension_id,
             installation_id,
-            declared,
+            declared
+                .iter()
+                .map(DeclaredChannelEgress::from_descriptor)
+                .collect(),
             Arc::clone(&self.transport),
         ))
     }

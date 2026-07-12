@@ -63,8 +63,18 @@ pub enum HookError {
 
 /// Host-owned egress used by `channel.activate()`/`cleanup()`. Injected so
 /// the crate does not link the concrete egress implementation.
+///
+/// The lifecycle passes the staged record's declared `[[channel.egress]]`
+/// targets so vendor wiring works **during** activation — before the
+/// extension is published to any snapshot (a snapshot lookup here would
+/// fail-closed exactly when `activate()` needs egress).
 pub trait EgressFactory: Send + Sync {
-    fn egress_for(&self, extension_id: &str) -> Arc<dyn RestrictedEgress>;
+    fn egress_for_channel(
+        &self,
+        extension_id: &str,
+        installation_id: &str,
+        declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+    ) -> Arc<dyn RestrictedEgress>;
 }
 
 /// Dependencies `ExtensionHost` is constructed with. Every port is generic;
@@ -216,7 +226,16 @@ impl ExtensionHost {
                 // Vendor wiring: channel.activate(). Failure aborts with
                 // nothing published.
                 if let Some(channel) = &active.channel {
-                    let egress = self.deps.egress.egress_for(extension_id);
+                    let egress = self.deps.egress.egress_for_channel(
+                        extension_id,
+                        &record.installation_id,
+                        record
+                            .resolved
+                            .channel
+                            .as_ref()
+                            .map(|channel| channel.egress.as_slice())
+                            .unwrap_or(&[]),
+                    );
                     let ctx = ironclaw_product_adapters::ChannelContext {
                         extension_id: &record.extension_id,
                         installation_id: &record.installation_id,
@@ -309,7 +328,16 @@ impl ExtensionHost {
         if let Some(active) = &active
             && let Some(channel) = &active.channel
         {
-            let egress = self.deps.egress.egress_for(extension_id);
+            let egress = self.deps.egress.egress_for_channel(
+                extension_id,
+                &record.installation_id,
+                record
+                    .resolved
+                    .channel
+                    .as_ref()
+                    .map(|channel| channel.egress.as_slice())
+                    .unwrap_or(&[]),
+            );
             if let Err(error) = with_deadline(
                 self.deps.hook_deadline,
                 channel.cleanup(

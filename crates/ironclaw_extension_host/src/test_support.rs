@@ -378,7 +378,12 @@ impl DrainController for RecordingDrain {
 pub struct FakeEgressFactory;
 
 impl EgressFactory for FakeEgressFactory {
-    fn egress_for(&self, _extension_id: &str) -> Arc<dyn RestrictedEgress> {
+    fn egress_for_channel(
+        &self,
+        _extension_id: &str,
+        _installation_id: &str,
+        _declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+    ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllEgress)
     }
 }
