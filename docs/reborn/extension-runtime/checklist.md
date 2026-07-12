@@ -334,8 +334,23 @@ Rules — kept short on purpose:
   unchanged URLs end-to-end).
 - [ ] AUTH-14 Slack end-to-end: blocked tool → gate → scripted callback →
   grant stored → tool resumes (extends the existing oauth-connect integration
-  test).
-- [ ] AUTH-15 Engine flow/grant persistence passes on both DBs.
+  test). — PARTIAL: the generic round trip is proven at the composed-services
+  tier with the recipe-driven driver and the `{provider}` callback route
+  (`vendor_oauth_callback_resumes_blocked_turn_gate`,
+  `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`), and the
+  callback→coordinator resume is pinned by
+  `local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator`
+  (`crates/ironclaw_reborn_composition/src/factory/auth_tests.rs`). The
+  Slack-package blocked-TOOL leg through the integration harness needs the P4
+  channel wiring (the harness has no Slack OAuth client credentials seam yet).
+- [ ] AUTH-15 Engine flow/grant persistence passes on both DBs. — PARTIAL:
+  the engine reuses the backend-generic `FilesystemAuthProductServices`
+  store; the connect flow is pinned on the in-memory backend and on a real
+  libSQL root filesystem (`oauth_connect_flow_persists_credential_account`,
+  `oauth_connect_flow_persists_credential_account_on_libsql`,
+  `tests/integration/oauth_connect.rs`). A direct Postgres-rooted leg is
+  still owed (the store has no backend-specific code; the leg needs a
+  Postgres root-filesystem bundle in test support).
 - [x] AUTH-16 The provider string multiplexor, provider spec constants, and
   Slack OAuth branches are deleted. — `MultiplexAuthProviderClient` /
   `compose_provider_clients`, `HostOAuthProviderSpec`, `TokenResponseShape`,

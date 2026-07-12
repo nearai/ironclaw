@@ -135,6 +135,23 @@ impl ScriptedOAuthTokenEgress {
             .len()
     }
 
+    /// The form parameter NAMES of every captured token-exchange request, in
+    /// order. Names only — values may carry authorization codes, PKCE
+    /// verifiers, or client secrets and are never exposed. Tests use this to
+    /// pin which protocol parameters crossed the egress.
+    pub fn captured_form_param_names(&self) -> Vec<Vec<String>> {
+        self.captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|request| {
+                url::form_urlencoded::parse(&request.body)
+                    .map(|(name, _)| name.into_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
     /// The OAuth `grant_type` of every captured token-exchange request, in order.
     ///
     /// Deliberately returns ONLY the non-secret `grant_type` discriminator —
@@ -417,6 +434,65 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         Arc::new(TestNoopContinuationDispatcher),
     ));
 
+    OAuthProductAuthTestBundle { services, egress }
+}
+
+/// Construct the same engine-backed bundle as [`build_oauth_product_auth_for_test`]
+/// with the durable flow/account store persisted on a real libSQL-backed root
+/// filesystem instead of the in-memory backend — the second persistence leg
+/// for the auth engine (checklist AUTH-15).
+#[cfg(feature = "libsql")]
+pub async fn build_oauth_product_auth_for_test_on_libsql(
+    db_path: &std::path::Path,
+) -> OAuthProductAuthTestBundle {
+    use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql database for oauth bundle"),
+    );
+    let root = Arc::new(LibSqlRootFilesystem::new(db));
+    root.run_migrations()
+        .await
+        .expect("libsql filesystem migrations");
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").expect("mount alias"),
+        VirtualPath::new("/tenants/test-tenant/users/test-user/secrets").expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped_fs: Arc<ScopedFilesystem<LibSqlRootFilesystem>> =
+        Arc::new(ScopedFilesystem::with_fixed_view(root, mounts));
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
+    let durable = Arc::new(
+        crate::product_auth::durable::FilesystemAuthProductServices::new(
+            Arc::clone(&scoped_fs),
+            Arc::clone(&secret_store),
+        ),
+    );
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_token(
+        "test-access-token-abc123",
+    ));
+    let engine = engine_provider_client_for_test(
+        "test-oauth-provider",
+        &["test.readonly"],
+        "https://oauth.test.example.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
+    let services = Arc::new(crate::RebornProductAuthServices::new(
+        durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+        durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+        Arc::new(TestNoopContinuationDispatcher),
+    ));
     OAuthProductAuthTestBundle { services, egress }
 }
 
