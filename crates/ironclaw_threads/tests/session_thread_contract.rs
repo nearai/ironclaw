@@ -2089,6 +2089,88 @@ async fn append_tool_result_reference_persists_model_observation_in_envelope() {
     assert!(observation["detail"].get("preview").is_none());
 }
 
+/// Issue #5838: `ironclaw_reborn_composition::local_dev` inlines a first-look
+/// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` (2048 bytes) into
+/// the `result_reference` observation. This pins that a full-size,
+/// JSON-braces-heavy 2048-byte preview survives this crate's own
+/// `validate_model_observation` boundary (whole-envelope cap 4096 bytes) —
+/// the preview is not dropped, and it appears in the replayed model-visible
+/// content.
+#[tokio::test]
+async fn append_tool_result_reference_retains_full_size_result_preview() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("full-size-result-preview");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-full-size-result-preview").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // JSON-braces-heavy text repeated to exactly 2048 bytes, matching the
+    // production preview cap.
+    let unit = r#"{"id":1,"value":"x"},"#;
+    let mut preview = unit.repeat(2048 / unit.len() + 1);
+    preview.truncate(2048);
+    assert_eq!(preview.len(), 2048);
+
+    let observation = serde_json::json!({
+        "schema_version": 1,
+        "status": "success",
+        "summary": "Tool completed; preview truncated, use result_read with the result reference and offset 2048 for more output.",
+        "detail": {
+            "kind": "result_reference",
+            "result_ref": "result:full-size-result-preview-tool",
+            "byte_len": 9000,
+            "preview": preview,
+            "total_bytes": 9000,
+            "next_offset": 2048
+        },
+        "artifacts": [{
+            "artifact_ref": "result:full-size-result-preview-tool",
+            "summary": "Stored tool result"
+        }],
+        "trust": "untrusted_tool_output"
+    });
+
+    let tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-1".into(),
+            result_ref: "result:full-size-result-preview-tool".into(),
+            safe_summary: ToolResultSafeSummary::new("tool completed").unwrap(),
+            provider_call: None,
+            model_observation: Some(observation.clone()),
+        })
+        .await
+        .unwrap();
+    let envelope =
+        ToolResultReferenceEnvelope::from_json_str(tool_result.content.as_deref().unwrap())
+            .unwrap();
+
+    assert_eq!(
+        envelope.model_observation,
+        Some(observation),
+        "a full-size 2048-byte preview must not be dropped by envelope validation"
+    );
+    // The replayed content is the JSON-encoded observation, so the quote
+    // characters in the JSON-braces-heavy preview are escaped there; compare
+    // through a parsed round trip instead of a raw substring match.
+    let replayed = envelope.model_visible_content_or_safe_summary();
+    let replayed_value: serde_json::Value =
+        serde_json::from_str(&replayed).expect("replayed content is the JSON observation");
+    assert_eq!(
+        replayed_value["detail"]["preview"],
+        serde_json::Value::String(preview),
+        "the retained preview must appear in the replayed model-visible content"
+    );
+}
+
 #[tokio::test]
 async fn append_tool_result_reference_backfills_and_preserves_first_model_observation_on_retry() {
     let service = InMemorySessionThreadService::default();

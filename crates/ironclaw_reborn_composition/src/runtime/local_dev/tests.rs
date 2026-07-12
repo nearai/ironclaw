@@ -1113,6 +1113,284 @@ mod tests {
         );
     }
 
+    /// Issue #5838: a result under the preview cap gets an inline first-look
+    /// preview covering the whole serialized output, with no truncation
+    /// markers, so the model does not need a follow-up `result_read` call.
+    #[tokio::test]
+    async fn write_capability_result_observation_carries_full_preview_when_under_cap() {
+        let run_context = run_context("first-look-preview-full").await;
+        let fallback_user_id =
+            UserId::new("first-look-preview-full-owner").expect("fallback user id");
+        let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+            .expect("run scope has an agent");
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope,
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service,
+            fallback_user_id,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        let output = serde_json::json!({"content": "hello"});
+        let full_text = serde_json::to_string(&output).expect("serialize reference output");
+
+        let write_result = capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output: output.clone(),
+                display_preview: None,
+            })
+            .await
+            .expect("small result stages");
+
+        let observation = write_result
+            .model_observation
+            .as_ref()
+            .expect("write result carries a first-look observation");
+        match &observation.detail {
+            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+                preview: Some(preview),
+                total_bytes,
+                next_offset,
+                byte_len,
+                ..
+            } => {
+                assert_eq!(preview, &full_text, "preview must cover the whole output");
+                assert_eq!(*total_bytes, Some(*byte_len));
+                assert_eq!(*next_offset, None, "a full preview needs no continuation");
+            }
+            detail => panic!("expected a full-coverage result reference preview, got {detail:?}"),
+        }
+        assert!(
+            !observation.summary.contains("result_read"),
+            "a complete preview must not instruct the model to call result_read"
+        );
+    }
+
+    /// Issue #5838: a result over the preview cap is truncated at a UTF-8 char
+    /// boundary (not mid-character), the reported `next_offset` matches the
+    /// preview's own byte length exactly, and reading a continuation chunk
+    /// from that offset through the production `result_read` capability
+    /// reproduces the full serialized result with no gap or overlap.
+    #[tokio::test]
+    async fn local_dev_result_read_continues_exactly_where_first_look_preview_truncated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-result-read-continuation",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let fallback_user_id =
+            UserId::new("result-read-continuation-owner").expect("fallback user id");
+        let run_context = run_context("result-read-continuation").await;
+        let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+            .expect("agent-scoped thread");
+        let backend = Arc::new(InMemoryBackend::new());
+        let filesystem = scoped_thread_filesystem(Arc::clone(&backend));
+        let thread_service: Arc<dyn SessionThreadService> =
+            Arc::new(FilesystemSessionThreadService::new(filesystem));
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            fallback_user_id.clone(),
+        ));
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+
+        // A multi-byte character straddling the 2048-byte preview boundary:
+        // the serialized JSON string (leading `"` + 2046 ASCII bytes) puts the
+        // 3-byte '日' character at bytes [2047, 2050), so byte 2048 (the raw
+        // cap) falls inside it and must round down.
+        let content = format!("{}{}{}", "a".repeat(2046), '日', "a".repeat(100));
+        let output = serde_json::Value::String(content);
+        let full_text = serde_json::to_string(&output).expect("serialize reference output");
+        assert!(
+            full_text.len() > 2048,
+            "fixture must exceed the preview cap"
+        );
+
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        let write_result = capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output,
+                display_preview: None,
+            })
+            .await
+            .expect("large result stages");
+
+        let observation = write_result
+            .model_observation
+            .as_ref()
+            .expect("write result carries a first-look observation");
+        let (preview, next_offset) = match &observation.detail {
+            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+                preview: Some(preview),
+                next_offset: Some(next_offset),
+                ..
+            } => (preview.clone(), *next_offset),
+            detail => panic!("expected a truncated result reference preview, got {detail:?}"),
+        };
+        assert!(
+            preview.is_char_boundary(preview.len()),
+            "preview must end on a UTF-8 char boundary"
+        );
+        assert!(
+            next_offset < 2048,
+            "the multi-byte char must round the boundary down below the raw cap"
+        );
+        assert_eq!(
+            preview.len() as u64,
+            next_offset,
+            "next_offset must match the preview's own byte length exactly"
+        );
+        assert!(observation.summary.contains("result_read"));
+        assert!(observation.summary.contains(&next_offset.to_string()));
+
+        // `write_capability_result` only persists the raw record; the executor
+        // finalizes the model-visible `ToolResultReference` message afterward
+        // (`append_capability_result_ref` in production). Do the same here so
+        // `result_read` below can find a finalized reference to continue from.
+        let observation_value = serde_json::to_value(observation).expect("observation serializes");
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                result_ref: write_result.result_ref.as_str().to_string(),
+                safe_summary: ToolResultSafeSummary::new(observation.summary.clone())
+                    .expect("summary is safe"),
+                provider_call: None,
+                model_observation: Some(observation_value),
+            })
+            .await
+            .expect("finalized reference exists");
+
+        // Continue reading from `next_offset` through the production
+        // `result_read` capability and confirm the two chunks concatenate
+        // with no gap or overlap.
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id: fallback_user_id.clone(),
+            policy: Arc::clone(&local_runtime.capability_policy),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            project_service: Arc::clone(&local_runtime.project_service),
+            thread_service: thread_service.clone(),
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+        };
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": write_result.result_ref.as_str(),
+                        "offset": next_offset,
+                        "max_bytes": 2048,
+                    }),
+                ),
+            ))
+            .await
+            .expect("result_read provider call stages");
+        let outcome = port
+            .invoke_capability(invocation_for_candidate(&candidate))
+            .await
+            .expect("result_read invokes");
+        let message = match outcome {
+            CapabilityOutcome::Completed(message) => message,
+            outcome => panic!("result_read should complete, got {outcome:?}"),
+        };
+        let continuation_output = capability_io
+            .result_output(message.result_ref.as_str())
+            .expect("continuation result output lookup succeeds")
+            .expect("continuation result output exists");
+        let continuation_content = continuation_output["content"]
+            .as_str()
+            .expect("continuation chunk is text");
+        assert_eq!(
+            continuation_output["next_offset"],
+            serde_json::Value::Null,
+            "the continuation must reach the end of the payload"
+        );
+
+        let mut reassembled = preview;
+        reassembled.push_str(continuation_content);
+        assert_eq!(
+            reassembled, full_text,
+            "preview + continuation must reproduce the full serialized result with no gap or overlap"
+        );
+    }
+
     #[tokio::test]
     async fn capability_io_resolves_input_refs_repeatedly() {
         let capability_io = LocalDevCapabilityIo::default();

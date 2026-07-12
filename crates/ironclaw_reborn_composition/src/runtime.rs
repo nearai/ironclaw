@@ -5190,12 +5190,16 @@ output_schema_ref = "schemas/write.output.json"
         requests: StdMutex<Vec<HostManagedModelRequest>>,
     }
 
-    // Local-dev model replay is intentionally a bounded reference observation;
-    // the raw result remains available through the result reader.
+    // Local-dev model replay is a bounded reference observation: for a
+    // result under the inline first-look preview cap (issue #5838,
+    // `LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES`), the raw content legitimately
+    // appears inline in `detail.preview` so the model does not need a
+    // follow-up `result_read` call; only content beyond the cap requires one.
+    // Both fixtures below are well under the cap.
     fn assert_local_dev_result_reference(tool_result: &HostManagedModelMessage, raw_marker: &str) {
         assert!(
-            !tool_result.content.contains(raw_marker),
-            "raw capability output must stay out of model replay: {}",
+            tool_result.content.contains(raw_marker),
+            "a result under the first-look preview cap should appear inline in model replay: {}",
             tool_result.content
         );
         let Some(HostManagedToolResultContent::Reference { envelope }) =
