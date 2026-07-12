@@ -89,7 +89,7 @@ use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 use crate::extension_host::registered_extension_store::{
-    is_owner_registered, migrate_legacy_owner_layout, resolve_any_owner_for_restore,
+    is_owner_registered, migrate_legacy_owner_layout, resolve_registered_for_owner,
     resolve_registered_for_scope, search_with_owner_overlay_for_scope,
 };
 
@@ -231,14 +231,35 @@ pub(crate) async fn restore_extension_lifecycle_state(
         let available = match catalog.resolve(&package_ref) {
             Ok(available) => available,
             Err(_) => {
-                match resolve_any_owner_for_restore(filesystem.as_ref(), &package_ref).await {
-                    Ok(available) => Arc::new(available),
-                    Err(error) => {
+                match resolve_registered_restore_owner_scope(installation_store, &installation)
+                    .await
+                {
+                    Some((tenant_id, owner)) => {
+                        match resolve_registered_for_owner(
+                            filesystem.as_ref(),
+                            &tenant_id,
+                            &owner,
+                            &package_ref,
+                        )
+                        .await
+                        {
+                            Ok(available) => Arc::new(available),
+                            Err(error) => {
+                                tracing::warn!(
+                                    extension_id = installation.extension_id().as_str(),
+                                    installation_id = installation.installation_id().as_str(),
+                                    %error,
+                                    "skipping extension installation restore: not available in the catalog or its row-owned registered store"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
                         tracing::warn!(
                             extension_id = installation.extension_id().as_str(),
                             installation_id = installation.installation_id().as_str(),
-                            %error,
-                            "skipping extension installation restore: not available in the catalog or any registered store"
+                            "skipping extension installation restore: not available in the catalog and the row has no resolvable registered-owner scope"
                         );
                         continue;
                     }
@@ -287,6 +308,26 @@ pub(crate) async fn restore_extension_lifecycle_state(
         }
     }
     Ok(())
+}
+
+/// The row-authoritative registered-store owner scope to key a boot restore
+/// fallback lookup on: the row's stored manifest record must exist and be
+/// `UserRegistered`, and `effective_owner_scope` must resolve one singleton
+/// owner from it. `None` means the row cannot be pinned to one owner (no
+/// stored manifest, non-registered source, or a non-singleton owner set) —
+/// callers must skip-and-log rather than guess an owner to scan.
+async fn resolve_registered_restore_owner_scope(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation: &ExtensionInstallation,
+) -> Option<(TenantId, UserId)> {
+    let stored_manifest = match installation_store
+        .get_manifest(installation.extension_id())
+        .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) | Err(_) => return None,
+    };
+    effective_owner_scope(installation, &stored_manifest.manifest().source)
 }
 
 async fn remove_retired_internal_installation(
@@ -2347,7 +2388,6 @@ fn registration_owner(source: &ManifestSource) -> Option<InstallationOwner> {
 /// provenance. `None` for non-registered sources and for rows whose owner is
 /// not a singleton member set (registered rows are always singletons —
 /// design point 5).
-#[allow(dead_code)] // consumed by T2 egress gating; asserted by unit tests here until then
 fn effective_owner_scope(
     installation: &ExtensionInstallation,
     source: &ManifestSource,

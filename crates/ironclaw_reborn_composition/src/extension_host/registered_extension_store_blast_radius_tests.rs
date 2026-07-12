@@ -316,3 +316,211 @@ url = "http://127.0.0.1:9/mcp"
         "the broken installation must not be published"
     );
 }
+
+const OWNER_A_USER_ID: &str = "e5555555-7fe5-474c-965a-67cb69df3d08";
+const OWNER_B_USER_ID: &str = "f6666666-7fe5-474c-965a-67cb69df3d09";
+const SHARED_EXTENSION_ID: &str = "shared-mcp";
+
+const OWNER_A_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "shared-mcp"
+name = "Owner A's Shared MCP"
+version = "0.1.0"
+description = "Owner A's registration (row-owned)"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://owner-a.example/mcp"
+"#;
+
+const OWNER_B_MANIFEST_TOML: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "shared-mcp"
+name = "Owner B's Shared MCP"
+version = "0.1.0"
+description = "Owner B's independent (non-row-owning) registration of the same id"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "http://owner-b.example/mcp"
+"#;
+
+/// Wraps a real `LocalFilesystem`, forcing a FIXED owner iteration order
+/// (owner B before owner A) for exactly the registered-tenant root's
+/// `list_dir`. Real directory listing order is filesystem/OS-dependent and
+/// not something a correct implementation may rely on; this override makes
+/// the "wrong owner scanned first" case deterministic for the regression
+/// test below instead of depending on it happening to occur locally.
+struct OwnerBFirstFilesystem {
+    inner: LocalFilesystem,
+    tenant_root: VirtualPath,
+}
+
+#[async_trait]
+impl RootFilesystem for OwnerBFirstFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        let entries = self.inner.list_dir(path).await?;
+        if path != &self.tenant_root {
+            return Ok(entries);
+        }
+        let mut ordered = entries;
+        ordered.sort_by_key(|entry| entry.name != OWNER_B_USER_ID);
+        Ok(ordered)
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+}
+
+/// Regression for the T2 restore-fallback ownership bug: two owners
+/// independently register descriptors under the SAME bare extension id with
+/// different manifest content (different runtime URL). The installation row
+/// belongs to owner A. An any-owner directory scan (the old
+/// `resolve_any_owner_for_restore`, order-dependent) can find owner B's
+/// descriptor first and serve IT for owner A's row — publishing the wrong
+/// endpoint under A's installation (or, since A's row pins the manifest hash
+/// it was installed with, tripping a hash-mismatch that aborts the ENTIRE
+/// boot restore even though A's own correct descriptor was available the
+/// whole time). The row-owner-keyed fallback must go straight to owner A's
+/// shard and never consult owner B's, regardless of directory order.
+#[tokio::test]
+async fn restore_uses_row_owners_registered_descriptor_not_a_differently_ordered_owner() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage_root = dir.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+    seed_registered_manifest(&storage_root, OWNER_A_USER_ID, SHARED_EXTENSION_ID);
+    // Overwrite with A's real (row-owning) content; `seed_registered_manifest`
+    // writes `HEALTHY_MANIFEST_TOML` by default.
+    std::fs::write(
+        storage_root
+            .join("system/extensions/registered")
+            .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+            .join(OWNER_A_USER_ID)
+            .join(SHARED_EXTENSION_ID)
+            .join("manifest.toml"),
+        OWNER_A_MANIFEST_TOML,
+    )
+    .expect("write owner A's descriptor");
+    let owner_b_dir = storage_root
+        .join("system/extensions/registered")
+        .join(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+        .join(OWNER_B_USER_ID)
+        .join(SHARED_EXTENSION_ID);
+    std::fs::create_dir_all(&owner_b_dir).expect("owner B descriptor dir");
+    std::fs::write(owner_b_dir.join("manifest.toml"), OWNER_B_MANIFEST_TOML)
+        .expect("write owner B's descriptor");
+
+    let mut local_filesystem = LocalFilesystem::new();
+    local_filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").expect("valid virtual path"),
+            HostPath::from_path_buf(storage_root.join("system/extensions")),
+        )
+        .expect("mount system extensions");
+    let tenant_root = VirtualPath::new(format!(
+        "/system/extensions/registered/{}",
+        ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID
+    ))
+    .expect("valid virtual path");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(OwnerBFirstFilesystem {
+        inner: local_filesystem,
+        tenant_root,
+    });
+
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts");
+
+    let owner_a_manifest_hash =
+        ManifestHash::new(sha256_digest_token(OWNER_A_MANIFEST_TOML.as_bytes()))
+            .expect("valid manifest hash");
+    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+        OWNER_A_MANIFEST_TOML,
+        ManifestSource::UserRegistered {
+            tenant_id: TenantId::from_trusted(
+                ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID.to_string(),
+            ),
+            owner: UserId::new(OWNER_A_USER_ID).expect("valid owner id"),
+        },
+        &host_ports,
+        Some(owner_a_manifest_hash.clone()),
+        &contracts,
+    )
+    .expect("owner A manifest record");
+    let extension_id = ExtensionId::new(SHARED_EXTENSION_ID).expect("valid extension id");
+    let installation = ExtensionInstallation::new(
+        ExtensionInstallationId::new(SHARED_EXTENSION_ID).expect("valid installation id"),
+        extension_id.clone(),
+        ExtensionActivationState::Enabled,
+        ExtensionManifestRef::new(extension_id.clone(), Some(owner_a_manifest_hash)),
+        Vec::new(),
+        chrono::Utc::now(),
+        InstallationOwner::user(UserId::new(OWNER_A_USER_ID).expect("valid owner id")),
+    )
+    .expect("owner A installation");
+
+    let installation_store: Arc<dyn ExtensionInstallationStore> =
+        Arc::new(InMemoryExtensionInstallationStore::default());
+    installation_store
+        .upsert_manifest(manifest_record)
+        .await
+        .expect("seed owner A manifest record");
+    installation_store
+        .upsert_installation(installation)
+        .await
+        .expect("seed owner A installation");
+
+    let empty_catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+    let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+        ExtensionRegistry::new(),
+    )));
+    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let trust_policy =
+        Arc::new(HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy"));
+    let active_extensions = ActiveExtensionPublisher::new(
+        Arc::clone(&active_registry),
+        Arc::clone(&trust_policy),
+        Arc::new(InvalidationBus::new()),
+    );
+
+    restore_extension_lifecycle_state(
+        &empty_catalog,
+        &filesystem,
+        &installation_store,
+        &lifecycle_service,
+        &active_extensions,
+    )
+    .await
+    .expect(
+        "restore must resolve owner A's own registered descriptor for owner A's row, not \
+         owner B's differently-ordered one (RED before the row-owner-keyed fallback lands: \
+         the any-owner scan finds owner B first and either serves B's manifest under A's row \
+         or trips a manifest-hash mismatch that aborts the whole boot restore)",
+    );
+
+    let snapshot = active_registry.snapshot();
+    let published = snapshot
+        .get_extension(&extension_id)
+        .expect("owner A's row must restore and publish");
+    let ironclaw_extensions::ExtensionRuntime::Mcp { url, .. } = &published.manifest.runtime else {
+        panic!("expected an MCP runtime declaration");
+    };
+    assert_eq!(
+        url.as_deref(),
+        Some("http://owner-a.example/mcp"),
+        "restore must materialize owner A's own manifest content, never owner B's"
+    );
+}

@@ -84,12 +84,13 @@ impl RegisteredExtensionStore {
         .await
     }
 
-    /// Every tenant's every owner's registered packages. Boot-time-only
-    /// concern: an `ExtensionInstallation` record carries no owner field yet
-    /// (plan risk 2), so restore's fallback must search across all
-    /// tenant-owners. Never call this from the live search/install path,
-    /// which must stay scoped to the calling tenant-owner via
-    /// [`list_for_scope`].
+    /// Every tenant's every owner's registered packages. No longer backs the
+    /// boot restore fallback (that's row-owner-keyed via
+    /// [`resolve_registered_for_owner`] now); kept as a general any-owner
+    /// listing utility for callers that genuinely need one, and exercised
+    /// directly by its own blast-radius tests. Never call this from the live
+    /// search/install path, which must stay scoped to the calling
+    /// tenant-owner via [`list_for_scope`].
     pub(crate) async fn list_all<F>(
         fs: &F,
     ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
@@ -382,20 +383,27 @@ where
 }
 
 /// Boot-only restore fallback, reached on a `catalog.resolve()` miss during
-/// `restore_extension_lifecycle_state`. Deliberately any-tenant-owner because
-/// restore walks every tenant's installations; never call it from a live
-/// search/install path, which must stay scoped via
-/// [`resolve_registered_for_scope`].
-pub(crate) async fn resolve_any_owner_for_restore<F>(
+/// `restore_extension_lifecycle_state`. Row-owner-keyed: the caller derives
+/// `(tenant_id, owner)` from the installation row's `InstallationOwner`
+/// singleton member and its stored manifest's tenant provenance
+/// (`extension_lifecycle::effective_owner_scope`), then this does a direct
+/// lookup at that owner's shard — never a cross-owner scan. A prior version
+/// of this fallback (`resolve_any_owner_for_restore`) scanned every
+/// tenant-owner for a bare id match; that could serve a DIFFERENT owner's
+/// descriptor for this row depending on directory listing order. Callers
+/// that cannot establish a row owner must fail the restore for that package
+/// (skip-and-log) rather than call this with a guessed scope.
+pub(crate) async fn resolve_registered_for_owner<F>(
     fs: &F,
+    tenant_id: &TenantId,
+    owner: &UserId,
     package_ref: &LifecyclePackageRef,
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
 {
-    let packages = RegisteredExtensionStore::list_all(fs).await?;
-    packages
-        .into_iter()
-        .find(|package| &package.package_ref == package_ref)
-        .ok_or_else(not_found)
+    let mut scope = ResourceScope::local_default(owner.clone(), InvocationId::new())
+        .map_err(map_binding_error)?;
+    scope.tenant_id = tenant_id.clone();
+    resolve_registered_for_scope(fs, &scope, package_ref).await
 }
