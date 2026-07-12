@@ -11,11 +11,10 @@ use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
-    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornBuildInput, RebornReadiness,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
-    WebuiServeConfig, build_reborn_runtime, local_trigger_access_fire_checker,
-    webui_v2_app_with_lifecycle,
+    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
+    LocalTriggerAccessStore, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
+    build_reborn_runtime, local_trigger_access_fire_checker, webui_v2_app_with_lifecycle,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
@@ -31,10 +30,7 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::{
-    RuntimeInputOptions, open_trigger_access_store_for_profile,
-    resolve_google_oauth_config_from_env,
-};
+use crate::runtime::{RuntimeInputOptions, open_trigger_access_store_for_profile};
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
@@ -542,27 +538,12 @@ impl ServeCommand {
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
-            if let Some(google_oauth) = resolve_google_oauth_config_from_env()
-                .context("failed to resolve Google OAuth setup config for WebUI")?
-            {
-                let mut route_config = GoogleOAuthRouteConfig::new(
-                    google_oauth.client.client_id.as_str(),
-                    google_oauth.client.redirect_uri.as_str(),
-                )
-                .context("invalid Google OAuth route config for WebUI")?;
-                if let Some(hosted_domain_hint) = google_oauth.hosted_domain_hint {
-                    route_config = route_config
-                        .with_hosted_domain_hint(hosted_domain_hint)
-                        .context("invalid Google OAuth hosted-domain hint for WebUI")?;
-                }
-                serve_config = serve_config.with_google_oauth(route_config);
-            }
+            // Google/Slack OAuth start + callback now run on the generic
+            // recipe-driven engine routes; the deployment client material is
+            // wired on the build input (`resolve_google_oauth_config_from_env`
+            // in runtime/mod.rs) rather than on the serve config.
             #[cfg(feature = "slack-v2-host-beta")]
-            {
-                if let Some(slot) = slack_personal_lazy_slot {
-                    serve_config = serve_config.with_slack_personal_oauth(slot);
-                }
-            }
+            let _ = slack_personal_lazy_slot;
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -776,10 +757,9 @@ fn with_notion_dcr_oauth_backend(
     services: RebornBuildInput,
     callback_origin: &str,
 ) -> anyhow::Result<RebornBuildInput> {
-    // Provider-visible DCR client display name shown during Notion OAuth consent.
     services
-        .with_notion_dcr_oauth_backend(callback_origin, "Ironclaw")
-        .map_err(|error| anyhow!("Notion DCR OAuth backend rejected callback origin: {error}"))
+        .with_dcr_oauth_callback(callback_origin)
+        .map_err(|error| anyhow!("OAuth callback origin rejected: {error}"))
 }
 
 fn webui_notion_dcr_callback_origin(

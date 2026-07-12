@@ -44,7 +44,6 @@ pub(crate) mod runtime_setup;
 
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::provider_identity::RebornUserIdentityLookup;
 use crate::provider_identity::{
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore,
@@ -68,6 +67,7 @@ use crate::slack::slack_personal_binding::{
     SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService,
 };
+use crate::slack::slack_personal_oauth::SlackPersonalOAuthBindingConfig;
 use crate::slack::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationResolver,
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,

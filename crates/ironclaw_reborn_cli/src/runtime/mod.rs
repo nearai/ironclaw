@@ -654,7 +654,7 @@ pub(crate) fn build_services_input_with_options(
         hosted_domain_hint: _hosted_domain_hint,
     }) = resolve_google_oauth_config_from_env()?
     {
-        services_input = services_input.with_google_oauth_backend(client);
+        services_input = services_input.with_vendor_oauth_client("google", client);
     }
     #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot =

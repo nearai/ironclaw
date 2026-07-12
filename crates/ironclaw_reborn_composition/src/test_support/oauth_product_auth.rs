@@ -228,17 +228,65 @@ impl ironclaw_host_api::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
     }
 }
 
-/// Noop capability-obligation handler: permits every OAuth egress obligation.
+/// Build a recipe-driven [`ironclaw_auth::AuthEngine`] over the scripted
+/// egress for one synthetic test vendor.
+fn engine_provider_client_for_test(
+    vendor: &str,
+    scopes: &[&str],
+    token_endpoint: &str,
+    egress: Arc<ScriptedOAuthTokenEgress>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+) -> Arc<ironclaw_auth::AuthEngine> {
+    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
+        "method": "oauth2_code",
+        "display_name": format!("{vendor} account"),
+        "authorization_endpoint": "https://oauth.test.example.com/authorize",
+        "token_endpoint": token_endpoint,
+        "scopes": scopes,
+        "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
+        "token_response": {
+            "access_token": "/access_token",
+            "refresh_token": "/refresh_token",
+            "expires_in": "/expires_in",
+            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+        },
+    }))
+    .expect("test vendor recipe parses");
+    Arc::new(ironclaw_auth::AuthEngine::new(
+        ironclaw_auth::AuthEngineDeps {
+            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+                ironclaw_auth::ResolvedVendorAuthRecipe {
+                    vendor: vendor.to_string(),
+                    recipe,
+                    token_exchange_resource: None,
+                },
+            ])),
+            client_credentials: Arc::new(TestStaticClientCredentials),
+            egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            secret_store,
+            callback_base: ironclaw_auth::EngineCallbackBase::new(
+                "https://localhost/api/reborn/product-auth/oauth",
+            )
+            .expect("test callback base"),
+            dcr_client_name: "Ironclaw test".to_string(),
+        },
+    ))
+}
+
 #[derive(Debug)]
-struct TestNoopObligationHandler;
+struct TestStaticClientCredentials;
 
 #[async_trait]
-impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHandler {
-    async fn satisfy(
+impl ironclaw_auth::EngineClientCredentialsSource for TestStaticClientCredentials {
+    async fn resolve(
         &self,
-        _request: ironclaw_capabilities::CapabilityObligationRequest<'_>,
-    ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
-        Ok(())
+        _vendor: &str,
+        _credentials: &ironclaw_host_api::RecipeClientCredentials,
+    ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError> {
+        Ok(ironclaw_auth::EngineOAuthClientMaterial {
+            client_id: ironclaw_auth::OAuthClientId::new("test-client-id")?,
+            client_secret: None,
+        })
     }
 }
 
@@ -348,37 +396,23 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         "test-access-token-abc123",
     ));
 
-    // Real OAuth provider client wired to the scripted egress.
-    // token_endpoint must be HTTPS to pass HostOAuthProviderClient's guard;
+    // The recipe-driven auth engine wired to the scripted egress.
+    // The token endpoint must be HTTPS to pass the engine's endpoint guard;
     // ScriptedOAuthTokenEgress ignores the actual URL.
-    let spec = crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec {
-        provider_id: "test-oauth-provider",
-        capability_id: "builtin.oauth.test",
-        token_endpoint: "https://oauth.test.example.com/token",
-        secret_handle_prefix: "test-oauth",
-        resource: None,
-        exchange_scope_policy:
-            crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
-        token_response_shape:
-            crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
-    };
-    let provider_client =
-        crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient::new(
-            spec,
-            Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
-            Arc::clone(&secret_store),
-            Arc::new(TestNoopObligationHandler),
-            ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
-            ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
-        )
-        .expect("test OAuth provider client must build");
+    let engine = engine_provider_client_for_test(
+        "test-oauth-provider",
+        &["test.readonly"],
+        "https://oauth.test.example.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
 
     let services = Arc::new(crate::RebornProductAuthServices::new(
         durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
         durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
-        Arc::new(provider_client) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
         durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
         Arc::new(TestNoopContinuationDispatcher),
     ));
@@ -522,30 +556,16 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
         "test-google-refresh-token",
     ));
 
-    // Google OAuth spec: provider_id must be "google" for
-    // HostOAuthProviderClient::refresh_token to accept the request.
-    let spec = crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec {
-        provider_id: "google",
-        capability_id: "builtin.oauth.google",
-        token_endpoint: "https://oauth2.googleapis.com/token",
-        secret_handle_prefix: "google",
-        resource: None,
-        exchange_scope_policy:
-            crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
-        token_response_shape:
-            crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
-    };
-    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = Arc::new(
-        crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient::new(
-            spec,
-            Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+    // The vendor id must be "google" so the engine resolves the same recipe
+    // the refresh path requests; the recipe is synthetic test data.
+    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> =
+        engine_provider_client_for_test(
+            "google",
+            &["email"],
+            "https://oauth2.googleapis.com/token",
+            Arc::clone(&egress),
             Arc::clone(&secret_store),
-            Arc::new(TestNoopObligationHandler),
-            ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
-            ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
-        )
-        .expect("google test OAuth provider client must build"),
-    );
+        );
 
     // Build services then wrap credential_account_service with
     // ProviderBackedCredentialAccountService via with_provider_client() so

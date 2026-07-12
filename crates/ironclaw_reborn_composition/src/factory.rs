@@ -1099,11 +1099,11 @@ fn compose_product_auth_services(
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
-    if let Some(registry) = provider_composition.dcr_registry {
-        services = services.with_dcr_oauth_registry(registry);
+    if let Some(engine) = provider_composition.engine {
+        services = services.with_auth_engine(engine);
     }
-    if let Some(registry) = provider_composition.gate_registry {
-        services = services.with_oauth_gate_registry(registry);
+    if let Some(driver) = provider_composition.gate_driver {
+        services = services.with_oauth_gate_driver(driver);
     }
     if let Some(scope) = nearai_mcp_host_managed_scope {
         services = services.with_host_managed_nearai_credential_scope(scope)?;
@@ -1143,7 +1143,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         runtime_process_binding,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config,
@@ -1481,7 +1481,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
         #[cfg(feature = "slack-v2-host-beta")]
@@ -1542,12 +1542,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 )
                 .with_provider_client(Arc::clone(&provider_client))
                 .with_flow_record_source(durable_services);
-                let services = match provider_composition.dcr_registry.clone() {
-                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                let services = match provider_composition.engine.clone() {
+                    Some(engine) => services.with_auth_engine(engine),
                     None => services,
                 };
-                let services = match provider_composition.gate_registry.clone() {
-                    Some(registry) => services.with_oauth_gate_registry(registry),
+                let services = match provider_composition.gate_driver.clone() {
+                    Some(driver) => services.with_oauth_gate_driver(driver),
                     None => services,
                 };
                 let services = match security_audit_sink.clone() {
@@ -1572,21 +1572,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(provider_client) => services.with_provider_client(provider_client),
                     None => services,
                 };
-                let services = match provider_composition.dcr_registry.clone() {
-                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                let services = match provider_composition.engine.clone() {
+                    Some(engine) => services.with_auth_engine(engine),
                     None => services,
                 };
                 let services = match security_audit_sink.clone() {
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                let services = match provider_composition.gate_registry.clone() {
-                    Some(registry) => services.with_oauth_gate_registry(registry),
-                    None => services,
-                };
-                #[cfg(feature = "slack-v2-host-beta")]
-                let services = match provider_composition.slack_gate_registry.clone() {
-                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
+                let services = match provider_composition.gate_driver.clone() {
+                    Some(driver) => services.with_oauth_gate_driver(driver),
                     None => services,
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
@@ -3835,7 +3830,7 @@ async fn build_production_shaped(
             network_http_egress_for_test: _,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config: _,
@@ -3860,7 +3855,7 @@ async fn build_production_shaped(
         local_runtime_identity,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         turn_state_store_limits,
     );
     #[cfg(feature = "slack-v2-host-beta")]
@@ -3913,7 +3908,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
-                oauth_dcr_provider_configs,
+                oauth_dcr_callback,
                 #[cfg(feature = "slack-v2-host-beta")]
                 slack_personal_oauth_lazy_slot,
                 owner_id,
@@ -3960,7 +3955,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
-                oauth_dcr_provider_configs,
+                oauth_dcr_callback,
                 #[cfg(feature = "slack-v2-host-beta")]
                 slack_personal_oauth_lazy_slot,
                 owner_id,
@@ -4005,7 +4000,7 @@ struct RebornProductionBuildContext {
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
-    oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
+    oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
     slack_personal_oauth_lazy_slot:
         Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
@@ -4490,7 +4485,7 @@ where
         production_wiring,
         product_auth_ports,
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         owner_id,
@@ -4605,7 +4600,7 @@ where
     let services = attach_hosted_mcp_runtime(services)?;
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
-        oauth_dcr_provider_configs,
+        oauth_dcr_callback,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
         #[cfg(feature = "slack-v2-host-beta")]

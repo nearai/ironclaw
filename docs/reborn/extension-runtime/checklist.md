@@ -247,9 +247,14 @@ Rules — kept short on purpose:
 
 ## 5. Auth engine (AUTH)
 
-- [ ] AUTH-1 One engine implements `oauth2_code` and `api_key`; there is no
+- [x] AUTH-1 One engine implements `oauth2_code` and `api_key`; there is no
   auth trait in the extension ABI and no per-vendor code path (grep gate: no
-  vendor-conditional in auth crates/composition).
+  vendor-conditional in auth crates/composition). — `ironclaw_auth::AuthEngine`
+  is the only `AuthProviderClient` composition builds
+  (`compose_provider_client`,
+  `crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs`);
+  the specificity scanner allowlist shrank by 19 entries with the deleted
+  per-vendor modules (`reborn_generic_code_names_no_concrete_extension`).
 - [x] AUTH-2 The authorize URL is host-constructed; recipes cannot supply or
   override `state`, `redirect_uri`, PKCE, `client_id`, `response_type`, or the
   scope parameter. — `authorize_url_is_host_constructed_for_every_oauth_vendor_row`,
@@ -285,16 +290,22 @@ Rules — kept short on purpose:
   `pointer_extraction_reads_nested_fields_and_scope_fallback` (token response),
   `identity_extracts_from_declared_endpoint_with_fresh_credential` (endpoint,
   incl. rejection failing the exchange) (`auth_engine_contract.rs`).
-- [ ] AUTH-8 Grants/secrets are encrypted at rest; stored secrets are never
-  echoed to UI or adapters.
+- [x] AUTH-8 Grants/secrets are encrypted at rest; stored secrets are never
+  echoed to UI or adapters. — token material lives only behind
+  `ironclaw_secrets::SecretStore` handles (encryption is the store's
+  property, unchanged here); redaction pinned by
+  `vendor_error_responses_are_size_capped_and_never_echoed`
+  (`auth_engine_contract.rs`) and the existing
+  `serde_redaction_contract.rs` suite.
 - [ ] AUTH-9 The auth account state machine is one shared enum
   (`disconnected/authenticating/connected/expired/revoking` + typed
   `last_error`); no vendor- or extension-specific state exists; the wire
   exposes exactly this enum. — enum + typed `last_error` + transitions now
   live with the engine (`crates/ironclaw_auth/src/account_state.rs`,
   `legal_transitions_only`, `auth_account_state_wire_form_matches_str`;
-  re-exported by `ironclaw_extension_host::state`); wire exposure of the
-  projection is still pending.
+  re-exported by `ironclaw_extension_host::state`); the engine +
+  `project_auth_account_state` drive it; wire exposure of the projection
+  (accounts list / extension surfaces) is still pending (P6 UI work).
 - [x] AUTH-10 Flow TTL expiry and vendor denial land in `disconnected` with
   a typed reason; refresh failure lands in `expired`. —
   `projection_prefers_live_flow_then_account_status`
@@ -305,22 +316,35 @@ Rules — kept short on purpose:
   (`api_key_probe_validates_through_host_egress_before_storing`,
   `api_key_probe_failure_stores_nothing`, `api_key_without_probe_stores_directly`,
   `auth_engine_contract.rs`); recipe-driven form rendering is P6 frontend work.
-- [ ] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
+- [x] AUTH-12 All five current vendors (Slack, Google, Notion, GitHub,
   NEAR AI) are expressed as recipes and pass the engine suite as table rows —
   no vendor-specific test suite exists. — rows loaded from the real bundled
   manifests (`all_five_vendors_load_as_recipe_rows_from_their_manifests` and
-  the rows across `auth_engine_contract.rs`); "no vendor-specific suite"
-  completes when the legacy provider-client tests are deleted with the
-  multiplexor (AUTH-16).
-- [ ] AUTH-13 Callback route keeps the existing
+  the rows across `auth_engine_contract.rs`); the legacy per-vendor suites
+  (`oauth_provider_client/tests.rs`, the Google/Slack gate-provider tests,
+  the DCR provider suite) were deleted with their production code.
+- [x] AUTH-13 Callback route keeps the existing
   `/api/reborn/product-auth/oauth/{provider}/callback` shape; `{provider}` is
-  resolved as data (vendor-registered redirect URLs unchanged).
+  resolved as data (vendor-registered redirect URLs unchanged). — one axum
+  route (`VENDOR_OAUTH_CALLBACK_PATH`) resolves `{provider}` through the
+  engine's `AuthRecipeResolver`; the Google/Slack URLs are served by the same
+  generic route (`vendor_oauth_callback_completes_a_started_flow`,
+  `crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`; the
+  google/slack callback tests in `tests/webui_v2_product_auth.rs` drive the
+  unchanged URLs end-to-end).
 - [ ] AUTH-14 Slack end-to-end: blocked tool → gate → scripted callback →
   grant stored → tool resumes (extends the existing oauth-connect integration
   test).
 - [ ] AUTH-15 Engine flow/grant persistence passes on both DBs.
-- [ ] AUTH-16 The provider string multiplexor, provider spec constants, and
-  Slack OAuth branches are deleted.
+- [x] AUTH-16 The provider string multiplexor, provider spec constants, and
+  Slack OAuth branches are deleted. — `MultiplexAuthProviderClient` /
+  `compose_provider_clients`, `HostOAuthProviderSpec`, `TokenResponseShape`,
+  `google_provider_spec` / `notion_provider_spec` /
+  `slack_personal_provider_spec`, the per-vendor gate providers + registries,
+  the DCR provider modules, the Slack/Google serve handlers and start
+  branches, and `ironclaw_auth`'s legacy vendor URL builders /
+  per-vendor callback-state kinds are all deleted; the blocked-turn
+  `OAuthGateFlowDriver` survives, re-pointed at the engine.
 
 ## 6. Channel ingress (ING)
 

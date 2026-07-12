@@ -96,11 +96,6 @@ const SLACK_OAUTH_SETUP_SCOPES: &[&str] = &[
     "chat:write",
 ];
 
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_personal_oauth_setup_scopes() -> &'static [&'static str] {
-    SLACK_OAUTH_SETUP_SCOPES
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostManagedCredentialExtension {
     NearAi,
@@ -419,6 +414,50 @@ impl AvailableExtensionCatalog {
         #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
         Ok(Self::from_packages(packages))
+    }
+
+    /// Unified vendor auth recipes across every bundled first-party manifest —
+    /// the recipe catalog behind the auth engine (fallback for extensions not
+    /// yet active). Shared vendors unify per overview §3.2 (union scope
+    /// ceiling; incompatible recipes are a startup error).
+    pub(crate) fn bundled_vendor_recipes()
+    -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductWorkflowError> {
+        let catalog = Self::from_first_party_assets_with_nearai_mcp_config(None)?;
+        let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host port catalog unavailable for recipe resolution: {error}"),
+            }
+        })?;
+        let contracts =
+            ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+                ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!(
+                        "host API contracts unavailable for recipe resolution: {error}"
+                    ),
+                }
+            })?;
+        let mut resolved = Vec::new();
+        for package in &catalog.packages {
+            let record = ExtensionManifestRecord::from_toml(
+                &package.manifest_toml,
+                ManifestSource::HostBundled,
+                &host_ports,
+                None,
+                &contracts,
+            )
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "bundled extension manifest failed recipe resolution ({}): {error}",
+                    package.package_ref.id
+                ),
+            })?;
+            resolved.push(record.resolved().clone());
+        }
+        ironclaw_extension_host::unified_vendor_recipes(resolved.iter()).map_err(|conflict| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("bundled vendor recipes conflict: {conflict}"),
+            }
+        })
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
@@ -2390,7 +2429,7 @@ mod tests {
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let package = catalog.resolve(&package_ref).unwrap();
 
-        let ceiling = slack_personal_oauth_setup_scopes()
+        let ceiling = SLACK_OAUTH_SETUP_SCOPES
             .iter()
             .map(|scope| scope.to_string())
             .collect::<BTreeSet<_>>();

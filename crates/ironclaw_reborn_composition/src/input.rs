@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, CredentialAccountLabel, OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::{AuthProductError, OAuthClientId, OAuthRedirectUri};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 #[cfg(feature = "postgres")]
@@ -28,10 +28,6 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
-use crate::product_auth::oauth::google_oauth::google_provider_spec;
-use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
-use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
-use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
@@ -101,15 +97,21 @@ impl std::fmt::Debug for OAuthClientConfig {
     }
 }
 
+/// Deployment OAuth client material for one vendor id. The vendor's recipe
+/// (from its manifest) names the client-credential handles; this config
+/// supplies their values.
 #[derive(Debug, Clone)]
 pub(crate) struct OAuthProviderBackendConfig {
-    pub(crate) spec: HostOAuthProviderSpec,
+    pub(crate) vendor: String,
     pub(crate) client: OAuthClientConfig,
 }
 
+/// The public origin serving the static vendor OAuth callback routes —
+/// enables dynamic client registration (and the engine callback base) for
+/// vendors whose recipes carry no deployment client credentials.
 #[derive(Debug, Clone)]
-pub(crate) struct OAuthDcrProviderBackendConfig {
-    pub(crate) config: OAuthDcrProviderConfig,
+pub(crate) struct OAuthDcrCallbackConfig {
+    pub(crate) callback_origin: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -193,7 +195,7 @@ pub struct RebornBuildInput {
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
-    pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
+    pub(crate) oauth_dcr_callback: Option<OAuthDcrCallbackConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     pub(crate) nearai_mcp_bootstrap_config:
@@ -695,22 +697,17 @@ impl RebornBuildInput {
         self
     }
 
-    /// Record product/bootstrap-provided Google OAuth metadata on the build input.
+    /// Record deployment OAuth client material for one vendor id. The vendor's
+    /// manifest recipe names the client-credential handles these values fill.
     ///
     /// `RebornBuildInput` owns this composition seam until a settings-backed
     /// source exists.
-    pub fn with_google_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.push_oauth_provider_config(google_provider_spec(), config);
-        self
-    }
-
-    /// Record product/bootstrap-provided Notion MCP OAuth metadata on the build input.
-    ///
-    /// This keeps Notion OAuth in the Reborn product-auth provider path; callers
-    /// that use dynamic client registration can pass the client metadata they
-    /// registered for this host callback URL.
-    pub fn with_notion_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.push_oauth_provider_config(notion_provider_spec(), config);
+    pub fn with_vendor_oauth_client(
+        mut self,
+        vendor: impl Into<String>,
+        config: OAuthClientConfig,
+    ) -> Self {
+        self.push_oauth_provider_config(vendor.into(), config);
         self
     }
 
@@ -723,23 +720,18 @@ impl RebornBuildInput {
         self
     }
 
-    /// Enable Dynamic Client Registration for the bundled Notion MCP OAuth provider.
-    ///
-    /// Callers provide the public origin that serves the Reborn product-auth
-    /// callback route. Local loopback HTTP origins are accepted; non-loopback
-    /// deployments must use HTTPS.
-    pub fn with_notion_dcr_oauth_backend(
+    /// Record the public origin serving the vendor OAuth callback routes.
+    /// Enables the engine's dynamic client registration (RFC 7591) for
+    /// recipes without deployment client credentials, and anchors the static
+    /// vendor callback base. Local loopback HTTP origins are accepted;
+    /// non-loopback deployments must use HTTPS.
+    pub fn with_dcr_oauth_callback(
         mut self,
         callback_origin: impl Into<String>,
-        client_name: impl Into<String>,
     ) -> Result<Self, ironclaw_auth::AuthProductError> {
-        self.push_oauth_dcr_provider_config(OAuthDcrProviderConfig {
-            spec: notion_provider_spec(),
-            callback_origin: callback_origin.into(),
-            client_name: client_name.into(),
-            account_label: CredentialAccountLabel::new("notion")?,
-            scopes: Vec::new(),
-        });
+        let callback_origin = callback_origin.into();
+        validate_dcr_callback_origin(&callback_origin)?;
+        self.oauth_dcr_callback = Some(OAuthDcrCallbackConfig { callback_origin });
         Ok(self)
     }
 
@@ -756,35 +748,17 @@ impl RebornBuildInput {
         self
     }
 
-    fn push_oauth_provider_config(
-        &mut self,
-        spec: HostOAuthProviderSpec,
-        client: OAuthClientConfig,
-    ) {
+    fn push_oauth_provider_config(&mut self, vendor: String, client: OAuthClientConfig) {
         if let Some(existing) = self
             .oauth_provider_configs
             .iter_mut()
-            .find(|existing| existing.spec.provider_id == spec.provider_id)
+            .find(|existing| existing.vendor == vendor)
         {
-            existing.spec = spec;
             existing.client = client;
             return;
         }
         self.oauth_provider_configs
-            .push(OAuthProviderBackendConfig { spec, client });
-    }
-
-    fn push_oauth_dcr_provider_config(&mut self, config: OAuthDcrProviderConfig) {
-        if let Some(existing) = self
-            .oauth_dcr_provider_configs
-            .iter_mut()
-            .find(|existing| existing.config.spec.provider_id == config.spec.provider_id)
-        {
-            existing.config = config;
-            return;
-        }
-        self.oauth_dcr_provider_configs
-            .push(OAuthDcrProviderBackendConfig { config });
+            .push(OAuthProviderBackendConfig { vendor, client });
     }
 
     fn new(
@@ -810,7 +784,7 @@ impl RebornBuildInput {
             network_http_egress_for_test: None,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
-            oauth_dcr_provider_configs: Vec::new(),
+            oauth_dcr_callback: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth_lazy_slot: None,
             nearai_mcp_bootstrap_config: None,
@@ -1096,6 +1070,22 @@ fn parse_bool_opt_in(value: &str) -> Option<bool> {
         "1" | "true" | "yes" | "on" => Some(true),
         _ => None,
     }
+}
+
+/// The DCR callback origin must be a bare https (or loopback http) origin.
+fn validate_dcr_callback_origin(origin: &str) -> Result<(), AuthProductError> {
+    let parsed = url::Url::parse(origin).map_err(|_| AuthProductError::BackendUnavailable)?;
+    let is_loopback_http = parsed.scheme() == "http"
+        && parsed
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]"));
+    if parsed.scheme() != "https" && !is_loopback_http {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

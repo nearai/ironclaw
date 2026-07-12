@@ -90,8 +90,6 @@ pub use factory::{RebornServices, build_reborn_services, builtin_first_party_tru
 pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use failure_summary::reborn_failure_summary_for_category;
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
-#[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_auth::GoogleOAuthRouteConfig;
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
 /// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
@@ -167,8 +165,6 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::{
@@ -246,6 +242,8 @@ pub use slack::slack_personal_binding_serve::{
     SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteConfigError,
     SlackPersonalBindingStartResponse,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack::slack_personal_oauth::SlackPersonalOAuthBindingConfig;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]

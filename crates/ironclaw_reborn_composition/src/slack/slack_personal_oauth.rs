@@ -1,128 +1,273 @@
-//! Slack personal (user-token) OAuth: provider spec + blocked-gate provider.
+//! Slack personal (user-token) OAuth wiring over the generic auth engine.
 //!
-//! This is one of the two production [`OAuthGateProvider`] implementors. The
-//! shared challenge/turn-gate-reuse/PKCE-store/cleanup/expiry logic lives in
-//! [`crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver`]; only the flow preparation differs
-//! from Google — Slack resolves client credentials from its setup slot at
-//! request time and emits `user_scope=` (its `scope=` is reserved for bot
-//! tokens) via the generic authorization-URL builder.
+//! The former per-vendor provider spec and gate provider are gone: Slack's
+//! OAuth flow executes the manifest's `[auth.slack]` recipe through the host
+//! auth engine like every other vendor. What remains here is Slack-owned
+//! wiring registered as **data**:
+//!
+//! - the deployment client-credential lookups (the operator saves the Slack
+//!   OAuth client id/secret through the setup service after startup), and
+//! - the post-exchange identity hook that binds the exchanged `authed_user`
+//!   identity to the authenticated Reborn user (identity-binding machinery,
+//!   deleted with `composition/src/slack/**` in P6).
 
 use std::fmt;
+use std::sync::Arc;
 
-use ironclaw_auth::{
-    AuthFlowId, AuthProductError, AuthProductScope, CredentialAccountLabel,
-    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
-    OAuthCallbackStateKind, OAuthScopeParam, PkceVerifierSecret, ProviderScope,
-    SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PROVIDER_ID,
-    build_authorization_url_with_scope_param, opaque_state_hash, pkce_s256_challenge,
-    pkce_verifier_hash,
-};
+use ironclaw_auth::{AuthProductError, AuthProductScope, OAuthProviderIdentity};
 use secrecy::SecretString;
 
-use crate::product_auth::oauth::oauth_gate::{OAuthGateProvider, PreparedOAuthGateFlow};
-use crate::product_auth::oauth::oauth_provider_client::{
-    ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
+use crate::product_auth::api::auth::{
+    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
+    OAuthProviderIdentityCheckFuture,
 };
+use crate::product_auth::credentials::product_auth_providers::{
+    CompositionClientCredentials, DynamicClientCredentialLookup,
+};
+use crate::provider_identity::{
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+};
+use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
+use crate::slack::slack_personal_binding::{
+    SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
+    SlackPersonalUserBindingRequest,
+};
+use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
 use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 
-/// Host OAuth provider spec for the Slack personal (user-token) provider.
-///
-/// `SlackAuthedUser` response shape so the exchanger extracts the user token
-/// from `authed_user.access_token`. Slack does not return granted scopes in a
-/// standard `scope` field, so the exchange falls back to the requested scopes.
-pub(crate) fn slack_personal_provider_spec() -> HostOAuthProviderSpec {
-    HostOAuthProviderSpec {
-        provider_id: SLACK_PROVIDER_ID,
-        capability_id: "ironclaw_auth.slack_personal_oauth",
-        token_endpoint: ironclaw_auth::SLACK_PERSONAL_TOKEN_ENDPOINT,
-        secret_handle_prefix: "slack",
-        resource: None,
-        exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
-        token_response_shape: TokenResponseShape::SlackAuthedUser,
+/// The unified Slack vendor id (matches the manifest's `[auth.slack]`).
+pub(crate) const SLACK_VENDOR_ID: &str = "slack";
+
+/// Register the Slack OAuth client-credential lookups: the recipe's
+/// `client_credentials` handles resolve through the operator setup service at
+/// request time (the operator may save them after startup).
+pub(crate) fn register_slack_personal_client_credentials(
+    credentials: &mut CompositionClientCredentials,
+    recipes: &dyn ironclaw_auth::AuthRecipeResolver,
+    slot: SlackPersonalSetupServiceSlot,
+) {
+    let Some(resolved) = recipes.recipe_for_vendor(SLACK_VENDOR_ID) else {
+        tracing::warn!("no [auth.slack] recipe resolved; Slack OAuth client lookups not wired");
+        return;
+    };
+    let ironclaw_host_api::VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+        return;
+    };
+    let Some(client_credentials) = &recipe.client_credentials else {
+        return;
+    };
+    credentials.register_dynamic(
+        client_credentials.client_id_handle.as_str(),
+        Arc::new(SlotClientCredentialLookup {
+            slot: slot.clone(),
+            secret: false,
+        }),
+    );
+    if let Some(secret_handle) = &client_credentials.client_secret_handle {
+        credentials.register_dynamic(
+            secret_handle.as_str(),
+            Arc::new(SlotClientCredentialLookup { slot, secret: true }),
+        );
     }
 }
 
-/// Slack personal (user-token) blocked-turn OAuth gate provider.
-///
-/// Holds the Slack setup slot; the shared [`crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver`]
-/// owns everything else.
-#[derive(Clone)]
-pub(crate) struct SlackPersonalOAuthGateProvider {
+struct SlotClientCredentialLookup {
     slot: SlackPersonalSetupServiceSlot,
+    secret: bool,
 }
 
-impl SlackPersonalOAuthGateProvider {
-    pub(crate) fn new(slot: SlackPersonalSetupServiceSlot) -> Self {
-        Self { slot }
+impl fmt::Debug for SlotClientCredentialLookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SlotClientCredentialLookup")
+            .field("secret", &self.secret)
+            .finish()
     }
 }
 
 #[async_trait::async_trait]
-impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
-    fn provider_id(&self) -> &'static str {
-        SLACK_PROVIDER_ID
-    }
-
-    fn pkce_secret_handle_label(&self) -> &'static str {
-        "slack-personal-oauth-gate-flow-pkce"
-    }
-
-    async fn prepare_flow(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-        scopes: Vec<ProviderScope>,
-    ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
-        let service = self
-            .slot
-            .get()
-            .ok_or(AuthProductError::BackendUnavailable)?;
-        let (client_id, _client_secret) = service.oauth_credentials().await.map_err(|e| {
-            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
+impl DynamicClientCredentialLookup for SlotClientCredentialLookup {
+    async fn resolve(&self) -> Result<SecretString, AuthProductError> {
+        let service = self.slot.get().ok_or_else(|| {
+            tracing::warn!("Slack personal OAuth slot not yet filled (startup race)");
             AuthProductError::BackendUnavailable
         })?;
-        let account_label = CredentialAccountLabel::new("slack")?;
-        let state = OAuthCallbackState::new(
-            OAuthCallbackStateKind::SLACK_PERSONAL,
-            flow_id,
-            scope.clone(),
-            account_label,
-            scopes.clone(),
-        )?
-        .encode()?;
-        let opaque_state_hash = opaque_state_hash(state.as_str())?;
-        let pkce_verifier = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
-        let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone())?;
-        let pkce_verifier_hash = pkce_verifier_hash(&pkce_secret)?;
-        let pkce_challenge = pkce_s256_challenge(&pkce_secret);
-        let authorization_endpoint =
-            OAuthAuthorizationEndpoint::new(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT)?;
-        let authorization_url = build_authorization_url_with_scope_param(
-            OAuthAuthorizeUrlRequest {
-                authorization_endpoint: &authorization_endpoint,
-                client_id: &client_id,
-                redirect_uri: self.slot.redirect_uri(),
-                state: &state,
-                code_challenge: &pkce_challenge,
-                scopes: &scopes,
-                extra_params: &[],
-            },
-            OAuthScopeParam::UserScope,
-        )?;
-        Ok(PreparedOAuthGateFlow {
-            authorization_url,
-            opaque_state_hash,
-            pkce_verifier_hash,
-            pkce_verifier,
-        })
+        let (client_id, client_secret) = service.oauth_credentials().await.map_err(|error| {
+            tracing::warn!(error = %error, "Slack personal OAuth credentials not configured");
+            AuthProductError::MalformedConfig
+        })?;
+        if self.secret {
+            Ok(client_secret)
+        } else {
+            Ok(SecretString::from(client_id.as_str().to_string()))
+        }
     }
 }
 
-impl fmt::Debug for SlackPersonalOAuthGateProvider {
+/// The pieces the Slack post-exchange identity binding needs.
+#[derive(Clone)]
+pub struct SlackPersonalOAuthBindingConfig {
+    pub(crate) binding_service: Arc<dyn SlackPersonalUserBinder>,
+    pub(crate) connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
+    /// Undoes an identity binding written by the callback identity hook when
+    /// `complete_oauth_callback` fails afterwards; the binding is the
+    /// user-visible "connected" signal, so it must not survive a completion
+    /// failure that already deleted the token material.
+    pub(crate) binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+}
+
+impl SlackPersonalOAuthBindingConfig {
+    pub(crate) fn new(
+        binding_service: Arc<dyn SlackPersonalUserBinder>,
+        connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
+        binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    ) -> Self {
+        Self {
+            binding_service,
+            connection_scope_resolver,
+            binding_rollback_store,
+        }
+    }
+}
+
+impl fmt::Debug for SlackPersonalOAuthBindingConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("SlackPersonalOAuthGateProvider")
-            .field("slot", &self.slot)
+            .debug_struct("SlackPersonalOAuthBindingConfig")
+            .field("binding_service", &self.binding_service)
+            .field(
+                "connection_scope_resolver",
+                &"Arc<dyn SlackPersonalConnectionScopeResolver>",
+            )
+            .field(
+                "binding_rollback_store",
+                &"Arc<dyn RebornUserIdentityBindingDeleteStore>",
+            )
             .finish()
+    }
+}
+
+/// Build the Slack vendor-identity hook factory the product-auth routes
+/// register under the `slack` vendor id: it binds the exchanged `authed_user`
+/// identity to the authenticated Reborn user and hands back a rollback.
+pub(crate) fn slack_personal_identity_hook_factory(
+    config: SlackPersonalOAuthBindingConfig,
+) -> Arc<crate::product_auth::serve::VendorIdentityHookFactory> {
+    Arc::new(move |callback_scope: &AuthProductScope| {
+        let config = config.clone();
+        let callback_scope = callback_scope.clone();
+        Some(
+            Box::new(move |provider_identity: Option<OAuthProviderIdentity>| {
+                let config = config.clone();
+                let callback_scope = callback_scope.clone();
+                Box::pin(async move {
+                    bind_slack_personal_oauth_identity_for_callback(
+                        &config,
+                        &callback_scope,
+                        provider_identity.as_ref(),
+                    )
+                    .await
+                    .map(Some)
+                }) as OAuthProviderIdentityCheckFuture
+            }) as OAuthProviderIdentityCheck,
+        )
+    })
+}
+
+async fn bind_slack_personal_oauth_identity_for_callback(
+    config: &SlackPersonalOAuthBindingConfig,
+    callback_scope: &AuthProductScope,
+    provider_identity: Option<&OAuthProviderIdentity>,
+) -> Result<OAuthProviderIdentityBindingRollback, AuthProductError> {
+    let identity = provider_identity.ok_or(AuthProductError::MalformedCallback)?;
+    let connection_scope = config
+        .connection_scope_resolver
+        .resolve_personal_connection_scope()
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                "Slack personal OAuth binding connection scope resolver failed"
+            );
+            AuthProductError::BackendUnavailable
+        })?
+        .ok_or(AuthProductError::BackendUnavailable)?;
+    let team_id = identity
+        .team_id
+        .as_ref()
+        .ok_or(AuthProductError::MalformedCallback)?;
+    if team_id.as_str() != connection_scope.team_id.as_str() {
+        return Err(AuthProductError::MalformedCallback);
+    }
+    let api_app_id = identity
+        .app_id
+        .as_ref()
+        .ok_or(AuthProductError::MalformedCallback)?;
+    let enterprise_id = identity
+        .enterprise_id
+        .as_ref()
+        .map(|value| SlackEnterpriseId::new(value.clone()));
+
+    // Computed before the request takes ownership of the installation id so
+    // the rollback can target exactly the binding this callback writes.
+    let bound_provider_user_id = crate::provider_identity::installation_scoped_provider_user_id(
+        &connection_scope.installation_id,
+        identity.subject.as_str(),
+    );
+    config
+        .binding_service
+        .bind_personal_user(
+            SlackPersonalBindingPrincipal {
+                tenant_id: callback_scope.resource.tenant_id.clone(),
+                user_id: callback_scope.resource.user_id.clone(),
+            },
+            SlackPersonalUserBindingRequest {
+                installation_id: connection_scope.installation_id,
+                slack_user_id: SlackUserId::new(identity.subject.as_str()),
+                team_id: SlackTeamId::new(team_id.clone()),
+                enterprise_id,
+                api_app_id: SlackApiAppId::new(api_app_id.clone()),
+            },
+        )
+        .await
+        .map_err(slack_personal_user_binding_auth_error)?;
+
+    let rollback_store = Arc::clone(&config.binding_rollback_store);
+    let rollback_user_id = callback_scope.resource.user_id.clone();
+    Ok(Box::pin(async move {
+        // Passing the full provider_user_id as the prefix confines the delete
+        // to the binding this exact callback wrote. Best-effort by contract:
+        // a rollback failure only errs toward "shows connected without a
+        // credential", which Disconnect already repairs.
+        if let Err(error) = rollback_store
+            .delete_user_identity_bindings_for_user(
+                crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
+                &rollback_user_id,
+                Some(bound_provider_user_id.as_str()),
+            )
+            .await
+        {
+            tracing::warn!(
+                %error,
+                "failed to roll back Slack identity binding after OAuth completion failure"
+            );
+        }
+    }))
+}
+
+fn slack_personal_user_binding_auth_error(
+    error: SlackPersonalUserBindingError,
+) -> AuthProductError {
+    match error {
+        SlackPersonalUserBindingError::UnknownInstallation { .. }
+        | SlackPersonalUserBindingError::InstallationNotTenantScoped { .. }
+        | SlackPersonalUserBindingError::SlackInstallationContextMismatch { .. }
+        | SlackPersonalUserBindingError::InvalidSlackId { .. } => {
+            AuthProductError::MalformedCallback
+        }
+        SlackPersonalUserBindingError::BindingStore(
+            RebornUserIdentityBindingError::ProviderIdentityAlreadyBound,
+        ) => AuthProductError::ProviderIdentityAlreadyConnected,
+        SlackPersonalUserBindingError::BindingStore(_) => AuthProductError::BackendUnavailable,
     }
 }

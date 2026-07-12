@@ -1008,7 +1008,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "web_access",
     ),
-    ("crates/ironclaw_reborn_composition/src/input.rs", "google"),
     (
         "crates/ironclaw_reborn_composition/src/input.rs",
         "nearai_mcp",
@@ -1017,7 +1016,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/input.rs",
         "nearaimcp",
     ),
-    ("crates/ironclaw_reborn_composition/src/input.rs", "notion"),
     ("crates/ironclaw_reborn_composition/src/input.rs", "slack"),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "github"),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "google"),
@@ -1061,10 +1059,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs",
         "nearai_mcp",
     ),
     (
@@ -1081,10 +1075,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/credentials/product_auth_providers.rs",
         "slack",
     ),
     (
@@ -1096,59 +1086,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/google_oauth/mod.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/mod.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/mod.rs",
-        "notion",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs",
-        "mcp.notion.com",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs",
-        "notion",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_gate.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_gate.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_provider_client.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_provider_client.rs",
-        "notion",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_provider_client.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/serve/oauth.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/product_auth/serve/oauth.rs",
         "slack",
     ),
     (
@@ -1254,10 +1192,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs",
-        "google",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/slack/slack_personal_oauth.rs",
         "slack",
     ),
     (
@@ -1279,10 +1213,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/web_access.rs",
         "webaccess",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/webui/webui_serve.rs",
-        "google",
     ),
     (
         "crates/ironclaw_reborn_composition/src/webui/webui_serve.rs",
