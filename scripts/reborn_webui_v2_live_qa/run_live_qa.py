@@ -1273,6 +1273,9 @@ async def _live_chat_case(
             observed["connect_action_dismissed_before_submit"] = True
         composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
         await expect(composer).to_be_visible(timeout=15000)
+        assistant_count_before = await page.locator(  # type: ignore[attr-defined]
+            "[data-testid='msg-assistant']"
+        ).count()
         error_count_before = await page.locator(  # type: ignore[attr-defined]
             "[data-testid='msg-error']"
         ).count()
@@ -1299,6 +1302,7 @@ async def _live_chat_case(
             required_text=required_text,
             timeout=timeout,
             semantic_goal=prompt,
+            assistant_count_before=assistant_count_before,
             error_count_before=error_count_before,
             enforce_marker=enforce_marker,
         )
@@ -1317,6 +1321,9 @@ async def _live_chat_case(
                 reply.text_excerpt, **follow_up_kwargs
             )
             if follow_up:
+                follow_up_assistant_count_before = await page.locator(  # type: ignore[attr-defined]
+                    "[data-testid='msg-assistant']"
+                ).count()
                 follow_up_error_count_before = await page.locator(  # type: ignore[attr-defined]
                     "[data-testid='msg-error']"
                 ).count()
@@ -1336,6 +1343,7 @@ async def _live_chat_case(
                     required_text=required_text,
                     timeout=timeout,
                     semantic_goal=f"{prompt}\n{follow_up}",
+                    assistant_count_before=follow_up_assistant_count_before,
                     error_count_before=follow_up_error_count_before,
                     enforce_marker=enforce_marker,
                 )
@@ -1565,12 +1573,12 @@ async def _wait_for_assistant_reply(
     required_text: list[str],
     timeout: float,
     semantic_goal: str | None = None,
+    assistant_count_before: int = 0,
     error_count_before: int = 0,
     enforce_marker: bool = True,
 ) -> AssistantReplyWaitResult:
     started = time.monotonic()
     deadline = time.monotonic() + timeout
-    assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
     last_final_assistant_text = ""
     last_observed_text = ""
@@ -1592,7 +1600,9 @@ async def _wait_for_assistant_reply(
         if terminal_failure is not None:
             raise TerminalRunFailure(terminal_failure)
         assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
-        if await assistant_blocks.count() > 0:
+        assistant_count = await assistant_blocks.count()
+        if assistant_count > max(0, assistant_count_before):
+            assistant = assistant_blocks.last
             try:
                 final_assistant_text = await assistant.inner_text(timeout=1000)
             except Exception:
@@ -1610,9 +1620,10 @@ async def _wait_for_assistant_reply(
             else:
                 last_final_reply_state = observed_final_reply_state
             try:
+                all_block_texts = await assistant_blocks.all_inner_texts()
                 block_texts = [
                     block.strip()
-                    for block in await assistant_blocks.all_inner_texts()
+                    for block in all_block_texts[max(0, assistant_count_before) :]
                     if block.strip()
                 ]
             except Exception:
@@ -1654,7 +1665,7 @@ async def _wait_for_assistant_reply(
                     semantic_judge_reason="literal_required_text_matched",
                     final_reply_wait_ms=int((time.monotonic() - started) * 1000),
                     final_reply_reason=(
-                        "final_reply_marker_matched"
+                        "final_reply_observed"
                         if last_final_reply_state == "true"
                         else "fallback_quiet_period_matched"
                     ),
@@ -1683,7 +1694,7 @@ async def _wait_for_assistant_reply(
                 semantic_judge_reason="semantic_judge_completed",
                 final_reply_wait_ms=int((time.monotonic() - started) * 1000),
                 final_reply_reason=(
-                    "semantic_judge_final_reply_marker_matched"
+                    "semantic_judge_final_reply_observed"
                     if last_final_reply_state == "true"
                     else "semantic_judge_timeout_fallback"
                 ),
@@ -1693,6 +1704,7 @@ async def _wait_for_assistant_reply(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
         f"enforce_marker={enforce_marker!r} "
+        f"assistant_count_before={assistant_count_before!r} "
         f"latest_final_reply_state={last_final_reply_state!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"

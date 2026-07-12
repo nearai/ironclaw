@@ -140,6 +140,86 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         return FakePage()
 
+    def _fake_sequenced_terminal_page(
+        self,
+        snapshots: list[dict[str, list[dict[str, str | None]]]],
+    ):
+        state = {"index": 0}
+
+        def current() -> dict[str, list[dict[str, str | None]]]:
+            return snapshots[state["index"]]
+
+        class FakeApprove:
+            @property
+            def last(self):
+                return self
+
+            async def is_visible(self, **_kwargs):
+                return False
+
+        class FakeAssistantBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return len(current()["assistants"])
+
+            async def inner_text(self, **_kwargs):
+                return str(current()["assistants"][-1].get("text") or "")
+
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-final-reply":
+                    return current()["assistants"][-1].get("final_reply_state")
+                raise AssertionError(f"unexpected assistant attribute: {name}")
+
+            async def all_inner_texts(self):
+                return [
+                    str(message.get("text") or "")
+                    for message in current()["assistants"]
+                ]
+
+        class FakeErrorBlocks:
+            @property
+            def last(self):
+                return self
+
+            async def count(self):
+                return len(current()["errors"])
+
+            async def inner_text(self, **_kwargs):
+                return str(current()["errors"][-1].get("summary") or "")
+
+            async def get_attribute(self, name, **_kwargs):
+                if name == "data-failure-category":
+                    return current()["errors"][-1].get("failure_category")
+                if name == "data-failure-status":
+                    return current()["errors"][-1].get("failure_status")
+                raise AssertionError(f"unexpected error attribute: {name}")
+
+        class FakeMain:
+            async def inner_text(self, **_kwargs):
+                assistants = current()["assistants"]
+                return str(assistants[-1].get("text") or "") if assistants else ""
+
+        class FakePage:
+            def locator(self, selector):
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantBlocks()
+                if selector == "[data-testid='msg-error']":
+                    return FakeErrorBlocks()
+                if selector == "main":
+                    return FakeMain()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+            def get_by_role(self, _role, **_kwargs):
+                return FakeApprove()
+
+        def advance() -> None:
+            state["index"] = min(len(snapshots) - 1, state["index"] + 1)
+
+        return FakePage(), advance
+
     def test_dismiss_visible_connect_action_clicks_only_visible_card(self):
         class FakeDismiss:
             def __init__(self, *, count: int, visible: bool) -> None:
@@ -1101,7 +1181,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("emails", text.lower())
         self.assertFalse(reply.semantic_judge_used)
         self.assertEqual(reply.semantic_judge_reason, "literal_required_text_matched")
-        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+        self.assertEqual(reply.final_reply_reason, "final_reply_observed")
 
     def test_wait_for_assistant_reply_waits_for_final_marked_message(self):
         state = {"index": 0, "sleep_calls": 0}
@@ -1164,7 +1244,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertGreaterEqual(state["sleep_calls"], 1)
         self.assertEqual(reply.text_excerpt, "Google Calendar connected.")
-        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+        self.assertEqual(reply.final_reply_reason, "final_reply_observed")
 
     def test_wait_for_assistant_reply_preserves_non_final_state_on_attribute_error(self):
         state = {"index": 0, "sleep_calls": 0}
@@ -1231,7 +1311,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertGreaterEqual(state["sleep_calls"], 2)
         self.assertEqual(reply.text_excerpt, "Google Calendar connected.")
-        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+        self.assertEqual(reply.final_reply_reason, "final_reply_observed")
 
     def test_wait_for_assistant_reply_returns_final_reply_when_marker_is_not_enforced(
         self,
@@ -1254,7 +1334,109 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(reply.full_text, response_text)
         self.assertFalse(reply.semantic_judge_used)
-        self.assertEqual(reply.final_reply_reason, "final_reply_marker_matched")
+        self.assertEqual(reply.final_reply_reason, "final_reply_observed")
+
+    def test_wait_for_assistant_reply_waits_for_post_baseline_final_reply(self):
+        stale_reply = {
+            "text": "Stale finalized reply.",
+            "final_reply_state": "true",
+        }
+        current_reply = {
+            "text": "Current finalized reply.",
+            "final_reply_state": "true",
+        }
+        page, advance = self._fake_sequenced_terminal_page(
+            [
+                {"assistants": [stale_reply], "errors": []},
+                {"assistants": [stale_reply, current_reply], "errors": []},
+            ]
+        )
+
+        async def reveal_current_reply(_seconds):
+            advance()
+
+        with patch.object(
+            run_live_qa.asyncio,
+            "sleep",
+            side_effect=reveal_current_reply,
+        ):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    page,
+                    marker="MUTATED_CURRENT_MARKER",
+                    required_text=[],
+                    timeout=30.0,
+                    assistant_count_before=1,
+                    error_count_before=0,
+                    enforce_marker=False,
+                )
+            )
+
+        self.assertEqual(reply.full_text, "Current finalized reply.")
+        self.assertEqual(reply.final_reply_reason, "final_reply_observed")
+
+    def test_wait_for_assistant_reply_new_terminal_error_beats_stale_final_reply(
+        self,
+    ):
+        stale_reply = {
+            "text": "Stale finalized reply.",
+            "final_reply_state": "true",
+        }
+        terminal_error = {
+            "summary": "The current model provider is unavailable.",
+            "failure_category": "model_unavailable",
+            "failure_status": "failed",
+        }
+        page, advance = self._fake_sequenced_terminal_page(
+            [
+                {"assistants": [stale_reply], "errors": []},
+                {"assistants": [stale_reply], "errors": [terminal_error]},
+            ]
+        )
+
+        async def reveal_terminal_error(_seconds):
+            advance()
+
+        with patch.object(
+            run_live_qa.asyncio,
+            "sleep",
+            side_effect=reveal_terminal_error,
+        ):
+            with self.assertRaises(run_live_qa.TerminalRunFailure) as raised:
+                asyncio.run(
+                    run_live_qa._wait_for_assistant_reply(
+                        page,
+                        marker="MUTATED_CURRENT_MARKER",
+                        required_text=[],
+                        timeout=30.0,
+                        assistant_count_before=1,
+                        error_count_before=0,
+                        enforce_marker=False,
+                    )
+                )
+
+        self.assertEqual(
+            raised.exception.observation.summary,
+            "The current model provider is unavailable.",
+        )
+
+    def test_wait_for_assistant_reply_baseline_zero_final_reply_is_immediate(self):
+        async def fail_if_waits(_seconds):
+            raise AssertionError("new finalized reply should return immediately")
+
+        with patch.object(run_live_qa.asyncio, "sleep", side_effect=fail_if_waits):
+            reply = asyncio.run(
+                run_live_qa._wait_for_assistant_reply(
+                    self._fake_assistant_reply_page("Current finalized reply."),
+                    marker=None,
+                    required_text=[],
+                    timeout=30.0,
+                    assistant_count_before=0,
+                )
+            )
+
+        self.assertEqual(reply.full_text, "Current finalized reply.")
+        self.assertEqual(reply.final_reply_reason, "final_reply_observed")
 
     def test_wait_for_assistant_reply_fails_immediately_when_marker_is_enforced(self):
         async def fail_if_waits(_seconds):
@@ -1417,6 +1599,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             async def count(self):
                 return 2
 
+        class FakeAssistantMessages:
+            async def count(self):
+                return 1
+
         class FakePage:
             async def goto(self, _url, **_kwargs):
                 return None
@@ -1430,6 +1616,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     return FakeUserMessages()
                 if selector == "[data-testid='msg-error']":
                     return FakeErrors()
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantMessages()
                 raise AssertionError(f"unexpected selector: {selector}")
 
         class FakeExpectation:
@@ -1479,9 +1667,128 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
+        self.assertEqual(captured_wait["assistant_count_before"], 1)
         self.assertEqual(captured_wait["error_count_before"], 2)
         self.assertEqual(result.details["failure_category"], "model_unavailable")
         self.assertEqual(result.details["failure_status"], "failed")
+
+    def test_live_chat_case_refreshes_assistant_baseline_before_confirmation_submit(
+        self,
+    ):
+        events: list[str] = []
+        assistant_counts = iter([1, 2])
+        captured_baselines: list[int] = []
+        wait_calls = 0
+
+        class FakeComposer:
+            async def fill(self, _text):
+                return None
+
+            async def press(self, _key):
+                events.append("submit")
+
+        class FakeUserMessages:
+            @property
+            def last(self):
+                return self
+
+        class FakeDismiss:
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return 0
+
+        class FakeErrors:
+            async def count(self):
+                return 0
+
+        class FakeAssistantMessages:
+            async def count(self):
+                count = next(assistant_counts)
+                events.append(f"assistant_baseline:{count}")
+                return count
+
+        class FakePage:
+            async def goto(self, _url, **_kwargs):
+                return None
+
+            def locator(self, selector):
+                if selector == "[aria-label='Dismiss connect action']":
+                    return FakeDismiss()
+                if selector == "[data-testid='chat-composer']":
+                    return FakeComposer()
+                if selector == "[data-testid='msg-user']":
+                    return FakeUserMessages()
+                if selector == "[data-testid='msg-error']":
+                    return FakeErrors()
+                if selector == "[data-testid='msg-assistant']":
+                    return FakeAssistantMessages()
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        class FakeExpectation:
+            async def to_be_visible(self, **_kwargs):
+                return None
+
+            async def to_contain_text(self, _text, **_kwargs):
+                return None
+
+        def fake_expect(_locator):
+            return FakeExpectation()
+
+        async def fake_with_page(_output_dir, _case_name, action):
+            await action(FakePage())
+
+        async def fake_wait(_page, **kwargs):
+            nonlocal wait_calls
+            wait_calls += 1
+            captured_baselines.append(kwargs["assistant_count_before"])
+            text = (
+                "Would you like me to create the routine?"
+                if wait_calls == 1
+                else "Routine created."
+            )
+            return run_live_qa.AssistantReplyWaitResult(
+                text_excerpt=text,
+                full_text=text,
+                semantic_judge_used=False,
+                semantic_judge_reason="literal_required_text_matched",
+                final_reply_wait_ms=0,
+                final_reply_reason="final_reply_observed",
+            )
+
+        playwright_module = types.ModuleType("playwright")
+        playwright_async_api = types.ModuleType("playwright.async_api")
+        playwright_async_api.expect = fake_expect
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "playwright": playwright_module,
+                    "playwright.async_api": playwright_async_api,
+                },
+            ),
+            patch.object(run_live_qa, "_with_page", new=fake_with_page),
+            patch.object(run_live_qa, "_wait_for_assistant_reply", new=fake_wait),
+        ):
+            result = asyncio.run(
+                run_live_qa._live_chat_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_confirmation_baseline",
+                    prompt="Create a routine.",
+                    marker=None,
+                    required_text=["routine"],
+                    routine_confirmation_follow_up=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured_baselines, [1, 2])
+        self.assertEqual(
+            events,
+            ["assistant_baseline:1", "submit", "assistant_baseline:2", "submit"],
+        )
 
     def test_slack_correctness_chat_reply_does_not_enforce_answer_marker(self):
         captured: dict[str, object] = {}
@@ -1558,6 +1865,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("Trigger ID", text)
         self.assertTrue(reply.semantic_judge_used)
         self.assertEqual(reply.semantic_judge_reason, "semantic_judge_completed")
+        self.assertEqual(
+            reply.final_reply_reason,
+            "semantic_judge_final_reply_observed",
+        )
         self.assertEqual(reply.semantic_judge["confidence"], 0.91)
         self.assertEqual(captured["required_text"], ["routine"])
         self.assertIn("hourly Hacker News", captured["semantic_goal"])
