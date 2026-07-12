@@ -799,6 +799,126 @@ async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
 }
 
 #[tokio::test]
+async fn builtin_write_file_rejects_edit_when_default_read_was_truncated_by_lines() {
+    let temp = tempfile::tempdir().unwrap();
+    let original: String = (0..2_100).map(|index| format!("line {index}\n")).collect();
+    std::fs::write(temp.path().join("long.txt"), &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    // A default read of a >2,000-line file returns a truncated window.
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/long.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["truncated"], json!(true));
+    assert_eq!(read["truncated_by"], json!("lines"));
+
+    // The truncated read must not unlock a whole-file overwrite.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/long.txt", "content": "blind overwrite"}),
+        context.clone(),
+    )
+    .await;
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("read it in full with read_file"),
+        "rejection must tell the model to read the file in full, got: {message}"
+    );
+    assert!(
+        message.contains("truncated"),
+        "rejection must explain that a truncated read does not count, got: {message}"
+    );
+
+    // An explicit offset/limit read (even one wide enough to cover the whole
+    // file) still does not unlock edits.
+    let ranged = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/long.txt", "offset": 1, "limit": 2_100}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ranged["truncated"], json!(false));
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/long.txt", "content": "blind overwrite"}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("long.txt")).unwrap(),
+        original,
+        "rejected writes must not touch the file"
+    );
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_rejects_edit_when_default_read_was_truncated_by_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    // Fewer lines than the 2,000-line cap, but wide enough that the rendered
+    // body exceeds the 64 KiB byte budget: byte truncation, not line truncation.
+    let wide_line = "x".repeat(120);
+    let original: String = std::iter::once("seed-marker line\n".to_string())
+        .chain((0..900).map(|_| format!("{wide_line}\n")))
+        .collect();
+    std::fs::write(temp.path().join("wide.txt"), &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["truncated"], json!(true));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+
+    // Even a patch anchored in the visible part of the window is rejected:
+    // the guard requires the model to have seen the complete file.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/wide.txt",
+            "old_string": "seed-marker line",
+            "new_string": "patched line"
+        }),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("read it in full with read_file"),
+        "rejection must tell the model to read the file in full, got: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("wide.txt")).unwrap(),
+        original,
+        "rejected patches must not touch the file"
+    );
+}
+
+#[tokio::test]
 async fn builtin_read_file_failure_reports_missing_path() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());

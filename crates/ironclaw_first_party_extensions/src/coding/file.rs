@@ -91,9 +91,19 @@ pub(super) async fn read_file(
         }
     };
 
-    // Only a full read (no offset/limit window) proves the model has seen the
-    // whole file, which is what unlocks write_file/apply_patch on it.
-    if !has_explicit_range {
+    let output = read_file_text_output(
+        &content,
+        resolved.scoped_path.as_str(),
+        offset,
+        limit,
+        has_explicit_range,
+    );
+
+    // Only a complete read proves the model has seen the whole file, which is
+    // what unlocks write_file/apply_patch on it: no offset/limit window AND no
+    // default line/byte truncation of the returned body. A truncated default
+    // read of a large file must not authorize whole-file edits.
+    if !has_explicit_range && !read_output_truncated(&output) {
         read_states.record(
             &read_scope_key(request),
             resolved.virtual_path.as_str(),
@@ -101,13 +111,16 @@ pub(super) async fn read_file(
         );
     }
 
-    Ok(read_file_text_output(
-        &content,
-        resolved.scoped_path.as_str(),
-        offset,
-        limit,
-        has_explicit_range,
-    ))
+    Ok(output)
+}
+
+fn read_output_truncated(output: &Value) -> bool {
+    // Fail safe: treat a missing/unreadable flag as truncated so an unproven
+    // read never unlocks edits.
+    output
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 fn decode_read_file_text(bytes: &[u8]) -> Result<String, CodingCapabilityError> {
@@ -443,7 +456,7 @@ async fn verify_read_before_edit(
 
 fn read_before_edit_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
     operation_error_with_summary(format!(
-        "{operation} failed for {}: read it with read_file before editing it",
+        "{operation} failed for {}: read it in full with read_file before editing it. Ranged reads (offset or limit) and default reads truncated at the line or byte cap do not count as having seen the whole file; a file too large to read in full cannot be edited with this tool",
         safe_summary_path(scoped_path)
     ))
 }
