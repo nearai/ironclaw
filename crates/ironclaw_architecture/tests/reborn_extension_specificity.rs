@@ -745,7 +745,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_llm/src/gemini_oauth.rs",
         "www.googleapis.com",
     ),
-    ("crates/ironclaw_llm/src/reasoning.rs", "slack"),
     (
         "crates/ironclaw_llm/src/tool_schema/placeholder_stripping.rs",
         "notion",
