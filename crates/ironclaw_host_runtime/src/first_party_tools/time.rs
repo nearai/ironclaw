@@ -2,6 +2,7 @@ use chrono::{DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offse
 use chrono_tz::Tz;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{EffectKind, PermissionMode};
+use rust_decimal::Decimal;
 use serde_json::{Number, Value, json};
 
 use crate::FirstPartyCapabilityError;
@@ -9,6 +10,7 @@ use crate::FirstPartyCapabilityError;
 use super::{first_party_capability_manifest, input_error, resource_profile};
 
 pub const TIME_CAPABILITY_ID: &str = "builtin.time";
+pub(super) const UNIX_MILLIS_THRESHOLD: i128 = 100_000_000_000;
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
@@ -196,21 +198,21 @@ fn parse_timestamp(
 }
 
 fn parse_unix_number(number: &Number) -> Option<DateTime<Utc>> {
-    if number.as_i64().is_some() || number.as_u64().is_some() {
-        return parse_unix_timestamp(&number.to_string());
-    }
-    let value = number.as_f64()?;
-    if value.is_finite() && value.fract() == 0.0 {
-        return parse_unix_timestamp(&format!("{value:.0}"));
-    }
+    number.as_f64().filter(|value| value.is_finite())?;
     parse_unix_timestamp(&number.to_string())
 }
 
 fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
     const NANOS_PER_SECOND: i128 = 1_000_000_000;
-    const UNIX_MILLIS_THRESHOLD: i128 = 100_000_000_000;
 
     let input = input.trim();
+    let normalized;
+    let input = if input.contains(['e', 'E']) {
+        normalized = Decimal::from_scientific(input).ok()?.to_string();
+        normalized.as_str()
+    } else {
+        input
+    };
     let (negative, unsigned) = match input.as_bytes().first() {
         Some(b'-') => (true, &input[1..]),
         Some(b'+') => (false, &input[1..]),
@@ -239,13 +241,11 @@ fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
         whole
     };
     let Some(fraction) = fraction else {
-        let timestamp = i64::try_from(signed_whole).ok()?;
-        return if signed_whole.abs() >= UNIX_MILLIS_THRESHOLD {
-            DateTime::from_timestamp_millis(timestamp)
-        } else {
-            DateTime::from_timestamp(timestamp, 0)
-        };
+        return parse_integral_unix_timestamp(signed_whole);
     };
+    if fraction.bytes().all(|byte| byte == b'0') {
+        return parse_integral_unix_timestamp(signed_whole);
+    }
 
     let fractional_nanos = fraction.parse::<i128>().ok()?
         * 10_i128.pow(u32::try_from(9_usize.checked_sub(fraction.len())?).ok()?);
@@ -260,6 +260,15 @@ fn parse_unix_timestamp(input: &str) -> Option<DateTime<Utc>> {
     let seconds = i64::try_from(total_nanos.div_euclid(NANOS_PER_SECOND)).ok()?;
     let nanos = u32::try_from(total_nanos.rem_euclid(NANOS_PER_SECOND)).ok()?;
     DateTime::from_timestamp(seconds, nanos)
+}
+
+fn parse_integral_unix_timestamp(timestamp: i128) -> Option<DateTime<Utc>> {
+    let value = i64::try_from(timestamp).ok()?;
+    if timestamp.abs() >= UNIX_MILLIS_THRESHOLD {
+        DateTime::from_timestamp_millis(value)
+    } else {
+        DateTime::from_timestamp(value, 0)
+    }
 }
 
 fn parse_naive_datetime(input: &str) -> Option<NaiveDateTime> {

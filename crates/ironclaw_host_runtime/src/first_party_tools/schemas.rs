@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use super::time::UNIX_MILLIS_THRESHOLD;
+
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {
         "schemas/builtin/echo.input.v1.json" => json!({
@@ -570,7 +572,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
 fn timestamp_input_schema(description: &str) -> Value {
     json!({
         "description": format!(
-            "{description}. Accepts an ISO 8601 string, Unix seconds (including fractional Slack timestamps), or Unix milliseconds. Integer values with absolute magnitude at least 100000000000 are interpreted as milliseconds."
+            "{description}. Accepts an ISO 8601 string, Unix seconds (including fractional Slack timestamps), or Unix milliseconds. Integer values with absolute magnitude at least {UNIX_MILLIS_THRESHOLD} are interpreted as milliseconds."
         ),
         "oneOf": [
             { "type": "string" },

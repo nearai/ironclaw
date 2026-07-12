@@ -3642,6 +3642,38 @@ async fn builtin_time_accepts_unix_seconds_millis_and_slack_fractional_timestamp
         json!(1778590800123_i64)
     );
 
+    let parsed_string_float_millis = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": "1778590800123.0"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        parsed_string_float_millis["unix_millis"],
+        json!(1778590800123_i64)
+    );
+
+    let fractional_exponent_input =
+        serde_json::from_str(r#"{"operation":"parse","input":1e-9}"#).unwrap();
+    let parsed_fractional_exponent = invoke(TIME_CAPABILITY_ID, fractional_exponent_input)
+        .await
+        .unwrap();
+    assert_eq!(
+        parsed_fractional_exponent["iso"],
+        json!("1970-01-01T00:00:00.000000001+00:00")
+    );
+
+    let parsed_negative_fraction = invoke(
+        TIME_CAPABILITY_ID,
+        json!({"operation": "parse", "input": "-0.25"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        parsed_negative_fraction["iso"],
+        json!("1969-12-31T23:59:59.750+00:00")
+    );
+
     let parsed_slack_timestamp = invoke(
         TIME_CAPABILITY_ID,
         json!({"operation": "parse", "input": "1783634967.123456"}),

@@ -10,8 +10,59 @@ mod reborn_support;
 mod support;
 
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
+
+#[tokio::test]
+async fn runs_numeric_time_input_through_builtin_tools_group() {
+    let g = RebornIntegrationGroup::builtin_tools()
+        .await
+        .expect("builtin tools group builds");
+    let arguments = serde_json::from_str(r#"{"operation":"parse","input":1.778590800123e12}"#)
+        .expect("numeric time arguments parse");
+    let h = g
+        .thread("conv-time-unix")
+        .script([
+            RebornScriptedReply::tool_call("builtin.time", arguments),
+            RebornScriptedReply::text("parsed"),
+        ])
+        .build()
+        .await
+        .expect("time thread builds");
+
+    h.submit_turn("parse this Unix millisecond timestamp")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("builtin.time")
+        .await
+        .expect("time tool ran");
+    let output = h
+        .tool_result_output("builtin.time")
+        .await
+        .expect("time result recorded");
+    assert_eq!(output["unix_millis"], json!(1778590800123_i64));
+
+    let definitions = h.scripted_llm.captured_tool_definitions();
+    let time = definitions
+        .iter()
+        .flatten()
+        .find(|definition| definition.name == "builtin__time")
+        .expect("numeric time schema reaches the model");
+    assert!(
+        time.parameters["properties"]["input"]["oneOf"]
+            .as_array()
+            .expect("time input has alternatives")
+            .iter()
+            .any(|kind| kind["type"] == "number")
+    );
+    assert!(
+        time.parameters["properties"]["input"]["description"]
+            .as_str()
+            .expect("time input has a description")
+            .contains("100000000000")
+    );
+}
 
 #[tokio::test]
 async fn runs_http_tool_call_through_recorded_egress() {
