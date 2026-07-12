@@ -4359,6 +4359,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_safety",
  "ironclaw_skills",
+ "ironclaw_turns",
  "regex",
  "serde",
  "serde_json",

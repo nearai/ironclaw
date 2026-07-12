@@ -248,10 +248,15 @@ fn reject_unbacked_scoped_workdir(
     ))
 }
 
-/// Bound a failure reason before it becomes the dispatch safe summary. The
-/// summary is validated downstream (fixed category fallback if it fails the
-/// strict validator) and also flows to the model-visible diagnostic detail,
-/// so it must stay short.
+/// Bound a failure reason before it becomes the dispatch safe summary.
+///
+/// Truncation counts chars (never bytes), so multibyte input cannot split a
+/// code point. No other sanitization happens here on purpose: downstream,
+/// `failure_from` (production.rs) validates the reason against the strict
+/// loop safe-summary rules — reasons that pass ride the summary, and reasons
+/// that fail (paths, newlines) are preserved on the model-visible diagnostic
+/// detail, where secret values are scrubbed and control characters
+/// normalized at the loop boundary.
 fn bounded_failure_reason(reason: String) -> String {
     const MAX_CHARS: usize = 512;
     if reason.chars().count() <= MAX_CHARS {
@@ -333,6 +338,63 @@ mod tests {
             summary.contains("spawn failed: no such file"),
             "summary should carry the execution failure reason, got: {summary}"
         );
+    }
+
+    #[test]
+    fn shell_error_preserves_paths_and_newlines_for_the_diagnostic_channel() {
+        // The producer must NOT pre-sanitize: reasons carrying paths or
+        // newlines fail the strict loop safe-summary validator downstream and
+        // are then preserved verbatim on the model-visible diagnostic detail
+        // (`failure_from` in production.rs), where secret values are scrubbed
+        // and control characters normalized at the loop boundary. Stripping
+        // them here would blind the diagnostic.
+        let error = shell_error(shell_core::ShellExecutionError::NotAuthorized(
+            "Blocked sensitive file access: cat /etc/passwd\nsecond line".to_string(),
+        ));
+
+        let summary = dispatch_safe_summary(&error).expect("reason must be carried");
+        assert!(
+            summary.contains("/etc/passwd"),
+            "the concrete path must be preserved for the diagnostic, got: {summary}"
+        );
+        assert!(
+            summary.contains('\n'),
+            "newlines must be preserved for the diagnostic, got: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_failure_reason_keeps_exactly_512_chars_intact() {
+        let input = "x".repeat(512);
+
+        assert_eq!(bounded_failure_reason(input.clone()), input);
+    }
+
+    #[test]
+    fn bounded_failure_reason_truncates_513_chars_to_512_with_ellipsis() {
+        let bounded = bounded_failure_reason("x".repeat(513));
+
+        assert_eq!(bounded.chars().count(), 512);
+        assert!(bounded.ends_with("..."));
+        assert!(bounded.starts_with(&"x".repeat(509)));
+    }
+
+    #[test]
+    fn bounded_failure_reason_truncates_multibyte_input_on_char_boundaries() {
+        // 513 three-byte chars: byte-index truncation would panic or split a
+        // code point; char-based truncation must stay on boundaries.
+        let bounded = bounded_failure_reason("界".repeat(513));
+
+        assert_eq!(bounded.chars().count(), 512);
+        assert!(bounded.ends_with("..."));
+        assert_eq!(
+            bounded.chars().take(509).collect::<String>(),
+            "界".repeat(509)
+        );
+
+        // Exactly at the limit, multibyte input is kept intact.
+        let exact = "界".repeat(512);
+        assert_eq!(bounded_failure_reason(exact.clone()), exact);
     }
 
     #[test]

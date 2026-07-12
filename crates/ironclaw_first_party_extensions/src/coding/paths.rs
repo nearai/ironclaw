@@ -44,11 +44,20 @@ fn resolve_path(
     // Name the offending path and the roots that DO exist: an agent that
     // targeted an out-of-scope absolute path (e.g. one copied verbatim from a
     // task description) can only correct course when the rejection says so.
+    //
+    // These summaries render paths and roots delimiter-free (`/` → space):
+    // the strict loop safe-summary validator rejects raw path delimiters, and
+    // FilesystemDenied surfaces as a Denied loop outcome whose only
+    // model-visible channel is the summary itself — a raw-path summary would
+    // silently collapse to the generic category sentence. Summaries that
+    // still fail validation (hostile file names) ride the model-visible
+    // diagnostic detail channel instead of the summary.
     let scoped_path = mounts.scoped_path(scoped_path_input(path)).map_err(|_| {
         CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::InputEncode,
             format!(
-                "path {path} is not under an available scoped root ({})",
+                "{} is not under an available scoped root (available roots: {})",
+                summary_path_hint(path),
                 available_roots(mounts)
             ),
         )
@@ -62,7 +71,8 @@ fn resolve_path(
         CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
             format!(
-                "path {path} does not resolve inside an available scoped root ({})",
+                "{} does not resolve inside an available scoped root (available roots: {})",
+                summary_path_hint(path),
                 available_roots(mounts)
             ),
         )
@@ -75,7 +85,10 @@ fn resolve_path(
     if !operation_allowed(&grant.permissions, operation) {
         return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
-            format!("the mount for {path} does not permit this operation"),
+            format!(
+                "the mount for {} does not permit this operation",
+                summary_path_hint(path)
+            ),
         ));
     }
     Ok(ResolvedPath {
@@ -85,11 +98,27 @@ fn resolve_path(
     })
 }
 
+/// Delimiter-free path rendering for loop-safe failure summaries, mirroring
+/// `file.rs::safe_summary_path`: "/testbed/replacer.go" → "path testbed
+/// replacer.go". The strict summary validator bans `/` and `\`.
+fn summary_path_hint(path: &str) -> String {
+    let hint = path.trim_start_matches('/').replace(['/', '\\'], " ");
+    format!("path {hint}")
+}
+
 fn available_roots(mounts: &ironclaw_host_api::MountView) -> String {
-    let mut roots: Vec<&str> = mounts
+    let mut roots: Vec<String> = mounts
         .mounts
         .iter()
-        .map(|mount| mount.alias.as_str())
+        // Aliases are absolute ("/workspace"); render them without the
+        // leading delimiter so the summary stays loop-safe.
+        .map(|mount| {
+            mount
+                .alias
+                .as_str()
+                .trim_start_matches('/')
+                .replace(['/', '\\'], " ")
+        })
         .collect();
     roots.sort_unstable();
     roots.join(", ")

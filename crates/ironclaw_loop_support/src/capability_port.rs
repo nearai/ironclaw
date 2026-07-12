@@ -2753,13 +2753,17 @@ fn runtime_failure_to_loop(
             runtime_model_visible_failure_to_loop(failure)
         }
         CapabilityFailureDisposition::RetrySameCall => {
+            let detail = match runtime_failure_detail_to_loop(failure.detail.clone()) {
+                Some(structured) => Some(structured),
+                None => runtime_failure_diagnostic_detail(&failure),
+            };
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: runtime_failure_kind_to_loop(failure.kind)?,
                 safe_summary: runtime_failure_safe_summary(
                     &failure,
                     "capability invocation failed",
                 ),
-                detail: runtime_failure_diagnostic_detail(&failure),
+                detail,
             }))
         }
     }
@@ -2776,11 +2780,31 @@ fn runtime_failure_diagnostic_detail(
         return None;
     }
     let raw = failure.safe_summary()?;
+    model_visible_diagnostic_text(&raw).map(|text| CapabilityFailureDetail::Diagnostic { text })
+}
+
+/// Prepare free text for the model-visible diagnostic channel: scrub secret
+/// VALUES and replace control characters the model-observation validator
+/// rejects (everything but `\n`, `\r`, `\t`) with spaces, so one stray escape
+/// byte cannot invalidate — and thereby drop — the whole observation.
+fn model_visible_diagnostic_text(raw: &str) -> Option<String> {
     let scrubbed = sanitize_model_visible_text(raw);
-    if scrubbed.trim().is_empty() {
+    let normalized: String = scrubbed
+        .chars()
+        .map(|character| {
+            if character == '\0'
+                || (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    if normalized.trim().is_empty() {
         return None;
     }
-    Some(CapabilityFailureDetail::Diagnostic { text: scrubbed })
+    Some(normalized)
 }
 
 fn runtime_model_visible_failure_to_loop(
@@ -2812,17 +2836,26 @@ fn runtime_model_visible_failure_to_loop(
 fn runtime_failure_detail_to_loop(
     detail: Option<DispatchFailureDetail>,
 ) -> Option<CapabilityFailureDetail> {
-    detail.map(dispatch_failure_detail_to_loop)
+    detail.and_then(dispatch_failure_detail_to_loop)
 }
 
-fn dispatch_failure_detail_to_loop(detail: DispatchFailureDetail) -> CapabilityFailureDetail {
+fn dispatch_failure_detail_to_loop(
+    detail: DispatchFailureDetail,
+) -> Option<CapabilityFailureDetail> {
     match detail {
-        DispatchFailureDetail::InvalidInput { issues } => CapabilityFailureDetail::InvalidInput {
-            issues: issues
-                .into_iter()
-                .map(dispatch_input_issue_to_loop)
-                .collect(),
-        },
+        DispatchFailureDetail::InvalidInput { issues } => {
+            Some(CapabilityFailureDetail::InvalidInput {
+                issues: issues
+                    .into_iter()
+                    .map(dispatch_input_issue_to_loop)
+                    .collect(),
+            })
+        }
+        // Raw failure cause the host runtime preserved because the strict
+        // safe-summary validator rejected it (paths, newlines). Scrub secret
+        // values and normalize control characters before the model sees it.
+        DispatchFailureDetail::Diagnostic { text } => model_visible_diagnostic_text(&text)
+            .map(|text| CapabilityFailureDetail::Diagnostic { text }),
     }
 }
 
@@ -3485,6 +3518,67 @@ mod tests {
             text.contains("[redacted]"),
             "redaction marker should be present: {text}"
         );
+    }
+
+    #[test]
+    fn runtime_diagnostic_detail_maps_to_model_visible_diagnostic_scrubbed() {
+        // The host runtime preserves validator-rejected failure reasons as a
+        // structured Diagnostic detail (see `failure_from` in
+        // ironclaw_host_runtime::production). The loop boundary must carry it
+        // to the model with secret VALUES scrubbed, newlines preserved, and
+        // disallowed control characters normalized — a raw control character
+        // would invalidate the entire model observation downstream.
+        let capability_id = CapabilityId::new("builtin.shell").expect("valid capability id");
+        let failure = RuntimeCapabilityFailure::new(
+            capability_id,
+            RuntimeFailureKind::OperationFailed,
+            Some("the tool operation failed".to_string()),
+        )
+        .with_detail(DispatchFailureDetail::Diagnostic {
+            text: "cannot read /etc/passwd\nsecond\u{7} line with sk-LIVEsecretvalue".to_string(),
+        });
+
+        let outcome = runtime_failure_to_loop(failure).expect("convert host runtime failure");
+
+        let CapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected a model-visible Failed outcome");
+        };
+        let Some(CapabilityFailureDetail::Diagnostic { text }) = failure.detail else {
+            panic!("expected a diagnostic detail carrying the raw cause");
+        };
+        assert!(
+            text.contains("/etc/passwd"),
+            "the path must reach the model intact: {text}"
+        );
+        assert!(text.contains('\n'), "newlines are allowed and kept: {text}");
+        assert!(
+            !text.contains('\u{7}'),
+            "disallowed control characters must be normalized: {text:?}"
+        );
+        assert!(
+            !text.contains("sk-LIVEsecretvalue"),
+            "secret value must be redacted from the model-visible detail: {text}"
+        );
+    }
+
+    #[test]
+    fn runtime_diagnostic_detail_that_normalizes_to_nothing_is_dropped() {
+        // A diagnostic that is nothing but disallowed control characters
+        // normalizes to whitespace; an empty diagnostic would fail the
+        // model-observation validator downstream, so it is dropped instead.
+        let capability_id = CapabilityId::new("builtin.shell").expect("valid capability id");
+        let failure =
+            RuntimeCapabilityFailure::new(capability_id, RuntimeFailureKind::OperationFailed, None)
+                .with_detail(DispatchFailureDetail::Diagnostic {
+                    text: "\u{7}\u{8}\u{1b}".to_string(),
+                });
+
+        let outcome = runtime_failure_to_loop(failure).expect("convert host runtime failure");
+
+        let CapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected a model-visible Failed outcome");
+        };
+        assert_eq!(failure.detail, None, "empty diagnostics must be dropped");
     }
 
     #[test]

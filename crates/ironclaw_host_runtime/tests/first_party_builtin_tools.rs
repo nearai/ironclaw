@@ -3347,6 +3347,43 @@ async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure(
 }
 
 #[tokio::test]
+async fn builtin_shell_path_bearing_failure_reason_rides_the_diagnostic_detail() {
+    // Loop-boundary pin for the "model-visible tool-failure reasons" feature:
+    // a shell rejection reason that names a concrete path (here the sensitive
+    // credential path guard) fails the strict loop safe-summary validator, so
+    // the message degrades to the fixed category sentence — but the raw
+    // reason must NOT be dropped: it rides the diagnostic detail that the
+    // loop layer scrubs and carries to the model.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "cat /etc/shadow"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+
+    let message = failure
+        .message
+        .as_deref()
+        .expect("failure carries a message");
+    assert!(
+        !message.contains("/etc/shadow"),
+        "the raw path must not leak into the strict summary channel: {message}"
+    );
+    let Some(DispatchFailureDetail::Diagnostic { text }) = &failure.detail else {
+        panic!(
+            "expected the raw reason on the diagnostic detail, got {:?}",
+            failure.detail
+        );
+    };
+    assert!(
+        text.contains("/etc/shadow"),
+        "the model-visible diagnostic must carry the concrete path: {text}"
+    );
+}
+
+#[tokio::test]
 async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
     let local_process = Arc::new(RecordingProcessPort::default());
     let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
