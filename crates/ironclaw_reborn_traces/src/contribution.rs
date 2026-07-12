@@ -101,6 +101,11 @@ pub struct IronclawTraceMetadata {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_flags: BTreeMap<String, String>,
     pub channel: TraceChannel,
+    /// The originating extension/surface id when `channel` is
+    /// [`TraceChannel::Extension`] (generic origin data replacing the retired
+    /// concrete variants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
 }
@@ -110,10 +115,15 @@ pub struct IronclawTraceMetadata {
 pub enum TraceChannel {
     Web,
     Cli,
-    Telegram,
-    Slack,
     Routine,
     Other,
+    /// An extension-served channel. The concrete identity lives in
+    /// `IronclawTraceMetadata::channel_origin` (data, never an enum variant).
+    /// `#[serde(other)]` also absorbs historical concrete tags and any
+    /// future unknown tag — persisted envelopes always deserialize (LLM data
+    /// is never dropped to a parse quarantine over a channel name).
+    #[serde(other)]
+    Extension,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1176,6 +1186,8 @@ pub struct RecordedTraceContributionOptions {
     pub include_tool_payloads: bool,
     pub consent_scopes: Vec<ConsentScope>,
     pub channel: TraceChannel,
+    /// Origin id recorded when `channel` is [`TraceChannel::Extension`].
+    pub channel_origin: Option<String>,
     pub engine_version: Option<String>,
     pub feature_flags: BTreeMap<String, String>,
     pub pseudonymous_contributor_id: Option<String>,
@@ -1190,6 +1202,7 @@ impl Default for RecordedTraceContributionOptions {
             include_tool_payloads: false,
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
             channel: TraceChannel::Cli,
+            channel_origin: None,
             engine_version: None,
             feature_flags: BTreeMap::new(),
             pseudonymous_contributor_id: None,
@@ -1350,6 +1363,7 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                channel_origin: options.channel_origin.clone(),
                 model_name: Some(trace.model_name.clone()),
             },
             consent: ConsentMetadata {
@@ -1478,6 +1492,7 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                channel_origin: options.channel_origin.clone(),
                 model_name: None,
             },
             consent: ConsentMetadata {
@@ -2662,10 +2677,9 @@ fn channel_label(channel: TraceChannel) -> &'static str {
     match channel {
         TraceChannel::Web => "web",
         TraceChannel::Cli => "cli",
-        TraceChannel::Telegram => "telegram",
-        TraceChannel::Slack => "slack",
         TraceChannel::Routine => "routine",
         TraceChannel::Other => "other",
+        TraceChannel::Extension => "extension",
     }
 }
 
@@ -2682,7 +2696,9 @@ fn tool_category_for(tool_name: &str) -> String {
         "workspace".to_string()
     } else if lower.contains("memory") || lower.contains("search") {
         "retrieval".to_string()
-    } else if lower.contains("calendar") || lower.contains("email") || lower.contains("slack") {
+    } else if lower.contains("calendar") || lower.contains("email") || lower.contains('.') {
+        // Namespaced capability ids (`<extension>.<tool>`) are external-app
+        // tools by construction.
         "external_app".to_string()
     } else {
         "other".to_string()

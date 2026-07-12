@@ -1299,7 +1299,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_reborn_identity/src/lib.rs", "github"),
     ("crates/ironclaw_reborn_identity/src/lib.rs", "google"),
     ("crates/ironclaw_reborn_identity/src/lib.rs", "slack"),
-    ("crates/ironclaw_reborn_traces/src/client.rs", "slack"),
     (
         "crates/ironclaw_reborn_traces/src/contribution.rs",
         "github",
