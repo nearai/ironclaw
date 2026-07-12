@@ -19,6 +19,8 @@ ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn config path
 ironclaw-reborn doctor
+ironclaw-reborn doctor --json
+ironclaw-reborn doctor --live
 ironclaw-reborn extension search github
 ironclaw-reborn extension search github --json
 ironclaw-reborn extension install github-mcp
@@ -290,24 +292,34 @@ Expected fields include:
 - `profile`
 - `v1_state: not-used`
 
-`config path`, `doctor`, and other read-only surfaces do not create Reborn
-state or seed config files.
+`config path`, `doctor` (without `--live`), and other read-only surfaces do not
+create Reborn state or seed config files. `doctor --live` explicitly opts into
+opening and initializing the configured storage and secrets backends, which may
+create or migrate Reborn-owned local state.
 
 ### `doctor`
 
-Validates and reports Reborn boot configuration without creating state directories or starting runtime services.
+Validates Reborn boot configuration, LLM provider credentials, and driver
+readiness. Without `--live`, the command is side-effect-free. With `--live`,
+it opens and initializes the configured storage and secrets backends through
+the production composition path, which may create or migrate Reborn-owned
+local state.
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- doctor
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- doctor --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- doctor --live
 ```
 
-Expected fields include:
+Checks are grouped into three categories:
 
-- `reborn_home`
-- `home_source`
-- `profile`
-- `v1_state: not-used`
-- `driver_registry: initialized`
+- **Core** — boot files: `reborn_home`, `home_source`, `profile`, `config_file`, `providers_file`
+- **Dependencies** — `llm_provider` (always probed), `storage_backend`, `secrets_store`, and `runtime_wiring` (probed only with `--live`; skipped otherwise)
+- **Drivers** — runtime driver registration: `text_only_driver`, `planned_driver`, `subagent_planned_driver`, `planned_default_profile`
+
+Each check reports `pass`, `fail`, or `skip`, and the summary line counts
+each outcome. `--json` emits the full `DoctorDto` structure instead of the
+text table.
 
 ### `hooks list`
 

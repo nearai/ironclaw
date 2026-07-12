@@ -70,9 +70,11 @@ export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
 ```
 
-`config path` and `doctor` are safe diagnostics; they report the resolved home,
-profile, `config.toml`, `providers.json`, and `v1_state: not-used`.
-They do not create Reborn state or seed config files.
+`config path` and `doctor` (without `--live`) are safe diagnostics; they report
+the resolved home, profile, `config.toml`, `providers.json`, and
+`v1_state: not-used`. They do not create Reborn state or seed config files.
+`doctor --live` explicitly opts into initializing storage and secrets backends,
+which may create Reborn-owned local state.
 
 ### Configure the model route
 
