@@ -108,10 +108,7 @@ fn build_driver_checks() -> Vec<DoctorCheck> {
         driver_check("text_only_driver", &snapshot.text_only_driver),
         driver_check("planned_driver", &snapshot.planned_driver),
         driver_check("subagent_planned_driver", &snapshot.subagent_planned_driver),
-        driver_check(
-            "planned_default_profile",
-            &snapshot.planned_default_profile,
-        ),
+        driver_check("planned_default_profile", &snapshot.planned_default_profile),
     ]
 }
 
@@ -502,8 +499,7 @@ mod tests {
 
     #[test]
     fn wiring_build_failure_is_attributed_to_runtime_wiring() {
-        let checks =
-            classify_live_build_error(RebornBuildError::MissingProductionTrustPolicy);
+        let checks = classify_live_build_error(RebornBuildError::MissingProductionTrustPolicy);
         assert_eq!(checks[0].name, "storage_backend");
         assert_eq!(checks[0].outcome, CheckOutcome::Skip);
         assert_eq!(checks[1].name, "secrets_store");
