@@ -416,6 +416,9 @@ impl IngressSecretsPort for StaticIngressSecrets {
 pub struct ExtensionIngressParts {
     pub router: Arc<ExtensionIngressRouter>,
     pub registry: Arc<ExtensionIngressRegistry>,
+    /// The router's `reply_context` storage — shared with the delivery
+    /// coordinator's read half (ING-11).
+    pub reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
 }
 
 /// Build the generic ingress router over the generic host's snapshot watch.
@@ -423,18 +426,22 @@ pub(crate) fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
 ) -> ExtensionIngressParts {
     let registry = Arc::new(ExtensionIngressRegistry::default());
+    let reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore> =
+        Arc::new(ironclaw_extension_host::ingress::InMemoryReplyContextStore::default());
     let router = Arc::new(ExtensionIngressRouter::new(
         watch,
         ironclaw_extension_host::ingress::ExtensionIngressRouterDeps {
             secrets: Arc::clone(&registry) as Arc<dyn IngressSecretsPort>,
             sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
-            reply_context: Arc::new(
-                ironclaw_extension_host::ingress::InMemoryReplyContextStore::default(),
-            ),
+            reply_context: Arc::clone(&reply_context),
         },
         ironclaw_extension_host::ingress::IngressRouterConfig::default(),
     ));
-    ExtensionIngressParts { router, registry }
+    ExtensionIngressParts {
+        router,
+        registry,
+        reply_context,
+    }
 }
 
 #[cfg(feature = "webui-v2-beta")]
