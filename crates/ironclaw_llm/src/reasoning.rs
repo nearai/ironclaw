@@ -613,11 +613,9 @@ impl Reasoning {
 
     /// Add channel-specific conversation data for the system prompt.
     ///
-    /// This provides the LLM with context about who/group it's talking to.
-    /// Examples:
-    ///   - Signal: sender, sender_uuid, target (group ID if in group)
-    ///   - Discord: guild_id, channel_id, user_id
-    ///   - Telegram: chat_id, user_id
+    /// This provides the LLM with context about who/group it's talking to
+    /// (e.g. sender ids, group/space ids, chat ids — whatever the connected
+    /// channel exposes).
     pub fn with_conversation_data(
         mut self,
         key: impl Into<String>,

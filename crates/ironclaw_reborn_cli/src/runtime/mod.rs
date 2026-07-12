@@ -36,6 +36,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+#[cfg(feature = "slack-v2-host-beta")]
+mod native_extensions;
 #[cfg(test)]
 mod test_env;
 mod trigger_poller;
@@ -547,8 +549,18 @@ pub(crate) fn build_runtime_input_with_options(
     #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
 
+    // The binary assembles the native extension factory registry (DEL-7's
+    // target shape); composition receives it as input and never links a
+    // concrete extension crate for it.
+    #[cfg(feature = "slack-v2-host-beta")]
+    let services_input = runtime_services
+        .services_input
+        .with_native_extension_factories(native_extensions::bundled_native_extension_factories());
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    let services_input = runtime_services.services_input;
+
     #[allow(unused_mut)]
-    let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
+    let mut runtime_input = RebornRuntimeInput::from_services(services_input)
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),

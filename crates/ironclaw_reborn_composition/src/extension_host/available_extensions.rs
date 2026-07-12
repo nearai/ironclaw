@@ -52,6 +52,9 @@ const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
 const SLACK_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 #[cfg(feature = "slack-v2-host-beta")]
+const TELEGRAM_MANIFEST: &str =
+    include_str!("../../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
+#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
 );
@@ -418,6 +421,8 @@ impl AvailableExtensionCatalog {
         ];
         #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
+        #[cfg(feature = "slack-v2-host-beta")]
+        packages.push(telegram_package()?);
         Ok(Self::from_packages(packages))
     }
 
@@ -600,6 +605,18 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
+}
+
+/// The Telegram channel package: a pure channel extension — one manifest,
+/// zero package assets beyond it (DEL-10's addition test).
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "telegram",
+        "Telegram",
+        TELEGRAM_MANIFEST,
+        vec![bytes_asset("manifest.toml", TELEGRAM_MANIFEST.as_bytes())],
+    )
 }
 
 pub(crate) fn google_calendar_manifest_digest() -> String {

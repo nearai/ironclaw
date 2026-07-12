@@ -1304,6 +1304,58 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "github",
     ),
     ("crates/ironclaw_reborn_traces/src/contribution.rs", "gmail"),
+    ("crates/ironclaw_common/src/attachment.rs", "telegram"),
+    ("crates/ironclaw_common/src/identity.rs", "telegram"),
+    ("crates/ironclaw_common/src/platform.rs", "telegram"),
+    (
+        "crates/ironclaw_product_adapter_registry/src/lib.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_product_adapters/src/identity.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_product_adapters/src/outbound.rs",
+        "telegram",
+    ),
+    ("crates/ironclaw_product_workflow/Cargo.toml", "telegram"),
+    ("crates/ironclaw_product_workflow/src/lib.rs", "telegram"),
+    (
+        "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
+        "telegram",
+    ),
+    ("crates/ironclaw_reborn_identity/src/key.rs", "telegram"),
+    ("crates/ironclaw_reborn_identity/src/lib.rs", "telegram"),
+    (
+        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "telegram",
+    ),
+    ("crates/ironclaw_safety/src/leak_detector.rs", "telegram"),
+    (
+        "crates/ironclaw_wasm_product_adapters/src/auth_verifier.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_wasm_product_adapters/src/egress_policy.rs",
+        "api.telegram.org",
+    ),
+    (
+        "crates/ironclaw_wasm_product_adapters/src/egress_policy.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_wasm_product_adapters/src/lib.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/chat/hooks/useChannelOnboarding.ts",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_webui_v2/frontend/src/pages/chat/hooks/useThreads.ts",
+        "telegram",
+    ),
     ("crates/ironclaw_reborn_traces/src/contribution.rs", "slack"),
     ("crates/ironclaw_skills/src/selector.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "github"),
