@@ -107,6 +107,8 @@ pub(crate) enum StorageReopen {
     },
     Postgres {
         database_url: String,
+        // Boxed: the container handle dwarfs the other variants
+        // (clippy::large_enum_variant) and is only held for its Drop.
         _container: Box<
             testcontainers_modules::testcontainers::ContainerAsync<
                 testcontainers_modules::postgres::Postgres,
