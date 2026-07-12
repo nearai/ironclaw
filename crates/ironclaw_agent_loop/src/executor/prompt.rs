@@ -702,7 +702,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
     if state.completion_nudge_pending {
         context_request
             .inline_messages
-            .push(super::completion_nudge_control_message());
+            .push(super::completion_nudge_control_message()?);
     }
     let inline_messages = context_request.inline_messages.clone();
     let prompt_mode = context_request.mode;

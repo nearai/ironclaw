@@ -2001,7 +2001,11 @@ async fn completion_nudge_lets_model_use_tools_to_finish_after_trailing_off() {
     );
     // Three prompt-driven model calls: trail-off, tool call, closing answer.
     let prompt_requests = host.prompt_requests();
-    assert_eq!(prompt_requests.len(), 3, "expected trail-off + nudged retry + close");
+    assert_eq!(
+        prompt_requests.len(),
+        3,
+        "expected trail-off + nudged retry + close"
+    );
     assert!(prompt_requests[0].inline_messages.is_empty());
     assert!(
         prompt_requests[1]

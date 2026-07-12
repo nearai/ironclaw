@@ -49,13 +49,21 @@ pub(super) fn reply_trailed_off(content: &str) -> bool {
 /// Inline control message carrying the completion-nudge instruction. Delivered as
 /// a `User` turn (matching `FINAL_ANSWER_NUDGE`'s role and the bench nudge, which
 /// re-prompted the agent with a user message) so the model treats it as a fresh
-/// directive to act on with its tools.
-pub(super) fn completion_nudge_control_message() -> LoopInlineMessage {
-    LoopInlineMessage {
+/// directive to act on with its tools. Fallible (never panics) like the
+/// `FINAL_ANSWER_NUDGE` construction: a malformed static body surfaces as a
+/// planner-contract error the caller propagates.
+pub(super) fn completion_nudge_control_message() -> Result<LoopInlineMessage, AgentLoopExecutorError>
+{
+    let safe_body =
+        LoopInlineMessageBody::new(COMPLETION_NUDGE.trim().to_string()).map_err(|_| {
+            AgentLoopExecutorError::PlannerContract {
+                detail: "completion-nudge control text was invalid",
+            }
+        })?;
+    Ok(LoopInlineMessage {
         role: LoopInlineMessageRole::User,
-        safe_body: LoopInlineMessageBody::new(COMPLETION_NUDGE.trim().to_string())
-            .expect("static completion-nudge text is non-empty and safe"),
-    }
+        safe_body,
+    })
 }
 
 /// Driver-specific "final-answer" nudge: when the loop would otherwise end a turn
