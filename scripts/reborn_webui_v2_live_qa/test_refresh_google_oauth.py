@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from typing import NoReturn
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -145,12 +146,37 @@ class RefreshGoogleOauthTests(unittest.TestCase):
         self.assertIsNone(token)
         self.assertEqual(status, "http_503")
 
+    def test_non_object_and_unsafe_http_errors_use_status_fallback(self):
+        bodies = (
+            b'[]',
+            b'null',
+            b'"invalid_grant"',
+            b'{"error":"contains a space"}',
+            b'{"error":"line\\nbreak"}',
+            b'{"error":"' + (b"x" * 129) + b'"}',
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                error = urllib.error.HTTPError(
+                    refresh_google_oauth.TOKEN_URL,
+                    429,
+                    "secret response detail",
+                    {},
+                    io.BytesIO(body),
+                )
+                with patch.dict(os.environ, self.env, clear=True), patch.object(
+                    refresh_google_oauth.urllib.request, "urlopen", side_effect=error
+                ):
+                    token, status = refresh_google_oauth.refresh_access_token()
+                self.assertIsNone(token)
+                self.assertEqual(status, "http_429")
+
     def test_unreadable_http_error_body_is_sanitized(self):
         class UnreadableBody:
-            def read(self):
-                raise OSError("private transport detail")
+            def read(self) -> NoReturn:
+                raise OSError
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         error = urllib.error.HTTPError(

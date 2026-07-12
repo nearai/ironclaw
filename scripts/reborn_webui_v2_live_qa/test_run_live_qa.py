@@ -4773,6 +4773,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn("REBORN_WEBUI_V2_GOOGLE_CASES", match.group("body"))
         self.assertEqual(
+            len(re.findall(r"^    env:\s*$", match.group("body"), re.M)),
+            1,
+            "the job must have one env mapping so Google-case gating is not overwritten",
+        )
+        self.assertEqual(
             match.group("body").count(".github/scripts/google_oauth_cases.py"),
             3,
             "preflight filtering, mint selection, and mint-failure filtering "

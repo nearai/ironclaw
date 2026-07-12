@@ -68,8 +68,17 @@ def refresh_access_token() -> Tuple[Optional[str], str]:
         try:
             payload = json.loads(exc.read().decode("utf-8", errors="replace"))
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            payload = {}
-        return None, str(payload.get("error") or f"http_{exc.code}")
+            return None, f"http_{exc.code}"
+        if not isinstance(payload, dict):
+            return None, f"http_{exc.code}"
+        error = payload.get("error")
+        if (
+            not isinstance(error, str)
+            or not 1 <= len(error) <= 128
+            or not all(character.isascii() and (character.isalnum() or character in "._-") for character in error)
+        ):
+            return None, f"http_{exc.code}"
+        return None, error
     except (OSError, urllib.error.URLError) as exc:
         return None, f"network:{type(exc).__name__}"
 
