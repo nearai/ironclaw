@@ -18,15 +18,12 @@ pub fn build_loop_family_registry_with_overrides(
     default_iteration_limit: Option<NonZeroU32>,
     model_availability_attempts: Option<NonZeroU32>,
 ) -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
-    let default_family =
-        if default_iteration_limit.is_none() && model_availability_attempts.is_none() {
-            families::default()
-        } else {
-            families::default_with_overrides(
-                default_iteration_limit.map(NonZeroU32::get),
-                model_availability_attempts.map(NonZeroU32::get),
-            )
-        };
+    // `default_with_overrides` returns the pure-default composition (static
+    // replay digest included) when no override is set.
+    let default_family = families::default_with_overrides(families::FamilyOverrides {
+        iteration_limit: default_iteration_limit.map(NonZeroU32::get),
+        model_availability_attempts: model_availability_attempts.map(NonZeroU32::get),
+    });
     LoopFamilyRegistry::with_families(vec![
         Arc::new(default_family),
         Arc::new(families::subagent()),
