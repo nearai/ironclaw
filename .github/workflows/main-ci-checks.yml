@@ -2,6 +2,7 @@ name: Main CI Checks
 
 on:
   workflow_run:
+    # Keep this list aligned with the required/optional workflow lists in `jobs.fast-forward-staging-release.steps.ci`.
     workflows:
       - Code Style
       - Tests (Reborn)
@@ -156,7 +157,7 @@ jobs:
             local required="$2"
             local run_json status conclusion url
 
-            run_json="$(gh run list \
+            if ! run_json="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow "$workflow" \
               --branch main \
@@ -164,7 +165,11 @@ jobs:
               --commit "$HEAD_SHA" \
               --limit 1 \
               --json conclusion,status,url \
-              --jq '.[0] // {}')"
+              --jq '.[0] // {}' \
+              2>/dev/null)"; then
+              echo "::warning::Failed to query workflow status for ${workflow}; treating as missing."
+              run_json='{}'
+            fi
             status="$(jq -r '.status // "missing"' <<<"$run_json")"
             conclusion="$(jq -r '.conclusion // "missing"' <<<"$run_json")"
             url="$(jq -r '.url // ""' <<<"$run_json")"
@@ -188,29 +193,48 @@ jobs:
             fi
           }
 
-          for workflow in "${required_workflows[@]}"; do
-            check_workflow "$workflow" required
-          done
-          for workflow in "${optional_workflows[@]}"; do
-            check_workflow "$workflow" optional
-          done
+          attempts=1
+          max_attempts=3
+          while true; do
+            missing=()
+            pending=()
+            failed=()
 
-          if [ "${#failed[@]}" -gt 0 ]; then
-            printf '::error::Main CI failed for %s; refusing to fast-forward staging-release.\n' "$HEAD_SHA"
-            printf 'Failed workflow: %s\n' "${failed[@]}"
-            exit 1
-          fi
+            for workflow in "${required_workflows[@]}"; do
+              check_workflow "$workflow" required
+            done
+            for workflow in "${optional_workflows[@]}"; do
+              check_workflow "$workflow" optional
+            done
 
-          if [ "${#missing[@]}" -gt 0 ] || [ "${#pending[@]}" -gt 0 ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            if [ "${#missing[@]}" -gt 0 ]; then
-              printf 'Required workflow has not appeared yet: %s\n' "${missing[@]}"
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "::error::Main CI failed for ${HEAD_SHA}; refusing to fast-forward staging-release."
+              for workflow in "${failed[@]}"; do
+                printf 'Failed workflow: %s\n' "$workflow"
+              done
+              exit 1
             fi
-            if [ "${#pending[@]}" -gt 0 ]; then
-              printf 'Workflow is still pending: %s\n' "${pending[@]}"
+
+            if [ "${#missing[@]}" -gt 0 ] || [ "${#pending[@]}" -gt 0 ]; then
+              if [ "$attempts" -lt "$max_attempts" ]; then
+                attempts=$((attempts + 1))
+                echo "::warning::Required workflow checks for ${HEAD_SHA} are incomplete (attempt ${attempts}/${max_attempts}). Retrying in 30 seconds."
+                sleep 30
+                continue
+              fi
+
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              if [ "${#missing[@]}" -gt 0 ]; then
+                printf 'Required workflow has not appeared yet: %s\n' "${missing[@]}"
+              fi
+              if [ "${#pending[@]}" -gt 0 ]; then
+                printf 'Workflow is still pending: %s\n' "${pending[@]}"
+              fi
+              exit 0
             fi
-            exit 0
-          fi
+
+            break
+          done
 
           echo "ready=true" >> "$GITHUB_OUTPUT"
           echo "All required main CI workflows passed for ${HEAD_SHA}."
@@ -228,14 +252,14 @@ jobs:
           set -euo pipefail
           git fetch origin main "${STAGING_BRANCH}"
 
-          if git merge-base --is-ancestor "$HEAD_SHA" "origin/${STAGING_BRANCH}"; then
-            echo "::notice::${STAGING_BRANCH} already contains main ${HEAD_SHA}; nothing to sync."
-            exit 0
-          fi
-
           if ! git merge-base --is-ancestor "origin/${STAGING_BRANCH}" "origin/main"; then
             echo "::error::${STAGING_BRANCH} has commits that are not in main; refusing to overwrite or merge automatically."
             exit 1
+          fi
+
+          if git merge-base --is-ancestor "$HEAD_SHA" "origin/${STAGING_BRANCH}"; then
+            echo "::notice::${STAGING_BRANCH} already contains main ${HEAD_SHA}; nothing to sync."
+            exit 0
           fi
 
           git push origin "HEAD:refs/heads/${STAGING_BRANCH}"

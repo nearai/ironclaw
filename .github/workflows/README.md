@@ -116,12 +116,15 @@ The same workflow fast-forwards `staging-release` to the main commit after all
 required push-to-main CI workflows for that SHA have succeeded. Required
 workflows are Code Style, Tests (Reborn), Platform & Compat, Replay Snapshot
 Gate, Code Coverage, and Release-plz. Path-filtered workflows — Reborn E2E and
-nearai-bench dispatcher tests — block staging-release promotion when they ran
-for the SHA, but are ignored when their path filters skip them. The
-staging-release update is a normal `git push` to
-`refs/heads/staging-release`: it skips when `staging-release` already contains
-the SHA, and fails only when `staging-release` has commits that are not
-ancestors of `main`.
+nearai-bench dispatcher tests — block staging-release promotion when they ran for
+the SHA, but are ignored when their path filters skip them.
+
+The `staging-release` update is a normal `git push` to
+`refs/heads/staging-release`. It skips when `staging-release` already contains
+the SHA, fails when required checks are hard-blocking (`staging-release` has
+commits not in `main`), and can also be delayed or fail for other operational
+reasons such as missing/pending CI runs (at trigger time), insufficient push
+permissions, concurrent workflow updates, or checkout/push errors.
 
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-checks.yml`.
