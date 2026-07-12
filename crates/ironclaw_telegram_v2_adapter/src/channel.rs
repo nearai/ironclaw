@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::{NetworkMethod, RestrictedEgress, RestrictedEgressRequest, SecretHandle};
 use ironclaw_product_adapters::{
     AdapterInstallationId, AttachmentRef, ChannelAdapter, ChannelContext, ChannelError,
-    DeliveryReport, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, VerifiedInbound,
+    DeliveryReport, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
+    PartDeliveryOutcome, VerifiedInbound,
 };
 
 use crate::payload::{
@@ -27,6 +28,13 @@ pub const TELEGRAM_WEBHOOK_URL_CONFIG: &str = "telegram_webhook_url";
 pub const TELEGRAM_WEBHOOK_SECRET_HANDLE: &str = "telegram_webhook_secret";
 /// Secret handle for the bot token the host injects on Bot API egress.
 pub const TELEGRAM_BOT_TOKEN_HANDLE: &str = "telegram_bot_token";
+
+/// Path placeholder the manifest's `[[channel.egress]] injection` declares;
+/// the host substitutes the token host-side (`/bot{telegram_bot_token}/…`).
+pub const TELEGRAM_TOKEN_PLACEHOLDER: &str = "telegram_bot_token";
+
+/// Telegram sendMessage hard limit (characters).
+const TELEGRAM_TEXT_LIMIT_CHARS: usize = 4096;
 
 /// The Telegram channel adapter. Group-forwarding triggers are non-secret
 /// installation config, supplied at construction (bind-time).
@@ -141,14 +149,179 @@ impl ChannelAdapter for TelegramChannelAdapter {
         }
     }
 
+    /// Render one coordinator envelope as Bot API `sendMessage` calls: plain
+    /// text split at the vendor's 4096-char limit, `chat_id` from the
+    /// conversation ref, forum-topic threading when the anchor is numeric.
+    /// The bot token rides the declared path placeholder — injected
+    /// host-side, never adapter-visible.
     async fn deliver(
         &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn RestrictedEgress,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
-        // Outbound cutover is extension-runtime P5 (delivery coordinator).
-        Err(ChannelError::Unsupported)
+        if envelope.parts.is_empty() {
+            return Err(ChannelError::Render {
+                reason: "outbound envelope carries no parts".to_string(),
+            });
+        }
+        let chat_id = envelope.target.conversation.conversation_id().to_string();
+        let message_thread_id = envelope
+            .target
+            .thread_anchor
+            .as_deref()
+            .or_else(|| envelope.target.conversation.topic_id())
+            .and_then(|topic| topic.parse::<i64>().ok());
+
+        let mut parts = Vec::new();
+        'parts: for part in &envelope.parts {
+            match part {
+                OutboundPart::Text(text) => {
+                    for chunk in telegram_text_chunks(text) {
+                        let mut body = serde_json::json!({ "chat_id": chat_id, "text": chunk });
+                        if let Some(thread_id) = message_thread_id {
+                            body["message_thread_id"] = thread_id.into();
+                        }
+                        let outcome = send_telegram_message(egress, body).await;
+                        let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                        parts.push(outcome);
+                        if !sent {
+                            // The report describes what the vendor accepted;
+                            // the coordinator owns retry semantics.
+                            break 'parts;
+                        }
+                    }
+                }
+                OutboundPart::Attachment(_) => {
+                    parts.push(PartDeliveryOutcome::Permanent {
+                        reason: "telegram outbound attachment upload is not supported yet"
+                            .to_string(),
+                    });
+                    break 'parts;
+                }
+            }
+        }
+        Ok(DeliveryReport { parts })
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramSendMessageResponse {
+    ok: bool,
+    error_code: Option<u16>,
+    description: Option<String>,
+    result: Option<TelegramSentMessage>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramSentMessage {
+    message_id: i64,
+}
+
+async fn send_telegram_message(
+    egress: &dyn RestrictedEgress,
+    body: serde_json::Value,
+) -> PartDeliveryOutcome {
+    let response = match egress.send(bot_api_request("sendMessage", body)).await {
+        Ok(response) => response,
+        Err(error) => return telegram_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return telegram_outcome_for_status(
+            response.status,
+            format!("telegram bot api returned status {}", response.status),
+        );
+    }
+    let parsed: TelegramSendMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        // A truncated body from a proxy/LB timeout is transient infra.
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("sendMessage response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: parsed.result.map(|message| message.message_id.to_string()),
+        };
+    }
+    let description = parsed
+        .description
+        .unwrap_or_else(|| "unknown_error".to_string());
+    telegram_outcome_for_status(
+        parsed.error_code.unwrap_or(400),
+        format!("telegram rejected sendMessage ({description})"),
+    )
+}
+
+fn telegram_outcome_for_status(status: u16, reason: String) -> PartDeliveryOutcome {
+    if status >= 500 || status == 429 || status == 408 {
+        PartDeliveryOutcome::Retryable { reason }
+    } else if status == 401 || status == 403 {
+        PartDeliveryOutcome::Unauthorized { reason }
+    } else {
+        PartDeliveryOutcome::Permanent { reason }
+    }
+}
+
+fn telegram_outcome_for_egress_error(
+    error: &ironclaw_host_api::RestrictedEgressError,
+) -> PartDeliveryOutcome {
+    use ironclaw_host_api::RestrictedEgressError as EgressError;
+    match error {
+        EgressError::Transport { .. } | EgressError::DeadlineExceeded => {
+            PartDeliveryOutcome::Retryable {
+                reason: error.to_string(),
+            }
+        }
+        EgressError::AuthRequired { .. } | EgressError::UndeclaredCredential { .. } => {
+            PartDeliveryOutcome::Unauthorized {
+                reason: error.to_string(),
+            }
+        }
+        EgressError::UndeclaredHost { .. }
+        | EgressError::UndeclaredMethod
+        | EgressError::HostOwnedHeader { .. }
+        | EgressError::PolicyDenied
+        | EgressError::ResponseTooLarge => PartDeliveryOutcome::Permanent {
+            reason: error.to_string(),
+        },
+    }
+}
+
+/// Split text at the vendor's 4096-char message limit, preferring newline
+/// boundaries within each window.
+fn telegram_text_chunks(text: &str) -> Vec<String> {
+    if text.chars().count() <= TELEGRAM_TEXT_LIMIT_CHARS {
+        return vec![text.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_chars = 0usize;
+    for segment in text.split_inclusive('\n') {
+        let segment_chars = segment.chars().count();
+        if current_chars + segment_chars > TELEGRAM_TEXT_LIMIT_CHARS && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_chars = 0;
+        }
+        if segment_chars > TELEGRAM_TEXT_LIMIT_CHARS {
+            for ch in segment.chars() {
+                if current_chars == TELEGRAM_TEXT_LIMIT_CHARS {
+                    chunks.push(std::mem::take(&mut current));
+                    current_chars = 0;
+                }
+                current.push(ch);
+                current_chars += 1;
+            }
+        } else {
+            current.push_str(segment);
+            current_chars += segment_chars;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 /// A Bot API request against the declared vendor host, naming the bot-token
@@ -157,7 +330,7 @@ impl ChannelAdapter for TelegramChannelAdapter {
 fn bot_api_request(method: &str, body: serde_json::Value) -> RestrictedEgressRequest {
     RestrictedEgressRequest {
         method: NetworkMethod::Post,
-        url: format!("https://{TELEGRAM_API_HOST}/bot/{method}"),
+        url: format!("https://{TELEGRAM_API_HOST}/bot{{{TELEGRAM_TOKEN_PLACEHOLDER}}}/{method}"),
         headers: vec![("content-type".to_string(), "application/json".to_string())],
         body: Some(body.to_string().into_bytes()),
         credential: SecretHandle::new(TELEGRAM_BOT_TOKEN_HANDLE).ok(),
@@ -351,5 +524,197 @@ mod tests {
             inbound(br#"{"message": {"message_id": 1, "date": 1, "chat": {"id": 1, "type": "private"}}}"#),
             Err(ChannelError::Parse { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod deliver_tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
+    use ironclaw_product_adapters::{
+        ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
+        PartDeliveryOutcome,
+    };
+
+    use super::*;
+
+    struct ScriptedEgress {
+        requests: Mutex<Vec<RestrictedEgressRequest>>,
+        responses: Mutex<VecDeque<Result<RestrictedEgressResponse, RestrictedEgressError>>>,
+    }
+
+    impl ScriptedEgress {
+        fn new(responses: Vec<Result<RestrictedEgressResponse, RestrictedEgressError>>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses.into_iter().collect()),
+            }
+        }
+
+        fn ok(body: &str) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: body.as_bytes().to_vec(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RestrictedEgress for ScriptedEgress {
+        async fn send(
+            &self,
+            request: RestrictedEgressRequest,
+        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            self.requests.lock().unwrap().push(request);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Err(RestrictedEgressError::PolicyDenied))
+        }
+    }
+
+    fn envelope(parts: Vec<OutboundPart>, topic: Option<&str>) -> OutboundEnvelope {
+        OutboundEnvelope {
+            extension_id: "telegram".to_string(),
+            installation_id: "install_alpha".to_string(),
+            delivery_attempt_id: "attempt-1".to_string(),
+            target: OutboundTarget {
+                conversation: ExternalConversationRef::new(None, "8675309", topic, None)
+                    .expect("conversation"),
+                thread_anchor: None,
+            },
+            parts,
+            reply_context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_posts_send_message_through_the_token_path_template() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"result":{"message_id":42}}"#,
+        )]);
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(vec![OutboundPart::Text("hello".to_string())], Some("77")),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert_eq!(report.parts.len(), 1);
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Sent { vendor_message_ref: Some(id) } if id == "42"
+        ));
+        let requests = egress.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].url, "https://api.telegram.org/bot{telegram_bot_token}/sendMessage",
+            "the token rides the declared path placeholder, substituted host-side"
+        );
+        assert_eq!(
+            requests[0].credential.as_ref().map(SecretHandle::as_str),
+            Some(TELEGRAM_BOT_TOKEN_HANDLE)
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(requests[0].body.as_deref().unwrap_or_default()).unwrap();
+        assert_eq!(body["chat_id"], "8675309");
+        assert_eq!(body["text"], "hello");
+        assert_eq!(body["message_thread_id"], 77, "numeric topic threads");
+    }
+
+    #[tokio::test]
+    async fn deliver_splits_oversized_text_at_the_vendor_limit() {
+        let egress = ScriptedEgress::new(vec![
+            ScriptedEgress::ok(r#"{"ok":true,"result":{"message_id":1}}"#),
+            ScriptedEgress::ok(r#"{"ok":true,"result":{"message_id":2}}"#),
+        ]);
+        let long_text = "line\n".repeat(1_000); // 5000 chars > 4096
+        let report = TelegramChannelAdapter::default()
+            .deliver(envelope(vec![OutboundPart::Text(long_text)], None), &egress)
+            .await
+            .expect("deliver drives");
+        assert_eq!(report.parts.len(), 2);
+        assert!(
+            report
+                .parts
+                .iter()
+                .all(|part| matches!(part, PartDeliveryOutcome::Sent { .. }))
+        );
+        assert_eq!(egress.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deliver_classifies_vendor_and_egress_failures_and_stops() {
+        // 429 body → Retryable; the second text part is never attempted.
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error_code":429,"description":"Too Many Requests"}"#,
+        )]);
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(
+                    vec![
+                        OutboundPart::Text("one".to_string()),
+                        OutboundPart::Text("two".to_string()),
+                    ],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert_eq!(report.parts.len(), 1);
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Retryable { .. }
+        ));
+        assert_eq!(egress.requests.lock().unwrap().len(), 1);
+
+        // 403 → Unauthorized (bot kicked / token revoked).
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error_code":403,"description":"Forbidden"}"#,
+        )]);
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(vec![OutboundPart::Text("x".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Unauthorized { .. }
+        ));
+
+        // Missing credential material → Unauthorized without vendor traffic
+        // beyond the failed attempt.
+        let egress = ScriptedEgress::new(vec![Err(RestrictedEgressError::AuthRequired {
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+        })]);
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(vec![OutboundPart::Text("x".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Unauthorized { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_rejects_empty_envelopes_and_unsupported_attachments() {
+        let egress = ScriptedEgress::new(Vec::new());
+        let error = TelegramChannelAdapter::default()
+            .deliver(envelope(Vec::new(), None), &egress)
+            .await
+            .expect_err("empty envelope is a render error");
+        assert!(matches!(error, ChannelError::Render { .. }));
+        assert!(egress.requests.lock().unwrap().is_empty());
     }
 }
