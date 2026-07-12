@@ -292,37 +292,107 @@ Rules — kept short on purpose:
 
 ## 6. Channel ingress (ING)
 
-- [ ] ING-1 One generic router serves
+- [x] ING-1 One generic router serves
   `/webhooks/extensions/{extension_id}/{route_suffix}` from the active
   snapshot; extensions cannot mount arbitrary routes; collisions with fixed
-  host routes fail activation.
-- [ ] ING-2 Method, body limit, rate limit, and deadline are enforced before
-  adapter work.
-- [ ] ING-3 `hmac_sha256` recipes verify exact byte construction
+  host routes fail activation. —
+  `route_table_follows_snapshot_swaps_without_router_rebuild`,
+  `activation_rejects_collision_with_fixed_host_routes`
+  (`crates/ironclaw_extension_host/tests/ingress_router_contract.rs`);
+  production mount leg:
+  `signed_acme_post_flows_through_the_production_mount_into_a_turn`
+  (`tests/integration/extension_ingress.rs`). Fixed-route set injected by
+  composition (`reserved_fixed_ingress_routes`, empty today — no fixed host
+  route lives under the extension namespace).
+- [x] ING-2 Method, body limit, rate limit, and deadline are enforced before
+  adapter work. —
+  `method_body_and_rate_limits_run_before_verification_and_adapter`,
+  `request_deadline_bounds_verification_through_admission`
+  (`ingress_router_contract.rs`).
+- [x] ING-3 `hmac_sha256` recipes verify exact byte construction
   (fixture-pinned), with constant-time comparison and timestamp/replay
-  rejection.
-- [ ] ING-4 `shared_secret_header` verifies constant-time and rejects
-  missing/duplicate headers.
-- [ ] ING-5 Signing secrets are never observable by the adapter (scripted
-  adapter records its full inputs).
-- [ ] ING-6 With multiple candidate installations, verification tries each
-  within the fixed bound and resolves exactly one or rejects as ambiguous.
-- [ ] ING-7 `adapter.inbound` receives bounded input, is panic-isolated, and
-  returns `Messages`/`Respond`/`Ignore` only.
-- [ ] ING-8 2xx is returned only after the durable dedupe/admission commit;
+  rejection. — `hmac_recipe_verifies_the_exact_acme_byte_construction`,
+  `hmac_recipe_enforces_the_replay_window_before_any_hmac`,
+  `hmac_recipe_rejects_tampered_body_missing_and_bad_signatures`
+  (`crates/ironclaw_extension_host/src/ingress/verifier.rs`, `subtle::ct_eq`
+  comparisons); wire legs in `ingress_router_contract.rs` and
+  `tests/integration/extension_ingress.rs`.
+- [x] ING-4 `shared_secret_header` verifies constant-time and rejects
+  missing/duplicate headers. —
+  `shared_secret_header_verifies_constant_time_and_rejects_missing_duplicate`
+  (`verifier.rs`; duplicate signature/timestamp headers also fail closed:
+  `hmac_recipe_rejects_duplicated_signature_or_timestamp_headers`).
+- [x] ING-5 Signing secrets are never observable by the adapter (scripted
+  adapter records its full inputs). —
+  `adapter_never_observes_verification_headers_or_secret_material`
+  (`ingress_router_contract.rs`).
+- [x] ING-6 With multiple candidate installations, verification tries each
+  within the fixed bound and resolves exactly one or rejects as ambiguous. —
+  `hmac_recipe_resolves_exactly_one_of_multiple_candidates` (`verifier.rs`,
+  bound `MAX_VERIFICATION_CANDIDATES = 8`);
+  `multi_candidate_verification_resolves_exactly_one_installation`
+  (`ingress_router_contract.rs`).
+- [x] ING-7 `adapter.inbound` receives bounded input, is panic-isolated, and
+  returns `Messages`/`Respond`/`Ignore` only. —
+  `adapter_panic_is_isolated_and_the_router_survives`,
+  `adapter_never_observes_verification_headers_or_secret_material`
+  (`ingress_router_contract.rs`; the outcome enum is the trait's only return
+  shape, and out-of-bounds messages/responses are rejected host-side).
+- [x] ING-8 2xx is returned only after the durable dedupe/admission commit;
   store failure returns retryable 5xx; crash/duplicate/restart replay
-  converges exactly once (both DBs).
-- [ ] ING-9 Challenge (`Respond`) answers after verification without enqueue,
-  within response size/status bounds.
-- [ ] ING-10 Normalized messages flow through existing identity/conversation
-  binding and turn submission (integration: signed vendor POST → turn).
+  converges exactly once (both DBs). —
+  `two_hundred_only_after_durable_admission_commit`
+  (`ingress_router_contract.rs`, scripted-sink leg);
+  `duplicate_and_restart_replay_converge_exactly_once` matrixed over
+  `StorageMode::{LibSql,Postgres}`
+  (`tests/integration/extension_ingress.rs`, real durable idempotency
+  ledger; "restart" = fresh sink over the same durable ledger). NOTE: a
+  terminally settled workflow rejection also acks 2xx — it is durably
+  accounted for (replay converges `Duplicate`), and user feedback flows
+  through the post-admission observer. `Ignore` acks without a ledger write:
+  ignored outcomes carry no event identity to key a commit.
+- [x] ING-9 Challenge (`Respond`) answers after verification without enqueue,
+  within response size/status bounds. —
+  `respond_outcome_answers_without_enqueue_within_bounds`
+  (`ingress_router_contract.rs`);
+  `url_verification_challenge_becomes_an_immediate_response`
+  (`crates/ironclaw_slack_v2_adapter/src/channel.rs`); production-mount leg
+  in `tests/integration/extension_ingress.rs`.
+- [x] ING-10 Normalized messages flow through existing identity/conversation
+  binding and turn submission (integration: signed vendor POST → turn). —
+  `signed_acme_post_flows_through_the_production_mount_into_a_turn`
+  (`tests/integration/extension_ingress.rs`: the post-admission observer
+  records `ProductInboundAck::Accepted { submitted_run_id, .. }` from the
+  REAL `DefaultProductWorkflow`).
 - [ ] ING-11 `reply_context` is stored host-side and returned to the same
-  extension's adapter at delivery time.
+  extension's adapter at delivery time. — Storage half proven:
+  `reply_context_is_stored_host_side_keyed_by_conversation`
+  (`ingress_router_contract.rs`, keyed by conversation fingerprint).
+  Delivery-time return lands with the P5 delivery coordinator (the
+  `OutboundEnvelope.reply_context` slot exists; no coordinator reads the
+  store yet).
 - [ ] ING-12 Slack and Telegram inbound both pass through the same router and
-  workflow caller with zero host branches (one integration proof each).
+  workflow caller with zero host branches (one integration proof each). —
+  Slack: the full `slack_serve/e2e_tests.rs` scenario suite (24 tests) now
+  drives the generic router + recipe verifier + `SlackChannelAdapter` +
+  generic sink through the alias mount (e.g.
+  `slack_dm_delivers_final_reply_after_immediate_ack`,
+  `slack_events_rejects_forged_hmac_signature`), and
+  `build_slack_events_route_mount_dispatches_signed_event_callback`
+  (`slack_host_beta.rs`) proves it over the composed runtime. Acme proves the
+  route-agnostic half (`tests/integration/extension_ingress.rs`). Telegram:
+  adapter + parsing proven at the crate tier
+  (`crates/ironclaw_telegram_v2_adapter/src/channel.rs`); the
+  through-the-router integration proof lands with the bundled telegram
+  package (see DEL-10).
 - [ ] ING-13 Inbound attachments are references; any byte fetch happens
   host-side through restricted egress with the channel credential — adapters
-  never fetch.
+  never fetch. — Reference half holds by construction (`AttachmentRef`
+  carries descriptor + vendor ref + mime hint; Slack/Telegram adapters map
+  descriptors without fetching —
+  `dm_message_normalizes_with_text_trigger_and_event_identity`). The
+  host-side fetch path is specified but deliberately unbuilt until a
+  consumer needs bytes (overview §4.2).
 
 ## 7. Channel outbound (OUT)
 
@@ -382,7 +452,19 @@ Rules — kept short on purpose:
   pass — the deletion test.
 - [ ] DEL-10 Telegram runs as a real installed package (manifest +
   `activate()` webhook registration) — the addition test proven by the second
-  production channel.
+  production channel. — Adapter half built (P4):
+  `TelegramChannelAdapter::{inbound,activate,cleanup}` with
+  `shared_secret_header` verification host-side and `setWebhook`/
+  `deleteWebhook` over `RestrictedEgress`
+  (`activate_registers_the_webhook_with_the_secret_token_handle`,
+  `cleanup_unregisters_the_webhook`,
+  `private_chat_update_normalizes_to_one_message`,
+  `crates/ironclaw_telegram_v2_adapter/src/channel.rs`). Remaining: bundled
+  telegram package assets + catalog entry, the binary-assembled entrypoint
+  binding, a real channel-egress factory (the host's `EgressFactory` is
+  still fail-closed pending the P5 egress work — Telegram's token-in-path
+  Bot API also needs host-side path injection), and the
+  install→activate→signed-update→turn integration proof through the router.
 
 ## 9. Frontend (UI)
 
@@ -413,8 +495,14 @@ Rules — kept short on purpose:
   root is read outside migration code.
 - [ ] MIG-4 Old installation lifecycle records backfill into the standard
   state enum.
-- [ ] MIG-5 `/webhooks/slack/events` forwards to the canonical route for one
-  release; a removal note names the release that deletes it.
+- [x] MIG-5 `/webhooks/slack/events` forwards to the canonical route for one
+  release; a removal note names the release that deletes it. — The legacy
+  path is an internal forwarding alias into the generic router
+  (`slack_events_alias_mount`, `composition/src/slack/slack_serve.rs`; the
+  whole `slack_serve/e2e_tests.rs` suite posts to it). REMOVAL NOTE: delete
+  the alias (and `SLACK_EVENTS_PATH`) in the first release after the P4
+  cutover ships; vendors reconfigure their Events URL to
+  `/webhooks/extensions/slack/events`.
 - [ ] MIG-6 OAuth callback URLs are unchanged (no vendor reconfiguration
   needed) — verified by the route tests.
 - [ ] MIG-7 Migrations are idempotent (second run is a no-op) and skip
