@@ -133,6 +133,16 @@ impl ChannelAdapter for SlackChannelAdapter {
                     });
                     break 'parts;
                 }
+                OutboundPart::Retract { vendor_message_ref } => {
+                    let outcome =
+                        delete_slack_message(egress, &credential, &channel, vendor_message_ref)
+                            .await;
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
             }
         }
         Ok(DeliveryReport { parts })
@@ -205,6 +215,65 @@ async fn post_slack_chunk(
     part_outcome_for_kind(
         slack_error_kind(&error),
         format!("slack rejected chat.postMessage ({error})"),
+    )
+}
+
+/// Retract an earlier post (`chat.delete`). The `vendor_message_ref` is the
+/// `ts` a previous `Sent` outcome returned; the channel comes from the
+/// envelope's target conversation.
+async fn delete_slack_message(
+    egress: &dyn RestrictedEgress,
+    credential: &SecretHandle,
+    channel: &str,
+    ts: &str,
+) -> PartDeliveryOutcome {
+    let body = match serde_json::to_vec(&serde_json::json!({ "channel": channel, "ts": ts })) {
+        Ok(body) => body,
+        Err(error) => {
+            return PartDeliveryOutcome::Permanent {
+                reason: format!("chat.delete body did not serialize: {error}"),
+            };
+        }
+    };
+    let response = egress
+        .send(RestrictedEgressRequest {
+            method: NetworkMethod::Post,
+            url: format!("https://{SLACK_API_HOST}/api/chat.delete"),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: Some(body),
+            credential: Some(credential.clone()),
+        })
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return part_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return part_outcome_for_kind(
+            SlackDeliveryFailureKind::from_http_status(response.status),
+            format!("slack web api returned status {}", response.status),
+        );
+    }
+    let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("chat.delete response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: None,
+        };
+    }
+    let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+    part_outcome_for_kind(
+        slack_error_kind(&error),
+        format!("slack rejected chat.delete ({error})"),
     )
 }
 
@@ -516,6 +585,64 @@ mod tests {
         assert_eq!(body["channel"], "D123");
         assert_eq!(body["thread_ts"], "1710000000.000100");
         assert_eq!(body["text"], "*bold* reply", "markdown renders to mrkdwn");
+    }
+
+    #[tokio::test]
+    async fn deliver_retract_part_deletes_the_referenced_message() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true}"#)]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::Retract {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert_eq!(report.parts.len(), 1);
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Sent {
+                vendor_message_ref: None
+            }
+        ));
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://slack.com/api/chat.delete");
+        assert_eq!(
+            requests[0].credential.as_ref().map(|h| h.as_str()),
+            Some("slack_bot_token")
+        );
+        let body = body_json(&requests[0]);
+        assert_eq!(body["channel"], "D123");
+        assert_eq!(body["ts"], "1710000001.000001");
+    }
+
+    #[tokio::test]
+    async fn deliver_retract_vendor_rejection_maps_to_permanent() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":false,"error":"message_not_found"}"#,
+        )]);
+        let report = SlackChannelAdapter
+            .deliver(
+                envelope(
+                    vec![OutboundPart::Retract {
+                        vendor_message_ref: "1710000001.000001".to_string(),
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { reason } if reason.contains("message_not_found")
+        ));
     }
 
     #[tokio::test]

@@ -176,6 +176,13 @@ pub struct OutboundTarget {
 pub enum OutboundPart {
     Text(String),
     Attachment(AttachmentRef),
+    /// Remove an earlier delivery in the target conversation (the `Cleanup`
+    /// intent, e.g. deleting a working indicator). `vendor_message_ref` is
+    /// the reference a previous [`PartDeliveryOutcome::Sent`] returned; the
+    /// adapter resolves it against the envelope's target conversation.
+    Retract {
+        vendor_message_ref: String,
+    },
 }
 
 /// Structured per-attempt delivery report. The adapter cannot mark anything

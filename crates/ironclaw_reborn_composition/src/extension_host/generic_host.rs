@@ -57,21 +57,36 @@ pub(crate) struct GenericExtensionHost {
     pub(crate) resolver: Arc<SnapshotToolResolver>,
 }
 
+/// Inputs for [`build_generic_extension_host`]: the runtime lanes, binding
+/// tables, durable state, and policy inputs the host composes over.
+pub(crate) struct GenericExtensionHostParams {
+    pub(crate) binder: ExtensionLaneToolBinder,
+    pub(crate) native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
+    pub(crate) channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
+    pub(crate) installation_store: Arc<dyn ExtensionInstallationStore>,
+    pub(crate) governor: Arc<dyn ResourceGovernor>,
+    pub(crate) reserved_capability_ids: BTreeSet<CapabilityId>,
+    pub(crate) reserved_ingress_routes: BTreeSet<String>,
+    pub(crate) channel_egress_transport:
+        Option<Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>>,
+}
+
 /// Construct the generic extension host over the host-runtime lanes and
 /// hydrate it from the facade's durable installation state (every `Enabled`
 /// installation activates into the first published generation).
 pub(crate) async fn build_generic_extension_host(
-    binder: ExtensionLaneToolBinder,
-    native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
-    channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
-    installation_store: Arc<dyn ExtensionInstallationStore>,
-    governor: Arc<dyn ResourceGovernor>,
-    reserved_capability_ids: BTreeSet<CapabilityId>,
-    reserved_ingress_routes: BTreeSet<String>,
-    channel_egress_transport: Option<
-        Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>,
-    >,
+    params: GenericExtensionHostParams,
 ) -> Result<GenericExtensionHost, crate::RebornBuildError> {
+    let GenericExtensionHostParams {
+        binder,
+        native_factories,
+        channel_adapters,
+        installation_store,
+        governor,
+        reserved_capability_ids,
+        reserved_ingress_routes,
+        channel_egress_transport,
+    } = params;
     let factories: HashMap<String, Arc<dyn NativeExtensionFactory>> = native_factories
         .into_iter()
         .map(|factory| (factory.service().to_string(), factory))

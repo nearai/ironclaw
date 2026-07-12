@@ -1840,7 +1840,7 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
     CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
-    DeliveryRetryPolicy, ResolvedChannelDelivery,
+    DeliveryRetryPolicy, NoticeDeliveryRequest, ResolvedChannelDelivery,
 };
 
 struct CoordinatorDenyAllEgress;
@@ -2036,12 +2036,16 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
 
     let CoordinatedDeliveryOutcome::Delivered {
         attempt,
+        conversation,
         vendor_message_refs,
     } = outcome
     else {
         panic!("expected delivered outcome");
     };
     assert_eq!(vendor_message_refs, vec!["ts-100".to_string()]);
+    // The resolved target conversation rides the outcome so emitters can
+    // record gate routes / cleanup targets without vendor knowledge.
+    assert_eq!(conversation.conversation_id(), "tg-chat-123");
     // OUT-3: the adapter observed the attempt already persisted as Sending.
     assert_eq!(
         adapter.observed_statuses(),
@@ -2295,6 +2299,257 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
     assert_eq!(
         attempts[0].failure_kind,
         Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
+    );
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+// ── Notice-class deliveries (§5.4: Working / Cleanup / FailureNotice /
+// ConnectRequired) — source-routed system notices on the originating
+// conversation; no outbound-policy resolution, but the same persistence,
+// retry, and sole-writer rules apply. ──────────────────────────────────────
+
+fn notice_source_conversation() -> ExternalConversationRef {
+    ExternalConversationRef::new(Some("team-9"), "conv-notice", Some("1719.100"), None)
+        .expect("valid notice conversation")
+}
+
+fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest<'_> {
+    NoticeDeliveryRequest {
+        intent: DeliveryIntent::Working,
+        scope,
+        turn_run_id: None,
+        conversation: notice_source_conversation(),
+        thread_anchor: Some("1719.100".to_string()),
+        parts: vec![ironclaw_product_adapters::OutboundPart::Text(
+            "Working on it...".to_string(),
+        )],
+        extension_id,
+        notice_ref: "run-42".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn coordinator_notice_is_source_routed_and_persists_before_egress() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-900")],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let outcome = coordinator
+        .deliver_notice(working_notice(scope.clone(), "vendorx"))
+        .await
+        .expect("notice delivers");
+
+    let CoordinatedDeliveryOutcome::Delivered {
+        attempt,
+        conversation,
+        vendor_message_refs,
+    } = outcome
+    else {
+        panic!("expected delivered outcome");
+    };
+    assert_eq!(vendor_message_refs, vec!["ts-900".to_string()]);
+    assert_eq!(
+        conversation.conversation_fingerprint(),
+        notice_source_conversation().conversation_fingerprint()
+    );
+    // OUT-3 applies to notices too: `Sending` durable before the adapter ran.
+    assert_eq!(
+        adapter.observed_statuses(),
+        vec![ironclaw_outbound::OutboundDeliveryStatus::Sending]
+    );
+    let envelopes = adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(
+        envelopes[0].target.conversation.conversation_fingerprint(),
+        notice_source_conversation().conversation_fingerprint()
+    );
+    assert_eq!(
+        envelopes[0].target.thread_anchor.as_deref(),
+        Some("1719.100")
+    );
+    // The stored source reply context rides back on notice envelopes too
+    // (ING-11 covers system notices).
+    assert_eq!(
+        envelopes[0].reply_context.as_deref(),
+        Some(b"vendor-reply-ctx".as_slice())
+    );
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].delivery_id, attempt.delivery_id);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+    assert_eq!(
+        attempts[0].candidate.kind,
+        ironclaw_outbound::OutboundPushKind::DeliveryStatus
+    );
+    assert!(!attempts[0].candidate.requires_reply_target_revalidation);
+}
+
+#[tokio::test]
+async fn coordinator_notice_rejects_policy_class_intents() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let mut request = working_notice(scope.clone(), "vendorx");
+    request.intent = DeliveryIntent::FinalReply;
+    let error = coordinator
+        .deliver_notice(request)
+        .await
+        .expect_err("policy-class intents must use the policy path");
+    assert!(matches!(
+        error,
+        CoordinatedDeliveryError::IntentClassMismatch { .. }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+    assert!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn coordinator_deliver_rejects_notice_class_intents() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let mut request = coordinated_final_reply(scope.clone(), "vendorx");
+    request.intent = DeliveryIntent::Working;
+    let error = coordinator
+        .deliver(&policy, &preferences, &resolver, request)
+        .await
+        .expect_err("notice-class intents must use the notice path");
+    assert!(matches!(
+        error,
+        CoordinatedDeliveryError::IntentClassMismatch { .. }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[tokio::test]
+async fn coordinator_cleanup_retract_parts_reach_the_adapter() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: None,
+            }],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+
+    let mut request = working_notice(scope.clone(), "vendorx");
+    request.intent = DeliveryIntent::Cleanup;
+    request.parts = vec![ironclaw_product_adapters::OutboundPart::Retract {
+        vendor_message_ref: "ts-900".to_string(),
+    }];
+    let outcome = coordinator
+        .deliver_notice(request)
+        .await
+        .expect("cleanup delivers");
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    let envelopes = adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert!(matches!(
+        &envelopes[0].parts[..],
+        [ironclaw_product_adapters::OutboundPart::Retract { vendor_message_ref }]
+            if vendor_message_ref == "ts-900"
+    ));
+}
+
+#[tokio::test]
+async fn coordinator_notice_rejected_while_draining() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    coordinator.begin_drain();
+
+    let error = coordinator
+        .deliver_notice(working_notice(scope.clone(), "vendorx"))
+        .await
+        .expect_err("draining rejects notices");
+    assert!(matches!(error, CoordinatedDeliveryError::Draining));
+    assert_eq!(adapter.deliver_calls(), 0);
+    assert!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn coordinator_notice_fails_closed_when_the_channel_is_unavailable() {
+    let scope = scope();
+    let store = Arc::new(InMemoryOutboundStateStore::default());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStore>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: true,
+        }),
+        Arc::new(FixedReplyContext(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let error = coordinator
+        .deliver_notice(working_notice(scope.clone(), "vendorx"))
+        .await
+        .expect_err("unavailable channel fails closed");
+    assert!(matches!(
+        error,
+        CoordinatedDeliveryError::ChannelUnavailable { .. }
+    ));
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
     );
     assert_eq!(adapter.deliver_calls(), 0);
 }

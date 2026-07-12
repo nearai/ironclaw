@@ -1766,22 +1766,26 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
         });
         let generic = crate::extension_host::generic_host::build_generic_extension_host(
-            services.extension_lane_tool_binder(),
-            native_extension_factories,
-            crate::extension_host::available_extensions::bundled_channel_adapter_bindings(),
-            store_graph
-                .local_runtime
-                .extension_management
-                .as_ref()
-                .map(|management| management.installation_store_handle())
-                .ok_or_else(|| RebornBuildError::InvalidConfig {
-                    reason: "generic extension host requires extension management".to_string(),
-                })?,
-            Arc::clone(&store_graph.resource_governor)
-                as Arc<dyn ironclaw_resources::ResourceGovernor>,
-            reserved_capability_ids,
-            crate::extension_host::extension_ingress::reserved_fixed_ingress_routes(),
-            channel_egress_transport,
+            crate::extension_host::generic_host::GenericExtensionHostParams {
+                binder: services.extension_lane_tool_binder(),
+                native_factories: native_extension_factories,
+                channel_adapters:
+                    crate::extension_host::available_extensions::bundled_channel_adapter_bindings(),
+                installation_store: store_graph
+                    .local_runtime
+                    .extension_management
+                    .as_ref()
+                    .map(|management| management.installation_store_handle())
+                    .ok_or_else(|| RebornBuildError::InvalidConfig {
+                        reason: "generic extension host requires extension management".to_string(),
+                    })?,
+                governor: Arc::clone(&store_graph.resource_governor)
+                    as Arc<dyn ironclaw_resources::ResourceGovernor>,
+                reserved_capability_ids,
+                reserved_ingress_routes:
+                    crate::extension_host::extension_ingress::reserved_fixed_ingress_routes(),
+                channel_egress_transport,
+            },
         )
         .await?;
         if let Some(management) = store_graph.local_runtime.extension_management.as_ref() {

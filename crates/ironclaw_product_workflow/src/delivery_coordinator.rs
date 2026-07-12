@@ -28,12 +28,16 @@ use async_trait::async_trait;
 use ironclaw_host_api::RestrictedEgress;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
-    OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundStateStore,
-    PrepareCommunicationDeliveryRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
+    OutboundPushKind, OutboundStateStore, PrepareCommunicationDeliveryRequest,
+    UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    ChannelAdapter, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+    ChannelAdapter, ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
+    PartDeliveryOutcome,
 };
+use ironclaw_turns::{TurnRunId, TurnScope};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::debug;
 
@@ -79,6 +83,27 @@ impl DeliveryIntent {
                 | Self::AuthPrompt
                 | Self::TriggeredDelivery
         )
+    }
+
+    /// Notice-class intents (`deliver_notice`): still persisted and driven by
+    /// the coordinator, but targeted at the originating conversation instead
+    /// of a policy-resolved binding.
+    pub fn is_notice_class(self) -> bool {
+        !self.runs_outbound_policy()
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FinalReply => "final-reply",
+            Self::Progress => "progress",
+            Self::GatePrompt => "gate-prompt",
+            Self::AuthPrompt => "auth-prompt",
+            Self::FailureNotice => "failure-notice",
+            Self::ConnectRequired => "connect-required",
+            Self::Working => "working",
+            Self::Cleanup => "cleanup",
+            Self::TriggeredDelivery => "triggered-delivery",
+        }
     }
 }
 
@@ -140,6 +165,27 @@ pub struct CoordinatedDeliveryRequest<'a> {
     pub extension_id: &'a str,
 }
 
+/// One notice-class delivery request (§5.4: `Working`, `Cleanup`,
+/// `FailureNotice`, `ConnectRequired`): a source-routed system notice on the
+/// originating conversation. There is no policy resolution — the target IS
+/// the conversation the triggering inbound event arrived on — but the
+/// attempt is persisted and driven under the same sole-writer rules.
+pub struct NoticeDeliveryRequest<'a> {
+    pub intent: DeliveryIntent,
+    pub scope: TurnScope,
+    pub turn_run_id: Option<TurnRunId>,
+    /// The originating conversation (the source route). Requests without a
+    /// source conversation cannot be constructed — that is the fail-closed
+    /// rule for notices.
+    pub conversation: ExternalConversationRef,
+    pub thread_anchor: Option<String>,
+    pub parts: Vec<OutboundPart>,
+    pub extension_id: &'a str,
+    /// Audit discriminator recorded in the attempt's projection ref
+    /// (e.g. a run id or event id), so repeated notices stay distinguishable.
+    pub notice_ref: String,
+}
+
 /// Coordinator outcome for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatedDeliveryOutcome {
@@ -150,6 +196,9 @@ pub enum CoordinatedDeliveryOutcome {
     /// The adapter reported every part sent.
     Delivered {
         attempt: OutboundDeliveryAttempt,
+        /// The resolved target conversation, so emitters can record follow-up
+        /// state (gate routes, cleanup targets) without vendor knowledge.
+        conversation: ExternalConversationRef,
         vendor_message_refs: Vec<String>,
     },
     /// Terminal failure (permanent, retries exhausted, or partial-multipart).
@@ -172,6 +221,10 @@ pub enum CoordinatedDeliveryError {
     AlreadyInFlight,
     #[error("the coordinator is draining; new deliveries are rejected")]
     Draining,
+    #[error("intent {intent:?} does not belong to this delivery path")]
+    IntentClassMismatch { intent: DeliveryIntent },
+    #[error("notice request is invalid: {reason}")]
+    InvalidNotice { reason: String },
 }
 
 /// Retry policy for retryable per-part outcomes (bounded, jitter-free by
@@ -278,6 +331,11 @@ impl DeliveryCoordinator {
         if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(CoordinatedDeliveryError::Draining);
         }
+        if !request.intent.runs_outbound_policy() {
+            return Err(CoordinatedDeliveryError::IntentClassMismatch {
+                intent: request.intent,
+            });
+        }
 
         // 1. Policy: authorize the candidate and persist the attempt.
         let Some(decision) = outbound_policy
@@ -324,6 +382,83 @@ impl DeliveryCoordinator {
         result
     }
 
+    /// Deliver one notice-class intent to its source conversation, under the
+    /// same persistence and sole-writer rules as the policy path. The attempt
+    /// is recorded `Prepared` before the channel resolves and moves to
+    /// `Sending` before any vendor egress.
+    pub async fn deliver_notice(
+        &self,
+        request: NoticeDeliveryRequest<'_>,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
+        if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(CoordinatedDeliveryError::Draining);
+        }
+        if !request.intent.is_notice_class() {
+            return Err(CoordinatedDeliveryError::IntentClassMismatch {
+                intent: request.intent,
+            });
+        }
+
+        // Persist the attempt before anything else. The synthetic reply
+        // target names the source conversation (hashed: fingerprints can
+        // exceed the ref bound); `requires_reply_target_revalidation` is
+        // false because there is no policy binding to revalidate — the
+        // source conversation is the target by construction.
+        let target = notice_target_ref(&request.conversation)
+            .map_err(|reason| CoordinatedDeliveryError::InvalidNotice { reason })?;
+        let projection_ref = ironclaw_outbound::ProjectionUpdateRef::new(format!(
+            "system-notice:{}:{}",
+            request.intent.as_str(),
+            request.notice_ref
+        ))
+        .map_err(|reason| CoordinatedDeliveryError::InvalidNotice { reason })?;
+        let attempt = OutboundDeliveryAttempt {
+            delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+            scope: request.scope.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: request.scope.tenant_id.clone(),
+                agent_id: request.scope.agent_id.clone(),
+                project_id: request.scope.project_id.clone(),
+                thread_id: request.scope.thread_id.clone(),
+                turn_run_id: request.turn_run_id,
+                target,
+                kind: OutboundPushKind::DeliveryStatus,
+                projection_ref,
+                requires_reply_target_revalidation: false,
+            },
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: chrono::Utc::now(),
+            failure_kind: None,
+        };
+        self.store.record_delivery_attempt(attempt.clone()).await?;
+
+        // Single-flight per delivery id (uniform with the policy path).
+        let delivery_id = attempt.delivery_id;
+        {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !in_flight.insert(delivery_id) {
+                return Err(CoordinatedDeliveryError::AlreadyInFlight);
+            }
+        }
+        let result = self
+            .drive_resolved(
+                attempt,
+                request.extension_id,
+                request.conversation,
+                request.thread_anchor,
+                request.parts,
+            )
+            .await;
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&delivery_id);
+        result
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn drive_authorized(
         &self,
@@ -337,7 +472,7 @@ impl DeliveryCoordinator {
         require_direct_message: bool,
         extension_id: &str,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
-        let _ = intent;
+        let _ = (intent, outbound_policy);
         // 2. Resolve the trusted conversation metadata for the sealed target.
         let metadata: VerifiedProductOutboundTargetMetadata = match target_resolver
             .resolve_product_outbound_target_metadata(&target, require_direct_message)
@@ -353,6 +488,27 @@ impl DeliveryCoordinator {
             }
         };
 
+        self.drive_resolved(
+            attempt,
+            extension_id,
+            metadata.external_conversation_ref,
+            thread_anchor,
+            parts,
+        )
+        .await
+    }
+
+    /// Shared delivery drive: channel resolution (generation-pinned), reply
+    /// context, `Sending` persisted before egress (OUT-3), bounded retries,
+    /// and the partial-multipart terminal rule (OUT-7).
+    async fn drive_resolved(
+        &self,
+        attempt: OutboundDeliveryAttempt,
+        extension_id: &str,
+        conversation: ExternalConversationRef,
+        thread_anchor: Option<String>,
+        parts: Vec<OutboundPart>,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         // 3. Resolve the channel from ONE snapshot read (generation-pinned).
         let Some(channel) = self.resolver.resolve_channel_delivery(extension_id) else {
             self.mark_terminal(
@@ -372,9 +528,7 @@ impl DeliveryCoordinator {
             .reply_context(
                 &channel.extension_id,
                 &channel.installation_id,
-                &metadata
-                    .external_conversation_ref
-                    .conversation_fingerprint(),
+                &conversation.conversation_fingerprint(),
             )
             .await;
 
@@ -383,7 +537,7 @@ impl DeliveryCoordinator {
             installation_id: channel.installation_id.clone(),
             delivery_attempt_id: attempt.delivery_id.to_string(),
             target: OutboundTarget {
-                conversation: metadata.external_conversation_ref.clone(),
+                conversation: conversation.clone(),
                 thread_anchor,
             },
             parts,
@@ -391,7 +545,7 @@ impl DeliveryCoordinator {
         };
 
         // 5. Persist Sending BEFORE any vendor egress (OUT-3).
-        if let Err(error) = outbound_policy
+        self.store
             .update_delivery_status(UpdateDeliveryStatusRequest {
                 delivery_id: attempt.delivery_id,
                 scope: attempt.scope.clone(),
@@ -400,9 +554,7 @@ impl DeliveryCoordinator {
                 failure_kind: None,
             })
             .await
-        {
-            return Err(CoordinatedDeliveryError::Outbound(error));
-        }
+            .map_err(CoordinatedDeliveryError::Outbound)?;
 
         // 6. Drive the adapter with bounded retries. Once any part has been
         //    sent, a later retryable failure is terminal (OUT-7).
@@ -445,6 +597,7 @@ impl DeliveryCoordinator {
                             .await;
                         return Ok(CoordinatedDeliveryOutcome::Delivered {
                             attempt,
+                            conversation,
                             vendor_message_refs: sent_refs,
                         });
                     }
@@ -528,4 +681,15 @@ impl DeliveryCoordinator {
             );
         }
     }
+}
+
+/// Synthetic reply-target ref naming a notice's source conversation. Hashed:
+/// conversation fingerprints embed raw ids and can exceed the 256-byte ref
+/// bound.
+fn notice_target_ref(
+    conversation: &ExternalConversationRef,
+) -> Result<ironclaw_turns::ReplyTargetBindingRef, String> {
+    let digest = Sha256::digest(conversation.conversation_fingerprint().as_bytes());
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    ironclaw_turns::ReplyTargetBindingRef::new(format!("system-notice:{hex}"))
 }

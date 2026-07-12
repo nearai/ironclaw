@@ -138,7 +138,7 @@ pub use lifecycle::{
 pub use delivery_coordinator::{
     ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
     CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
-    DeliveryRetryPolicy, NoReplyContext, ResolvedChannelDelivery,
+    DeliveryRetryPolicy, NoReplyContext, NoticeDeliveryRequest, ResolvedChannelDelivery,
 };
 pub use outbound_delivery::{
     ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,

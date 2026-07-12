@@ -198,6 +198,30 @@ impl ChannelAdapter for TelegramChannelAdapter {
                     });
                     break 'parts;
                 }
+                OutboundPart::Retract { vendor_message_ref } => {
+                    let outcome = match vendor_message_ref.parse::<i64>() {
+                        Ok(message_id) => {
+                            delete_telegram_message(
+                                egress,
+                                serde_json::json!({
+                                    "chat_id": chat_id,
+                                    "message_id": message_id,
+                                }),
+                            )
+                            .await
+                        }
+                        Err(_) => PartDeliveryOutcome::Permanent {
+                            reason: format!(
+                                "retract target `{vendor_message_ref}` is not a telegram message id"
+                            ),
+                        },
+                    };
+                    let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+                    parts.push(outcome);
+                    if !sent {
+                        break 'parts;
+                    }
+                }
             }
         }
         Ok(DeliveryReport { parts })
@@ -251,6 +275,53 @@ async fn send_telegram_message(
     telegram_outcome_for_status(
         parsed.error_code.unwrap_or(400),
         format!("telegram rejected sendMessage ({description})"),
+    )
+}
+
+/// `deleteMessage` responds with `result: true` (a boolean, not a message
+/// object), so it gets its own response shape.
+#[derive(Debug, serde::Deserialize)]
+struct TelegramDeleteMessageResponse {
+    ok: bool,
+    error_code: Option<u16>,
+    description: Option<String>,
+}
+
+/// Retract an earlier post (`deleteMessage`). The `vendor_message_ref` is
+/// the message id a previous `Sent` outcome returned.
+async fn delete_telegram_message(
+    egress: &dyn RestrictedEgress,
+    body: serde_json::Value,
+) -> PartDeliveryOutcome {
+    let response = match egress.send(bot_api_request("deleteMessage", body)).await {
+        Ok(response) => response,
+        Err(error) => return telegram_outcome_for_egress_error(&error),
+    };
+    if !(200..300).contains(&response.status) {
+        return telegram_outcome_for_status(
+            response.status,
+            format!("telegram bot api returned status {}", response.status),
+        );
+    }
+    let parsed: TelegramDeleteMessageResponse = match serde_json::from_slice(&response.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return PartDeliveryOutcome::Retryable {
+                reason: format!("deleteMessage response was not valid JSON: {error}"),
+            };
+        }
+    };
+    if parsed.ok {
+        return PartDeliveryOutcome::Sent {
+            vendor_message_ref: None,
+        };
+    }
+    let description = parsed
+        .description
+        .unwrap_or_else(|| "unknown_error".to_string());
+    telegram_outcome_for_status(
+        parsed.error_code.unwrap_or(400),
+        format!("telegram rejected deleteMessage ({description})"),
     )
 }
 
@@ -589,6 +660,65 @@ mod deliver_tests {
             parts,
             reply_context: None,
         }
+    }
+
+    #[tokio::test]
+    async fn deliver_retract_part_deletes_the_referenced_message() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true,"result":true}"#)]);
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(
+                    vec![OutboundPart::Retract {
+                        vendor_message_ref: "42".to_string(),
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert_eq!(report.parts.len(), 1);
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Sent {
+                vendor_message_ref: None
+            }
+        ));
+        let requests = egress.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].url,
+            "https://api.telegram.org/bot{telegram_bot_token}/deleteMessage"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(requests[0].body.as_deref().unwrap_or_default()).unwrap();
+        assert_eq!(body["chat_id"], "8675309");
+        assert_eq!(body["message_id"], 42);
+    }
+
+    #[tokio::test]
+    async fn deliver_retract_with_non_numeric_ref_is_permanent_without_egress() {
+        let egress = ScriptedEgress::new(Vec::new());
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(
+                    vec![OutboundPart::Retract {
+                        vendor_message_ref: "not-a-message-id".to_string(),
+                    }],
+                    None,
+                ),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+        assert!(matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { .. }
+        ));
+        assert!(
+            egress.requests.lock().unwrap().is_empty(),
+            "an unparseable retract target must not reach the vendor"
+        );
     }
 
     #[tokio::test]
